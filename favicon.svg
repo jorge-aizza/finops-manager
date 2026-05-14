@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Cubo FinOps Foundation -->
+  <!-- Face superior -->
+  <polygon points="32,4 58,18 32,32 6,18" fill="#4caf7d"/>
+  <!-- Face esquerda -->
+  <polygon points="6,18 32,32 32,60 6,46" fill="#2e7d50"/>
+  <!-- Face direita -->
+  <polygon points="58,18 32,32 32,60 58,46" fill="#3a9962"/>
+  <!-- Linhas internas da face esquerda -->
+  <line x1="19" y1="25" x2="19" y2="53" stroke="white" stroke-width="1.5" stroke-opacity="0.35"/>
+  <!-- Linhas internas da face direita -->
+  <line x1="45" y1="25" x2="45" y2="53" stroke="white" stroke-width="1.5" stroke-opacity="0.35"/>
+  <!-- Linha do meio vertical -->
+  <line x1="32" y1="32" x2="32" y2="60" stroke="white" stroke-width="1.5" stroke-opacity="0.35"/>
+</svg>

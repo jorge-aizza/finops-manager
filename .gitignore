@@ -1,0 +1,27 @@
+# Dependências
+node_modules/
+
+# Ambiente e segredos
+.env
+.env.key
+.env.enc
+.finops_setup
+
+# Uploads temporários
+uploads_tmp/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+.png
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/

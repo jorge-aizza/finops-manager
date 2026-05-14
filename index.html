@@ -1,0 +1,2691 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FinOps Manager</title>
+  <!-- Favicon FinOps -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="shortcut icon" href="favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <!-- Carrega tema antes do primeiro render para evitar flash -->
+  <script>(function(){if(localStorage.getItem('finops-theme')==='light')document.documentElement.setAttribute('data-theme','light');})()</script>
+  <style>
+    /* ── Replicate box ── */
+    .replicate-box {
+      background: var(--surface, #181825);
+      border: 1px solid var(--border, #313244);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: 20px 0 10px;
+    }
+    .replicate-box-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-muted, #6c7086);
+      margin-bottom: 10px;
+    }
+    .replicate-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .replicate-row input[type="number"] {
+      height: 34px;
+      width: 150px;
+      padding: 0 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border, #333);
+      background: var(--base, #1e1e2e);
+      color: var(--text, #cdd6f4);
+      font-size: 13px;
+    }
+    .btn-rep {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 7px 13px;
+      border-radius: 6px;
+      border: 1px solid var(--accent, #89b4fa);
+      background: transparent;
+      color: var(--accent, #89b4fa);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+      white-space: nowrap;
+    }
+    .btn-rep:hover { background: var(--accent, #89b4fa); color: var(--base, #1e1e2e); }
+    .btn-rep.secondary {
+      border-color: var(--border, #444);
+      color: var(--text-muted, #6c7086);
+    }
+    .btn-rep.secondary:hover { background: var(--border, #444); color: var(--text, #cdd6f4); }
+    .month-checkboxes {
+      display: none;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .month-checkboxes.open { display: flex; }
+    .month-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid var(--border, #444);
+      background: transparent;
+      color: var(--text-muted, #6c7086);
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+      transition: all .15s;
+    }
+    .month-chip input { display: none; }
+    .month-chip.checked {
+      border-color: var(--accent, #89b4fa);
+      background: rgba(137,180,250,.12);
+      color: var(--accent, #89b4fa);
+    }
+    .month-chips-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+    /* ── section title for months ── */
+    .months-section-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-muted, #6c7086);
+      margin: 22px 0 10px;
+    }
+    /* ── Import button ── */
+    .btn-import {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 0 14px; height: 34px; border-radius: 6px;
+      border: 1px solid var(--border, #444);
+      background: transparent; color: var(--text-muted, #6c7086);
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: all .15s;
+    }
+    .btn-import:hover { border-color: var(--accent,#89b4fa); color: var(--accent,#89b4fa); }
+    /* ── Import modal ── */
+    .import-instructions { background: var(--surface,#181825); border-radius:8px; padding:14px 16px; margin-bottom:16px; }
+    .import-columns-title { font-size:12px; color:var(--text-muted,#6c7086); margin-bottom:8px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; }
+    .import-columns { display:flex; gap:8px; flex-wrap:wrap; }
+    .import-col { font-size:12px; padding:3px 10px; border-radius:4px; background:rgba(137,180,250,.1); color:var(--accent,#89b4fa); border:1px solid rgba(137,180,250,.25); font-family:monospace; }
+    .import-col.required { background:rgba(166,227,161,.1); color:#a6e3a1; border-color:rgba(166,227,161,.25); }
+    .import-drop-area {
+      border: 2px dashed var(--border,#444); border-radius:10px;
+      padding:32px; text-align:center; cursor:pointer;
+      transition: border-color .2s, background .2s; color:var(--text-muted,#6c7086);
+    }
+    .import-drop-area:hover, .import-drop-area.drag-over {
+      border-color: var(--accent,#89b4fa); background:rgba(137,180,250,.05);
+      color: var(--accent,#89b4fa);
+    }
+    .import-drop-text { margin-top:10px; font-size:14px; }
+    .import-drop-text span { color:var(--accent,#89b4fa); text-decoration:underline; }
+    .import-drop-sub { font-size:12px; margin-top:4px; opacity:.6; }
+    .import-preview-header { display:flex; align-items:center; gap:10px; margin:16px 0 8px; font-weight:600; }
+    .badge-success { background:rgba(166,227,161,.15); color:#a6e3a1; border:1px solid rgba(166,227,161,.3); padding:2px 10px; border-radius:20px; font-size:12px; }
+    .badge-warn    { background:rgba(249,226,175,.15); color:#f9e2af; border:1px solid rgba(249,226,175,.3); padding:2px 10px; border-radius:20px; font-size:12px; }
+    .row-ok   { color: var(--text,#cdd6f4); }
+    .row-warn { color: #f9e2af; opacity:.8; }
+    /* ── Cloud stats grid (topo do dashboard) ── */
+    .cloud-stats-grid {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin: 12px 0 16px;
+    }
+    .cloud-stat-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(8, 1, 18, 0.88);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border, #150028);
+      border-radius: 14px;
+      padding: 12px 18px;
+      flex: 1;
+      min-width: 140px;
+      transition: border-color .2s, background .2s;
+    }
+    .cloud-stat-card:hover { border-color: var(--accent, #9333ea); background: rgba(40, 8, 64, 0.75); }
+    .cloud-stat-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .cloud-stat-info { flex: 1; min-width: 0; }
+    .cloud-stat-name {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--text-muted, #7b6a9e);
+      margin-bottom: 2px;
+    }
+    .cloud-stat-count {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text, #e8eaf0);
+      line-height: 1.1;
+    }
+    .cloud-stat-pct {
+      font-size: 11px;
+      color: var(--text-muted, #7b6a9e);
+    }
+    .cloud-stat-bar {
+      height: 3px;
+      background: var(--border, #280040);
+      border-radius: 2px;
+      margin-top: 6px;
+      overflow: hidden;
+    }
+    .cloud-stat-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--accent, #9333ea);
+      transition: width .4s ease;
+    }
+    /* ── Cloud cards ── */
+    .cloud-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 4px;
+      border-bottom: 1px solid var(--border, #313244);
+    }
+    .cloud-card:last-child { border-bottom: none; }
+    .cloud-card-icon {
+      width: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .cloud-card-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .cloud-card-name {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text, #cdd6f4);
+      margin-bottom: 5px;
+    }
+    .cloud-card-bar-wrap {
+      height: 5px;
+      background: var(--surface, #181825);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .cloud-card-bar-fill {
+      height: 100%;
+      background: var(--accent, #89b4fa);
+      border-radius: 3px;
+      transition: width .4s ease;
+    }
+    .cloud-card-stats {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      flex-shrink: 0;
+    }
+    .cloud-card-count {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text, #cdd6f4);
+      line-height: 1;
+    }
+    .cloud-card-pct {
+      font-size: 11px;
+      color: var(--text-muted, #6c7086);
+      margin-top: 2px;
+    }
+    /* ── Recentes legend ── */
+    .recentes-legend {
+      display: flex;
+      gap: 6px;
+      padding: 0 0 10px 0;
+      flex-wrap: wrap;
+    }
+    .legend-chip {
+      font-size: 11px;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-weight: 500;
+    }
+    .legend-andamento { background: rgba(137,180,250,.12); color: #89b4fa; border: 1px solid rgba(137,180,250,.3); }
+    .legend-planejado { background: rgba(203,166,247,.12); color: #cba6f7; border: 1px solid rgba(203,166,247,.3); }
+    .legend-concluido { background: rgba(166,227,161,.12); color: #a6e3a1; border: 1px solid rgba(166,227,161,.3); }
+    /* ── Setup Wizard hints ── */
+    .sw-hint {
+      width: 100%; border-radius: 8px; padding: 12px 14px;
+      font-size: 13px; line-height: 1.6; margin-bottom: 4px;
+    }
+    .sw-hint-warn {
+      background: rgba(255,140,66,.08);
+      border: 1px solid rgba(255,140,66,.3);
+      color: #ff8c42;
+    }
+    .sw-hint-ok {
+      background: rgba(147,51,234,.08);
+      border: 1px solid rgba(147,51,234,.3);
+      color: #c084fc;
+    }
+    .sw-hint-err {
+      background: rgba(255,77,106,.08);
+      border: 1px solid rgba(255,77,106,.3);
+      color: #ff4d6a;
+    }
+    .sw-hint code {
+      background: rgba(147,51,234,.15); border-radius: 4px;
+      padding: 1px 6px; font-family: monospace; font-size: 12px;
+      color: #c084fc;
+    }
+    /* ── Setup Wizard ── */
+    .setup-steps {
+      display: flex; align-items: center; gap: 0; margin-bottom: 4px; width: 100%;
+    }
+    .setup-step {
+      display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0;
+    }
+    .setup-step span {
+      width: 28px; height: 28px; border-radius: 50%;
+      border: 2px solid var(--border, #280040);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; color: var(--text-muted, #7b6a9e);
+      transition: all .2s;
+    }
+    .setup-step small { font-size: 10px; color: var(--text-muted, #7b6a9e); }
+    .setup-step.active span  { border-color: var(--accent,#9333ea); color: var(--accent,#9333ea); background: rgba(147,51,234,.12); }
+    .setup-step.done span    { border-color: var(--green,#22c55e); color: var(--green,#22c55e); background: rgba(34,197,94,.10); }
+    .setup-step-line { flex: 1; height: 2px; background: var(--border, #280040); margin: 0 6px 14px; }
+    .setup-panel { width: 100%; }
+    /* ── Login screen ── */
+    @keyframes vivo-rotate {
+      from { transform: translate(-50%,-50%) rotate(0deg); }
+      to   { transform: translate(-50%,-50%) rotate(360deg); }
+    }
+    @keyframes vivo-pulse {
+      0%,100% { opacity: .55; transform: translate(-50%,-50%) scale(1); }
+      50%      { opacity: .80; transform: translate(-50%,-50%) scale(1.08); }
+    }
+    @keyframes vivo-ray {
+      0%,100% { opacity: 0; }
+      50%      { opacity: 1; }
+    }
+    @keyframes vivo-float {
+      0%,100% { transform: translateY(0px); }
+      50%      { transform: translateY(-8px); }
+    }
+    .login-screen {
+      position: fixed; inset: 0; z-index: 9999;
+      background: #0c0014;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+    }
+    /* Núcleo central brilhante */
+    .login-screen::before {
+      content: '';
+      position: absolute;
+      left: 50%; top: 42%;
+      width: 520px; height: 520px;
+      transform: translate(-50%,-50%);
+      background: radial-gradient(ellipse at center,
+        rgba(200,80,255,.55) 0%,
+        rgba(147,51,234,.35) 25%,
+        rgba(80,0,160,.20) 55%,
+        transparent 75%);
+      animation: vivo-pulse 4s ease-in-out infinite;
+      pointer-events: none;
+    }
+    /* Disco de raios girando */
+    .login-screen::after {
+      content: '';
+      position: absolute;
+      left: 50%; top: 42%;
+      width: 900px; height: 900px;
+      transform: translate(-50%,-50%) rotate(0deg);
+      background:
+        repeating-conic-gradient(
+          from 0deg,
+          rgba(220,120,255,.18) 0deg 1.5deg,
+          transparent 1.5deg 9deg
+        );
+      border-radius: 50%;
+      animation: vivo-rotate 18s linear infinite;
+      pointer-events: none;
+    }
+    /* Camada extra de raios mais finos e rápidos */
+    .login-rays {
+      position: absolute;
+      left: 50%; top: 42%;
+      width: 1200px; height: 1200px;
+      transform: translate(-50%,-50%) rotate(0deg);
+      background:
+        repeating-conic-gradient(
+          from 0deg,
+          rgba(255,180,255,.10) 0deg .7deg,
+          transparent .7deg 6deg
+        );
+      border-radius: 50%;
+      animation: vivo-rotate 9s linear infinite reverse;
+      pointer-events: none;
+    }
+    /* Brilho de borda suave */
+    .login-glow {
+      position: absolute;
+      left: 50%; top: 42%;
+      width: 320px; height: 320px;
+      transform: translate(-50%,-50%);
+      background: radial-gradient(ellipse at center,
+        rgba(220,100,255,.30) 0%,
+        transparent 70%);
+      animation: vivo-pulse 3s ease-in-out infinite .8s;
+      pointer-events: none;
+    }
+    .login-box {
+      background: rgba(18, 2, 32, 0.78);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(147,51,234,.35);
+      border-radius: 20px;
+      padding: 40px 36px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 0 60px rgba(147,51,234,.20), 0 24px 64px rgba(0,0,0,.6);
+      display: flex;
+      position: relative; z-index: 2;
+      animation: vivo-float 6s ease-in-out infinite;
+      flex-direction: column;
+      align-items: center;
+    }
+    .login-logo { margin-bottom: 12px; display:flex; justify-content:center; }
+    .login-brand {
+      font-size: 22px; font-weight: 700;
+      color: var(--text, #cdd6f4); letter-spacing: -.3px;
+    }
+    .login-sub {
+      font-size: 13px; color: var(--text-muted, #6c7086);
+      margin-top: 4px; margin-bottom: 4px;
+    }
+    .login-box .form-group { width: 100%; }
+    .login-error {
+      width: 100%; background: rgba(243,139,168,.12);
+      border: 1px solid rgba(243,139,168,.3);
+      color: #f38ba8; border-radius: 6px;
+      padding: 8px 12px; font-size: 13px; margin-top: 12px;
+    }
+    .login-divider {
+      width: 100%; text-align: center; position: relative;
+      margin: 18px 0; color: var(--text-muted, #6c7086); font-size: 12px;
+    }
+    .login-divider::before {
+      content: ''; position: absolute; top: 50%; left: 0; right: 0;
+      height: 1px; background: var(--border, #313244);
+    }
+    .login-divider span {
+      position: relative; background: var(--surface, #181825); padding: 0 10px;
+    }
+    .btn-sso {
+      width: 100%; display: flex; align-items: center; justify-content: center;
+      gap: 10px; padding: 10px; border-radius: 8px; margin-bottom: 8px;
+      border: 1px solid var(--border, #444); background: transparent;
+      color: var(--text, #cdd6f4); font-size: 13px; font-weight: 500;
+      cursor: pointer; transition: border-color .15s, background .15s;
+    }
+    .btn-sso:hover { border-color: var(--accent, #89b4fa); background: rgba(137,180,250,.05); }
+    .login-footer { font-size: 11px; color: var(--text-muted,#6c7086); margin-top: 24px; }
+    /* ── Logout button ── */
+    .btn-logout:hover { color: var(--danger, #f38ba8) !important; background: rgba(243,139,168,.1) !important; }
+    /* ── Logged user chip in sidebar ── */
+    .logged-user-chip {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--text-muted,#6c7086);
+      overflow: hidden; max-width: 110px;
+    }
+    .logged-user-chip strong { color: var(--text,#cdd6f4); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    /* ── Refresh control ── */
+    /* ── Floating Refresh — compact ── */
+    .refresh-fab {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      gap: 0;
+      background: var(--surface, #181825);
+      border: 1px solid var(--border, #313244);
+      border-radius: 14px;
+      padding: 3px 6px 3px 4px;
+      box-shadow: 0 1px 8px rgba(0,0,0,.3);
+      opacity: 0.45;
+      transition: opacity .25s;
+    }
+    .refresh-fab:hover { opacity: 0.9; }
+    .refresh-fab-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--text-muted, #6c7086);
+      display: flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px;
+      transition: color .15s; flex-shrink: 0;
+    }
+    .refresh-fab-btn:hover { color: var(--accent,#89b4fa); }
+    .refresh-fab-sep {
+      width: 1px; height: 11px;
+      background: var(--border,#313244);
+      margin: 0 4px; flex-shrink: 0;
+    }
+    .refresh-fab-select {
+      background: none; border: none; outline: none;
+      color: var(--text-muted,#6c7086);
+      font-size: 10px; cursor: pointer;
+      padding: 0; max-width: 40px;
+    }
+    .refresh-fab-select option { background: var(--surface,#181825); }
+    .refresh-fab-countdown {
+      font-size: 9px; color: var(--accent,#89b4fa);
+      font-family: monospace; margin-left: 2px; min-width: 18px;
+    }
+    @keyframes spin { from{transform:rotate(0deg);}to{transform:rotate(360deg);} }
+    .spinning { animation: spin .7s linear infinite; }
+    /* ── Cloud strip (sticky) ── */
+    .cloud-stats-strip {
+      display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto;
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(8, 1, 18, 0.88);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid var(--border,#150028);
+      border-radius: 14px;
+      padding: 6px 8px; margin-bottom: 12px;
+      scrollbar-width: none;
+    }
+    .cloud-stats-strip::-webkit-scrollbar { display: none; }
+    .cloud-stat-card {
+      display: flex; align-items: center; gap: 10px;
+      background: rgba(8, 1, 18, 0.65);
+      border: 1px solid var(--border,#150028);
+      border-radius: 10px;
+      padding: 10px 16px; flex-shrink: 0; cursor: pointer;
+      transition: border-color .2s, background .2s; min-width: 130px;
+      user-select: none;
+    }
+    .cloud-stat-card:hover {
+      border-color: var(--accent,#9333ea);
+      background: rgba(40, 8, 64, 0.70);
+    }
+    .cloud-stat-card.active {
+      border-color: var(--accent,#9333ea);
+      background: rgba(147,51,234,.18);
+      box-shadow: 0 0 0 1px rgba(147,51,234,.40);
+    }
+    .cloud-stat-card.all-card { min-width: 80px; }
+    /* ── DB connections list ── */
+    .db-conn-card {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px; border-radius: 8px;
+      border: 1px solid var(--border, #313244);
+      background: var(--surface, #181825);
+      margin-bottom: 8px;
+    }
+    .db-conn-icon { font-size: 20px; flex-shrink: 0; }
+    .db-conn-info { flex: 1; min-width: 0; }
+    .db-conn-name { font-size: 13px; font-weight: 600; color: var(--text,#cdd6f4); }
+    .db-conn-meta { font-size: 11px; color: var(--text-muted,#6c7086); margin-top:2px; }
+    .db-conn-badges { display: flex; gap: 5px; flex-shrink: 0; }
+    .badge-db-ok      { background:rgba(166,227,161,.12); color:#a6e3a1; border:1px solid rgba(166,227,161,.3); padding:2px 8px; border-radius:20px; font-size:11px; }
+    .badge-db-default { background:rgba(137,180,250,.12); color:#89b4fa; border:1px solid rgba(137,180,250,.3); padding:2px 8px; border-radius:20px; font-size:11px; }
+    .db-test-ok   { background:rgba(166,227,161,.1); border:1px solid rgba(166,227,161,.3); color:#a6e3a1; border-radius:8px; padding:10px 14px; font-size:13px; }
+    .db-test-fail { background:rgba(243,139,168,.1); border:1px solid rgba(243,139,168,.3); color:#f38ba8; border-radius:8px; padding:10px 14px; font-size:13px; }
+    /* ── Gear / Settings button ── */
+    .sidebar-footer {
+      display: flex !important;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .btn-gear {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      color: var(--text-muted, #6c7086);
+      padding: 4px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      transition: color .15s, background .15s;
+    }
+    .btn-gear:hover {
+      color: var(--accent, #89b4fa);
+      background: rgba(137,180,250,.1);
+    }
+    /* ── Settings Modal ── */
+    .settings-tabs {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border, #313244);
+      margin-bottom: 20px;
+    }
+    .settings-tab {
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted, #6c7086);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color .15s, border-color .15s;
+      white-space: nowrap;
+    }
+    .settings-tab.active {
+      color: var(--accent, #89b4fa);
+      border-bottom-color: var(--accent, #89b4fa);
+    }
+    .settings-panel { display: none; }
+    .settings-panel.active { display: block; }
+    .settings-section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-muted, #6c7086);
+      margin: 18px 0 10px;
+    }
+    .settings-section-title:first-child { margin-top: 0; }
+    .role-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500;
+    }
+    .role-admin    { background: rgba(243,139,168,.12); color: #f38ba8; border: 1px solid rgba(243,139,168,.3); }
+    .role-finops   { background: rgba(137,180,250,.12); color: #89b4fa; border: 1px solid rgba(137,180,250,.3); }
+    .role-reader   { background: rgba(166,227,161,.12); color: #a6e3a1; border: 1px solid rgba(166,227,161,.3); }
+    .user-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 0; border-bottom: 1px solid var(--border, #313244);
+    }
+    .user-row:last-child { border-bottom: none; }
+    .user-avatar {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: var(--surface, #181825);
+      border: 1px solid var(--border, #313244);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 600; color: var(--accent, #89b4fa);
+      flex-shrink: 0;
+    }
+    .user-info { flex: 1; min-width: 0; }
+    .user-name  { font-size: 13px; font-weight: 500; color: var(--text, #cdd6f4); }
+    .user-email { font-size: 11px; color: var(--text-muted, #6c7086); }
+    .integration-card {
+      background: var(--surface, #181825);
+      border: 1px solid var(--border, #313244);
+      border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
+    }
+    .integration-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .integration-logo { width: 28px; height: 28px; flex-shrink: 0; }
+    .integration-title { font-size: 13px; font-weight: 600; color: var(--text, #cdd6f4); }
+    .integration-sub { font-size: 11px; color: var(--text-muted, #6c7086); }
+    .toggle-switch {
+      position: relative; width: 36px; height: 20px; flex-shrink: 0;
+    }
+    .toggle-switch input { display: none; }
+    .toggle-slider {
+      position: absolute; inset: 0; background: var(--border, #444);
+      border-radius: 20px; cursor: pointer; transition: .2s;
+    }
+    .toggle-slider:before {
+      content: ''; position: absolute; width: 14px; height: 14px;
+      left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s;
+    }
+    .toggle-switch input:checked + .toggle-slider { background: var(--accent, #89b4fa); }
+    .toggle-switch input:checked + .toggle-slider:before { transform: translateX(16px); }
+    /* ── Atrasado badge ── */
+    .status-atrasado {
+      background: rgba(243,139,168,.15);
+      color: var(--danger, #f38ba8);
+      border: 1px solid rgba(243,139,168,.35);
+      margin-left: 4px;
+      font-size: 11px;
+    }
+    /* ── Stat value colors ── */
+    .stat-value.yellow { color: #f9e2af; }
+    .stat-value.blue   { color: #89b4fa; }
+    .stat-card.yellow-card { border-color: rgba(249,226,175,.25); }
+    .stat-card.blue-card   { border-color: rgba(137,180,250,.25); }
+    .stat-card.green-card  { border-color: rgba(166,227,161,.25); }
+    /* ── Danger / Atrasadas ── */
+    .stat-card.danger .stat-value { color: var(--danger, #f38ba8); }
+    .stat-card.danger { border-color: rgba(243,139,168,.3); }
+    .badge-danger {
+      background: rgba(243,139,168,.15);
+      color: var(--danger, #f38ba8);
+      border: 1px solid rgba(243,139,168,.3);
+    }
+    .card-atrasadas { margin-top: 20px; }
+    .atrasado-days {
+      font-weight: 600;
+      color: var(--danger, #f38ba8);
+    }
+    /* ── ID FinOps readonly ── */
+    #acao-id-finops[readonly] {
+      background: var(--surface-alt, #181825) !important;
+      color: var(--text-muted, #6c7086) !important;
+      cursor: default;
+    }
+
+    /* ── Export button ── */
+    .btn-export {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 14px; border-radius: 8px;
+      border: 1px solid rgba(147,51,234,.5);
+      background: rgba(147,51,234,.15);
+      color: #c084fc; font-size: 12px; font-weight: 500;
+      cursor: pointer; transition: all .15s;
+    }
+    .btn-export:hover { background: rgba(147,51,234,.28); border-color: #9333ea; color: #ffffff; }
+
+    /* ════════════════════════════════════════
+       RESPONSIVE — Mobile & Tablet
+    ════════════════════════════════════════ */
+
+    /* ══ RESPONSIVE ══════════════════════════════ */
+
+    /* Tablet: 768px – 1024px */
+    @media (max-width: 1024px) {
+      .stats-grid     { grid-template-columns: repeat(2, 1fr); }
+      .months-grid    { grid-template-columns: repeat(4, 1fr); }
+      .form-grid-2    { grid-template-columns: 1fr; }
+      .dashboard-grid { grid-template-columns: 1fr; }
+      .cloud-stats-strip { gap: 8px; }
+      .cloud-stat-card   { min-width: 110px; padding: 8px 12px; }
+      .card { padding: 14px; }
+      .card-header { flex-wrap: wrap; gap: 8px; }
+    }
+
+    /* Mobile: up to 767px */
+    @media (max-width: 767px) {
+      /* ── Layout ── */
+      .app-shell { flex-direction: column; }
+      .sidebar {
+        width: 100%; height: auto; flex-direction: row; align-items: center;
+        padding: 8px 12px; border-right: none;
+        border-bottom: 1px solid var(--border, #313244);
+        position: sticky; top: 0; z-index: 200; overflow: hidden;
+      }
+      .sidebar-brand  { flex-shrink: 0; }
+      .sidebar-nav    { display: flex; flex-direction: row; gap: 2px; flex: 1; overflow-x: auto; padding: 0 6px; scrollbar-width: none; }
+      .sidebar-nav::-webkit-scrollbar { display: none; }
+      .sidebar-footer { margin-left: auto; flex-shrink: 0; }
+      .nav-section-label { display: none; }
+      .nav-item       { padding: 6px 10px; font-size: 12px; white-space: nowrap; border-radius: 6px; }
+      .brand-sub      { display: none; }
+
+      /* ── Header ── */
+      .main-content { min-height: 0; overflow: hidden; }
+      .view-content { padding: 10px 12px; }
+      .top-bar      { padding: 8px 12px; gap: 8px; }
+      .page-title   { font-size: 14px; }
+      .top-actions  { gap: 6px; }
+      .btn-primary  { padding: 6px 12px; font-size: 12px; }
+
+      /* ── Stat cards ── */
+      .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+      .stat-card  { padding: 12px; }
+      .stat-value { font-size: 20px; }
+      .stat-label { font-size: 10px; }
+      .stat-sub   { font-size: 10px; }
+
+      /* ── Cloud strip ── */
+      .cloud-stats-strip { gap: 6px; padding: 8px 0 10px; }
+      .cloud-stat-card   { min-width: 85px; padding: 8px 10px; }
+      .cloud-stat-count  { font-size: 16px; }
+      .cloud-stat-pct    { display: none; }
+      .cloud-stat-bar    { display: none; }
+
+      /* ── Cards ── */
+      .card { padding: 12px; border-radius: 8px; }
+      .card-header { flex-wrap: wrap; gap: 6px; }
+      .card-title  { font-size: 13px; }
+      .card-atrasadas { margin-top: 12px; }
+
+      /* ── Tables ── */
+      .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .data-table    { font-size: 11px; min-width: 580px; }
+      .data-table th, .data-table td { padding: 7px 8px; white-space: nowrap; }
+      .finops-id     { font-size: 11px; }
+      .status-badge  { font-size: 10px; padding: 2px 6px; }
+      .cloud-tag     { font-size: 10px; padding: 2px 6px; }
+
+      /* ── Months grid ── */
+      .months-grid { grid-template-columns: repeat(3, 1fr); }
+      .form-grid-2 { grid-template-columns: 1fr; }
+
+      /* ── Modal ── */
+      .modal       { width: 96vw; max-width: 96vw; margin: 12px auto; border-radius: 10px; }
+      .modal-wide  { width: 96vw; max-width: 96vw; }
+      .modal-body  { padding: 14px; max-height: 80vh; overflow-y: auto; }
+      .modal-header { padding: 12px 14px; }
+      .modal-actions { flex-direction: column-reverse; gap: 8px; }
+      .modal-actions button { width: 100%; justify-content: center; }
+
+      /* ── Replicate ── */
+      .replicate-box    { padding: 10px 12px; }
+      .replicate-row    { flex-wrap: wrap; }
+      .replicate-row input[type="number"] { width: 100% !important; }
+      .btn-rep          { flex: 1; justify-content: center; }
+
+      /* ── Month chips ── */
+      .month-checkboxes { gap: 4px; }
+      .month-chip       { padding: 4px 8px; font-size: 11px; }
+
+      /* ── Filters bar ── */
+      .filters-bar  { flex-direction: column; gap: 8px; }
+      .filter-input, .filter-select { width: 100% !important; }
+
+      /* ── Settings ── */
+      .settings-tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+      .settings-tabs::-webkit-scrollbar { display: none; }
+      .settings-tab  { font-size: 11px; padding: 8px 10px; white-space: nowrap; }
+      .integration-card { padding: 12px; }
+      .integration-header { flex-wrap: wrap; gap: 8px; }
+      .user-row { flex-wrap: wrap; gap: 8px; }
+      .db-conn-card { flex-wrap: wrap; gap: 8px; }
+
+      /* ── Login / Setup ── */
+      .login-screen  { padding: 16px; align-items: flex-start; padding-top: 40px; }
+      .login-box     { padding: 24px 18px; max-width: 100%; border-radius: 12px; }
+      .login-brand   { font-size: 18px; }
+      .btn-sso       { padding: 10px 12px; font-size: 12px; }
+      .login-box .form-grid-2 { grid-template-columns: 1fr; }
+      .setup-steps   { gap: 0; }
+
+      /* ── Dashboard specifics ── */
+      .dashboard-grid { margin-top: 0; }
+      .recent-list    { padding: 0; }
+      .cloud-breakdown { padding: 0; }
+
+      /* ── Refresh FAB ── */
+      .refresh-fab { bottom: 12px; right: 12px; padding: 5px 8px 5px 6px; }
+      .refresh-fab-select { font-size: 11px; }
+    }
+
+    /* Small mobile: up to 480px */
+    @media (max-width: 480px) {
+      .stats-grid    { grid-template-columns: 1fr; gap: 6px; }
+      .months-grid   { grid-template-columns: repeat(2, 1fr); }
+      .cloud-stat-card { min-width: 75px; padding: 6px 8px; }
+      .cloud-stat-icon svg { width: 20px; height: 20px; }
+      .cloud-stat-name { font-size: 9px; }
+      .cloud-stat-count { font-size: 14px; }
+      .brand-name    { font-size: 13px; }
+      .stat-value    { font-size: 18px; }
+      .data-table    { font-size: 10px; }
+      .data-table th, .data-table td { padding: 6px 6px; }
+      .modal-body    { max-height: 75vh; }
+    }
+    .toggle-switch { position:relative; display:inline-block; width:36px; height:20px; }
+    .toggle-switch input { opacity:0; width:0; height:0; }
+    .toggle-slider { position:absolute; cursor:pointer; inset:0; background:var(--border-light,#3d0060); border-radius:20px; transition:.2s; }
+    .toggle-slider::before { content:''; position:absolute; width:14px; height:14px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.2s; }
+    .toggle-switch input:checked + .toggle-slider { background:var(--accent,#9333ea); }
+    .toggle-switch input:checked + .toggle-slider::before { transform:translateX(16px); }
+  </style>
+
+</head>
+<body>
+  <!-- SETUP WIZARD — shown only on first run -->
+  <div id="setup-wizard" class="login-screen" style="display:none">
+    <div class="login-box" style="max-width:520px">
+
+      <!-- Step indicator -->
+      <div class="setup-steps">
+        <div class="setup-step active" id="step-ind-1"><span>1</span><small>Banco</small></div>
+        <div class="setup-step-line"></div>
+        <div class="setup-step" id="step-ind-2"><span>2</span><small>Admin</small></div>
+        <div class="setup-step-line"></div>
+        <div class="setup-step" id="step-ind-3"><span>3</span><small>Concluído</small></div>
+      </div>
+
+      <div class="login-logo" style="margin-top:16px">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 58 26" width="106" height="52"
+             style="filter:drop-shadow(0 0 8px rgba(147,51,234,.6))">
+          <text x="2" y="22" font-family="Arial Black, Arial" font-weight="900"
+                font-size="26" fill="#9333ea" letter-spacing="-1">vivo</text>
+        </svg>
+      </div>
+      <div class="login-brand" style="background:linear-gradient(90deg,#c084fc,#9333ea,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">Configuração Inicial</div>
+
+      <!-- STEP 1 — Database -->
+      <div id="setup-step-1" class="setup-panel">
+        <div class="login-sub" style="margin-bottom:20px">Configure a conexão com o banco de dados</div>
+
+        <div style="width:100%">
+          <div class="form-group">
+            <label>Tipo de Banco *</label>
+            <select id="sw-db-tipo" onchange="swOnDbTipoChange()" style="width:100%">
+              <option value="">Selecione...</option>
+              <optgroup label="On-Premises">
+                <option value="postgresql" selected>PostgreSQL</option>
+                <option value="sqlserver">SQL Server</option>
+                <option value="mysql">MySQL / MariaDB</option>
+              </optgroup>
+              <optgroup label="Cloud — AWS">
+                <option value="aws-rds-pg">AWS RDS PostgreSQL</option>
+                <option value="aws-rds-mysql">AWS RDS MySQL</option>
+                <option value="aws-aurora">AWS Aurora</option>
+              </optgroup>
+              <optgroup label="Cloud — Azure">
+                <option value="azure-pg">Azure Database for PostgreSQL</option>
+                <option value="azure-sql">Azure SQL Database</option>
+              </optgroup>
+              <optgroup label="Cloud — GCP">
+                <option value="gcp-pg">Cloud SQL PostgreSQL</option>
+                <option value="gcp-mysql">Cloud SQL MySQL</option>
+              </optgroup>
+              <optgroup label="Oracle Cloud">
+                <option value="oracle-atp">Oracle ATP</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <div class="form-grid-2" style="width:100%">
+            <div class="form-group">
+              <label>Host / Endpoint *</label>
+              <input type="text" id="sw-db-host" value="localhost" placeholder="localhost">
+            </div>
+            <div class="form-group">
+              <label>Porta *</label>
+              <input type="number" id="sw-db-porta" value="5432" placeholder="5432">
+            </div>
+            <div class="form-group">
+              <label>Nome do Banco *</label>
+              <input type="text" id="sw-db-database" value="finops_db" placeholder="finops_db">
+            </div>
+            <div class="form-group">
+              <label>Schema</label>
+              <input type="text" id="sw-db-schema" value="public" placeholder="public">
+            </div>
+            <div class="form-group">
+              <label>Usuário *</label>
+              <input type="text" id="sw-db-usuario" value="postgres" placeholder="postgres">
+            </div>
+            <div class="form-group">
+              <label>Senha *</label>
+              <input type="password" id="sw-db-senha" placeholder="••••••••">
+            </div>
+          </div>
+
+          <div class="integration-card" style="margin:8px 0;width:100%;box-sizing:border-box">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <div>
+                <div class="integration-title">🔒 SSL / TLS</div>
+                <div class="integration-sub">Recomendado para ambientes cloud</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="sw-db-ssl">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div id="sw-db-test-result" style="display:none;margin-bottom:8px"></div>
+          <div id="sw-db-hint" class="sw-hint" style="display:none"></div>
+
+          <div style="display:flex;gap:8px;width:100%;margin-top:4px">
+            <button type="button" class="btn-rep secondary" style="flex:1" onclick="swTestarConexao()">
+              🔌 Testar Conexão
+            </button>
+            <button type="button" class="btn-primary" id="sw-btn-proximo" style="flex:2;justify-content:center;opacity:.4;cursor:not-allowed" disabled onclick="swNextStep(2)">
+              Próximo →
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 2 — Admin user -->
+      <div id="setup-step-2" class="setup-panel" style="display:none">
+        <div class="login-sub" style="margin-bottom:20px">Crie a conta de administrador do sistema</div>
+        <div style="width:100%">
+          <div class="form-group">
+            <label>Nome Completo *</label>
+            <input type="text" id="sw-admin-nome" placeholder="Administrador FinOps">
+          </div>
+          <div class="form-group">
+            <label>E-mail *</label>
+            <input type="email" id="sw-admin-email" placeholder="admin@empresa.com">
+          </div>
+          <div class="form-group">
+            <label>Senha *</label>
+            <input type="password" id="sw-admin-senha" placeholder="Mínimo 8 caracteres">
+          </div>
+          <div class="form-group">
+            <label>Confirmar Senha *</label>
+            <input type="password" id="sw-admin-senha2" placeholder="Repita a senha">
+          </div>
+          <div id="sw-admin-error" class="login-error" style="display:none"></div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button type="button" class="btn-rep secondary" style="flex:1" onclick="swGoStep(1)">← Voltar</button>
+            <button type="button" class="btn-primary" style="flex:2;justify-content:center" onclick="swFinish()">
+              Concluir Setup
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 3 — Done -->
+      <div id="setup-step-3" class="setup-panel" style="display:none;text-align:center;width:100%">
+        <div style="width:56px;height:56px;border-radius:50%;background:rgba(34,197,94,.12);border:2px solid #22c55e;display:flex;align-items:center;justify-content:center;margin:16px auto 12px;font-size:26px;">✓</div>
+        <div style="font-size:18px;font-weight:700;background:linear-gradient(90deg,#c084fc,#9333ea);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:8px;">Sistema Configurado!</div>
+        <div class="login-sub" style="margin-bottom:24px">Banco conectado e administrador criado com sucesso.</div>
+        <div class="integration-card" style="text-align:left;margin-bottom:20px">
+          <div class="integration-sub" id="sw-summary"></div>
+        </div>
+        <button type="button" class="btn-primary" style="width:100%;justify-content:center" onclick="swGoLogin()">
+          Ir para o Login →
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- LOGIN SCREEN -->
+  <div id="login-screen" class="login-screen">
+    <div class="login-rays"></div>
+    <div class="login-glow"></div>
+    <div class="login-box">
+      <div class="login-logo" style="margin-bottom:8px">
+        <style>
+          /* mesmo keyframe para vivo-text e mascote — brilho idêntico */
+          @keyframes vivo-logo-glow {
+            0%,100% { filter: drop-shadow(0 0 3px rgba(147,51,234,.6)); }
+            50%      { filter: drop-shadow(0 0 6px rgba(147,51,234,1)) drop-shadow(0 0 12px rgba(147,51,234,.35)); }
+          }
+          .vivo-text    { animation: vivo-logo-glow 3s ease-in-out infinite; }
+          .vivo-mascote { animation: vivo-logo-glow 3s ease-in-out infinite; }
+        </style>
+        <div style="display:inline-flex;align-items:center;justify-content:center;gap:0;margin:0 auto;">
+          <!-- Texto vivo: começa invisível, aparece junto com o mascote após JS extrair a cor -->
+          <svg id="vivo-logo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 54" width="106" height="52"
+               style="opacity:0;transition:opacity .3s ease;">
+            <text id="vivo-logo-text" class="vivo-text" x="2" y="44"
+                  font-family="'Arial Black', 'Arial Bold', Arial"
+                  font-weight="900" font-size="46"
+                  fill="#9333ea" letter-spacing="-1">vivo</text>
+          </svg>
+
+          <!-- Mascote Vivo — pixels transparentes: glow segue o shape, fundo = login card -->
+          <canvas id="vivo-mascote-cvs" height="58" class="vivo-mascote"
+            style="display:block;margin-bottom:2px;margin-left:-8px;opacity:0;transition:opacity .3s ease;flex-shrink:0;"></canvas>
+          <script>
+            (function() {
+              var cvs = document.getElementById('vivo-mascote-cvs');
+              var offImg = new Image();
+              offImg.onload = function() {
+                try {
+                  var W = offImg.naturalWidth, H = offImg.naturalHeight;
+                  var scale = 58 / H;
+                  cvs.width  = Math.round(W * scale);
+                  cvs.height = 58;
+
+                  var tmp = document.createElement('canvas');
+                  tmp.width = W; tmp.height = H;
+                  var tctx = tmp.getContext('2d');
+                  tctx.drawImage(offImg, 0, 0);
+                  var d = tctx.getImageData(0, 0, W, H), px = d.data;
+
+                  // Amostra cor de fundo dos 8 pontos de borda do JPEG
+                  var cs=[[0,0],[W-1,0],[0,H-1],[W-1,H-1],[Math.floor(W/2),0],[0,Math.floor(H/2)],[W-1,Math.floor(H/2)],[Math.floor(W/2),H-1]];
+                  var bgR=0,bgG=0,bgB=0;
+                  for(var ci=0;ci<cs.length;ci++){var p4=(cs[ci][1]*W+cs[ci][0])*4;bgR+=px[p4];bgG+=px[p4+1];bgB+=px[p4+2];}
+                  bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
+
+                  // Limiar agressivo: HARD=corte total; SOFT=transição suave até opaco
+                  // drop-shadow CSS segue o canal alpha → glow em volta do mascote, não do retângulo
+                  var HARD=90, SOFT=130, rS=0,gS=0,bS=0,n=0;
+                  for (var i = 0; i < px.length; i += 4) {
+                    var r=px[i],g=px[i+1],b=px[i+2];
+                    var dr=r-bgR,dg=g-bgG,db=b-bgB;
+                    var dSq=dr*dr+dg*dg+db*db;
+                    if (dSq < HARD*HARD) {
+                      px[i+3]=0; // fundo → totalmente transparente
+                    } else if (dSq < SOFT*SOFT) {
+                      var d2=Math.sqrt(dSq);
+                      px[i+3]=Math.round(255*(d2-HARD)/(SOFT-HARD)); // borda suave
+                    } else {
+                      // mascote → opaco; coleta cor dominante
+                      var mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+                      if(mx-mn>35){rS+=r;gS+=g;bS+=b;n++;}
+                    }
+                  }
+                  tctx.putImageData(d, 0, 0);
+
+                  cvs.getContext('2d').drawImage(tmp, 0, 0, cvs.width, cvs.height);
+
+                  var svg=document.getElementById('vivo-logo-svg');
+                  if (n > 0) {
+                    var hx=function(v){return('0'+Math.round(v).toString(16)).slice(-2);};
+                    var cor='#'+hx(rS/n)+hx(gS/n)+hx(bS/n);
+                    var txt=document.getElementById('vivo-logo-text');
+                    if(txt)txt.setAttribute('fill',cor);
+                  }
+                  // revela vivo e mascote ao mesmo tempo (evita flash do estilo antigo)
+                  cvs.style.opacity='1';
+                  if(svg)svg.style.opacity='1';
+                } catch(e) {
+                  // fallback: mostra ambos com cor padrão
+                  cvs.style.opacity='1';
+                  var svg=document.getElementById('vivo-logo-svg');
+                  if(svg)svg.style.opacity='1';
+                }
+              };
+              offImg.src = 'mascote.png?' + Date.now();
+            })();
+          </script>
+        </div>
+      </div>
+      <div class="login-brand">FinOps Manager</div>
+      <div class="login-sub">Faça login para continuar</div>
+
+      <div id="login-error" class="login-error" style="display:none"></div>
+
+      <div class="form-group" style="margin-top:24px">
+        <label>E-mail</label>
+        <input type="email" id="login-email" placeholder="usuario@empresa.com" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <div class="form-group">
+        <label>Senha</label>
+        <input type="password" id="login-senha" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <button class="btn-primary" style="width:100%;margin-top:8px;justify-content:center" onclick="doLogin()">
+        Entrar
+      </button>
+
+      <div class="login-divider"><span>ou</span></div>
+
+      <button class="btn-sso" onclick="loginSSO('entra')">
+        <svg viewBox="0 0 20 20" fill="none" width="18" height="18">
+          <rect x="2" y="2" width="7" height="7" rx="1" fill="#F25022"/>
+          <rect x="11" y="2" width="7" height="7" rx="1" fill="#7FBA00"/>
+          <rect x="2" y="11" width="7" height="7" rx="1" fill="#00A4EF"/>
+          <rect x="11" y="11" width="7" height="7" rx="1" fill="#FFB900"/>
+        </svg>
+        Entrar com Microsoft Entra ID
+      </button>
+      <button class="btn-sso" onclick="loginSSO('ad')">
+        <svg viewBox="0 0 20 20" fill="none" width="18" height="18">
+          <rect width="20" height="20" rx="3" fill="#0078D4"/>
+          <path d="M10 4L4 7v6l6 3 6-3V7L10 4z" stroke="white" stroke-width="1.2" fill="none"/>
+          <circle cx="10" cy="10" r="2" fill="white"/>
+        </svg>
+        Entrar com Active Directory
+      </button>
+
+      <div class="login-footer">FinOps Manager · v1.0</div>
+    </div>
+  </div>
+
+  <div class="app-shell" id="app-shell" style="display:none">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="2" y="2" width="12" height="12" rx="2" fill="var(--accent)"/>
+            <rect x="18" y="2" width="12" height="12" rx="2" fill="var(--accent)" opacity="0.6"/>
+            <rect x="2" y="18" width="12" height="12" rx="2" fill="var(--accent)" opacity="0.6"/>
+            <rect x="18" y="18" width="12" height="12" rx="2" fill="var(--accent)" opacity="0.3"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">FinOps</span>
+          <span class="brand-sub">Manager</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section-label">Menu</div>
+        <!-- Dashboard — grupo expansível -->
+        <div class="nav-group open" id="nav-group-dashboard">
+          <div class="nav-group-header active" data-view="dashboard" onclick="openNavGroup('dashboard')">
+            <svg viewBox="0 0 20 20" fill="none" width="17" height="17" style="flex-shrink:0"><rect x="2" y="2" width="7" height="7" rx="1" fill="currentColor"/><rect x="11" y="2" width="7" height="7" rx="1" fill="currentColor" opacity="0.5"/><rect x="2" y="11" width="7" height="7" rx="1" fill="currentColor" opacity="0.5"/><rect x="11" y="11" width="7" height="7" rx="1" fill="currentColor" opacity="0.3"/></svg>
+            <span class="nav-label">Dashboard</span>
+            <svg class="nav-chevron" viewBox="0 0 16 16" fill="none" width="13" height="13" onclick="event.stopPropagation();toggleNavGroup('dashboard')"><path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="nav-group-items">
+            <a class="nav-item nav-sub active" id="nav-sub-acoes" onclick="showDashTab('acoes')">
+              <svg viewBox="0 0 20 20" fill="none" width="15" height="15"><path d="M2 4h12M2 9h9M2 14h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              <span class="nav-label">Ações FinOps</span>
+            </a>
+            <a class="nav-item nav-sub" id="nav-sub-estimativas" onclick="showDashTab('estimativas')">
+              <svg viewBox="0 0 20 20" fill="none" width="15" height="15"><path d="M9 3H5a1 1 0 00-1 1v12a1 1 0 001 1h10a1 1 0 001-1V8M9 3l5 5M9 3v5h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="nav-label">Estimativas</span>
+            </a>
+          </div>
+        </div>
+        <a class="nav-item" data-view="projetos" onclick="showView('projetos')" title="Projetos">
+          <svg viewBox="0 0 20 20" fill="none"><path d="M3 5a2 2 0 012-2h4l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V5z" stroke="currentColor" stroke-width="1.5"/></svg>
+          <span class="nav-label">Projetos</span>
+        </a>
+        <a class="nav-item" data-view="acoes" onclick="showView('acoes')" title="Ações FinOps">
+          <svg viewBox="0 0 20 20" fill="none"><path d="M9 5H7a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h0a2 2 0 002-2M9 5a2 2 0 012-2h0a2 2 0 012 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M7 11l2 2 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="nav-label">Ações FinOps</span>
+        </a>
+        <a class="nav-item" data-view="calculadora" onclick="showView('calculadora')" title="Calculadora">
+          <svg viewBox="0 0 20 20" fill="none">
+            <rect x="3" y="3" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M7 7h2M11 7h2M7 10h2M11 10h2M7 13h2M11 13h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="nav-label">Calculadora</span>
+        </a>
+        <a class="nav-item" data-view="estimativas" onclick="showView('estimativas')" title="Estimativas">
+          <svg viewBox="0 0 20 20" fill="none">
+            <rect x="3" y="2" width="14" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M7 7h6M7 10h6M7 13h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="nav-label">Estimativas</span>
+        </a>
+        <a class="nav-item" data-view="reservas" onclick="showView('reservas')" title="Reservas Cloud">
+          <svg viewBox="0 0 20 20" fill="none">
+            <rect x="2" y="5" width="16" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M2 9h16" stroke="currentColor" stroke-width="1.5"/>
+            <circle cx="6" cy="13" r="1" fill="currentColor"/>
+            <path d="M9 13h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="nav-label">Reservas Cloud</span>
+        </a>
+        <a class="nav-item" data-view="coleta" onclick="showView('coleta')" title="Coleta Automática">
+          <svg viewBox="0 0 20 20" fill="none" width="17" height="17">
+            <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M10 6v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M13 3.5A7 7 0 0 1 17 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M17 7.5v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="nav-label">Coleta Automática</span>
+        </a>
+      </nav>
+
+      <!-- Usuário conectado -->
+      <div id="sidebar-user-info" style="display:none;padding:8px 16px 10px;border-top:1px solid var(--border,rgba(255,255,255,0.07))">
+        <div style="display:flex;align-items:center;gap:9px">
+          <div id="sidebar-user-avatar" style="width:30px;height:30px;border-radius:50%;background:rgba(99,102,241,0.22);color:#a5b4fc;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0"></div>
+          <div style="min-width:0">
+            <div id="sidebar-user-name" style="font-size:12px;font-weight:500;color:var(--text-primary,#cdd6f4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+            <div id="sidebar-user-role" style="font-size:10px;color:var(--text-muted,#6c7086);margin-top:1px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div style="display:flex;align-items:center;justify-content:space-between;width:100%">
+          <div class="db-status">
+            <span class="db-dot" id="db-dot"></span>
+            <span id="db-status-text">Conectando...</span>
+          </div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <!-- Settings -->
+          <button class="btn-gear" onclick="openSettingsModal()" title="Configurações">
+            <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
+              <circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 2v1.5M10 16.5V18M18 10h-1.5M3.5 10H2M15.66 4.34l-1.06 1.06M5.4 14.6l-1.06 1.06M15.66 15.66l-1.06-1.06M5.4 5.4L4.34 4.34" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <!-- Logout -->
+          <button class="btn-gear btn-logout" onclick="logout()" title="Sair do Sistema">
+            <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
+              <path d="M13 15l4-5-4-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 10H8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M8 4H4a1 1 0 00-1 1v10a1 1 0 001 1h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Header -->
+      <!-- Overlay para fechar sidebar em mobile -->
+      <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+      <header class="top-bar">
+        <!-- Grupo esquerdo: hambúrguer + logo -->
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          <button class="btn-menu" id="btn-menu" onclick="toggleSidebar()"
+            title="Menu" aria-label="Abrir menu" aria-expanded="false">
+            <span class="hb-line"></span>
+            <span class="hb-line"></span>
+            <span class="hb-line"></span>
+          </button>
+
+          <!-- Logo Vivo -->
+          <div class="topbar-vivo-brand" style="display:flex;align-items:center;flex-shrink:0;">
+            <svg id="topbar-vivo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="58" height="26"
+                 style="flex-shrink:0;display:block;filter:drop-shadow(0 0 6px rgba(147,51,234,.55));">
+              <text id="topbar-vivo-text" x="1" y="30"
+                    font-family="'Arial Black','Arial Bold',Arial"
+                    font-weight="900" font-size="32" fill="#9333ea" letter-spacing="-1">vivo</text>
+            </svg>
+          </div>
+        </div>
+
+        <div class="page-title" id="page-title">Dashboard</div>
+        <div class="top-actions">
+          <button class="btn-primary" id="top-action-btn" style="display:none" onclick="openModal()">
+            <svg viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            Novo
+          </button>
+          <button class="btn-import" id="btn-import-projetos" style="display:none" onclick="openImportModal()">
+            <svg viewBox="0 0 16 16" fill="none" width="14" height="14"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 11v1a2 2 0 002 2h8a2 2 0 002-2v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <span class="btn-import-text">Importar Excel / CSV</span>
+          </button>
+
+          <!-- Toggle tema claro/escuro -->
+          <button class="btn-theme" id="btn-theme-toggle" onclick="toggleTheme()" title="Modo claro"
+            style="background:none;border:1px solid var(--border);border-radius:8px;padding:7px 9px;cursor:pointer;color:var(--text-dim);display:flex;align-items:center;justify-content:center;transition:all .15s;height:34px;width:36px;">
+            <svg id="theme-icon-sun" viewBox="0 0 20 20" fill="none" width="16" height="16">
+              <circle cx="10" cy="10" r="3.5" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 2v1.5M10 16.5V18M18 10h-1.5M3.5 10H2M15.66 4.34l-1.06 1.06M5.4 14.6l-1.06 1.06M15.66 15.66l-1.06-1.06M5.4 5.4L4.34 4.34" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <svg id="theme-icon-moon" viewBox="0 0 20 20" fill="none" width="16" height="16" style="display:none">
+              <path d="M17 12.7A8 8 0 117.3 3a6 6 0 009.7 9.7z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            </svg>
+          </button>
+
+          <!-- Sininho de Notificações -->
+          <div style="position:relative;display:flex;align-items:center" id="notif-wrapper">
+            <button id="notif-btn" onclick="toggleNotifPanel()" title="Notificações" style="background:none;border:1px solid var(--border);border-radius:8px;padding:7px 9px;cursor:pointer;color:var(--text-dim);display:flex;align-items:center;justify-content:center;transition:all .15s;height:34px;width:36px;position:relative">
+              <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
+                <path d="M10 2a6 6 0 00-6 6c0 3.5-2 5-2 5h16s-2-1.5-2-5a6 6 0 00-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                <path d="M11.73 17a2 2 0 01-3.46 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <span id="notif-badge" style="display:none;position:absolute;top:-5px;right:-5px;background:#f38ba8;color:#1e1e2e;font-size:10px;font-weight:700;min-width:17px;height:17px;border-radius:9px;align-items:center;justify-content:center;padding:0 3px;line-height:1">0</span>
+            </button>
+            <!-- Painel dropdown -->
+            <div id="notif-panel" style="display:none;position:absolute;right:0;top:calc(100% + 8px);width:340px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.35);z-index:200;overflow:hidden">
+              <div style="padding:12px 16px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+                <span style="font-size:13px;font-weight:600;color:var(--text)">Notificações</span>
+                <span id="notif-header-count" style="font-size:11px;color:var(--text-muted)"></span>
+              </div>
+              <div id="notif-list" style="max-height:380px;overflow-y:auto;scrollbar-width:thin"></div>
+            </div>
+          </div>
+
+        </div>
+      </header>
+
+      <!-- Views -->
+      <div class="view-content">
+
+        <!-- DASHBOARD VIEW -->
+        <div id="view-dashboard" class="view active">
+
+          <!-- ══ Painel: Ações FinOps ══ -->
+          <div class="dash-panel active" id="dash-panel-acoes">
+            <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+              <button class="btn-export" onclick="exportarExcel()">
+                <svg viewBox="0 0 16 16" fill="none" width="14" height="14"><path d="M2 12v2h12v-2M8 2v8M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Exportar Excel
+              </button>
+            </div>
+            <div class="stats-grid">
+              <div class="stat-card accent">
+                <div class="stat-label">Total de Ações</div>
+                <div class="stat-value" id="stat-total">—</div>
+                <div class="stat-sub">cadastradas</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Em Andamento</div>
+                <div class="stat-value" id="stat-andamento">—</div>
+                <div class="stat-sub">ações ativas</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Concluídas</div>
+                <div class="stat-value" id="stat-concluidas">—</div>
+                <div class="stat-sub">este ano</div>
+              </div>
+              <div class="stat-card danger">
+                <div class="stat-label">⚠ Atrasadas</div>
+                <div class="stat-value" id="stat-atrasadas">—</div>
+                <div class="stat-sub">prazo vencido</div>
+              </div>
+              <div class="stat-card green-card">
+                <div class="stat-label">Retorno Concluído</div>
+                <div class="stat-value green" id="stat-retorno">—</div>
+                <div class="stat-sub">ano atual · concluídas</div>
+              </div>
+              <div class="stat-card yellow-card">
+                <div class="stat-label">Retorno Em Andamento</div>
+                <div class="stat-value yellow" id="stat-retorno-andamento">—</div>
+                <div class="stat-sub">ano atual · em andamento</div>
+              </div>
+              <div class="stat-card blue-card">
+                <div class="stat-label">Retorno Planejado</div>
+                <div class="stat-value blue" id="stat-retorno-planejado">—</div>
+                <div class="stat-sub">ano atual · planejadas</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Retorno Próximo Ano</div>
+                <div class="stat-value green" id="stat-retorno-prox">—</div>
+                <div class="stat-sub">total projetado</div>
+              </div>
+            </div>
+
+            <!-- Cloud stats -->
+            <div class="cloud-stats-strip" id="cloud-stats-grid"></div>
+
+            <!-- Ações Recentes -->
+            <div class="dashboard-grid">
+              <div class="card" style="grid-column: 1 / -1;">
+                <div class="card-header">
+                  <span class="card-title">
+                    <svg viewBox="0 0 20 20" fill="none" width="16" height="16" style="vertical-align:-3px;margin-right:4px"><path d="M9 5H7a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h0a2 2 0 002-2M9 5a2 2 0 012-2h0a2 2 0 012 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    Ações Recentes
+                  </span>
+                  <div style="display:flex;gap:8px;align-items:center">
+                    <span class="legend-chip legend-andamento">Em Andamento</span>
+                    <span class="legend-chip legend-planejado">Planejado</span>
+                    <span class="legend-chip legend-concluido">Concluído</span>
+                    <span class="badge" id="recentes-count">0</span>
+                  </div>
+                </div>
+                <div class="table-wrapper">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>ID FinOps</th><th>Ação</th><th>Responsável</th><th>Projeto</th>
+                        <th>Cloud</th><th>Status</th><th>Data Conclusão</th><th></th>
+                      </tr>
+                    </thead>
+                    <tbody id="dashboard-acoes-list">
+                      <tr><td colspan="8" class="empty-state">Carregando...</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Atrasadas -->
+            <div class="card card-atrasadas">
+              <div class="card-header">
+                <span class="card-title" style="color:var(--danger,#f38ba8)">
+                  <svg viewBox="0 0 20 20" fill="none" width="16" height="16" style="vertical-align:-3px;margin-right:4px"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v4.5l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Ações com Prazo Vencido
+                </span>
+                <span class="badge badge-danger" id="atrasadas-count">0</span>
+              </div>
+              <div class="table-wrapper">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>ID FinOps</th><th>Ação</th><th>Responsável</th><th>Projeto</th>
+                      <th>Cloud</th><th>Status</th><th>Data Conclusão</th><th>Dias em Aberto</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="atrasadas-tbody">
+                    <tr><td colspan="9" class="empty-state">Carregando...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div><!-- /dash-panel-acoes -->
+
+          <!-- ══ Painel: Estimativas ══ -->
+          <div class="dash-panel" id="dash-panel-estimativas">
+
+            <!-- Cards de totais -->
+            <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px">
+              <div class="stat-card green-card">
+                <div class="stat-label">
+                  <svg viewBox="0 0 14 14" fill="none" width="12" height="12" style="vertical-align:-1px;margin-right:4px"><path d="M2 7l3 3 7-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Aprovadas
+                </div>
+                <div class="stat-value green" id="est-dash-aprov-valor">—</div>
+                <div class="stat-sub" id="est-dash-aprov-count">0 estimativas</div>
+              </div>
+              <div class="stat-card danger">
+                <div class="stat-label">
+                  <svg viewBox="0 0 14 14" fill="none" width="12" height="12" style="vertical-align:-1px;margin-right:4px"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                  Não Aprovadas
+                </div>
+                <div class="stat-value" style="color:var(--red)" id="est-dash-nao-aprov-valor">—</div>
+                <div class="stat-sub" id="est-dash-nao-aprov-count">0 estimativas</div>
+              </div>
+              <div class="stat-card yellow-card">
+                <div class="stat-label">
+                  <svg viewBox="0 0 14 14" fill="none" width="12" height="12" style="vertical-align:-1px;margin-right:4px"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.5"/><path d="M7 4.5V7l1.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  Pendentes
+                </div>
+                <div class="stat-value yellow" id="est-dash-pend-valor">—</div>
+                <div class="stat-sub" id="est-dash-pend-count">0 estimativas</div>
+              </div>
+            </div>
+
+            <!-- Detalhamento por projeto -->
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">
+                  <svg viewBox="0 0 16 16" fill="none" width="14" height="14" style="vertical-align:-2px;margin-right:4px"><path d="M1 3h14M1 8h10M1 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  Detalhamento por Projeto
+                </span>
+                <button class="btn-ghost" style="font-size:11px;padding:4px 12px" onclick="showView('estimativas')">Ver todas →</button>
+              </div>
+              <div class="est-dash-grid">
+                <div class="est-dash-panel est-dash-aprov">
+                  <div class="est-dash-panel-title">
+                    <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M3 8l3.5 3.5L13 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    Aprovadas — por Projeto
+                  </div>
+                  <div class="est-dash-projetos" id="est-dash-aprov-projetos"></div>
+                </div>
+                <div class="est-dash-panel est-dash-nao-aprov">
+                  <div class="est-dash-panel-title">
+                    <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    Não Aprovadas — por Projeto
+                  </div>
+                  <div class="est-dash-projetos" id="est-dash-nao-aprov-projetos"></div>
+                </div>
+              </div>
+            </div>
+          </div><!-- /dash-panel-estimativas -->
+
+        </div>
+
+        <!-- PROJETOS VIEW -->
+        <div id="view-projetos" class="view">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Projetos Cadastrados</span>
+              <span class="badge" id="projetos-count">0</span>
+            </div>
+            <div class="table-wrapper">
+              <table class="data-table" id="projetos-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Nome do Projeto</th>
+                    <th>Diretoria</th>
+                    <th>Descrição</th>
+                    <th>Criado em</th>
+                    <th>Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="projetos-tbody">
+                  <tr><td colspan="6" class="empty-state">Carregando...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- AÇÕES VIEW -->
+        <div id="view-acoes" class="view">
+          <div class="filters-bar">
+            <input type="text" class="filter-input" id="filter-search" placeholder="Buscar por ação, responsável..." oninput="filterAcoes()">
+            <select class="filter-select" id="filter-cloud" onchange="filterAcoes()">
+              <option value="">Todas as Clouds</option>
+              <option>AWS</option><option>Azure</option><option>GCP</option><option>Oracle</option><option>Multicloud</option>
+            </select>
+            <select class="filter-select" id="filter-status" onchange="filterAcoes()">
+              <option value="">Todos os Status</option>
+              <option>Planejado</option><option>Em Andamento</option><option>Concluído</option><option>Cancelado</option>
+            </select>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Ações FinOps</span>
+              <span class="badge" id="acoes-count">0</span>
+            </div>
+            <div class="table-wrapper">
+              <table class="data-table" id="acoes-table">
+                <thead>
+                  <tr>
+                    <th>ID FinOps</th>
+                    <th>Projeto</th>
+                    <th>Ação</th>
+                    <th>Cloud</th>
+                    <th>Responsável</th>
+                    <th>Tipo</th>
+                    <th>Impacto/Mês</th>
+                    <th>Status</th>
+                    <th>Retorno Ano</th>
+                    <th>Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="acoes-tbody">
+                  <tr><td colspan="10" class="empty-state">Carregando...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div id="view-calculadora" class="view"></div>
+
+        <div id="view-estimativas" class="view">
+          <div class="filters-bar">
+            <input type="text" class="filter-input" id="est-search"
+                   placeholder="Buscar por número, projeto, título..." oninput="filterEstimativas()">
+            <select class="filter-select" id="est-filter-projeto" onchange="filterEstimativas()">
+              <option value="">Todos os Projetos</option>
+            </select>
+          </div>
+          <div id="est-stats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;"></div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Número</th>
+                  <th>Projeto</th>
+                  <th>Título</th>
+                  <th>Responsável</th>
+                  <th style="text-align:right">Total Final</th>
+                  <th>Data</th>
+                  <th>Validade</th>
+                  <th>Status</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="est-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ══ VIEW: RESERVAS CLOUD ══ -->
+        <div id="view-reservas" class="view">
+          <!-- Stats -->
+          <div class="stats-grid" style="margin-bottom:16px">
+            <div class="stat-card accent">
+              <div class="stat-label">Total de Reservas</div>
+              <div class="stat-value" id="rsv-stat-total">—</div>
+              <div class="stat-sub">cadastradas</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Ativas</div>
+              <div class="stat-value" id="rsv-stat-ativas">—</div>
+              <div class="stat-sub">em vigor</div>
+            </div>
+            <div class="stat-card danger">
+              <div class="stat-label">Vencendo em 90 dias</div>
+              <div class="stat-value" id="rsv-stat-vencendo">—</div>
+              <div class="stat-sub">requerem atenção</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Custo Mensal Total</div>
+              <div class="stat-value" id="rsv-stat-custo">—</div>
+              <div class="stat-sub">reservas ativas</div>
+            </div>
+          </div>
+          <!-- Filtros -->
+          <div class="filters-bar">
+            <input type="text" class="filter-input" id="rsv-search" placeholder="Buscar reserva..." oninput="filterReservas()">
+            <select class="filter-select" id="rsv-filter-cloud" onchange="filterReservas()">
+              <option value="">Todas as Clouds</option>
+              <option>Azure</option><option>AWS</option><option>GCP</option>
+              <option>Oracle</option><option>Multicloud</option>
+            </select>
+            <select class="filter-select" id="rsv-filter-status" onchange="filterReservas()">
+              <option value="">Todos os Status</option>
+              <option>Ativa</option><option>Expirada</option><option>Cancelada</option>
+            </select>
+          </div>
+          <!-- Tabela -->
+          <div class="table-container">
+            <table class="data-table">
+              <thead><tr>
+                <th>Cloud</th>
+                <th>Nome da Reserva</th>
+                <th>Tipo de Recurso</th>
+                <th>Escopo</th>
+                <th>Subscription / RG</th>
+                <th>Prazo</th>
+                <th>Vencimento</th>
+                <th>Status</th>
+                <th style="text-align:right">Custo/Mês</th>
+                <th>Ações</th>
+              </tr></thead>
+              <tbody id="rsv-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ══ VIEW: COLETA AUTOMÁTICA ══ -->
+        <div id="view-coleta" class="view">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;align-items:start">
+
+            <!-- Card: Configuração -->
+            <div class="stat-card" style="padding:20px">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
+                <svg viewBox="0 0 20 20" fill="none" width="20" height="20" style="color:var(--accent);flex-shrink:0">
+                  <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+                  <path d="M10 6v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span style="font-size:14px;font-weight:700;color:var(--text)">Configuração</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:12px">
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Tenant ID</label>
+                  <input id="coleta-tenant-id" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                </div>
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Client ID (App Registration)</label>
+                  <input id="coleta-client-id" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                </div>
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Client Secret <span style="color:var(--text-dim);font-size:10px">(deixe em branco para manter o atual)</span></label>
+                  <input id="coleta-client-secret" type="password" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="••••••••••••••••">
+                </div>
+                <div style="display:flex;gap:12px;align-items:center">
+                  <div style="flex:1">
+                    <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Dia de Execução (mensal)</label>
+                    <input id="coleta-dia" type="number" class="filter-input" style="width:100%;box-sizing:border-box" min="1" max="28" value="5">
+                  </div>
+                  <div style="flex:1">
+                    <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Granularidade (dias/chunk)</label>
+                    <select id="coleta-granularidade" class="filter-select" style="width:100%;box-sizing:border-box">
+                      <option value="7">Semanal — 7 dias (recomendado)</option>
+                      <option value="14">Quinzenal — 14 dias</option>
+                      <option value="28">Mensal — 28 dias (1 request)</option>
+                    </select>
+                  </div>
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:14px">
+                    <label class="toggle-label" style="font-size:11px;color:var(--text-muted)">Ativo</label>
+                    <label class="toggle-switch" style="margin:0">
+                      <input type="checkbox" id="coleta-ativo">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:4px">
+                  <button class="btn-primary" style="flex:1;font-size:12px;padding:8px" onclick="saveColetaConfig()">Salvar Configuração</button>
+                  <button class="btn-ghost" style="flex:1;font-size:12px;padding:8px" onclick="testColetaConexao()">Testar Conexão</button>
+                </div>
+                <div id="coleta-test-result" style="display:none;font-size:11px;padding:8px 10px;border-radius:6px;margin-top:2px"></div>
+              </div>
+            </div>
+
+            <!-- Card: Status -->
+            <div class="stat-card" style="padding:20px">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
+                <svg viewBox="0 0 20 20" fill="none" width="20" height="20" style="color:var(--accent);flex-shrink:0">
+                  <path d="M3 10a7 7 0 1014 0A7 7 0 003 10z" stroke="currentColor" stroke-width="1.5"/>
+                  <path d="M10 7v3.5l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span style="font-size:14px;font-weight:700;color:var(--text)">Status da Coleta</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:10px">
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                  <span style="font-size:12px;color:var(--text-muted)">Estado atual</span>
+                  <span id="coleta-status-badge" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:rgba(147,51,234,.15);color:var(--accent)">Carregando...</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                  <span style="font-size:12px;color:var(--text-muted)">Última execução</span>
+                  <span id="coleta-ultima-exec" style="font-size:12px;color:var(--text)">—</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                  <span style="font-size:12px;color:var(--text-muted)">Última mensagem</span>
+                  <span id="coleta-ultima-msg" style="font-size:11px;color:var(--text-dim);text-align:right;max-width:200px;word-break:break-word">—</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                  <span style="font-size:12px;color:var(--text-muted)">Registros (último mês)</span>
+                  <span id="coleta-ultima-linhas" style="font-size:12px;color:var(--text)">—</span>
+                </div>
+                <button id="coleta-exec-btn" class="btn-primary" style="margin-top:8px;font-size:13px;padding:10px" onclick="executarColetaAgora()">
+                  <svg viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:inline;margin-right:5px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg>
+                  Executar Agora
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Histórico -->
+          <div class="stat-card" style="padding:20px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <span style="font-size:14px;font-weight:700;color:var(--text)">Histórico de Execuções</span>
+              <button class="btn-ghost" style="font-size:11px;padding:4px 12px" onclick="loadColetaHistorico()">Atualizar</button>
+            </div>
+            <div class="table-wrapper" style="max-height:360px;overflow-y:auto">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Início</th>
+                    <th>Tipo</th>
+                    <th>Status</th>
+                    <th style="text-align:right">Subs</th>
+                    <th style="text-align:right">Inseridos</th>
+                    <th style="text-align:right">Atualizados</th>
+                    <th style="text-align:right">Erros</th>
+                    <th>Duração</th>
+                    <th>Mensagem</th>
+                  </tr>
+                </thead>
+                <tbody id="coleta-hist-tbody">
+                  <tr><td colspan="9" class="empty-state">Carregando...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <!-- ═══════════════════════════════════ -->
+
+      </div>
+    </main>
+  </div>
+
+  <!-- MODAL ALERTAS DE RESERVAS (popup pós-login) -->
+  <div class="modal-overlay" id="modal-rsv-alerts" onclick="closeModalOnOverlay(event,'modal-rsv-alerts')">
+    <div class="modal" style="max-width:700px;width:95%">
+      <div class="modal-header" style="gap:10px">
+        <span style="display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style="flex-shrink:0;color:var(--orange)">
+            <path d="M12 2L2 20h20L12 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+            <path d="M12 9v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            <circle cx="12" cy="17" r="1" fill="currentColor"/>
+          </svg>
+          Alertas de Reservas
+        </span>
+        <button class="modal-close" onclick="document.getElementById('modal-rsv-alerts').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body" style="padding-top:12px">
+        <p id="rsv-alerts-summary" style="margin:0 0 14px;font-size:13px;color:var(--text-muted)"></p>
+        <div style="overflow-x:auto;border-radius:8px;border:1px solid var(--border)">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead>
+              <tr style="background:rgba(147,51,234,.12)">
+                <th style="padding:9px 12px;text-align:left;color:var(--text-muted);font-weight:600;white-space:nowrap">Nome da Reserva</th>
+                <th style="padding:9px 12px;text-align:left;color:var(--text-muted);font-weight:600;white-space:nowrap">Cloud</th>
+                <th style="padding:9px 12px;text-align:left;color:var(--text-muted);font-weight:600;white-space:nowrap">Tipo</th>
+                <th style="padding:9px 12px;text-align:left;color:var(--text-muted);font-weight:600;white-space:nowrap">Vencimento</th>
+                <th style="padding:9px 12px;text-align:center;color:var(--text-muted);font-weight:600;white-space:nowrap">Situação</th>
+              </tr>
+            </thead>
+            <tbody id="rsv-alerts-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:10px;padding:14px 20px">
+        <button class="btn-ghost" onclick="document.getElementById('modal-rsv-alerts').classList.remove('open')">Fechar</button>
+        <button class="btn-primary" onclick="document.getElementById('modal-rsv-alerts').classList.remove('open');showView('reservas')">Ver Reservas</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL RESERVA -->
+  <div class="modal-overlay" id="modal-reserva" onclick="closeModalOnOverlay(event,'modal-reserva')">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <span id="modal-rsv-title">Nova Reserva</span>
+        <button class="modal-close" onclick="document.getElementById('modal-reserva').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="rsv-id">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Cloud *</label>
+            <select id="rsv-cloud" onchange="onRsvCloudChange()" required>
+              <option value="">Selecione...</option>
+              <option>Azure</option><option>AWS</option><option>GCP</option>
+              <option>Oracle</option><option>Multicloud</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Nome da Reserva *</label>
+            <input type="text" id="rsv-nome" placeholder="Ex: VM-Prod-Reserva-1ano">
+          </div>
+          <div class="form-group">
+            <label>Tipo de Escopo *</label>
+            <select id="rsv-escopo" onchange="onRsvEscopoChange()">
+              <option value="Shared">Shared</option>
+            </select>
+          </div>
+          <div class="form-group" id="rsv-sub-group" style="display:none">
+            <label id="rsv-sub-label-title">Subscription</label>
+            <div class="cms-wrap" id="rsv-sub-wrap" style="display:none">
+              <div class="cms-trigger" id="rsv-sub-trigger" onclick="rsvToggleDrop('sub')">
+                <span id="rsv-sub-label" style="flex:1;font-size:13px;color:var(--text-muted)">— selecione —</span>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+              <div class="cms-dropdown" id="rsv-sub-drop" style="display:none">
+                <div class="cms-search-wrap">
+                  <input class="cms-search" id="rsv-sub-search" placeholder="Buscar subscription..." oninput="rsvFilterDrop('sub',this.value)" autocomplete="off">
+                </div>
+                <div class="cms-options" id="rsv-sub-options"></div>
+                <div class="cms-footer">
+                  <button class="cms-btn" onclick="rsvClearDrop('sub')">Limpar</button>
+                  <button class="cms-btn cms-btn-ok" onclick="rsvConfirmDrop('sub')">OK ✓</button>
+                </div>
+              </div>
+            </div>
+            <input type="text" id="rsv-sub-manual" placeholder="ID ou nome da subscription" style="display:none">
+          </div>
+          <div class="form-group" id="rsv-rg-group" style="display:none">
+            <label id="rsv-rg-label-title">Resource Group</label>
+            <div class="cms-wrap" id="rsv-rg-wrap" style="display:none">
+              <div class="cms-trigger" id="rsv-rg-trigger" onclick="rsvToggleDrop('rg')">
+                <span id="rsv-rg-label" style="flex:1;font-size:13px;color:var(--text-muted)">— selecione —</span>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+              <div class="cms-dropdown" id="rsv-rg-drop" style="display:none">
+                <div class="cms-search-wrap">
+                  <input class="cms-search" id="rsv-rg-search" placeholder="Buscar resource group..." oninput="rsvFilterDrop('rg',this.value)" autocomplete="off">
+                </div>
+                <div class="cms-options" id="rsv-rg-options"></div>
+                <div class="cms-footer">
+                  <button class="cms-btn" onclick="rsvClearDrop('rg')">Limpar</button>
+                  <button class="cms-btn cms-btn-ok" onclick="rsvConfirmDrop('rg')">OK ✓</button>
+                </div>
+              </div>
+            </div>
+            <input type="text" id="rsv-rg-manual" placeholder="Nome do resource group" style="display:none">
+          </div>
+          <div class="form-group">
+            <label>Tipo de Recurso *</label>
+            <select id="rsv-tipo-recurso"><option value="">Selecione a cloud primeiro</option></select>
+          </div>
+          <div class="form-group">
+            <label>Instância / Tamanho</label>
+            <input type="text" id="rsv-instancia" placeholder="Ex: Standard_D4s_v3, m5.xlarge">
+          </div>
+          <div class="form-group">
+            <label>Quantidade</label>
+            <input type="number" id="rsv-quantidade" value="1" min="1">
+          </div>
+          <div class="form-group">
+            <label>Prazo</label>
+            <select id="rsv-prazo" onchange="onRsvPrazoChange()">
+              <option value="">Selecione...</option>
+              <option>1 ano</option><option>3 anos</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Opção de Pagamento</label>
+            <select id="rsv-pagamento">
+              <option value="">Selecione...</option>
+              <option>All Upfront</option><option>Partial Upfront</option><option>No Upfront</option><option>Monthly</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Custo Total (R$)</label>
+            <input type="number" id="rsv-custo-total" step="0.01" placeholder="0,00">
+          </div>
+          <div class="form-group">
+            <label>Custo Mensal (R$)</label>
+            <input type="number" id="rsv-custo-mensal" step="0.01" placeholder="0,00">
+          </div>
+          <div class="form-group">
+            <label>Data de Início</label>
+            <input type="date" id="rsv-data-inicio" onchange="onRsvPrazoChange()">
+          </div>
+          <div class="form-group">
+            <label>Data de Vencimento *</label>
+            <input type="date" id="rsv-data-vencimento" required>
+          </div>
+          <div class="form-group">
+            <label>Status</label>
+            <select id="rsv-status">
+              <option>Ativa</option><option>Expirada</option><option>Cancelada</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:4px">
+          <label>Observações</label>
+          <textarea id="rsv-observacoes" rows="2" placeholder="Notas adicionais..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="rsv-btn-excluir" class="btn-ghost" style="color:var(--danger);border-color:var(--danger);display:none;margin-right:auto" onclick="deleteReservaFromModal()">Excluir</button>
+        <button class="btn-ghost" onclick="document.getElementById('modal-reserva').classList.remove('open')">Cancelar</button>
+        <button id="rsv-btn-salvar" class="btn-primary" onclick="saveReserva()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL ESTIMATIVA -->
+  <div class="modal-overlay" id="modal-estimativa" onclick="closeModalOnOverlay(event,'modal-estimativa')">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <span id="modal-est-title">Detalhes da Estimativa</span>
+        <button class="modal-close" onclick="document.getElementById('modal-estimativa').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body" id="modal-est-body"></div>
+    </div>
+  </div>
+
+  <!-- MODAL PROJETO -->
+  <div class="modal-overlay" id="modal-projeto" onclick="closeModalOnOverlay(event, 'modal-projeto')">
+    <div class="modal">
+      <div class="modal-header">
+        <span id="modal-projeto-title">Novo Projeto</span>
+        <button class="modal-close" onclick="document.getElementById('modal-projeto').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="form-projeto" onsubmit="submitProjeto(event)">
+          <input type="hidden" id="projeto-id">
+          <div class="form-group">
+            <label>Nome do Projeto *</label>
+            <input type="text" id="projeto-nome" required placeholder="Ex: Otimização de Instâncias EC2">
+          </div>
+          <div class="form-group">
+            <label>Diretoria</label>
+            <input type="text" id="projeto-diretoria" placeholder="Ex: Tecnologia, Infraestrutura...">
+          </div>
+          <div class="form-group">
+            <label>Descrição</label>
+            <textarea id="projeto-descricao" rows="3" placeholder="Descreva o projeto..."></textarea>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" onclick="document.getElementById('modal-projeto').classList.remove('open')">Cancelar</button>
+            <button type="submit" class="btn-primary">Salvar Projeto</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL AÇÃO -->
+  <div class="modal-overlay" id="modal-acao" onclick="closeModalOnOverlay(event, 'modal-acao')">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <span id="modal-acao-title">Nova Ação FinOps</span>
+        <button class="modal-close" onclick="document.getElementById('modal-acao').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="form-acao" onsubmit="submitAcao(event)">
+          <input type="hidden" id="acao-id">
+
+          <div class="form-section-title">Informações Gerais</div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>ID FinOps <span style="font-size:11px;color:var(--text-muted);font-weight:400">(gerado automaticamente)</span></label>
+              <input type="text" id="acao-id-finops" readonly placeholder="Gerado ao salvar" style="opacity:0.6;cursor:default">
+            </div>
+            <div class="form-group">
+              <label>Projeto *</label>
+              <select id="acao-projeto" required>
+                <option value="">Selecione...</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Ação *</label>
+              <input type="text" id="acao-nome" required placeholder="Descrição da ação">
+            </div>
+            <div class="form-group">
+              <label>Cloud *</label>
+              <select id="acao-cloud" required>
+                <option value="">Selecione...</option>
+                <option>AWS</option><option>Azure</option><option>GCP</option><option>Oracle</option><option>Multicloud</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Responsável *</label>
+              <select id="acao-responsavel" required>
+                <option value="">Selecione o responsável...</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Tipo de Ação *</label>
+              <select id="acao-tipo" required>
+                <option value="">Selecione...</option>
+                <option>Rightsizing</option><option>Reserved Instances</option><option>Savings Plans</option>
+                <option>Spot Instances</option><option>Eliminação de Recursos</option><option>Otimização de Storage</option>
+                <option>Otimização de Rede</option><option>Governança</option><option>Outro</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Impacto Atual (Mês) R$</label>
+              <input type="number" id="acao-impacto" step="0.01" placeholder="0,00">
+            </div>
+            <div class="form-group">
+              <label>Status *</label>
+              <select id="acao-status" required>
+                <option value="">Selecione...</option>
+                <option>Planejado</option><option>Em Andamento</option><option>Concluído</option><option>Cancelado</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Data de Início</label>
+              <input type="date" id="acao-data-inicio">
+            </div>
+            <div class="form-group">
+              <label>Data de Conclusão</label>
+              <input type="date" id="acao-data-conclusao">
+            </div>
+          </div>
+
+          <div class="months-section-title">Retorno Ano Atual (R$)</div>
+          <div class="replicate-box">
+            <div class="replicate-box-title">Replicar valor</div>
+            <div class="replicate-row">
+              <input type="number" id="replicate-atual-value" step="0.01" placeholder="Ex: 1500,00">
+              <button type="button" class="btn-rep" onclick="replicarTodos('atual')">
+                <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M2 8h9M8 5l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 4v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Todos os meses
+              </button>
+              <button type="button" class="btn-rep secondary" onclick="toggleMesSelect('atual')">
+                <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><rect x="2" y="3" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M9 5h5M9 11h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Selecionar meses
+              </button>
+            </div>
+            <div class="month-checkboxes" id="chips-atual">
+              <span class="month-chip" data-value="jan" onclick="toggleChipAuto(this)">Jan</span>
+              <span class="month-chip" data-value="fev" onclick="toggleChipAuto(this)">Fev</span>
+              <span class="month-chip" data-value="mar" onclick="toggleChipAuto(this)">Mar</span>
+              <span class="month-chip" data-value="abr" onclick="toggleChipAuto(this)">Abr</span>
+              <span class="month-chip" data-value="mai" onclick="toggleChipAuto(this)">Mai</span>
+              <span class="month-chip" data-value="jun" onclick="toggleChipAuto(this)">Jun</span>
+              <span class="month-chip" data-value="jul" onclick="toggleChipAuto(this)">Jul</span>
+              <span class="month-chip" data-value="ago" onclick="toggleChipAuto(this)">Ago</span>
+              <span class="month-chip" data-value="set" onclick="toggleChipAuto(this)">Set</span>
+              <span class="month-chip" data-value="out" onclick="toggleChipAuto(this)">Out</span>
+              <span class="month-chip" data-value="nov" onclick="toggleChipAuto(this)">Nov</span>
+              <span class="month-chip" data-value="dez" onclick="toggleChipAuto(this)">Dez</span>
+              <div class="month-chips-actions">
+                <button type="button" class="btn-rep" onclick="replicarSelecionados('atual')">Aplicar nos selecionados</button>
+                <button type="button" class="btn-rep secondary" onclick="selecionarTodosChips('atual', true)">Marcar todos</button>
+                <button type="button" class="btn-rep secondary" onclick="selecionarTodosChips('atual', false)">Desmarcar todos</button>
+              </div>
+            </div>
+          </div>
+          <div class="months-grid">
+            <div class="form-group"><label>Janeiro</label><input type="number" id="atual_jan" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Fevereiro</label><input type="number" id="atual_fev" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Março</label><input type="number" id="atual_mar" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Abril</label><input type="number" id="atual_abr" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Maio</label><input type="number" id="atual_mai" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Junho</label><input type="number" id="atual_jun" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Julho</label><input type="number" id="atual_jul" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Agosto</label><input type="number" id="atual_ago" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Setembro</label><input type="number" id="atual_set" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Outubro</label><input type="number" id="atual_out" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Novembro</label><input type="number" id="atual_nov" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Dezembro</label><input type="number" id="atual_dez" step="0.01" placeholder="0,00"></div>
+          </div>
+
+          <div class="months-section-title">Retorno Próximo Ano (R$)</div>
+          <div class="replicate-box">
+            <div class="replicate-box-title">Replicar valor</div>
+            <div class="replicate-row">
+              <input type="number" id="replicate-prox-value" step="0.01" placeholder="Ex: 1500,00">
+              <button type="button" class="btn-rep" onclick="replicarTodos('prox')">
+                <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M2 8h9M8 5l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 4v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Todos os meses
+              </button>
+              <button type="button" class="btn-rep secondary" onclick="toggleMesSelect('prox')">
+                <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><rect x="2" y="3" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="4" height="4" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M9 5h5M9 11h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                Selecionar meses
+              </button>
+            </div>
+            <div class="month-checkboxes" id="chips-prox">
+              <span class="month-chip" data-value="jan" onclick="toggleChipAuto(this)">Jan</span>
+              <span class="month-chip" data-value="fev" onclick="toggleChipAuto(this)">Fev</span>
+              <span class="month-chip" data-value="mar" onclick="toggleChipAuto(this)">Mar</span>
+              <span class="month-chip" data-value="abr" onclick="toggleChipAuto(this)">Abr</span>
+              <span class="month-chip" data-value="mai" onclick="toggleChipAuto(this)">Mai</span>
+              <span class="month-chip" data-value="jun" onclick="toggleChipAuto(this)">Jun</span>
+              <span class="month-chip" data-value="jul" onclick="toggleChipAuto(this)">Jul</span>
+              <span class="month-chip" data-value="ago" onclick="toggleChipAuto(this)">Ago</span>
+              <span class="month-chip" data-value="set" onclick="toggleChipAuto(this)">Set</span>
+              <span class="month-chip" data-value="out" onclick="toggleChipAuto(this)">Out</span>
+              <span class="month-chip" data-value="nov" onclick="toggleChipAuto(this)">Nov</span>
+              <span class="month-chip" data-value="dez" onclick="toggleChipAuto(this)">Dez</span>
+              <div class="month-chips-actions">
+                <button type="button" class="btn-rep" onclick="replicarSelecionados('prox')">Aplicar nos selecionados</button>
+                <button type="button" class="btn-rep secondary" onclick="selecionarTodosChips('prox', true)">Marcar todos</button>
+                <button type="button" class="btn-rep secondary" onclick="selecionarTodosChips('prox', false)">Desmarcar todos</button>
+              </div>
+            </div>
+          </div>
+          <div class="months-grid">
+            <div class="form-group"><label>Janeiro</label><input type="number" id="prox_jan" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Fevereiro</label><input type="number" id="prox_fev" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Março</label><input type="number" id="prox_mar" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Abril</label><input type="number" id="prox_abr" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Maio</label><input type="number" id="prox_mai" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Junho</label><input type="number" id="prox_jun" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Julho</label><input type="number" id="prox_jul" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Agosto</label><input type="number" id="prox_ago" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Setembro</label><input type="number" id="prox_set" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Outubro</label><input type="number" id="prox_out" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Novembro</label><input type="number" id="prox_nov" step="0.01" placeholder="0,00"></div>
+            <div class="form-group"><label>Dezembro</label><input type="number" id="prox_dez" step="0.01" placeholder="0,00"></div>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" class="btn-ghost" onclick="document.getElementById('modal-acao').classList.remove('open')">Cancelar</button>
+            <button type="submit" class="btn-primary">Salvar Ação</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- DETAIL MODAL -->
+  <div class="modal-overlay" id="modal-detalhe" onclick="closeModalOnOverlay(event, 'modal-detalhe')">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <span>Detalhes da Ação</span>
+        <button class="modal-close" onclick="document.getElementById('modal-detalhe').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body" id="detalhe-content"></div>
+    </div>
+  </div>
+
+  <!-- MODAL CONFIGURAÇÕES -->
+  <div class="modal-overlay" id="modal-settings" onclick="closeModalOnOverlay(event, 'modal-settings')">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <span>
+          <svg viewBox="0 0 20 20" fill="none" width="16" height="16" style="vertical-align:-2px;margin-right:6px">
+            <circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M10 2v1.5M10 16.5V18M18 10h-1.5M3.5 10H2M15.66 4.34l-1.06 1.06M5.4 14.6l-1.06 1.06M15.66 15.66l-1.06-1.06M5.4 5.4L4.34 4.34" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          Configurações
+        </span>
+        <button class="modal-close" onclick="document.getElementById('modal-settings').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body">
+
+        <!-- Tabs -->
+        <div class="settings-tabs">
+          <div class="settings-tab active" onclick="switchSettingsTab('usuarios')">👤 Usuários</div>
+          <div class="settings-tab" onclick="switchSettingsTab('privilegios')">🔐 Privilégios</div>
+          <div class="settings-tab" onclick="switchSettingsTab('integracao')">🔗 Integração AD / Entra ID</div>
+          <div class="settings-tab" onclick="switchSettingsTab('banco')">🗄️ Banco de Dados</div>
+        </div>
+
+        <!-- Tab: Usuários -->
+        <div class="settings-panel active" id="stab-usuarios">
+          <div class="settings-section-title">Novo Usuário Local</div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>Nome *</label>
+              <input type="text" id="nu-nome" placeholder="Nome completo">
+            </div>
+            <div class="form-group">
+              <label>E-mail *</label>
+              <input type="email" id="nu-email" placeholder="usuario@empresa.com">
+            </div>
+            <div class="form-group">
+              <label>Senha *</label>
+              <input type="password" id="nu-senha" placeholder="••••••••">
+            </div>
+            <div class="form-group">
+              <label>Perfil *</label>
+              <select id="nu-perfil">
+                <option value="">Selecione...</option>
+                <option value="admin">Administrador</option>
+                <option value="finops">Usuário FinOps</option>
+                <option value="reader">Reader</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <button type="button" class="btn-primary" onclick="adicionarUsuario()">
+              <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              Criar Usuário
+            </button>
+          </div>
+
+          <div class="settings-section-title" style="margin-top:24px">Usuários Cadastrados</div>
+          <div id="users-list">
+            <div class="loading-state">Carregando...</div>
+          </div>
+        </div>
+
+        <!-- Tab: Privilégios -->
+        <div class="settings-panel" id="stab-privilegios">
+          <div class="settings-section-title">Controle de Acesso por Perfil</div>
+
+          <div class="integration-card">
+            <div class="integration-header">
+              <span class="role-badge role-admin">🔴 Administrador</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-muted,#6c7086);line-height:1.7">
+              ✅ Acesso total ao sistema<br>
+              ✅ Criar / editar / excluir projetos e ações<br>
+              ✅ Gerenciar usuários e privilégios<br>
+              ✅ Configurar integrações AD / Entra ID<br>
+              ✅ Visualizar todos os dashboards e relatórios
+            </div>
+          </div>
+
+          <div class="integration-card">
+            <div class="integration-header">
+              <span class="role-badge role-finops">🔵 Usuário FinOps</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-muted,#6c7086);line-height:1.7">
+              ✅ Criar e editar projetos e ações<br>
+              ✅ Visualizar dashboards e relatórios<br>
+              ❌ Gerenciar usuários<br>
+              ❌ Alterar configurações de integração
+            </div>
+          </div>
+
+          <div class="integration-card">
+            <div class="integration-header">
+              <span class="role-badge role-reader">🟢 Reader</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-muted,#6c7086);line-height:1.7">
+              ✅ Visualizar dashboards e relatórios<br>
+              ✅ Visualizar projetos e ações<br>
+              ❌ Criar ou editar registros<br>
+              ❌ Gerenciar usuários ou configurações
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: Integração -->
+        <div class="settings-panel" id="stab-integracao">
+
+          <!-- Active Directory -->
+          <div class="integration-card">
+            <div class="integration-header" style="justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:10px">
+                <svg class="integration-logo" viewBox="0 0 32 32" fill="none">
+                  <rect width="32" height="32" rx="4" fill="#0078D4"/>
+                  <path d="M16 6L6 11v10l10 5 10-5V11L16 6z" stroke="white" stroke-width="1.5" fill="none"/>
+                  <circle cx="16" cy="16" r="3" fill="white"/>
+                </svg>
+                <div>
+                  <div class="integration-title">Active Directory (On-Premises)</div>
+                  <div class="integration-sub">Autenticação via LDAP / AD local</div>
+                </div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-ad" onchange="toggleIntegration('ad')">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="config-ad" style="display:none">
+              <div class="form-grid-2" style="margin-top:12px">
+                <div class="form-group"><label>Servidor LDAP</label><input type="text" id="ad-server" placeholder="ldap://servidor.empresa.local"></div>
+                <div class="form-group"><label>Base DN</label><input type="text" id="ad-basedn" placeholder="DC=empresa,DC=local"></div>
+                <div class="form-group"><label>Usuário de Bind</label><input type="text" id="ad-user" placeholder="CN=svc-finops,OU=Servicos,DC=empresa,DC=local"></div>
+                <div class="form-group"><label>Senha de Bind</label><input type="password" id="ad-pass" placeholder="••••••••"></div>
+                <div class="form-group"><label>Grupo de Admins</label><input type="text" id="ad-grp-admin" placeholder="GRP_FinOps_Admin"></div>
+                <div class="form-group"><label>Grupo FinOps</label><input type="text" id="ad-grp-finops" placeholder="GRP_FinOps_Users"></div>
+                <div class="form-group"><label>Grupo Reader</label><input type="text" id="ad-grp-reader" placeholder="GRP_FinOps_Readers"></div>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button type="button" class="btn-primary" onclick="testarConexao('ad')">Testar Conexão</button>
+                <button type="button" class="btn-rep secondary" onclick="salvarIntegracao('ad')">💾 Salvar Configuração</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Entra ID -->
+          <div class="integration-card">
+            <div class="integration-header" style="justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:10px">
+                <svg class="integration-logo" viewBox="0 0 32 32" fill="none">
+                  <rect width="32" height="32" rx="4" fill="#0078D4"/>
+                  <path d="M8 16L16 8l8 8-8 8-8-8z" fill="none" stroke="white" stroke-width="1.5"/>
+                  <circle cx="16" cy="16" r="3" fill="#50E6FF"/>
+                </svg>
+                <div>
+                  <div class="integration-title">Microsoft Entra ID (Azure AD)</div>
+                  <div class="integration-sub">Autenticação via OAuth 2.0 / SSO</div>
+                </div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-entra" onchange="toggleIntegration('entra')">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="config-entra" style="display:none">
+              <div class="form-grid-2" style="margin-top:12px">
+                <div class="form-group"><label>Tenant ID</label><input type="text" id="entra-tenant" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+                <div class="form-group"><label>Client ID</label><input type="text" id="entra-client" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+                <div class="form-group"><label>Client Secret</label><input type="password" id="entra-secret" placeholder="••••••••"></div>
+                <div class="form-group"><label>Redirect URI</label><input type="text" id="entra-redirect" placeholder="http://localhost:3000/auth/callback"></div>
+                <div class="form-group"><label>Grupo Admins (Object ID)</label><input type="text" id="entra-grp-admin" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+                <div class="form-group"><label>Grupo FinOps (Object ID)</label><input type="text" id="entra-grp-finops" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+                <div class="form-group"><label>Grupo Reader (Object ID)</label><input type="text" id="entra-grp-reader" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button type="button" class="btn-primary" onclick="testarConexao('entra')">Testar Conexão</button>
+                <button type="button" class="btn-rep secondary" onclick="salvarIntegracao('entra')">💾 Salvar Configuração</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Tab: Banco de Dados -->
+        <div class="settings-panel" id="stab-banco">
+
+          <div class="settings-section-title">Conexões Cadastradas</div>
+          <div id="db-alert" class="sw-hint" style="display:none;margin-bottom:10px"></div>
+          <div id="db-connections-list"><div class="loading-state">Carregando...</div></div>
+
+          <div class="settings-section-title" style="margin-top:20px">Nova Conexão</div>
+
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>Nome da Conexão *</label>
+              <input type="text" id="db-nome" placeholder="Ex: FinOps Produção">
+            </div>
+            <div class="form-group">
+              <label>Tipo de Banco *</label>
+              <select id="db-tipo" onchange="onDbTipoChange()">
+                <option value="">Selecione...</option>
+                <optgroup label="On-Premises">
+                  <option value="postgresql">PostgreSQL</option>
+                  <option value="sqlserver">SQL Server</option>
+                  <option value="mysql">MySQL / MariaDB</option>
+                  <option value="oracle">Oracle DB</option>
+                </optgroup>
+                <optgroup label="Cloud — AWS">
+                  <option value="aws-rds-pg">AWS RDS — PostgreSQL</option>
+                  <option value="aws-rds-mysql">AWS RDS — MySQL</option>
+                  <option value="aws-aurora">AWS Aurora</option>
+                  <option value="aws-redshift">AWS Redshift</option>
+                </optgroup>
+                <optgroup label="Cloud — Azure">
+                  <option value="azure-pg">Azure Database for PostgreSQL</option>
+                  <option value="azure-sql">Azure SQL Database</option>
+                  <option value="azure-mysql">Azure Database for MySQL</option>
+                </optgroup>
+                <optgroup label="Cloud — GCP">
+                  <option value="gcp-pg">Cloud SQL — PostgreSQL</option>
+                  <option value="gcp-mysql">Cloud SQL — MySQL</option>
+                  <option value="gcp-spanner">Cloud Spanner</option>
+                </optgroup>
+                <optgroup label="Cloud — Oracle">
+                  <option value="oracle-atp">Oracle Autonomous Transaction Processing</option>
+                  <option value="oracle-adw">Oracle Autonomous Data Warehouse</option>
+                </optgroup>
+              </select>
+            </div>
+          </div>
+
+          <!-- Campos base (todos os tipos) -->
+          <div class="form-grid-2" id="db-fields-base">
+            <div class="form-group">
+              <label>Host / Endpoint *</label>
+              <input type="text" id="db-host" placeholder="localhost ou endpoint.cloud.com">
+            </div>
+            <div class="form-group">
+              <label>Porta *</label>
+              <input type="number" id="db-porta" placeholder="5432">
+            </div>
+            <div class="form-group">
+              <label>Nome do Banco *</label>
+              <input type="text" id="db-database" placeholder="finops_db">
+            </div>
+            <div class="form-group">
+              <label>Schema</label>
+              <input type="text" id="db-schema" placeholder="public">
+            </div>
+            <div class="form-group">
+              <label>Usuário *</label>
+              <input type="text" id="db-usuario" placeholder="postgres">
+            </div>
+            <div class="form-group">
+              <label>Senha *</label>
+              <input type="password" id="db-senha" placeholder="••••••••">
+            </div>
+          </div>
+
+          <!-- Campos SSL -->
+          <div class="integration-card" style="margin-top:12px" id="db-ssl-card">
+            <div class="integration-header" style="justify-content:space-between">
+              <div>
+                <div class="integration-title">🔒 SSL / TLS</div>
+                <div class="integration-sub">Recomendado para conexões cloud</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="db-ssl" onchange="document.getElementById('db-ssl-cert-area').style.display=this.checked?'block':'none'">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="db-ssl-cert-area" style="display:none;margin-top:10px">
+              <div class="form-group">
+                <label>CA Certificate (opcional)</label>
+                <textarea id="db-ssl-ca" rows="3" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- Campos extras por tipo de cloud -->
+          <div id="db-fields-extra" style="display:none">
+            <div class="integration-card" style="margin-top:12px">
+              <div class="integration-title" id="db-extra-title">Configurações Adicionais</div>
+              <div class="form-grid-2" style="margin-top:10px" id="db-extra-fields"></div>
+            </div>
+          </div>
+
+          <!-- Pool de conexões -->
+          <div class="integration-card" style="margin-top:12px">
+            <div class="integration-title">⚡ Pool de Conexões</div>
+            <div class="form-grid-2" style="margin-top:10px">
+              <div class="form-group"><label>Mínimo de conexões</label><input type="number" id="db-pool-min" value="2" min="1" max="10"></div>
+              <div class="form-group"><label>Máximo de conexões</label><input type="number" id="db-pool-max" value="10" min="1" max="100"></div>
+              <div class="form-group"><label>Timeout (ms)</label><input type="number" id="db-pool-timeout" value="30000"></div>
+              <div class="form-group">
+                <label>Conexão Padrão</label>
+                <label class="toggle-switch" style="margin-top:8px">
+                  <input type="checkbox" id="db-is-default">
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+            <button type="button" class="btn-primary" onclick="testarConexaoDB()">
+              <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M8 2a6 6 0 100 12A6 6 0 008 2z" stroke="currentColor" stroke-width="1.5"/><path d="M8 6v2l1.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              Testar Conexão
+            </button>
+            <button type="button" class="btn-rep secondary" onclick="salvarConexaoDB()">
+              💾 Salvar Conexão
+            </button>
+            <button type="button" class="btn-rep secondary" onclick="limparFormDB()">
+              🗑 Limpar
+            </button>
+          </div>
+
+          <div id="db-test-result" style="display:none;margin-top:12px"></div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TIMEOUT MODAL -->
+  <div class="modal-overlay" id="modal-timeout" style="display:none;z-index:99999">
+    <div class="modal" style="max-width:380px;text-align:center">
+      <div class="modal-body" style="padding:32px 24px">
+        <div style="font-size:40px;margin-bottom:12px">⏱️</div>
+        <div style="font-size:17px;font-weight:700;color:var(--text,#cdd6f4);margin-bottom:8px">Sessão prestes a expirar</div>
+        <div style="font-size:13px;color:var(--text-muted,#6c7086);margin-bottom:20px">
+          Você está inativo há 15 minutos.<br>Deseja continuar conectado?
+        </div>
+        <div id="timeout-countdown-display" style="font-size:28px;font-weight:700;color:var(--danger,#f38ba8);margin-bottom:20px">60</div>
+        <div style="display:flex;gap:10px;justify-content:center">
+          <button class="btn-ghost" onclick="sessionLogout()">Sair agora</button>
+          <button class="btn-primary" onclick="extendSession()">Continuar conectado</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL IMPORTAR PROJETOS -->
+  <div class="modal-overlay" id="modal-import" onclick="closeModalOnOverlay(event, 'modal-import')">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <span>Importar Projetos — Excel / CSV</span>
+        <button class="modal-close" onclick="document.getElementById('modal-import').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="import-instructions">
+          <div class="import-columns-title">Colunas esperadas no arquivo:</div>
+          <div class="import-columns">
+            <span class="import-col required">nome <em>(obrigatório)</em></span>
+            <span class="import-col">diretoria</span>
+            <span class="import-col">descricao</span>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:8px">
+            <button type="button" class="btn-rep secondary" onclick="downloadTemplate()">
+              <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 11v1a2 2 0 002 2h8a2 2 0 002-2v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              Baixar template CSV
+            </button>
+          </div>
+        </div>
+
+        <div class="import-drop-area" id="import-drop-area" onclick="document.getElementById('import-file-input').click()" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleFileDrop(event)">
+          <svg viewBox="0 0 48 48" fill="none" width="40" height="40"><rect x="8" y="4" width="32" height="40" rx="4" stroke="currentColor" stroke-width="2" opacity=".4"/><path d="M16 20h16M16 28h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M30 2v10h10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".5"/></svg>
+          <div class="import-drop-text">Arraste um arquivo aqui ou <span>clique para selecionar</span></div>
+          <div class="import-drop-sub">Suporta .xlsx, .xls e .csv</div>
+          <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFileSelect(event)">
+        </div>
+
+        <div id="import-preview" style="display:none">
+          <div class="import-preview-header">
+            <span id="import-preview-title"></span>
+            <span id="import-preview-badges"></span>
+          </div>
+          <div class="table-wrapper" style="max-height:260px;overflow-y:auto">
+            <table class="data-table" id="import-preview-table">
+              <thead>
+                <tr><th>Nome</th><th>Diretoria</th><th>Descrição</th><th>Status</th></tr>
+              </thead>
+              <tbody id="import-preview-tbody"></tbody>
+            </table>
+          </div>
+          <div class="modal-actions" style="margin-top:16px">
+            <button type="button" class="btn-ghost" onclick="resetImport()">Cancelar</button>
+            <button type="button" class="btn-primary" id="btn-confirm-import" onclick="confirmarImport()">
+              <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M3 8l3 3 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Importar projetos
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Refresh FAB -->
+  <div class="refresh-fab" id="refresh-fab" style="display:none" title="Auto-refresh">
+    <button class="refresh-fab-btn" id="btn-refresh" onclick="manualRefresh()" title="Atualizar agora">
+      <svg id="refresh-icon" viewBox="0 0 16 16" fill="none" width="10" height="10">
+        <path d="M13.5 8A5.5 5.5 0 112.5 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M2.5 2v3.5H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <div class="refresh-fab-sep"></div>
+    <select class="refresh-fab-select" id="refresh-interval" onchange="setRefreshInterval(this.value)">
+      <option value="10" selected>10m</option>
+      <option value="15">15m</option>
+      <option value="20">20m</option>
+      <option value="30">30m</option>
+      <option value="0">—</option>
+    </select>
+    <span class="refresh-fab-countdown" id="refresh-countdown"></span>
+  </div>
+
+  </div><!-- /app-shell -->
+
+  <div id="toast" class="toast"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="app.js"></script>
+<script>
+// ── Sidebar responsiva ───────────────────────────────────────────
+function toggleSidebar() {
+  const sb  = document.querySelector('.sidebar');
+  const ov  = document.getElementById('sidebar-overlay');
+  const btn = document.getElementById('btn-menu');
+  if (!sb) return;
+  const isOpen = sb.classList.toggle('open');
+  if (ov) ov.classList.toggle('open', isOpen);
+  if (btn) {
+    btn.classList.toggle('open', isOpen);
+    btn.setAttribute('aria-expanded', String(isOpen));
+    btn.setAttribute('aria-label', isOpen ? 'Fechar menu' : 'Abrir menu');
+  }
+}
+
+// Sidebar sempre off-canvas — nada a fazer no resize
+
+// Fechar sidebar com Escape
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.querySelector('.sidebar')?.classList.contains('open')) {
+    toggleSidebar();
+  }
+});
+
+
+</script>
+  <script src="calculadora.js"></script>
+
+  <!-- Modal: Editar Usuário -->
+  <div class="modal-overlay" id="modal-editar-usuario" onclick="closeModalOnOverlay(event,'modal-editar-usuario')">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <h2 class="modal-title">Editar Usuário</h2>
+        <button class="modal-close" onclick="document.getElementById('modal-editar-usuario').classList.remove('open')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="eu-id">
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>Nome *</label>
+            <input type="text" id="eu-nome" placeholder="Nome completo">
+          </div>
+          <div class="form-group">
+            <label>E-mail *</label>
+            <input type="email" id="eu-email" placeholder="usuario@empresa.com">
+          </div>
+          <div class="form-group">
+            <label>Perfil *</label>
+            <select id="eu-perfil">
+              <option value="admin">Administrador</option>
+              <option value="finops">Usuário FinOps</option>
+              <option value="reader">Reader</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Status</label>
+            <select id="eu-ativo">
+              <option value="true">Ativo</option>
+              <option value="false">Inativo</option>
+            </select>
+          </div>
+        </div>
+        <div class="settings-section-title" style="margin-top:16px;margin-bottom:12px">Alterar Senha <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(deixe em branco para manter a atual)</span></div>
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>Nova Senha</label>
+            <input type="password" id="eu-senha" placeholder="••••••••">
+          </div>
+          <div class="form-group">
+            <label>Confirmar Senha</label>
+            <input type="password" id="eu-senha2" placeholder="••••••••">
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick="document.getElementById('modal-editar-usuario').classList.remove('open')">Cancelar</button>
+        <button type="button" class="btn-primary" onclick="salvarEdicaoUsuario()">Salvar Alterações</button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

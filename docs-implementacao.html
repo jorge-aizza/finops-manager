@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>FinOps Manager — Guia de Implementação</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'IBM Plex Sans','Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;color:#1a202c;background:#0d0014;padding:24px}
+.page{background:#fff;max-width:960px;margin:0 auto;overflow:hidden;box-shadow:0 8px 48px rgba(0,0,0,.6)}
+
+/* ── CAPA ── */
+.cover{background:linear-gradient(145deg,#0d0218 0%,#1e0040 40%,#0a0020 100%);min-height:260px;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;padding:36px 40px 32px}
+.cover::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 15% 60%,rgba(147,51,234,.22) 0%,transparent 55%),radial-gradient(ellipse at 85% 30%,rgba(100,0,200,.14) 0%,transparent 50%)}
+.cover-watermark{position:absolute;right:-10px;top:50%;transform:translateY(-50%);font-size:120pt;font-weight:900;color:rgba(147,51,234,.05);font-family:'Arial Black',Arial,sans-serif;user-select:none;line-height:1;letter-spacing:-.04em}
+.cover-top{display:flex;align-items:center;gap:10px;position:relative;z-index:1}
+.cover-vivo{display:block}
+.cover-mascote{height:52px;width:auto;filter:drop-shadow(0 0 10px rgba(147,51,234,.5))}
+.cover-divider{width:1px;height:44px;background:rgba(147,51,234,.3);margin:0 4px}
+.cover-app{display:flex;flex-direction:column;justify-content:center}
+.cover-app-name{font-size:17pt;font-weight:700;color:#c084fc;letter-spacing:.02em;line-height:1.15}
+.cover-app-sub{font-size:7pt;color:#7c5fa0;letter-spacing:.18em;text-transform:uppercase;margin-top:4px}
+.cover-mid{position:relative;z-index:1;padding:20px 0 12px}
+.cover-doc-label{font-size:7pt;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:#6b5480;margin-bottom:10px}
+.cover-title{font-size:26pt;font-weight:700;color:#e9d5ff;line-height:1.15;letter-spacing:-.01em}
+.cover-title span{color:#9333ea}
+.cover-bottom{display:flex;justify-content:space-between;align-items:flex-end;position:relative;z-index:1}
+.cover-meta{font-size:8pt;color:#7c5fa0}
+.cover-meta strong{color:#a78bca}
+.cover-badge{display:inline-block;padding:4px 14px;border-radius:20px;font-size:7pt;font-weight:700;color:#c084fc;border:1px solid rgba(147,51,234,.4);letter-spacing:.1em;text-transform:uppercase}
+.stripe{height:4px;background:linear-gradient(90deg,#2d0060 0%,#660099 25%,#9333ea 50%,#660099 75%,#2d0060 100%)}
+
+/* ── ÍNDICE ── */
+.toc{padding:28px 40px 24px;border-bottom:1px solid #ede9f7;background:linear-gradient(180deg,#faf7ff 0%,#fff 100%)}
+.toc-title{font-size:7pt;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:#7c3aed;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.toc-title::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,rgba(147,51,234,.3),transparent)}
+.toc-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 32px}
+.toc-item{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dotted #ede9f7}
+.toc-num{font-size:8pt;font-weight:700;color:#9333ea;font-family:'IBM Plex Mono','Courier New',monospace;width:22px;flex-shrink:0}
+.toc-label{font-size:9pt;color:#374151;flex:1}
+.toc-page{font-size:8pt;color:#9aa0be;font-family:'IBM Plex Mono','Courier New',monospace}
+
+/* ── SEÇÃO ── */
+.sec{padding:0 40px}
+.sec-hdr{display:flex;align-items:center;gap:10px;padding:16px 0 12px;border-bottom:2px solid #ede9f7;margin-bottom:16px;margin-top:28px}
+.sec-num{width:28px;height:28px;border-radius:6px;background:linear-gradient(135deg,#660099,#9333ea);display:flex;align-items:center;justify-content:center;font-size:10pt;font-weight:700;color:#fff;font-family:'IBM Plex Mono','Courier New',monospace;flex-shrink:0}
+.sec-ttl{font-size:13pt;font-weight:700;color:#0d0f14;letter-spacing:.01em}
+.subsec{margin:14px 0 8px;font-size:9.5pt;font-weight:700;color:#660099;letter-spacing:.02em;display:flex;align-items:center;gap:6px}
+.subsec::before{content:'';width:3px;height:14px;background:#9333ea;border-radius:2px;display:inline-block;flex-shrink:0}
+p{font-size:9.5pt;color:#374151;line-height:1.8;margin-bottom:8px}
+.note{background:#faf7ff;border-left:3px solid #9333ea;padding:10px 14px;margin:10px 0;border-radius:0 6px 6px 0}
+.note-lbl{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#7c3aed;margin-bottom:4px}
+.note p{margin:0;font-size:9pt;color:#4a5568}
+.warn{background:#fff8f0;border-left:3px solid #f97316;padding:10px 14px;margin:10px 0;border-radius:0 6px 6px 0}
+.warn-lbl{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#ea580c;margin-bottom:4px}
+.warn p{margin:0;font-size:9pt;color:#4a5568}
+
+/* ── TABELAS ── */
+.tbl-wrap{margin:10px 0;border-radius:8px;overflow:hidden;border:1px solid #ede9f7}
+table.doc{width:100%;border-collapse:collapse;font-size:9pt}
+table.doc thead tr{background:linear-gradient(90deg,#3d006b,#660099)}
+table.doc thead th{padding:9px 12px;font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#e9d5ff;text-align:left}
+table.doc tbody tr:nth-child(odd){background:#fff}
+table.doc tbody tr:nth-child(even){background:#faf7ff}
+table.doc tbody td{padding:8px 12px;color:#374151;border-bottom:1px solid #f0eef8;vertical-align:top}
+table.doc tbody td:first-child{font-family:'IBM Plex Mono','Courier New',monospace;font-size:8.5pt;color:#6d28d9;font-weight:600;white-space:nowrap}
+.req{font-size:7pt;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap}
+.req-yes{background:rgba(220,38,38,.1);color:#dc2626}
+.req-no{background:rgba(100,116,139,.1);color:#64748b}
+
+/* ── CODE ── */
+pre{background:#0d0f14;color:#c084fc;padding:14px 18px;border-radius:8px;font-family:'IBM Plex Mono','Courier New',monospace;font-size:8.5pt;line-height:1.7;margin:10px 0;overflow-x:auto;border:1px solid rgba(147,51,234,.2)}
+pre .c{color:#4a5568}
+pre .k{color:#f472b6}
+pre .s{color:#34d399}
+pre .v{color:#fbbf24}
+code{font-family:'IBM Plex Mono','Courier New',monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padding:1px 5px;border-radius:3px}
+
+/* ── STEPS ── */
+.steps{margin:10px 0;counter-reset:step}
+.step{display:flex;gap:12px;margin-bottom:12px;align-items:flex-start}
+.step-num{width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,#660099,#9333ea);display:flex;align-items:center;justify-content:center;font-size:9pt;font-weight:700;color:#fff;flex-shrink:0;margin-top:1px}
+.step-body{flex:1}
+.step-title{font-size:9.5pt;font-weight:700;color:#0d0f14;margin-bottom:3px}
+.step-desc{font-size:9pt;color:#4a5568;line-height:1.7}
+
+/* ── FEATURE CARDS ── */
+.feat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+.feat{padding:12px 14px;border-radius:8px;border:1px solid #ede9f7;background:#fff;position:relative;overflow:hidden}
+.feat::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:#9333ea}
+.feat-icon{font-size:16pt;margin-bottom:6px}
+.feat-name{font-size:9.5pt;font-weight:700;color:#0d0f14;margin-bottom:4px}
+.feat-desc{font-size:8.5pt;color:#64748b;line-height:1.6}
+
+/* ── ARCH DIAGRAM ── */
+.arch{background:#0d0f14;border-radius:8px;padding:20px;margin:12px 0;border:1px solid rgba(147,51,234,.2)}
+.arch-row{display:flex;align-items:center;justify-content:center;gap:0;margin:6px 0}
+.arch-box{background:rgba(147,51,234,.12);border:1px solid rgba(147,51,234,.35);border-radius:6px;padding:8px 16px;font-size:8.5pt;font-weight:600;color:#c084fc;text-align:center;min-width:130px}
+.arch-box.dark{background:rgba(22,4,38,.8);border-color:rgba(147,51,234,.5);color:#e9d5ff}
+.arch-arrow{color:#6b5480;font-size:14pt;padding:0 8px;flex-shrink:0}
+.arch-label{font-size:7pt;color:#7c5fa0;text-align:center;margin-top:3px;letter-spacing:.1em;text-transform:uppercase}
+.arch-sep{width:1px;height:32px;background:rgba(147,51,234,.2);margin:0 auto}
+
+/* ── ROLES ── */
+.roles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0}
+.role{padding:12px 14px;border-radius:8px;text-align:center;border:1px solid #ede9f7}
+.role-name{font-size:9.5pt;font-weight:700;margin-bottom:6px}
+.role-badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:7.5pt;font-weight:700;margin-bottom:8px}
+.role-list{font-size:8pt;color:#64748b;line-height:1.8;text-align:left}
+.role-admin .role-name{color:#6d28d9}.role-admin .role-badge{background:rgba(109,40,217,.12);color:#6d28d9}
+.role-finops .role-name{color:#0369a1}.role-finops .role-badge{background:rgba(3,105,161,.12);color:#0369a1}
+.role-reader .role-name{color:#374151}.role-reader .role-badge{background:rgba(55,65,81,.1);color:#374151}
+
+/* ── CHECKLIST ── */
+.checklist{margin:10px 0}
+.chk{display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid #f0eef8;font-size:9pt;color:#374151}
+.chk-box{width:14px;height:14px;border-radius:3px;border:2px solid #9333ea;flex-shrink:0;margin-top:1px}
+.chk.done .chk-box{background:#9333ea}
+.chk-text{flex:1;line-height:1.5}
+
+/* ── RODAPÉ ── */
+.foot{padding:11px 24px;background:linear-gradient(135deg,#0d0218,#1a0035,#0d0014);display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(147,51,234,.2)}
+.foot-l{font-size:8pt;color:#7c5fa0;display:flex;align-items:center;gap:8px}
+.foot-dot{width:4px;height:4px;border-radius:50%;background:#9333ea;opacity:.7;display:inline-block}
+.foot-r{font-size:7.5pt;color:#6b5480;font-family:'IBM Plex Mono','Courier New',monospace}
+
+/* ── PRINT ── */
+@media print{
+  body{background:#fff;padding:0}
+  .page{box-shadow:none;max-width:100%}
+  .sec{page-break-inside:avoid}
+  .sec-hdr{page-break-after:avoid}
+  pre{page-break-inside:avoid}
+  @page{size:A4 portrait;margin:8mm 10mm}
+  .cover{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .stripe{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .arch{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  table.doc thead tr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+</style>
+<script>
+window.onload=function(){
+  var img=document.getElementById('cover-mascote');
+  function applyColorAndPrint(){
+    try{
+      var W=img.naturalWidth,H=img.naturalHeight;
+      if(W&&H){
+        var cvs=document.createElement('canvas');cvs.width=W;cvs.height=H;
+        var ctx=cvs.getContext('2d');ctx.drawImage(img,0,0);
+        var d=ctx.getImageData(0,0,W,H),px=d.data;
+        var cs=[[0,0],[W-1,0],[0,H-1],[W-1,H-1],[Math.floor(W/2),0],[Math.floor(W/2),H-1]];
+        var bgR=0,bgG=0,bgB=0;
+        for(var ci=0;ci<cs.length;ci++){var p4=(cs[ci][1]*W+cs[ci][0])*4;bgR+=px[p4];bgG+=px[p4+1];bgB+=px[p4+2];}
+        bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
+        var rS=0,gS=0,bS=0,n=0;
+        for(var i=0;i<px.length;i+=4){
+          var r=px[i],g=px[i+1],b=px[i+2];
+          var dr=r-bgR,dg=g-bgG,db=b-bgB,dSq=dr*dr+dg*dg+db*db;
+          if(dSq>80*80){var mx=Math.max(r,g,b),mn=Math.min(r,g,b);if(mx-mn>30){rS+=r;gS+=g;bS+=b;n++;}}
+        }
+        if(n>0){
+          var hx=function(v){return('0'+Math.round(v).toString(16)).slice(-2);};
+          var col='#'+hx(rS/n)+hx(gS/n)+hx(bS/n);
+          document.querySelectorAll('.pdf-vivo-text').forEach(function(t){
+            t.setAttribute('fill',col);
+          });
+        }
+      }
+    }catch(e){}
+    window.print();
+    window.onfocus=function(){setTimeout(function(){window.close();},400);};
+  }
+  if(!img){window.print();window.onfocus=function(){setTimeout(function(){window.close();},400);};return;}
+  if(img.complete&&img.naturalWidth){applyColorAndPrint();}
+  else{img.onload=applyColorAndPrint;img.onerror=function(){window.print();window.onfocus=function(){setTimeout(function(){window.close();},400);};};}
+};
+</script>
+</head>
+<body>
+<div class="page">
+
+<!-- CAPA -->
+<div class="cover">
+  <div class="cover-watermark">vivo</div>
+  <div class="cover-top">
+    <svg class="cover-vivo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="72" height="34">
+      <text class="pdf-vivo-text" x="1" y="30" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="32" fill="#9333ea" letter-spacing="-1">vivo</text>
+    </svg>
+    <img id="cover-mascote" class="cover-mascote" src="mascote.png" height="52" alt="" onerror="this.style.display='none'">
+    <div class="cover-divider"></div>
+    <div class="cover-app">
+      <div class="cover-app-name">FinOps Manager</div>
+      <div class="cover-app-sub">Azure Cost Management</div>
+    </div>
+  </div>
+  <div class="cover-mid">
+    <div class="cover-doc-label">Documento Técnico</div>
+    <div class="cover-title">Guia de <span>Implementação</span><br>e Configuração</div>
+  </div>
+  <div class="cover-bottom">
+    <div class="cover-meta">
+      Versão <strong>1.0</strong> &nbsp;·&nbsp; Maio 2026 &nbsp;·&nbsp; Uso Interno
+    </div>
+    <div class="cover-badge">Confidencial</div>
+  </div>
+</div>
+<div class="stripe"></div>
+
+<!-- ÍNDICE -->
+<div class="toc">
+  <div class="toc-title">Índice</div>
+  <div class="toc-grid">
+    <div class="toc-item"><span class="toc-num">01</span><span class="toc-label">Visão Geral do Sistema</span></div>
+    <div class="toc-item"><span class="toc-num">07</span><span class="toc-label">Funcionalidades</span></div>
+    <div class="toc-item"><span class="toc-num">02</span><span class="toc-label">Pré-requisitos</span></div>
+    <div class="toc-item"><span class="toc-num">08</span><span class="toc-label">Importação de Custos Azure</span></div>
+    <div class="toc-item"><span class="toc-num">03</span><span class="toc-label">Instalação</span></div>
+    <div class="toc-item"><span class="toc-num">09</span><span class="toc-label">Segurança em Produção</span></div>
+    <div class="toc-item"><span class="toc-num">04</span><span class="toc-label">Variáveis de Ambiente</span></div>
+    <div class="toc-item"><span class="toc-num">10</span><span class="toc-label">Deploy em Plataformas Cloud</span></div>
+    <div class="toc-item"><span class="toc-num">05</span><span class="toc-label">Setup Inicial e Banco de Dados</span></div>
+    <div class="toc-item"><span class="toc-num">11</span><span class="toc-label">Configurar como Serviço do Sistema</span></div>
+    <div class="toc-item"><span class="toc-num">06</span><span class="toc-label">Perfis de Acesso</span></div>
+    <div class="toc-item"><span class="toc-num">12</span><span class="toc-label">Checklist de Deploy</span></div>
+  </div>
+</div>
+
+<!-- 01 VISÃO GERAL -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">01</div><div class="sec-ttl">Visão Geral do Sistema</div></div>
+  <p>O <strong>FinOps Manager</strong> é uma plataforma web de gestão de custos em nuvem desenvolvida para a Vivo. Permite acompanhar gastos Azure, criar projetos e ações de otimização, gerar estimativas de custos e gerenciar reservas de recursos cloud, tudo em uma interface unificada com tema visual Vivo.</p>
+
+  <div class="subsec">Arquitetura</div>
+  <div class="arch">
+    <div class="arch-row">
+      <div class="arch-box dark">Navegador (SPA)<div class="arch-label">index.html · app.js · calculadora.js</div></div>
+      <div class="arch-arrow">⟷</div>
+      <div class="arch-box dark">Node.js + Express<div class="arch-label">server.js · REST API · Auth JWT</div></div>
+      <div class="arch-arrow">⟷</div>
+      <div class="arch-box dark">PostgreSQL<div class="arch-label">Tabelas core + azure_costs</div></div>
+    </div>
+    <div class="arch-sep"></div>
+    <div class="arch-row">
+      <div style="font-size:7.5pt;color:#6b5480;text-align:center;width:100%">Aplicação Single-Process · Sem build step · Serve arquivos estáticos diretamente</div>
+    </div>
+  </div>
+
+  <div class="subsec">Tecnologias Utilizadas</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Componente</th><th>Tecnologia</th><th>Versão Mínima</th></tr></thead>
+      <tbody>
+        <tr><td>Runtime</td><td>Node.js</td><td>18.x LTS ou superior</td></tr>
+        <tr><td>Framework web</td><td>Express.js</td><td>4.x</td></tr>
+        <tr><td>Banco de dados</td><td>PostgreSQL</td><td>14 ou superior</td></tr>
+        <tr><td>Autenticação</td><td>JWT (jsonwebtoken) + bcryptjs</td><td>—</td></tr>
+        <tr><td>Upload de arquivos</td><td>Multer</td><td>—</td></tr>
+        <tr><td>Export Excel</td><td>ExcelJS</td><td>—</td></tr>
+        <tr><td>Parquet</td><td>@dsnp/parquetjs</td><td>—</td></tr>
+        <tr><td>Frontend</td><td>Vanilla JS + CSS (sem framework)</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 02 PRÉ-REQUISITOS -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">02</div><div class="sec-ttl">Pré-requisitos</div></div>
+  <p>Antes de iniciar a instalação, verifique se o ambiente possui os seguintes componentes instalados e configurados:</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Requisito</th><th>Versão</th><th>Observação</th></tr></thead>
+      <tbody>
+        <tr><td>Node.js</td><td>18.x LTS+</td><td>Verificar com: <code>node --version</code></td></tr>
+        <tr><td>npm</td><td>9.x+</td><td>Incluído com Node.js</td></tr>
+        <tr><td>PostgreSQL</td><td>14+</td><td>Local, Docker ou serviço gerenciado (Railway, Render, Supabase)</td></tr>
+        <tr><td>Acesso à internet</td><td>—</td><td>Necessário apenas para fontes Google (PDF) e CDN Excel.js</td></tr>
+        <tr><td>Porta disponível</td><td>3000 (padrão)</td><td>Configurável via variável <code>PORT</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <div class="note-lbl">Ambientes suportados</div>
+    <p>Linux (recomendado para produção), Windows Server, macOS. Para containers, utilize a imagem oficial <code>node:18-alpine</code>.</p>
+  </div>
+</div>
+
+<!-- 03 INSTALAÇÃO -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">03</div><div class="sec-ttl">Instalação</div></div>
+  <div class="subsec">Passos de Instalação</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <div class="step-title">Transferir os arquivos para o servidor</div>
+        <div class="step-desc">Copie todos os arquivos do projeto para o diretório de destino (ex: <code>/opt/finops-manager</code>). Certifique-se de incluir <code>.finops_setup</code> caso já exista configuração prévia.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <div class="step-title">Instalar dependências</div>
+        <div class="step-desc">Execute no diretório do projeto:</div>
+      </div>
+    </div>
+  </div>
+  <pre>npm install</pre>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <div class="step-title">Criar o arquivo de variáveis de ambiente</div>
+        <div class="step-desc">Crie o arquivo <code>.env</code> na raiz do projeto com as configurações do ambiente. Consulte a seção 04 para a lista completa de variáveis.</div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <div class="step-title">(Recomendado) Criptografar o .env</div>
+        <div class="step-desc">Para ambientes de produção, gere o arquivo criptografado:</div>
+      </div>
+    </div>
+  </div>
+  <pre>node encrypt-env.js encrypt   <span class="c"># gera .env.enc + .env.key</span></pre>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <div class="step-title">Iniciar o servidor</div>
+        <div class="step-desc">Para produção, use um gerenciador de processos como PM2:</div>
+      </div>
+    </div>
+  </div>
+  <pre><span class="c"># Produção simples</span>
+npm start
+
+<span class="c"># Com .env criptografado</span>
+node encrypt-env.js run
+
+<span class="c"># Com PM2 (recomendado para produção)</span>
+npm install -g pm2
+pm2 start server.js --name finops-manager
+pm2 save && pm2 startup
+
+<span class="c"># Desenvolvimento (hot reload)</span>
+npm run dev</pre>
+</div>
+
+<!-- 04 VARIÁVEIS DE AMBIENTE -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">04</div><div class="sec-ttl">Variáveis de Ambiente</div></div>
+  <p>Crie o arquivo <code>.env</code> na raiz do projeto. As variáveis marcadas como <span class="req req-yes">Obrigatório</span> devem ser definidas antes de iniciar em produção.</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Variável</th><th>Padrão</th><th>Obrig.</th><th>Descrição</th></tr></thead>
+      <tbody>
+        <tr><td>JWT_SECRET</td><td><code>finops-secret-2024</code></td><td><span class="req req-yes">Sim</span></td><td>Chave de assinatura JWT. Use string aleatória com no mínimo 32 caracteres em produção.</td></tr>
+        <tr><td>JWT_EXPIRES</td><td><code>8h</code></td><td><span class="req req-no">Não</span></td><td>Tempo de expiração do token. Ex: <code>8h</code>, <code>24h</code>, <code>7d</code></td></tr>
+        <tr><td>MASTER_KEY</td><td><em>valor padrão inseguro</em></td><td><span class="req req-yes">Sim</span></td><td>Chave AES para criptografia do arquivo <code>.finops_setup</code>. Mínimo 32 caracteres.</td></tr>
+        <tr><td>DB_HOST</td><td><code>localhost</code></td><td><span class="req req-yes">Sim</span></td><td>Endereço do servidor PostgreSQL.</td></tr>
+        <tr><td>DB_PORT</td><td><code>5432</code></td><td><span class="req req-no">Não</span></td><td>Porta do PostgreSQL.</td></tr>
+        <tr><td>DB_NAME</td><td><code>finops_db</code></td><td><span class="req req-yes">Sim</span></td><td>Nome do banco de dados.</td></tr>
+        <tr><td>DB_USER</td><td><code>postgres</code></td><td><span class="req req-yes">Sim</span></td><td>Usuário do banco de dados.</td></tr>
+        <tr><td>DB_PASSWORD</td><td>—</td><td><span class="req req-yes">Sim</span></td><td>Senha do banco de dados.</td></tr>
+        <tr><td>PORT</td><td><code>3000</code></td><td><span class="req req-no">Não</span></td><td>Porta HTTP do servidor Node.js.</td></tr>
+        <tr><td>ALLOWED_ORIGIN</td><td><em>permite tudo</em></td><td><span class="req req-yes">Sim*</span></td><td>Origem permitida para CORS. Ex: <code>https://finops.vivo.com.br</code>. *Obrigatório em produção.</td></tr>
+        <tr><td>DATABASE_URL</td><td>—</td><td><span class="req req-no">Não</span></td><td>URL completa PostgreSQL. Usado em Railway/Render/Fly.io. Substitui as variáveis DB_*.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="subsec">Como Gerar os Valores de JWT_SECRET e MASTER_KEY</div>
+  <p>Nunca use valores inventados manualmente. Utilize um dos comandos abaixo para gerar strings criptograficamente seguras:</p>
+  <p><strong>Opção 1 — Node.js</strong> (recomendado — já disponível no servidor):</p>
+  <pre>node -e <span class="s">"const c=require('crypto'); console.log('JWT_SECRET=' + c.randomBytes(48).toString('hex')); console.log('MASTER_KEY=' + c.randomBytes(48).toString('hex'));"</span></pre>
+  <p>O comando imprime as duas linhas prontas para colar no <code>.env</code>.</p>
+  <p><strong>Opção 2 — PowerShell</strong> (Windows):</p>
+  <pre><span class="c"># Execute duas vezes — uma para cada variável</span>
+[System.Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48))</pre>
+  <div class="warn">
+    <div class="warn-lbl">Regras Obrigatórias</div>
+    <p>
+      · Mínimo <strong>32 caracteres</strong> (os métodos acima geram 96).<br>
+      · <strong>Nunca compartilhar</strong> o <code>JWT_SECRET</code> — quem o tiver consegue forjar tokens de login válidos.<br>
+      · Se o <code>MASTER_KEY</code> for alterado após o setup, o arquivo <code>.finops_setup</code> não poderá mais ser lido. Guarde o valor em local seguro.<br>
+      · O servidor emite aviso no console ao iniciar caso os valores padrão estejam em uso.
+    </p>
+  </div>
+
+  <div class="subsec">Exemplo de arquivo .env</div>
+  <pre>JWT_SECRET=<span class="v">e0e19c2b4c4f3c98e1acfa31213dc9d684e2fc059c7f2d92132abc4ca0ef9acbe</span>  <span class="c"># gerado com Node.js</span>
+MASTER_KEY=<span class="v">6b558fd715fb636b8e67b2de76f213a2bf80b0be746f7cc1367f7028ddc05890</span>  <span class="c"># gerado com Node.js</span>
+JWT_EXPIRES=<span class="v">8h</span>
+DB_HOST=<span class="v">localhost</span>
+DB_PORT=<span class="v">5432</span>
+DB_NAME=<span class="v">finops_db</span>
+DB_USER=<span class="v">finops_user</span>
+DB_PASSWORD=<span class="v">senha-segura-do-banco</span>
+PORT=<span class="v">3000</span>
+ALLOWED_ORIGIN=<span class="v">https://finops.vivo.com.br</span></pre>
+</div>
+
+<!-- 05 SETUP INICIAL -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">05</div><div class="sec-ttl">Setup Inicial e Banco de Dados</div></div>
+  <div class="subsec">Primeiro Acesso — Wizard de Configuração</div>
+  <p>Na primeira execução, o sistema detecta a ausência do arquivo <code>.finops_setup</code> e exibe automaticamente o <strong>Wizard de Configuração</strong>. Nenhuma outra rota está disponível até a conclusão do wizard.</p>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Acesse o sistema no navegador</div><div class="step-desc">Abra <code>http://localhost:3000</code> (ou o domínio configurado). O wizard será exibido automaticamente.</div></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><div class="step-title">Configure a conexão com o banco de dados</div><div class="step-desc">Informe host, porta, nome do banco, usuário e senha. O sistema testará a conexão antes de prosseguir.</div></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><div class="step-title">Crie o usuário administrador</div><div class="step-desc">Defina nome, e-mail e senha do primeiro usuário com perfil <strong>admin</strong>. Este usuário poderá criar outros usuários posteriormente.</div></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><div class="step-title">Conclusão automática</div><div class="step-desc">O sistema cria o arquivo <code>.finops_setup</code> (criptografado com AES-256-CBC), inicializa todas as tabelas e redireciona para o login.</div></div></div>
+  </div>
+  <div class="subsec">Inicialização do Banco de Dados</div>
+  <p>Todas as tabelas são criadas automaticamente pelo sistema no startup, utilizando <code>CREATE TABLE IF NOT EXISTS</code>. Não é necessário executar scripts SQL manualmente.</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Tabela</th><th>Descrição</th></tr></thead>
+      <tbody>
+        <tr><td>usuarios</td><td>Usuários do sistema (local, AD, Entra ID)</td></tr>
+        <tr><td>perfis / permissoes</td><td>Controle de acesso por perfil</td></tr>
+        <tr><td>sessoes</td><td>Histórico de acessos</td></tr>
+        <tr><td>projetos</td><td>Projetos FinOps</td></tr>
+        <tr><td>acoes_finops</td><td>Ações de otimização de custos</td></tr>
+        <tr><td>reservas_cloud</td><td>Reservas de instâncias (Azure, AWS, GCP, Oracle)</td></tr>
+        <tr><td>azure_costs</td><td>Custos importados do Azure Cost Management (80+ campos)</td></tr>
+        <tr><td>azure_subs_cache</td><td>Cache de subscriptions para dropdowns (< 5 ms de carga)</td></tr>
+        <tr><td>azure_rg_cache</td><td>Cache de Resource Groups para dropdowns</td></tr>
+        <tr><td>estimativas</td><td>Estimativas de custo salvas</td></tr>
+        <tr><td>integracoes</td><td>Configurações de AD e Microsoft Entra ID</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 06 PERFIS -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">06</div><div class="sec-ttl">Perfis de Acesso</div></div>
+  <p>O sistema possui três perfis de acesso com permissões distintas. O perfil é definido no cadastro do usuário e pode ser alterado por um administrador.</p>
+  <div class="roles">
+    <div class="role role-admin">
+      <div class="role-name">Administrador</div>
+      <div class="role-badge">admin</div>
+      <div class="role-list">
+        ✔ Acesso total ao sistema<br>
+        ✔ Gerenciar usuários<br>
+        ✔ Configurar integrações (AD, Entra ID)<br>
+        ✔ Importar dados Azure<br>
+        ✔ Exportar relatórios Excel<br>
+        ✔ Gerenciar reservas cloud<br>
+        ✔ Purgar dados de custo
+      </div>
+    </div>
+    <div class="role role-finops">
+      <div class="role-name">FinOps</div>
+      <div class="role-badge">finops</div>
+      <div class="role-list">
+        ✔ Criar e editar projetos<br>
+        ✔ Gerenciar ações FinOps<br>
+        ✔ Importar custos Azure<br>
+        ✔ Usar calculadora<br>
+        ✔ Gerar estimativas PDF<br>
+        ✔ Gerenciar reservas<br>
+        ✖ Gerenciar usuários
+      </div>
+    </div>
+    <div class="role role-reader">
+      <div class="role-name">Leitor</div>
+      <div class="role-badge">reader</div>
+      <div class="role-list">
+        ✔ Visualizar dashboard<br>
+        ✔ Visualizar projetos e ações<br>
+        ✔ Visualizar custos Azure<br>
+        ✔ Usar calculadora (leitura)<br>
+        ✖ Criar ou editar registros<br>
+        ✖ Importar dados<br>
+        ✖ Configurações do sistema
+      </div>
+    </div>
+  </div>
+  <div class="subsec">Autenticação</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Método</th><th>Como Configurar</th></tr></thead>
+      <tbody>
+        <tr><td>Local</td><td>Padrão. Usuário e senha armazenados no banco com hash bcrypt. Configurado no wizard.</td></tr>
+        <tr><td>Active Directory (LDAP)</td><td>Ativar em <strong>Configurações &gt; Integrações &gt; Active Directory</strong>. Informe o servidor LDAP, domínio e base DN.</td></tr>
+        <tr><td>Microsoft Entra ID</td><td>Ativar em <strong>Configurações &gt; Integrações &gt; Entra ID</strong>. Necessário Client ID, Client Secret e Tenant ID no Azure AD.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 07 FUNCIONALIDADES -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">07</div><div class="sec-ttl">Funcionalidades</div></div>
+  <div class="feat-grid">
+    <div class="feat">
+      <div class="feat-icon">📊</div>
+      <div class="feat-name">Dashboard</div>
+      <div class="feat-desc">Visão consolidada de projetos, ações FinOps e custos cloud. Estatísticas por status, economia gerada e breakdown por nuvem. Atualização automática configurável (padrão 10 min).</div>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">📁</div>
+      <div class="feat-name">Projetos e Ações FinOps</div>
+      <div class="feat-desc">Cadastro de projetos com responsável e prazo. Ações de otimização com status, economia estimada/realizada, cloud e prioridade. Exportação completa em Excel (3 abas).</div>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">☁️</div>
+      <div class="feat-name">Custos Azure</div>
+      <div class="feat-desc">Visualização de gastos por subscription, resource group e período. Filtros avançados. Importação via CSV ou Parquet (Azure Cost Management). Suporte a arquivos de até 2 GB.</div>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">🧮</div>
+      <div class="feat-name">Calculadora de Estimativas</div>
+      <div class="feat-desc">Seleção de recursos Azure por subscription/RG/período. Simulação de horas de uso com slider. Geração de estimativa em PDF com logo Vivo e mascote. Salvamento no banco para histórico.</div>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">🔖</div>
+      <div class="feat-name">Reservas Cloud</div>
+      <div class="feat-desc">Cadastro de reservas para Azure, AWS, GCP e Oracle. Campos adaptativos por cloud. Alerta automático de vencimento (popup no login) para reservas dentro de 90 dias.</div>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">🔔</div>
+      <div class="feat-name">Notificações</div>
+      <div class="feat-desc">Painel de notificações com alertas de ações com prazo próximo e reservas a vencer. Atualizado a cada 5 minutos. Destaque visual por severidade.</div>
+    </div>
+  </div>
+</div>
+
+<!-- 08 IMPORTAÇÃO AZURE -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">08</div><div class="sec-ttl">Importação de Custos Azure</div></div>
+  <div class="subsec">Como Exportar do Azure Cost Management</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Acesse o Azure Portal</div><div class="step-desc">Navegue até <strong>Cost Management + Billing &gt; Cost Management &gt; Cost analysis</strong> ou use a URL <code>portal.azure.com</code>.</div></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><div class="step-title">Configure o escopo e período</div><div class="step-desc">Selecione a subscription desejada. Defina o período (recomendado: máximo 3 meses por arquivo para melhor performance).</div></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><div class="step-title">Exporte os dados</div><div class="step-desc">Clique em <strong>Download</strong> e escolha o formato <strong>CSV</strong> ou <strong>Parquet</strong>. O Parquet é mais compacto e recomendado para grandes volumes.</div></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><div class="step-title">Importe no FinOps Manager</div><div class="step-desc">Acesse <strong>Custos Azure &gt; Importar</strong>, arraste o arquivo e aguarde o processamento. O sistema exibirá o progresso em tempo real.</div></div></div>
+  </div>
+  <div class="note">
+    <div class="note-lbl">Deduplicação Automática</div>
+    <p>O sistema usa UPSERT com chave única <code>(subscription_id, resource_id, cost_date, meter_id, charge_type, quantity)</code>. Reimportar o mesmo período não duplica registros, apenas atualiza valores.</p>
+  </div>
+  <div class="warn">
+    <div class="warn-lbl">Atenção — Valores NULL na chave de UPSERT</div>
+    <p>O PostgreSQL considera NULL ≠ NULL. Se algum campo da chave for NULL no arquivo exportado, a deduplicação pode falhar e gerar duplicatas. Execute o script <code>migration_fix_nulls.sql</code> caso isso ocorra.</p>
+  </div>
+</div>
+
+<!-- 09 SEGURANÇA -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">09</div><div class="sec-ttl">Segurança em Produção</div></div>
+  <div class="subsec">Configurações Obrigatórias</div>
+  <p>As seguintes configurações são <strong>essenciais</strong> antes de expor o sistema em ambiente de produção:</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Configuração</th><th>Ação Necessária</th></tr></thead>
+      <tbody>
+        <tr><td>JWT_SECRET</td><td>Definir valor aleatório com ≥ 32 caracteres. Nunca usar o valor padrão.</td></tr>
+        <tr><td>MASTER_KEY</td><td>Definir valor aleatório com ≥ 32 caracteres. Protege o arquivo <code>.finops_setup</code>.</td></tr>
+        <tr><td>ALLOWED_ORIGIN</td><td>Definir com o domínio exato da aplicação. Ex: <code>https://finops.vivo.com.br</code></td></tr>
+        <tr><td>HTTPS</td><td>Obrigatório. Configurar via reverse proxy (nginx, Caddy, Traefik). O Node.js serve apenas HTTP.</td></tr>
+        <tr><td>.env criptografado</td><td>Usar <code>node encrypt-env.js encrypt</code> e remover o <code>.env</code> em texto puro do servidor.</td></tr>
+        <tr><td>Firewall do banco</td><td>PostgreSQL deve aceitar conexões apenas do servidor Node.js, não da internet.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="subsec">Exemplo de Configuração nginx (Reverse Proxy)</div>
+  <pre><span class="k">server</span> {
+  <span class="k">listen</span> <span class="v">443 ssl http2</span>;
+  <span class="k">server_name</span> <span class="s">finops.vivo.com.br</span>;
+
+  <span class="k">ssl_certificate</span>     <span class="s">/etc/ssl/certs/finops.crt</span>;
+  <span class="k">ssl_certificate_key</span> <span class="s">/etc/ssl/private/finops.key</span>;
+
+  <span class="k">location</span> / {
+    <span class="k">proxy_pass</span>         <span class="s">http://127.0.0.1:3000</span>;
+    <span class="k">proxy_set_header</span>   <span class="s">Host $host</span>;
+    <span class="k">proxy_set_header</span>   <span class="s">X-Real-IP $remote_addr</span>;
+    <span class="k">proxy_read_timeout</span> <span class="v">600s</span>; <span class="c"># necessário para upload de arquivos grandes</span>
+  }
+}</pre>
+  <div class="subsec">Rate Limiting Integrado</div>
+  <p>O sistema já possui rate limiting nativo nos endpoints de autenticação: máximo de <strong>20 requisições a cada 15 minutos</strong> por IP nos endpoints <code>/api/auth/login</code> e <code>/api/auth/ad</code>. Configure limites adicionais no nginx se necessário.</p>
+</div>
+
+<!-- 10 DEPLOY CLOUD -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">10</div><div class="sec-ttl">Deploy em Plataformas Cloud</div></div>
+  <p>O FinOps Manager pode ser implantado em qualquer plataforma que suporte Node.js e PostgreSQL. Abaixo estão as instruções para as plataformas mais utilizadas.</p>
+
+  <div class="subsec">Railway (recomendado para início rápido)</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Crie um projeto no Railway</div><div class="step-desc">Acesse <code>railway.app</code>, crie um novo projeto e faça o deploy do repositório ou faça upload dos arquivos via CLI.</div></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><div class="step-title">Adicione o PostgreSQL</div><div class="step-desc">No painel do projeto, clique em <strong>+ New &gt; Database &gt; PostgreSQL</strong>. O Railway provisiona e injeta <code>DATABASE_URL</code> automaticamente.</div></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><div class="step-title">Configure as variáveis de ambiente</div><div class="step-desc">Em <strong>Variables</strong>, adicione <code>JWT_SECRET</code>, <code>MASTER_KEY</code> e <code>ALLOWED_ORIGIN</code>. O <code>DATABASE_URL</code> já é injetado automaticamente pelo banco.</div></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><div class="step-title">Configure o comando de start</div><div class="step-desc">Em <strong>Settings &gt; Deploy &gt; Start Command</strong>, defina: <code>node server.js</code></div></div></div>
+  </div>
+  <div class="note"><div class="note-lbl">DATABASE_URL no Railway</div><p>O sistema reconhece automaticamente a variável <code>DATABASE_URL</code> e a converte para as configurações <code>DB_*</code>. Não é necessário definir <code>DB_HOST</code>, <code>DB_PORT</code>, etc. separadamente quando usar <code>DATABASE_URL</code>.</p></div>
+
+  <div class="subsec">Render</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Crie um Web Service</div><div class="step-desc">Em <code>render.com</code>, crie um novo <strong>Web Service</strong> apontando para o repositório. Defina <strong>Build Command</strong>: <code>npm install</code> e <strong>Start Command</strong>: <code>node server.js</code>.</div></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><div class="step-title">Adicione um banco PostgreSQL</div><div class="step-desc">Crie um <strong>PostgreSQL</strong> no Render. Copie a <strong>Internal Database URL</strong> e use como <code>DATABASE_URL</code> nas variáveis do Web Service.</div></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><div class="step-title">Configure as variáveis de ambiente</div><div class="step-desc">Em <strong>Environment</strong>, adicione: <code>DATABASE_URL</code>, <code>JWT_SECRET</code>, <code>MASTER_KEY</code>, <code>ALLOWED_ORIGIN</code>.</div></div></div>
+  </div>
+
+  <div class="subsec">Fly.io</div>
+  <pre><span class="c"># Instalar CLI</span>
+curl -L https://fly.io/install.sh | sh
+
+<span class="c"># Fazer login e inicializar o app</span>
+fly auth login
+fly launch --name finops-manager --region gru  <span class="c"># gru = São Paulo</span>
+
+<span class="c"># Provisionar PostgreSQL</span>
+fly postgres create --name finops-db
+fly postgres attach finops-db  <span class="c"># injeta DATABASE_URL automaticamente</span>
+
+<span class="c"># Definir variáveis de ambiente</span>
+fly secrets set JWT_SECRET=<span class="v">sua-chave-aqui</span>
+fly secrets set MASTER_KEY=<span class="v">sua-chave-aqui</span>
+fly secrets set ALLOWED_ORIGIN=<span class="v">https://finops-manager.fly.dev</span>
+
+<span class="c"># Deploy</span>
+fly deploy</pre>
+
+  <div class="subsec">Microsoft Azure — App Service + PostgreSQL Flexible Server</div>
+  <p>Solução PaaS completa sem necessidade de gerenciar VMs. O App Service gerencia escala, HTTPS e reinicialização automática.</p>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body">
+      <div class="step-title">Criar o Resource Group</div>
+      <div class="step-desc">No portal Azure (<code>portal.azure.com</code>) ou via CLI:<br>
+      <code>az group create --name rg-finops --location brazilsouth</code></div>
+    </div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body">
+      <div class="step-title">Criar o banco de dados PostgreSQL</div>
+      <div class="step-desc">Acesse <strong>Criar recurso &gt; Azure Database for PostgreSQL &gt; Flexible Server</strong>.<br>
+      Defina: nome do servidor, região (<strong>Brazil South</strong>), versão <strong>PostgreSQL 16</strong>, usuário e senha do admin.<br>
+      Em <strong>Rede</strong>, selecione <strong>Acesso público</strong> e adicione o IP do App Service (ou use Integração de VNet para isolamento total).<br>
+      Após criar, acesse o banco e execute: <code>CREATE DATABASE finops_db;</code></div>
+    </div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body">
+      <div class="step-title">Criar o App Service Plan e Web App</div>
+      <div class="step-desc">Acesse <strong>Criar recurso &gt; Web App</strong>.<br>
+      · <strong>Runtime stack:</strong> Node 18 LTS &nbsp;·&nbsp; <strong>OS:</strong> Linux<br>
+      · <strong>Plano:</strong> B1 (básico) para testes, P1v3 para produção<br>
+      · Região: <strong>Brazil South</strong> (mesma do banco)</div>
+    </div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body">
+      <div class="step-title">Configurar variáveis de ambiente</div>
+      <div class="step-desc">No Web App, acesse <strong>Configurações &gt; Variáveis de ambiente</strong> e adicione:</div>
+    </div></div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Variável</th><th>Valor</th></tr></thead>
+      <tbody>
+        <tr><td>DATABASE_URL</td><td><code>postgresql://admin:senha@servidor.postgres.database.azure.com:5432/finops_db?sslmode=require</code></td></tr>
+        <tr><td>JWT_SECRET</td><td>Gerado com Node.js crypto (≥ 32 chars)</td></tr>
+        <tr><td>MASTER_KEY</td><td>Gerado com Node.js crypto (≥ 32 chars)</td></tr>
+        <tr><td>ALLOWED_ORIGIN</td><td><code>https://seu-app.azurewebsites.net</code> (ou domínio customizado)</td></tr>
+        <tr><td>WEBSITE_RUN_FROM_PACKAGE</td><td><code>1</code> (habilita deploy por ZIP)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="steps">
+    <div class="step"><div class="step-num">5</div><div class="step-body">
+      <div class="step-title">Configurar o comando de startup</div>
+      <div class="step-desc">Em <strong>Configurações &gt; Configuração &gt; Configurações gerais &gt; Comando de inicialização</strong>:<br>
+      <code>node server.js</code></div>
+    </div></div>
+    <div class="step"><div class="step-num">6</div><div class="step-body">
+      <div class="step-title">Fazer o deploy dos arquivos</div>
+      <div class="step-desc">Via Azure CLI (método ZIP deploy — mais simples):</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Compactar os arquivos (excluindo node_modules e .env)</span>
+zip -r finops.zip . -x "node_modules/*" -x ".env" -x "uploads_tmp/*"
+
+<span class="c"># Deploy via CLI</span>
+az webapp deploy --resource-group rg-finops \
+  --name seu-app-finops \
+  --src-path finops.zip \
+  --type zip</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">7</div><div class="step-body">
+      <div class="step-title">HTTPS e domínio customizado</div>
+      <div class="step-desc">O App Service fornece HTTPS gratuito no domínio <code>*.azurewebsites.net</code>. Para domínio próprio, acesse <strong>Domínios personalizados &gt; Adicionar domínio</strong> e o Azure emite o certificado SSL automaticamente via App Service Managed Certificate.</div>
+    </div></div>
+  </div>
+  <div class="note"><div class="note-lbl">SSL no PostgreSQL Azure</div><p>O Azure Database for PostgreSQL exige SSL. A string de conexão deve incluir <code>?sslmode=require</code>. O certificado CA do Azure é aceito automaticamente pelo driver pg do Node.js.</p></div>
+
+  <div class="subsec">Google Cloud Platform — Cloud Run + Cloud SQL</div>
+  <p>Cloud Run executa containers serverless com escala automática para zero quando não há tráfego — ideal para ambientes de uso variável.</p>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body">
+      <div class="step-title">Ativar APIs necessárias</div>
+      <div class="step-desc">No Google Cloud Console (<code>console.cloud.google.com</code>) ou via CLI:</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Autenticar e configurar o projeto</span>
+gcloud auth login
+gcloud config set project <span class="v">SEU-PROJECT-ID</span>
+
+<span class="c"># Ativar as APIs necessárias</span>
+gcloud services enable run.googleapis.com \
+  sqladmin.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">2</div><div class="step-body">
+      <div class="step-title">Criar o Cloud SQL (PostgreSQL)</div>
+      <div class="step-desc">No console: <strong>SQL &gt; Criar instância &gt; PostgreSQL</strong>. Escolha <strong>PostgreSQL 16</strong>, região <code>southamerica-east1</code> (São Paulo), tipo de máquina conforme carga. Crie o banco:</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Criar a instância</span>
+gcloud sql instances create finops-db \
+  --database-version=POSTGRES_16 \
+  --tier=db-f1-micro \
+  --region=southamerica-east1
+
+<span class="c"># Criar o banco e usuário</span>
+gcloud sql databases create finops_db --instance=finops-db
+gcloud sql users set-password postgres --instance=finops-db --password=<span class="v">sua-senha</span></pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">3</div><div class="step-body">
+      <div class="step-title">Criar o Dockerfile e publicar a imagem</div>
+      <div class="step-desc">O Cloud Run exige uma imagem Docker. Crie o arquivo <code>Dockerfile</code> na raiz do projeto:</div>
+    </div></div>
+  </div>
+  <pre><span class="k">FROM</span> node:18-alpine
+<span class="k">WORKDIR</span> /app
+<span class="k">COPY</span> package*.json ./
+<span class="k">RUN</span> npm install --production
+<span class="k">COPY</span> . .
+<span class="k">EXPOSE</span> 8080
+<span class="k">ENV</span> PORT=8080
+<span class="k">CMD</span> ["node", "server.js"]</pre>
+  <pre><span class="c"># Criar o repositório no Artifact Registry</span>
+gcloud artifacts repositories create finops-repo \
+  --repository-format=docker \
+  --location=southamerica-east1
+
+<span class="c"># Build e push da imagem</span>
+gcloud builds submit \
+  --tag southamerica-east1-docker.pkg.dev/<span class="v">SEU-PROJECT-ID</span>/finops-repo/finops-manager:latest</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">4</div><div class="step-body">
+      <div class="step-title">Armazenar secrets no Secret Manager</div>
+      <div class="step-desc">Boas práticas no GCP: use o Secret Manager em vez de passar secrets como variáveis de ambiente diretamente.</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Criar os secrets</span>
+echo -n "<span class="v">sua-jwt-secret</span>"    | gcloud secrets create JWT_SECRET    --data-file=-
+echo -n "<span class="v">sua-master-key</span>"   | gcloud secrets create MASTER_KEY    --data-file=-
+echo -n "<span class="v">sua-db-password</span>"  | gcloud secrets create DB_PASSWORD   --data-file=-</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">5</div><div class="step-body">
+      <div class="step-title">Deploy no Cloud Run</div>
+      <div class="step-desc">Conecte o Cloud Run ao Cloud SQL via socket Unix (sem expor o banco à internet):</div>
+    </div></div>
+  </div>
+  <pre>gcloud run deploy finops-manager \
+  --image southamerica-east1-docker.pkg.dev/<span class="v">SEU-PROJECT-ID</span>/finops-repo/finops-manager:latest \
+  --region southamerica-east1 \
+  --platform managed \
+  --allow-unauthenticated \
+  --add-cloudsql-instances <span class="v">SEU-PROJECT-ID</span>:southamerica-east1:finops-db \
+  --set-env-vars DB_HOST=/cloudsql/<span class="v">SEU-PROJECT-ID</span>:southamerica-east1:finops-db \
+  --set-env-vars DB_NAME=finops_db,DB_USER=postgres \
+  --set-secrets  DB_PASSWORD=DB_PASSWORD:latest \
+  --set-secrets  JWT_SECRET=JWT_SECRET:latest \
+  --set-secrets  MASTER_KEY=MASTER_KEY:latest \
+  --set-env-vars ALLOWED_ORIGIN=<span class="v">https://finops-manager-xxx.run.app</span> \
+  --memory 512Mi \
+  --min-instances 0 \
+  --max-instances 5</pre>
+  <div class="note"><div class="note-lbl">Persistência no Cloud Run</div><p>O Cloud Run é stateless — cada instância começa do zero. O arquivo <code>.finops_setup</code> precisa estar disponível via Cloud Storage (mount com gcsfuse) ou use uma variável de ambiente com o conteúdo do setup para ambientes Cloud Run.</p></div>
+
+  <div class="subsec">Amazon Web Services — Elastic Beanstalk + RDS PostgreSQL</div>
+  <p>O Elastic Beanstalk gerencia toda a infraestrutura (EC2, Load Balancer, Auto Scaling) com um único deploy, mantendo controle sobre a configuração.</p>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body">
+      <div class="step-title">Instalar e configurar a AWS CLI</div>
+      <div class="step-desc"><code>aws configure</code> — informe Access Key ID, Secret Access Key, região padrão (<code>sa-east-1</code> para São Paulo) e formato de saída (<code>json</code>).</div>
+    </div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body">
+      <div class="step-title">Criar o banco RDS PostgreSQL</div>
+      <div class="step-desc">Via console: <strong>RDS &gt; Criar banco de dados &gt; PostgreSQL</strong>. Escolha <strong>Free tier</strong> (dev) ou <strong>Multi-AZ</strong> (prod). <strong>Importante:</strong> anote o endpoint, usuário e senha. Crie o banco <code>finops_db</code> após provisionamento.</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Criar banco via psql após o RDS estar disponível</span>
+psql -h <span class="v">endpoint.rds.amazonaws.com</span> -U postgres -c "CREATE DATABASE finops_db;"</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">3</div><div class="step-body">
+      <div class="step-title">Preparar o pacote de deploy</div>
+      <div class="step-desc">O Elastic Beanstalk exige um arquivo ZIP com o código da aplicação e um <code>Procfile</code>:</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Criar o Procfile na raiz do projeto</span>
+echo "web: node server.js" > Procfile
+
+<span class="c"># Compactar (sem node_modules e .env)</span>
+zip -r finops-deploy.zip . \
+  -x "node_modules/*" -x ".env" -x ".env.enc" -x ".env.key" \
+  -x "uploads_tmp/*" -x "*.zip"</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">4</div><div class="step-body">
+      <div class="step-title">Criar a aplicação no Elastic Beanstalk</div>
+      <div class="step-desc">Via console: <strong>Elastic Beanstalk &gt; Criar aplicação</strong>. Plataforma: <strong>Node.js 18</strong> no Amazon Linux 2023. Ou via CLI:</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Instalar o EB CLI</span>
+pip install awsebcli
+
+<span class="c"># Inicializar o projeto</span>
+eb init finops-manager \
+  --platform "Node.js 18 running on 64bit Amazon Linux 2023" \
+  --region sa-east-1
+
+<span class="c"># Criar o ambiente de produção</span>
+eb create finops-prod \
+  --instance-type t3.small \
+  --database.engine postgres \
+  --database.version 16 \
+  --database.instance db.t3.micro \
+  --database.username postgres \
+  --database.password <span class="v">sua-senha-rds</span></pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">5</div><div class="step-body">
+      <div class="step-title">Configurar variáveis de ambiente</div>
+      <div class="step-desc">Via console: <strong>Elastic Beanstalk &gt; Ambiente &gt; Configuração &gt; Propriedades do ambiente</strong>. Ou via CLI:</div>
+    </div></div>
+  </div>
+  <pre>eb setenv \
+  JWT_SECRET=<span class="v">sua-chave-gerada</span> \
+  MASTER_KEY=<span class="v">sua-chave-gerada</span> \
+  DB_HOST=<span class="v">endpoint.rds.amazonaws.com</span> \
+  DB_PORT=5432 \
+  DB_NAME=finops_db \
+  DB_USER=postgres \
+  DB_PASSWORD=<span class="v">sua-senha</span> \
+  ALLOWED_ORIGIN=<span class="v">https://finops-prod.sa-east-1.elasticbeanstalk.com</span> \
+  PORT=8080</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">6</div><div class="step-body">
+      <div class="step-title">Deploy e monitoramento</div>
+      <div class="step-desc"></div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Deploy do pacote ZIP</span>
+eb deploy
+
+<span class="c"># Verificar logs em tempo real</span>
+eb logs --all
+
+<span class="c"># Abrir no navegador</span>
+eb open
+
+<span class="c"># Status do ambiente</span>
+eb status</pre>
+  <div class="steps">
+    <div class="step"><div class="step-num">7</div><div class="step-body">
+      <div class="step-title">HTTPS com AWS Certificate Manager</div>
+      <div class="step-desc">No console AWS: <strong>ACM &gt; Solicitar certificado</strong> para seu domínio. Em seguida, no Elastic Beanstalk, vá em <strong>Configuração &gt; Load balancer &gt; Adicionar listener HTTPS 443</strong> e selecione o certificado ACM. O redirecionamento HTTP → HTTPS é feito automaticamente pelo Load Balancer.</div>
+    </div></div>
+  </div>
+  <div class="note"><div class="note-lbl">Security Groups AWS</div><p>Configure o Security Group do RDS para aceitar conexões na porta 5432 apenas do Security Group do Elastic Beanstalk. Nunca abra o RDS para <code>0.0.0.0/0</code>.</p></div>
+
+  <div class="subsec">Comparativo PaaS por Provedor</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Critério</th><th>Azure App Service</th><th>GCP Cloud Run</th><th>AWS Elastic Beanstalk</th></tr></thead>
+      <tbody>
+        <tr><td>Tipo</td><td>PaaS gerenciado</td><td>Serverless containers</td><td>PaaS com EC2 gerenciado</td></tr>
+        <tr><td>Banco PaaS</td><td>PostgreSQL Flexible Server</td><td>Cloud SQL</td><td>Amazon RDS</td></tr>
+        <tr><td>Região Brasil</td><td>Brazil South (São Paulo)</td><td>southamerica-east1</td><td>sa-east-1 (São Paulo)</td></tr>
+        <tr><td>HTTPS automático</td><td>✔ gratuito</td><td>✔ gratuito</td><td>✔ via ACM (gratuito)</td></tr>
+        <tr><td>Escala automática</td><td>✔ scale-out manual/auto</td><td>✔ serverless até zero</td><td>✔ Auto Scaling Groups</td></tr>
+        <tr><td>Deploy ZIP/código</td><td>✔ ZIP deploy</td><td>Via Docker obrigatório</td><td>✔ ZIP / eb deploy</td></tr>
+        <tr><td>Custo estimado mínimo</td><td>~U$13/mês (B1)</td><td>~U$0 (scale to zero)</td><td>~U$20/mês (t3.small)</td></tr>
+        <tr><td>Integração Vivo</td><td>Recomendado (já usa Azure)</td><td>Alternativa</td><td>Alternativa</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="subsec">Docker (qualquer plataforma)</div>
+  <pre><span class="c"># Dockerfile mínimo</span>
+<span class="k">FROM</span> node:18-alpine
+<span class="k">WORKDIR</span> /app
+<span class="k">COPY</span> package*.json ./
+<span class="k">RUN</span> npm install --production
+<span class="k">COPY</span> . .
+<span class="k">EXPOSE</span> 3000
+<span class="k">CMD</span> ["node", "server.js"]</pre>
+  <pre><span class="c"># Build e execução local</span>
+docker build -t finops-manager .
+docker run -d --name finops \
+  -p 3000:3000 \
+  -e JWT_SECRET=<span class="v">sua-chave</span> \
+  -e MASTER_KEY=<span class="v">sua-chave</span> \
+  -e DATABASE_URL=<span class="v">postgresql://user:pass@host:5432/finops_db</span> \
+  -e ALLOWED_ORIGIN=<span class="v">https://finops.vivo.com.br</span> \
+  -v finops-data:/app \
+  finops-manager</pre>
+  <div class="warn"><div class="warn-lbl">Persistência de dados no Docker</div><p>Monte o diretório da aplicação como volume (<code>-v finops-data:/app</code>) para preservar o arquivo <code>.finops_setup</code> e o diretório <code>uploads_tmp/</code> entre reinicializações do container.</p></div>
+</div>
+
+<!-- 11 SERVIÇO DO SISTEMA -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">11</div><div class="sec-ttl">Configurar como Serviço do Sistema</div></div>
+  <p>Para garantir que o FinOps Manager inicie automaticamente com o servidor e seja reiniciado em caso de falha, configure-o como um serviço do sistema operacional.</p>
+
+  <div class="subsec">PM2 — Linux e Windows (recomendado)</div>
+  <p>O PM2 é um gerenciador de processos para Node.js com suporte a reinicialização automática, logs e monitoramento.</p>
+  <pre><span class="c"># Instalar PM2 globalmente</span>
+npm install -g pm2
+
+<span class="c"># Iniciar a aplicação</span>
+pm2 start server.js --name finops-manager
+
+<span class="c"># Salvar a lista de processos</span>
+pm2 save
+
+<span class="c"># Registrar como serviço do sistema (gerado automaticamente para systemd/launchd/Windows)</span>
+pm2 startup
+<span class="c"># Execute o comando que o PM2 imprimir na tela</span>
+
+<span class="c"># Comandos úteis</span>
+pm2 status                        <span class="c"># ver status</span>
+pm2 logs finops-manager           <span class="c"># ver logs em tempo real</span>
+pm2 restart finops-manager        <span class="c"># reiniciar</span>
+pm2 stop finops-manager           <span class="c"># parar</span>
+pm2 delete finops-manager         <span class="c"># remover</span></pre>
+
+  <div class="subsec">systemd — Linux (Ubuntu / Debian / CentOS)</div>
+  <p>Para servidores Linux sem PM2, crie uma unit do systemd:</p>
+  <pre><span class="c"># Criar o arquivo de serviço</span>
+sudo nano /etc/systemd/system/finops-manager.service</pre>
+  <p>Conteúdo do arquivo:</p>
+  <pre>[Unit]
+Description=FinOps Manager - Vivo
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=<span class="v">finops</span>
+WorkingDirectory=<span class="v">/opt/finops-manager</span>
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=finops-manager
+EnvironmentFile=<span class="v">/opt/finops-manager/.env</span>
+
+[Install]
+WantedBy=multi-user.target</pre>
+  <pre><span class="c"># Ativar e iniciar o serviço</span>
+sudo systemctl daemon-reload
+sudo systemctl enable finops-manager   <span class="c"># inicia no boot</span>
+sudo systemctl start finops-manager
+
+<span class="c"># Verificar status e logs</span>
+sudo systemctl status finops-manager
+sudo journalctl -u finops-manager -f   <span class="c"># logs em tempo real</span></pre>
+
+  <div class="subsec">Windows Service (NSSM)</div>
+  <p>No Windows Server, use o NSSM (Non-Sucking Service Manager) para registrar o Node.js como serviço:</p>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Baixar o NSSM</div><div class="step-desc">Acesse <code>nssm.cc/download</code> e extraia o executável para <code>C:\nssm\</code>.</div></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><div class="step-title">Registrar o serviço</div><div class="step-desc">Abra o PowerShell como Administrador e execute:</div></div></div>
+  </div>
+  <pre><span class="c"># Instalar o serviço</span>
+C:\nssm\nssm.exe install FinOpsManager
+
+<span class="c"># Na janela que abrir, configure:</span>
+<span class="c">#   Path:            C:\Program Files\nodejs\node.exe</span>
+<span class="c">#   Startup dir:     C:\finops-manager</span>
+<span class="c">#   Arguments:       server.js</span>
+
+<span class="c"># Ou via linha de comando</span>
+nssm set FinOpsManager Application "C:\Program Files\nodejs\node.exe"
+nssm set FinOpsManager AppDirectory "C:\finops-manager"
+nssm set FinOpsManager AppParameters "server.js"
+nssm set FinOpsManager Start SERVICE_AUTO_START
+
+<span class="c"># Iniciar o serviço</span>
+nssm start FinOpsManager
+
+<span class="c"># Verificar status</span>
+nssm status FinOpsManager</pre>
+
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Plataforma</th><th>Método Recomendado</th><th>Reinício Automático</th><th>Logs Integrados</th></tr></thead>
+      <tbody>
+        <tr><td>Linux (produção)</td><td>systemd</td><td>✔</td><td>✔ journalctl</td></tr>
+        <tr><td>Linux (simplicidade)</td><td>PM2</td><td>✔</td><td>✔ pm2 logs</td></tr>
+        <tr><td>Windows Server</td><td>NSSM</td><td>✔</td><td>✔ Event Viewer</td></tr>
+        <tr><td>Windows (dev)</td><td>PM2</td><td>✔</td><td>✔ pm2 logs</td></tr>
+        <tr><td>Cloud (Railway/Render)</td><td>Nativo da plataforma</td><td>✔ automático</td><td>✔ painel web</td></tr>
+        <tr><td>Container (Docker/K8s)</td><td>Restart policy</td><td>✔ --restart always</td><td>✔ docker logs</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 12 CHECKLIST -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">12</div><div class="sec-ttl">Checklist de Deploy</div></div>
+  <p>Use esta lista como referência final antes de liberar o sistema para os usuários:</p>
+  <div class="subsec">Infraestrutura</div>
+  <div class="checklist">
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Node.js 18+ instalado no servidor</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">PostgreSQL 14+ acessível pelo servidor de aplicação</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Banco de dados criado (<code>CREATE DATABASE finops_db</code>)</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Usuário do banco com permissões de leitura e escrita</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Porta 3000 (ou configurada) acessível internamente</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Diretório <code>uploads_tmp/</code> com permissão de escrita</div></div>
+  </div>
+  <div class="subsec">Configuração</div>
+  <div class="checklist">
+    <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>JWT_SECRET</code> definido com valor aleatório seguro (≥ 32 chars)</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>MASTER_KEY</code> definido com valor aleatório seguro (≥ 32 chars)</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>ALLOWED_ORIGIN</code> definido com o domínio exato da aplicação</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>DB_PASSWORD</code> definido e diferente do padrão</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Arquivo <code>.env</code> criptografado com <code>encrypt-env.js</code></div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>.env</code> em texto puro removido do servidor após criptografar</div></div>
+  </div>
+  <div class="subsec">Aplicação</div>
+  <div class="checklist">
+    <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>npm install</code> executado com sucesso (sem erros)</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Servidor inicia sem erros: <code>node --check server.js</code></div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Wizard de configuração concluído e <code>.finops_setup</code> gerado</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Login com usuário administrador testado com sucesso</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Gerenciador de processos configurado (PM2 ou systemd)</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Reverse proxy (nginx/Caddy) com HTTPS configurado</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Importação de arquivo CSV Azure testada</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Geração de PDF de estimativa testada</div></div>
+  </div>
+  <div style="height:16px"></div>
+</div>
+
+<!-- RODAPÉ -->
+<div class="stripe"></div>
+<div class="foot">
+  <div class="foot-l">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="32" height="15" style="opacity:.6">
+      <text class="pdf-vivo-text" x="1" y="28" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="28" fill="#9333ea" letter-spacing="-1">vivo</text>
+    </svg>
+    <span class="foot-dot"></span>
+    <span>FinOps Manager</span>
+    <span class="foot-dot"></span>
+    <span>Guia de Implementação v1.0</span>
+    <span class="foot-dot"></span>
+    <span>Uso Interno Vivo</span>
+  </div>
+  <div class="foot-r">Maio 2026 · Confidencial</div>
+</div>
+
+</div><!-- .page -->
+</body>
+</html>
