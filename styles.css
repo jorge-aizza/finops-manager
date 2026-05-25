@@ -795,7 +795,7 @@ body {
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  padding: 20px;
+  padding: 8px;
 }
 .modal-overlay.open { display: flex; }
 
@@ -804,15 +804,15 @@ body {
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--border-light);
-  border-radius: 16px;
+  border-radius: 18px;
   width: 100%;
   max-width: 520px;
-  max-height: 90vh;
+  max-height: 96vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 24px 64px rgba(60, 0, 100, 0.5);
+  box-shadow: 0 32px 80px rgba(60, 0, 100, 0.55), 0 0 0 1px rgba(147,51,234,.08);
 }
-.modal-wide { max-width: 800px; }
+.modal-wide { max-width: 860px; }
 
 .modal-header {
   display: flex;
@@ -841,7 +841,7 @@ body {
 .modal-body {
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 20px 24px;
+  padding: 24px 28px;
   flex: 1;
 }
 
@@ -1037,7 +1037,7 @@ select option { background: var(--bg-card); }
   opacity: 0;
   transform: translateY(8px);
   transition: all 0.2s ease;
-  z-index: 2000;
+  z-index: 10000;
   pointer-events: none;
 }
 .toast.show {
@@ -1045,7 +1045,8 @@ select option { background: var(--bg-card); }
   transform: translateY(0);
 }
 .toast.success { background: var(--accent); color: #ffffff; }
-.toast.error { background: var(--red); color: #fff; }
+.toast.error   { background: var(--red);    color: #fff; }
+.toast.warn    { background: var(--orange, #ff8c42); color: #fff; }
 
 /* ── SCROLLBAR ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1178,9 +1179,9 @@ select option { background: var(--bg-card); }
     max-width: calc(100vw - 16px);
     width: calc(100vw - 16px);
     border-radius: 12px;
-    max-height: 92vh;
+    max-height: 96vh;
   }
-  .modal-overlay { padding: 8px; align-items: center; }
+  .modal-overlay { padding: 4px; align-items: center; }
 
   /* Filtros empilham em coluna */
   .filters-bar { flex-wrap: wrap; gap: 8px; }
@@ -1376,8 +1377,9 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .btn-primary:hover { background: #7c3aed; box-shadow: 0 0 16px var(--accent-glow); }
 
 /* Toast */
-[data-theme="light"] .toast.success { background: var(--accent); color: #fff; }
-[data-theme="light"] .toast.error   { background: var(--red);    color: #fff; }
+[data-theme="light"] .toast.success { background: var(--accent);           color: #fff; }
+[data-theme="light"] .toast.error   { background: var(--red);              color: #fff; }
+[data-theme="light"] .toast.warn    { background: var(--orange, #ff8c42);  color: #fff; }
 
 /* Tables */
 [data-theme="light"] tr:hover td { background: var(--bg-hover) !important; }

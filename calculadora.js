@@ -5,8 +5,12 @@
 const Calculadora = (() => {
 
   let _recursos     = [];
+  let _dadosDetalhe = [];   // linhas brutas para a visão "Por Data"
+  let _dadosServico = [];   // linhas brutas para a visão "Por Serviço"
+  let _modoVisao    = 'recursos'; // 'recursos' | 'detalhe' | 'servico'
   let _selecionados = {};
-  let _periodos     = [];   // [{inicio, fim, horas, label}]
+  let _periodos       = [];   // [{inicio, fim, horas, label}]
+  let _horasAplicadas = false; // true somente após Aplicar (HORAS) ou Incluir Período
   let _horasPeriodoValidas = false; // true quando datas/horas do período formam intervalo > 0
   let _subsSel      = [];   // subscription_ids selecionados
   let _rgsSel       = [];   // resource_group_names selecionados
@@ -16,15 +20,22 @@ const Calculadora = (() => {
   let _dataFim      = '';
   let _taxaBrl      = 5.70;
   let _estimativa   = null;
-  let _filtroTexto  = '';
+  let _filtroTexto    = '';
+  let _reconciliacao  = null;
+  let _azureRefValue  = 0;
   let _iniciado     = false;
 
   // ── API helper ───────────────────────────────────────────────────
-  function _api(method, path, body) {
+  async function _api(method, path, body) {
     const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
     const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token } };
     if (body) opts.body = JSON.stringify(body);
-    return fetch(window.location.origin + '/api' + path, opts).then(r => r.json());
+    const r = await fetch(window.location.origin + '/api' + path, opts);
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      throw new Error(`Servidor retornou HTTP ${r.status} — reinicie o servidor e tente novamente.`);
+    }
+    return r.json();
   }
 
   function _toast(msg, tipo) {
@@ -126,26 +137,9 @@ const Calculadora = (() => {
 </style>
 
 <!-- HEADER -->
-<div style="display:flex;align-items:center;justify-content:space-between;padding:18px 24px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
-  <div>
-    <div style="font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);margin-bottom:3px;">Azure Cost Management</div>
-    <h2 style="font-size:1.2rem;font-weight:700;margin:0;">Calculadora de Custo / Hora</h2>
-  </div>
-  <div style="display:flex;gap:8px;align-items:center;">
-    <button onclick="Calculadora.abrirDiagnostico()" style="display:inline-flex;align-items:center;gap:6px;padding:0 13px;height:36px;border-radius:7px;border:1px solid #4da6ff44;background:rgba(77,166,255,.07);color:#4da6ff;font-size:12px;font-weight:500;cursor:pointer;transition:background .15s;" title="Inspecionar padrões dos dados importados">
-      <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4"/><path d="M8 7v4M8 5.5v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-      Diagnóstico
-    </button>
-    <button onclick="Calculadora.abrirPurge()" style="display:inline-flex;align-items:center;gap:6px;padding:0 13px;height:36px;border-radius:7px;border:1px solid #ff4d6a44;background:rgba(255,77,106,.07);color:#ff4d6a;font-size:12px;font-weight:500;cursor:pointer;transition:background .15s;" title="Limpar dados e re-importar">
-      <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M2 4h12M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 7v5M10 7v5M3 4l1 9a1 1 0 001 1h6a1 1 0 001-1l1-9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      Limpar Dados
-    </button>
-    <label class="cbtn-imp" title="Selecione um ou vários arquivos .csv / .parquet">
-      <svg viewBox="0 0 16 16" fill="none" width="14" height="14"><path d="M8 2v8M5 7l3 3 3-3M2 12v2h12v-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      Importar Arquivos
-      <input type="file" id="cfile" accept=".csv,.parquet,.zip" multiple style="display:none">
-    </label>
-  </div>
+<div style="padding:18px 24px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+  <div style="font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);margin-bottom:3px;">Azure Cost Management</div>
+  <h2 style="font-size:1.2rem;font-weight:700;margin:0;">Calculadora de Custo / Hora</h2>
 </div>
 
 <!-- MODAL PURGE -->
@@ -222,23 +216,18 @@ const Calculadora = (() => {
   </div>
 </div>
 
-<!-- PAINEL DE IMPORTAÇÃO MULTI-ARQUIVO -->
-<div id="cimport-panel" style="display:none;padding:12px 24px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0;">
-
-  <!-- Barra geral -->
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-    <span id="cimport-title" style="font-size:12px;font-weight:600;color:var(--text);">Importando...</span>
-    <span id="cimport-geral-pct" style="font-size:12px;font-family:'IBM Plex Mono',monospace;color:var(--accent);">0 / 0</span>
+<!-- PAINEL DE IMPORTAÇÃO — notificação flutuante -->
+<div id="cimport-panel" style="display:none;position:fixed;bottom:60px;right:16px;z-index:9998;width:300px;background:var(--bg-card,#1a1e28);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.55);padding:14px 16px;">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px;">
+    <span id="cimport-title" style="font-size:12px;font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Importando...</span>
+    <span id="cimport-geral-pct" style="font-size:10px;font-family:'IBM Plex Mono',monospace;color:var(--text-muted);flex-shrink:0;"></span>
+    <button id="cimport-close" onclick="fecharPainelImport()" style="display:none;background:none;border:1px solid var(--border);border-radius:5px;color:var(--text-muted);width:20px;height:20px;cursor:pointer;font-size:12px;line-height:1;padding:0;flex-shrink:0;">✕</button>
   </div>
-  <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:10px;">
-    <div id="cimport-geral-fill" style="height:100%;width:0%;background:var(--accent);transition:width .3s;border-radius:2px;"></div>
+  <div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:8px;">
+    <div id="cimport-geral-fill" style="height:100%;width:0%;background:var(--accent);transition:width .4s;border-radius:2px;"></div>
   </div>
-
-  <!-- Lista de arquivos -->
-  <div id="cimport-list" style="display:flex;flex-direction:column;gap:5px;max-height:180px;overflow-y:auto;scrollbar-width:thin;"></div>
-
-  <!-- Resumo final -->
-  <div id="cimport-resumo" style="display:none;margin-top:10px;padding:8px 12px;border-radius:7px;background:rgba(147,51,234,.07);border:1px solid rgba(147,51,234,.2);font-size:12px;color:var(--text-dim);line-height:1.7;"></div>
+  <div id="cimport-arquivo-atual" style="font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px;"></div>
+  <div id="cimport-resumo" style="display:none;font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.6;border-top:1px solid var(--border);padding-top:6px;"></div>
 </div>
 
 <!-- mantido por compatibilidade com código legado -->
@@ -367,13 +356,29 @@ const Calculadora = (() => {
       <button class="cbtn-sec" onclick="Calculadora.selecionarTodos()">Sel. todos</button>
       <button class="cbtn-sec" onclick="Calculadora.deselecionarTodos()">Limpar</button>
       <div style="flex:1;"></div>
+      <!-- toggle visão -->
+      <div style="display:flex;gap:2px;background:rgba(255,255,255,.06);border-radius:7px;padding:2px;flex-shrink:0;">
+        <button id="cvtab-rec" onclick="Calculadora._switchVisao('recursos')"
+          style="padding:4px 13px;font-size:11px;font-weight:600;border-radius:5px;border:none;cursor:pointer;background:var(--accent);color:#fff;transition:all .15s;">
+          Recursos
+        </button>
+        <button id="cvtab-det" onclick="Calculadora._switchVisao('detalhe')"
+          style="padding:4px 13px;font-size:11px;font-weight:600;border-radius:5px;border:none;cursor:pointer;background:transparent;color:var(--text-muted);transition:all .15s;">
+          Por Data
+        </button>
+        <button id="cvtab-svc" onclick="Calculadora._switchVisao('servico')"
+          style="padding:4px 13px;font-size:11px;font-weight:600;border-radius:5px;border:none;cursor:pointer;background:transparent;color:var(--text-muted);transition:all .15s;">
+          Por Serviço
+        </button>
+      </div>
       <button id="cbtn-estimar" onclick="Calculadora._abrirConfigStep()" disabled
         style="display:inline-flex;align-items:center;gap:6px;padding:0 16px;height:32px;border-radius:6px;border:none;background:var(--border);color:var(--text-muted);font-size:12px;font-weight:700;cursor:not-allowed;opacity:.5;transition:all .2s;white-space:nowrap;flex-shrink:0;">
         <svg viewBox="0 0 16 16" fill="none" width="12" height="12"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Estimar
       </button>
     </div>
-    <div style="flex:1;overflow-y:auto;">
+    <!-- Visão: Recursos (padrão) -->
+    <div id="crecursos-wrap" style="flex:1;overflow-y:auto;">
       <table style="width:100%;border-collapse:collapse;">
         <thead style="position:sticky;top:0;z-index:2;background:var(--bg-card);">
           <tr>
@@ -389,7 +394,7 @@ const Calculadora = (() => {
             <th class="cth">Pricing Model</th>
             <th class="cth" style="text-align:right;">Consumed Quantity</th>
             <th class="cth">Unit of Measure</th>
-            <th class="cth" style="text-align:right;">Custo/Hora</th>
+            <th class="cth" style="text-align:right;" title="Hora → taxa real (effective_price)&#10;Reserva → amortizado pelo term&#10;Período → custo mensal estimado">Custo/h · /mês</th>
             <th class="cth" style="text-align:right;">Total Cobrado (BRL)</th>
           </tr>
         </thead>
@@ -400,7 +405,84 @@ const Calculadora = (() => {
         </tbody>
       </table>
     </div>
+
+    <!-- Visão: Por Data (portal-style expandable) -->
+    <div id="cdetalhe-wrap" style="display:none;flex:1;overflow-y:auto;">
+      <table style="width:100%;border-collapse:collapse;" id="cdetalhe-table">
+        <thead style="position:sticky;top:0;z-index:2;background:var(--bg-card);">
+          <tr>
+            <th class="cth" style="width:28px;"></th>
+            <th class="cth">Data</th>
+            <th class="cth">Recurso</th>
+            <th class="cth">Tipo</th>
+            <th class="cth">Localização</th>
+            <th class="cth">Resource Group</th>
+            <th class="cth">Assinatura</th>
+            <th class="cth" style="text-align:right;">Custo (BRL)</th>
+          </tr>
+        </thead>
+        <tbody id="cdetalhe-tbody">
+          <tr><td colspan="8" style="text-align:center;padding:50px 20px;color:var(--text-muted);font-size:13px;">
+            Selecione filtros e clique em <strong style="color:var(--accent);">Buscar</strong>.
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Visão: Por Serviço -->
+    <div id="csvc-wrap" style="display:none;flex:1;overflow-y:auto;">
+      <table style="width:100%;border-collapse:collapse;" id="csvc-table">
+        <thead style="position:sticky;top:0;z-index:2;background:var(--bg-card);">
+          <tr>
+            <th class="cth" style="width:36px;text-align:center;">#</th>
+            <th class="cth">Serviço (consumed_service)</th>
+            <th class="cth" style="text-align:right;">Recursos</th>
+            <th class="cth" style="text-align:right;">Resource Groups</th>
+            <th class="cth" style="text-align:right;">Total (BRL)</th>
+            <th class="cth" style="text-align:right;">% do Total</th>
+          </tr>
+        </thead>
+        <tbody id="csvc-tbody">
+          <tr><td colspan="6" style="text-align:center;padding:50px 20px;color:var(--text-muted);font-size:13px;">
+            Selecione filtros e clique em <strong style="color:var(--accent);">Buscar</strong>.
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
+
+  <!-- Rodapé: custo total -->
+  <div id="crodape-total" style="flex-shrink:0;border-top:1px solid var(--border);background:var(--bg-card);padding:7px 16px;display:none;align-items:center;gap:10px;">
+    <button onclick="Calculadora.abrirReconciliacao()" title="Reconciliar com Azure Cost Management"
+      style="display:flex;align-items:center;gap:5px;padding:0 10px;height:26px;border-radius:5px;border:1px solid var(--border-light);background:transparent;color:var(--text-muted);font-size:10px;font-weight:600;cursor:pointer;letter-spacing:.04em;white-space:nowrap;transition:all .15s;"
+      onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+      onmouseout="this.style.borderColor='var(--border-light)';this.style.color='var(--text-muted)'">
+      <svg viewBox="0 0 14 14" fill="none" width="11" height="11"><path d="M2 4h10M2 7h7M2 10h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      Reconciliar
+    </button>
+    <span id="crodape-nota" style="font-size:10px;color:var(--text-muted);"></span>
+    <div style="flex:1;"></div>
+    <span id="crodape-label" style="font-size:11px;color:var(--text-muted);"></span>
+    <span id="crodape-valor" style="font-size:15px;font-weight:700;color:var(--accent);font-family:'IBM Plex Mono',monospace;letter-spacing:.02em;"></span>
+  </div>
+
+<!-- ═══ MODAL RECONCILIAÇÃO ═══════════════════════════════════════════ -->
+<div id="crecon-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:14px;width:min(96vw,560px);max-height:85vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.6);">
+    <div style="padding:16px 20px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+      <div>
+        <div style="font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);">Azure Cost Management</div>
+        <div style="font-size:1rem;font-weight:700;color:var(--text);margin-top:2px;">Reconciliação de Valores</div>
+      </div>
+      <button onclick="Calculadora.fecharReconciliacao()" style="background:none;border:1px solid var(--border);border-radius:6px;color:var(--text-muted);width:28px;height:28px;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;">✕</button>
+    </div>
+    <div style="padding:18px 20px;overflow-y:auto;flex:1;">
+      <div id="crecon-body">
+        <div style="text-align:center;padding:30px;color:var(--text-muted);font-size:12px;">Carregando...</div>
+      </div>
+    </div>
+  </div>
+</div>
 
   <!-- painel direito removido — conteúdo movido para covmodal -->
 
@@ -533,9 +615,86 @@ const Calculadora = (() => {
 
       <!-- LEFT: resource cards + hidden compat IDs -->
       <div style="overflow-y:auto;padding:20px;border-right:1px solid var(--border);">
-        <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--text-muted);margin-bottom:14px;">
-          Recursos Selecionados &nbsp;<span id="cselcnt" style="color:var(--accent);font-weight:600;font-size:11px;text-transform:none;letter-spacing:0;"></span>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--text-muted);">
+            Recursos Selecionados &nbsp;<span id="cselcnt" style="color:var(--accent);font-weight:600;font-size:11px;text-transform:none;letter-spacing:0;"></span>
+          </div>
+          <button onclick="(function(){var l=document.getElementById('cov-legenda');l.style.display=l.style.display==='none'?'grid':'none';})()"
+            style="font-size:10px;color:var(--text-muted);background:transparent;border:1px solid var(--border);border-radius:6px;padding:2px 8px;cursor:pointer;flex-shrink:0;"
+            title="Mostrar/ocultar legenda">
+            📖 Legenda
+          </button>
         </div>
+
+        <!-- Legenda colapsável -->
+        <div id="cov-legenda" style="display:none;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:14px;padding:12px;background:rgba(147,51,234,.05);border:1px solid var(--border);border-radius:10px;">
+
+          <!-- Coluna 1 -->
+          <div style="display:flex;flex-direction:column;gap:5px;">
+            <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Fonte do Preço</div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:11px;flex-shrink:0;margin-top:1px;">📋</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--green,#22c55e);">PL/h</strong> ou <strong style="color:var(--green,#22c55e);">PL/mês</strong> — preço on-demand do Azure Price List. Estimativa mais precisa.</span>
+            </div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:11px;flex-shrink:0;margin-top:1px;">💰</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">Custo/h</strong> ou <strong style="color:var(--orange,#ff8c42);">Custo/dia</strong> — média do billing histórico. Usado quando PL não disponível.</span>
+            </div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:11px;flex-shrink:0;margin-top:1px;">🔒</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--blue,#4da6ff);">Amort./h</strong> — custo amortizado da reserva (1 ou 3 anos). Estimado permanece fixo.</span>
+            </div>
+
+            <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Descontos</div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:10px;color:var(--green,#22c55e);font-weight:700;flex-shrink:0;margin-top:1px;">▼%</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--green,#22c55e);">verde</strong> — desconto negociado vs on-demand + economia no período.</span>
+            </div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:10px;color:var(--blue,#4da6ff);font-weight:700;flex-shrink:0;margin-top:1px;">▼%</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--blue,#4da6ff);">azul</strong> — desconto da reserva vs on-demand. Indica retorno do compromisso.</span>
+            </div>
+          </div>
+
+          <!-- Coluna 2 -->
+          <div style="display:flex;flex-direction:column;gap:5px;">
+            <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Indicadores</div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:10px;flex-shrink:0;margin-top:1px;">⚡</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">H.reais</strong> — horas que o recurso ficou ligado no período importado (qty × fator UoM). Só aparece para recursos com cobrança horária.</span>
+            </div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:10px;flex-shrink:0;margin-top:1px;">⚠</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--orange,#ff8c42);">Uso parcial</strong> — recurso ficou ligado menos de 55% do mês (&lt;400h). Estimativa de mês cheio pode superestimar.</span>
+            </div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:10px;font-weight:700;flex-shrink:0;margin-top:1px;color:var(--text-muted);">*</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong>/mês*</strong> — estimativa proporcional ao billing. Recursos de consumo variável (storage, bandwidth) não têm taxa horária fixa.</span>
+            </div>
+
+            <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Coluna Estimado</div>
+
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="width:10px;height:10px;background:var(--green,#22c55e);border-radius:2px;flex-shrink:0;opacity:.8;"></span>
+              <span style="font-size:10px;color:var(--text-dim);">Verde — estimado com base no Price List</span>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="width:10px;height:10px;background:var(--text-muted);border-radius:2px;flex-shrink:0;opacity:.5;"></span>
+              <span style="font-size:10px;color:var(--text-dim);">Cinza — estimado com base no billing histórico</span>
+            </div>
+          </div>
+
+        </div><!-- /legenda -->
+
         <div id="cov-recursos" style="display:flex;flex-direction:column;gap:10px;"></div>
         <!-- hidden compat: _atualizarEstimativa escreve aqui (não precisa ser visível) -->
         <div style="display:none;" aria-hidden="true">
@@ -671,7 +830,7 @@ const Calculadora = (() => {
     <!-- Footer -->
     <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:14px 20px;border-top:1px solid var(--border);flex-shrink:0;">
       <button onclick="Calculadora._fecharConfigStep()" class="cbtn-sec">Fechar</button>
-      <button onclick="Calculadora.abrirInvoice()" class="cbtn-go" style="gap:6px;">
+      <button id="cov-btn-gerar" onclick="Calculadora._ovGerarEstimativa()" class="cbtn-go" style="gap:6px;">
         <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M3 1h10v14H3V1z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M6 5h4M6 7.5h4M6 10h2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="11.5" cy="11.5" r="3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 11.5h2M11.5 10.5v2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
         Visualizar Estimativa
       </button>
@@ -706,104 +865,103 @@ const Calculadora = (() => {
 
   // ── Importação ───────────────────────────────────────────────────
   // ══════════════════════════════════════════════════════════════════
-  // Importação multi-arquivo — fila sequencial com painel de progresso
-  // ══════════════════════════════════════════════════════════════════
+  // Importação multi-arquivo — upload → job background → polling de progresso
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Polling até o job concluir — atualiza barra de progresso com dados do servidor
+  async function _aguardarImport(jobId, nomeArquivo, idxAtual, totalArquivos, fillEl, atualEl) {
+    const token      = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const baseWidth  = ((idxAtual - 1) / totalArquivos) * 100;
+    const sliceWidth = 100 / totalArquivos;
+
+    while (true) {
+      await new Promise(r => setTimeout(r, 900));
+      try {
+        const r = await fetch(window.location.origin + '/api/azure-costs/import-status', {
+          headers: { 'Authorization': 'Bearer ' + token },
+        });
+        if (!r.ok) continue;
+        const { job } = await r.json();
+
+        // Job substituído ou sumiu — assume concluído sem dados
+        if (!job || job.id !== jobId) return { status: 'done', inseridos: 0, atualizados: 0, erros: 0, linhas: 0 };
+
+        // Progresso visual
+        const processado = (job.inseridos || 0) + (job.atualizados || 0) + (job.erros || 0);
+        const total      = job.linhas || 0;
+        const localPct   = total > 0 ? Math.min(processado / total, 0.99) : 0;
+        fillEl.style.width = Math.round(baseWidth + localPct * sliceWidth) + '%';
+
+        const subLabel = job.subArquivo ? ` · ${job.subArquivo}` : '';
+        if (total > 0) {
+          atualEl.textContent = `${nomeArquivo}${subLabel} · ${processado.toLocaleString('pt-BR')} / ${total.toLocaleString('pt-BR')}`;
+        } else {
+          atualEl.textContent = `${nomeArquivo}${subLabel} · carregando...`;
+        }
+
+        if (job.status !== 'running') return job;
+      } catch (_) { /* rede instável — continua polling */ }
+    }
+  }
+
   function _setupImport() {
     const inp = document.getElementById('cfile');
     if (!inp) return;
 
     inp.addEventListener('change', async (e) => {
       const files = Array.from(e.target.files || []);
-      inp.value = ''; // permite re-selecionar os mesmos arquivos
+      inp.value = '';
       if (!files.length) return;
 
-      // Validar extensões
       const invalid = files.filter(f => {
         const n = f.name.toLowerCase();
         return !n.endsWith('.csv') && !n.endsWith('.parquet') && !n.endsWith('.zip');
       });
-      if (invalid.length) {
-        _toast(`${invalid.length} arquivo(s) ignorado(s): apenas .csv, .parquet e .zip são aceitos.`, 'error');
-      }
+      if (invalid.length) _toast(`${invalid.length} arquivo(s) ignorado(s): apenas .csv, .parquet e .zip são aceitos.`, 'error');
+
       const validos = files.filter(f => {
         const n = f.name.toLowerCase();
         return n.endsWith('.csv') || n.endsWith('.parquet') || n.endsWith('.zip');
       });
       if (!validos.length) return;
 
-      // ── Exibir painel de importação ──────────────────────────────
+      if (typeof suspendInactivityTimer === 'function') suspendInactivityTimer();
+
       const panel    = document.getElementById('cimport-panel');
       const title    = document.getElementById('cimport-title');
-      const geralPct = document.getElementById('cimport-geral-pct');
-      const geralFill= document.getElementById('cimport-geral-fill');
-      const list     = document.getElementById('cimport-list');
+      const pctEl    = document.getElementById('cimport-geral-pct');
+      const fillEl   = document.getElementById('cimport-geral-fill');
+      const atualEl  = document.getElementById('cimport-arquivo-atual');
       const resumo   = document.getElementById('cimport-resumo');
+      const closeBtn = document.getElementById('cimport-close');
 
-      panel.style.display   = 'block';
-      resumo.style.display  = 'none';
-      list.innerHTML        = '';
-      geralFill.style.width = '0%';
-      geralPct.textContent  = `0 / ${validos.length}`;
-      title.style.color     = 'var(--text)';
-      title.textContent     = `Importando ${validos.length} arquivo${validos.length > 1 ? 's' : ''}...`;
+      panel.style.display    = 'block';
+      resumo.style.display   = 'none';
+      closeBtn.style.display = 'none';
+      fillEl.style.width     = '0%';
+      fillEl.style.background= 'var(--accent)';
+      title.style.color      = 'var(--text)';
+      title.textContent      = `Importando ${validos.length} arquivo${validos.length > 1 ? 's' : ''}...`;
+      pctEl.textContent      = `0 / ${validos.length}`;
+      atualEl.textContent    = '';
 
-      // ── Criar card para cada arquivo ─────────────────────────────
-      const cards = validos.map((f, i) => {
-        const id  = 'cfile_item_' + i;
-        const mb  = (f.size / 1024 / 1024).toFixed(1);
-        const div = document.createElement('div');
-        div.id    = id;
-        div.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;background:var(--bg-hover);border:1px solid var(--border);transition:border-color .2s,background .2s;';
-        div.innerHTML = `
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${_esc(f.name)}">${_esc(f.name)}</div>
-            <div style="font-size:10px;color:var(--text-muted);margin-top:1px;">${mb} MB</div>
-          </div>
-          <div style="width:120px;flex-shrink:0;">
-            <div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;">
-              <div id="${id}-fill" style="height:100%;width:0%;background:var(--accent);transition:width .3s;border-radius:2px;"></div>
-            </div>
-          </div>
-          <div id="${id}-status" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--text-muted);width:70px;text-align:right;flex-shrink:0;">aguardando</div>
-        `;
-        list.appendChild(div);
-        return { file: f, id };
-      });
+      localStorage.setItem('finops_import_status', JSON.stringify(
+        { status: 'running', files: validos.length, started: Date.now() }
+      ));
 
-      // Scroll automático para o painel
-      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      let totalInseridos = 0, totalErros = 0, concluidos = 0, falhas = 0;
 
-      // ── Fila sequencial ──────────────────────────────────────────
-      let totalLinhas    = 0;
-      let totalInseridos = 0;
-      let totalErros     = 0;
-      let concluidos     = 0;
-      let falhas         = 0;
-
-      for (let i = 0; i < cards.length; i++) {
-        const { file, id } = cards[i];
-        const fill   = document.getElementById(id + '-fill');
-        const status = document.getElementById(id + '-status');
-        const card   = document.getElementById(id);
-
-        // Marca como "enviando"
-        status.textContent    = 'enviando…';
-        status.style.color    = 'var(--accent)';
-        card.style.borderColor= 'rgba(147,51,234,.4)';
-        card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        // Animação de progresso simulada enquanto o servidor processa
-        let pct = 0;
-        const tick = setInterval(() => {
-          if (pct < 88) {
-            pct += Math.random() * 3 + 0.5;
-            fill.style.width = Math.min(pct, 88) + '%';
-          }
-        }, 400);
+      for (let i = 0; i < validos.length; i++) {
+        const file  = validos[i];
+        pctEl.textContent   = `${i + 1} / ${validos.length}`;
+        atualEl.textContent = file.name;
+        fillEl.style.width  = Math.round((i / validos.length) * 100) + '%';
 
         try {
           const fd    = new FormData();
           fd.append('arquivo', file);
+          fd.append('idx',   String(i + 1));
+          fd.append('total', String(validos.length));
           const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
 
           const r = await fetch(window.location.origin + '/api/azure-costs/import', {
@@ -812,94 +970,83 @@ const Calculadora = (() => {
             body: fd,
           });
 
-          clearInterval(tick);
-          fill.style.width = '100%';
-
           if (r.status === 401) {
-            clearInterval(tick);
-            sessionStorage.removeItem('finops_token');
-            sessionStorage.removeItem('finops_session');
-            localStorage.removeItem('finops_token');
-            localStorage.removeItem('finops_session');
-            status.textContent = 'sessão expirada';
-            status.style.color = '#ffaa00';
-            const expMsg = document.createElement('div');
-            expMsg.style.cssText = 'font-size:10px;color:#ffaa00;padding:2px 10px 5px;';
-            expMsg.textContent = '↳ Sessão expirada. Redirecionando para o login…';
-            card.parentNode.insertBefore(expMsg, card.nextSibling);
+            sessionStorage.removeItem('finops_token'); sessionStorage.removeItem('finops_session');
+            localStorage.removeItem('finops_token');  localStorage.removeItem('finops_session');
+            title.textContent      = '⚠️ Sessão expirada';
+            title.style.color      = '#ffaa00';
+            atualEl.textContent    = 'Redirecionando para o login...';
+            closeBtn.style.display = '';
+            if (typeof resumeInactivityTimer === 'function') resumeInactivityTimer();
             setTimeout(() => window.location.reload(), 2000);
             return;
           }
 
-          const data = await r.json();
+          // 409 = outra importação em andamento — aguardar e tentar de novo
+          if (r.status === 409) {
+            atualEl.textContent = `Aguardando importação anterior concluir...`;
+            await new Promise(resolve => setTimeout(resolve, 4000));
+            i--;
+            continue;
+          }
 
           if (!r.ok) {
-            status.textContent    = 'erro ✗';
-            status.style.color    = '#ff4d6a';
-            card.style.borderColor= 'rgba(255,77,106,.4)';
-            card.style.background = 'rgba(255,77,106,.04)';
-            fill.style.background = '#ff4d6a';
-            // Linha de detalhe do erro abaixo do card
-            const errMsg = document.createElement('div');
-            errMsg.style.cssText = 'font-size:10px;color:#ff4d6a;padding:2px 10px 5px;';
-            errMsg.textContent   = '↳ ' + (data.error || 'Erro desconhecido');
-            card.parentNode.insertBefore(errMsg, card.nextSibling);
-            falhas++;
-          } else {
-            totalLinhas    += data.total     || 0;
-            totalInseridos += data.inseridos || 0;
-            totalErros     += data.erros     || 0;
-            status.textContent    = `✓ ${(data.inseridos||0).toLocaleString('pt-BR')}`;
-            status.style.color    = 'var(--accent)';
-            card.style.borderColor= 'rgba(147,51,234,.25)';
-            card.style.background = 'rgba(147,51,234,.04)';
-            concluidos++;
+            const data = await r.json().catch(() => ({ error: 'erro desconhecido' }));
+            throw new Error(data.error || `HTTP ${r.status}`);
           }
-        } catch (err) {
-          clearInterval(tick);
-          fill.style.width  = '100%';
-          fill.style.background = '#ff4d6a';
-          status.textContent    = 'erro ✗';
-          status.style.color    = '#ff4d6a';
-          card.style.borderColor= 'rgba(255,77,106,.4)';
-          card.style.background = 'rgba(255,77,106,.04)';
-          const errMsg = document.createElement('div');
-          errMsg.style.cssText = 'font-size:10px;color:#ff4d6a;padding:2px 10px 5px;';
-          errMsg.textContent   = '↳ ' + err.message;
-          card.parentNode.insertBefore(errMsg, card.nextSibling);
-          falhas++;
-        }
 
-        // Atualiza barra geral
-        const feitos = i + 1;
-        geralFill.style.width = Math.round((feitos / cards.length) * 100) + '%';
-        geralPct.textContent  = `${feitos} / ${cards.length}`;
+          // 202 Accepted — servidor iniciou o job em background
+          const { jobId } = await r.json();
+
+          // Polling até concluir
+          const resultado = await _aguardarImport(jobId, file.name, i + 1, validos.length, fillEl, atualEl);
+
+          if (resultado.status === 'done') {
+            totalInseridos += resultado.inseridos   || 0;
+            totalErros     += resultado.erros       || 0;
+            concluidos++;
+          } else {
+            falhas++;
+            atualEl.textContent    = `⚠ ${file.name}: ${resultado.erro || 'erro no servidor'}`;
+            fillEl.style.background= 'var(--danger)';
+          }
+
+        } catch (err) {
+          falhas++;
+          atualEl.textContent    = `⚠ ${file.name}: ${err.message}`;
+          fillEl.style.background= 'var(--danger)';
+        }
       }
 
-      // ── Resumo final ─────────────────────────────────────────────
+      if (typeof resumeInactivityTimer === 'function') resumeInactivityTimer();
+
+      // ── Conclusão ────────────────────────────────────────────────
       const tudoOk = falhas === 0;
-      title.textContent = tudoOk
-        ? `✅ Importação concluída — ${cards.length} arquivo${cards.length > 1 ? 's' : ''} processado${cards.length > 1 ? 's' : ''}`
-        : `⚠️ ${concluidos} arquivo${concluidos !== 1 ? 's' : ''} ok, ${falhas} com erro`;
-      title.style.color = tudoOk ? 'var(--accent)' : '#f9e2af';
+      title.textContent      = tudoOk ? '✅ Importação concluída' : `⚠️ ${concluidos} ok · ${falhas} com erro`;
+      title.style.color      = tudoOk ? 'var(--green)' : '#f9e2af';
+      fillEl.style.background= tudoOk ? 'var(--green)' : '#f9e2af';
+      fillEl.style.width     = '100%';
+      atualEl.textContent    = '';
+      closeBtn.style.display = '';
+      pctEl.textContent      = '';
 
       resumo.style.display = 'block';
-      resumo.innerHTML = `
-        <strong style="color:var(--text);">Resumo da carga</strong><br>
-        📁 Arquivos: <strong>${concluidos}</strong> importados${falhas ? ` · <span style="color:#ff4d6a">${falhas} com erro</span>` : ''}<br>
-        📊 Linhas lidas: <strong>${totalLinhas.toLocaleString('pt-BR')}</strong><br>
-        ✅ Registros novos: <strong style="color:var(--accent)">${totalInseridos.toLocaleString('pt-BR')}</strong><br>
-        ⚠️ Ignorados / duplicados: <strong>${totalErros.toLocaleString('pt-BR')}</strong>
-      `;
+      resumo.innerHTML = tudoOk
+        ? `${concluidos} arquivo${concluidos !== 1 ? 's' : ''} · <strong style="color:var(--green)">${totalInseridos.toLocaleString('pt-BR')}</strong> novos · ${totalErros.toLocaleString('pt-BR')} ignorados`
+        : `${concluidos} ok${falhas ? ` · <span style="color:var(--danger)">${falhas} com erro</span>` : ''} · <strong>${totalInseridos.toLocaleString('pt-BR')}</strong> novos`;
 
-      if (concluidos > 0) {
-        _carregarSubscriptions();
-        if (tudoOk) {
-          _toast(`✅ ${concluidos} arquivo(s) — ${totalInseridos.toLocaleString('pt-BR')} registros inseridos.`, 'success');
-        } else {
-          _toast(`⚠️ ${concluidos} ok · ${falhas} com erro. Verifique o painel.`, 'error');
-        }
-      }
+      localStorage.setItem('finops_import_status', JSON.stringify({
+        status: tudoOk ? 'done' : 'partial',
+        files: validos.length, concluidos, falhas,
+        inserted: totalInseridos, errors: totalErros,
+        completed: Date.now()
+      }));
+
+      if (concluidos > 0) _carregarSubscriptions();
+      _toast(tudoOk
+        ? `✅ ${concluidos} arquivo(s) — ${totalInseridos.toLocaleString('pt-BR')} registros inseridos.`
+        : `⚠️ ${concluidos} ok · ${falhas} com erro.`,
+        tudoOk ? 'success' : 'error');
     });
   }
 
@@ -1018,6 +1165,7 @@ const Calculadora = (() => {
 
   async function buscarRecursos() {
     if (!_subsSel.length) { _toast('Selecione assinaturas e clique OK ✓.', 'error'); return; }
+    _horasAplicadas = false;
 
     // Formata Date → 'YYYY-MM-DD' usando hora local (evita bug de fuso UTC)
     const _fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -1042,7 +1190,11 @@ const Calculadora = (() => {
     }
 
     _selecionados = {};
+    _dadosDetalhe = [];
+    _dadosServico = [];
     await _carregarRecursos();
+    if (_modoVisao === 'detalhe') _buscarDetalhe();
+    if (_modoVisao === 'servico') _buscarServico();
   }
 
   async function onFiltroChange() {
@@ -1086,18 +1238,271 @@ const Calculadora = (() => {
 
       if (data && data.error) throw new Error(data.error);
       if (!Array.isArray(data)) throw new Error('Resposta inválida: ' + JSON.stringify(data).slice(0,100));
-      // _key: identificador único por linha (resource pode ter múltiplas linhas com UoM diferente)
+      // _key: identificador único por linha — inclui meter_name para evitar colisão entre
+      // meters que compartilham o mesmo UoM (ex: "Data Stored" vs "Standard Data Stored")
       _recursos = data.map(r => ({
         ...r,
-        _key: (r.resource_id||'') + '||' + (r.meter_category||r.categoria||'') + '||' + (r.unit_of_measure||r.unidade||'')
+        _key: (r.resource_id||'') + '||' + (r.categoria||'') + '||' + (r.meter_categories||'') + '||' + (r.unidade||'')
       }));
       _selecionados = {};
       _renderRecursos();
+      // Reconciliação em background (não bloqueia o render)
+      _reconciliacao = null;
+      _carregarReconciliacao(url.replace('/calculadora/recursos', '/calculadora/reconciliacao'));
     } catch (err) {
       console.error('[Calculadora] Erro:', err);
       const t = document.getElementById('ctbody');
       if (t) t.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:40px;color:#ff4d6a;font-size:12px;">⚠ Erro: ${_esc(err.message)}<br><span style="color:var(--text-muted);font-size:10px;">Verifique o console (F12)</span></td></tr>`;
     }
+  }
+
+  async function _carregarReconciliacao(url) {
+    try {
+      const data = await _api('GET', url.replace('/api', ''));
+      if (data && !data.error) {
+        _reconciliacao = data;
+        _atualizarNotaRodape();
+      }
+    } catch (_) { /* silencioso */ }
+  }
+
+  function _atualizarNotaRodape() {
+    const nota = document.getElementById('crodape-nota');
+    if (!nota || !_reconciliacao) return;
+
+    const tiposOcultos = ['Purchase', 'UnusedReservation', 'UnusedSavingsPlan', 'Tax', 'Refund'];
+    const ocultos = (_reconciliacao.por_tipo || []).filter(t =>
+      tiposOcultos.some(k => (t.charge_type || '').startsWith(k)) && t.total > 0.01
+    );
+    const totalOculto = ocultos.reduce((s, t) => s + t.total, 0);
+
+    const moedas = (_reconciliacao.por_moeda || []).filter(m => m.moeda !== 'BRL' && m.total > 0);
+
+    const partes = [];
+    if (totalOculto > 0.01) {
+      const nomes = [...new Set(ocultos.map(t => t.charge_type.replace('UnusedReservation','Reserva não usada').replace('UnusedSavingsPlan','Savings Plan não usado').replace('Purchase','Compra')))].join(', ');
+      partes.push(`⚠ ${_brl(totalOculto)} oculto (${nomes})`);
+    }
+    if (moedas.length) partes.push(`moeda: ${moedas.map(m => m.moeda).join(', ')}`);
+
+    nota.textContent  = partes.join(' · ');
+    nota.style.color  = totalOculto > 0.01 ? 'var(--orange)' : 'var(--text-muted)';
+    nota.title        = totalOculto > 0.01
+      ? 'Estes valores constam no banco mas não aparecem na visão de Recursos por não terem resource_id. Abra Reconciliar para ver o detalhamento.'
+      : '';
+    nota.style.cursor = totalOculto > 0.01 ? 'help' : '';
+  }
+
+  // ── Visão Por Data / Por Serviço ──────────────────────────────────
+  function _switchVisao(modo) {
+    _modoVisao = modo;
+    const recWrap = document.getElementById('crecursos-wrap');
+    const detWrap = document.getElementById('cdetalhe-wrap');
+    const svcWrap = document.getElementById('csvc-wrap');
+    const tabRec  = document.getElementById('cvtab-rec');
+    const tabDet  = document.getElementById('cvtab-det');
+    const tabSvc  = document.getElementById('cvtab-svc');
+    if (!recWrap || !detWrap || !svcWrap) return;
+    recWrap.style.display = modo === 'recursos' ? '' : 'none';
+    detWrap.style.display = modo === 'detalhe'  ? '' : 'none';
+    svcWrap.style.display = modo === 'servico'  ? '' : 'none';
+    const _tab = (el, active) => {
+      if (!el) return;
+      el.style.background = active ? 'var(--accent)' : 'transparent';
+      el.style.color       = active ? '#fff' : 'var(--text-muted)';
+    };
+    _tab(tabRec, modo === 'recursos');
+    _tab(tabDet, modo === 'detalhe');
+    _tab(tabSvc, modo === 'servico');
+    const btnEst = document.getElementById('cbtn-estimar');
+    if (btnEst) btnEst.style.display = modo === 'recursos' ? '' : 'none';
+    _atualizarTotalRodape();
+    if (modo === 'detalhe' && !_dadosDetalhe.length && _subsSel.length) _buscarDetalhe();
+    if (modo === 'servico' && !_dadosServico.length && _subsSel.length) _buscarServico();
+  }
+
+  async function _buscarDetalhe() {
+    const tbody = document.getElementById('cdetalhe-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:30px;color:var(--text-muted);font-size:12px;">
+      <span class="cskel" style="width:60%;display:inline-block;"></span></td></tr>`;
+    try {
+      const subs = _subsSel.length ? _subsSel : (_subAtual ? [_subAtual] : []);
+      const rgs  = _rgsSel.length  ? _rgsSel  : (_rgAtual  ? [_rgAtual]  : []);
+      let url = `/calculadora/detalhe-diario?subscription_id=${subs.map(encodeURIComponent).join(',')}`;
+      if (rgs.length) url += `&resource_group=${rgs.map(encodeURIComponent).join(',')}`;
+      if (_dataInicio) url += `&data_inicio=${_dataInicio}`;
+      if (_dataFim)    url += `&data_fim=${_dataFim}`;
+      const data = await _api('GET', url);
+      if (!Array.isArray(data)) throw new Error(data?.error || 'Resposta inválida');
+      _dadosDetalhe = data;
+      _renderDetalhe();
+    } catch (err) {
+      if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:30px;color:#ff4d6a;font-size:12px;">⚠ ${_esc(err.message)}</td></tr>`;
+    }
+  }
+
+  function _renderDetalhe() {
+    const tbody = document.getElementById('cdetalhe-tbody');
+    if (!tbody) return;
+    if (!_dadosDetalhe.length) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">Nenhum dado encontrado para o período.</td></tr>`;
+      return;
+    }
+
+    // Agrupa por (data, resource_id) → sub-linhas por (service_name, meter)
+    const grupos = {};
+    const ordem  = [];
+    for (const row of _dadosDetalhe) {
+      const k = row.cost_date + '||' + (row.resource_id || '');
+      if (!grupos[k]) {
+        grupos[k] = {
+          cost_date:          row.cost_date,
+          resource_id:        row.resource_id || '',
+          nome_recurso:       row.nome_recurso || row.resource_id || '—',
+          resource_type:      row.resource_type || '—',
+          location:           row.location || '—',
+          resource_group_name:row.resource_group_name || '—',
+          subscription_name:  row.subscription_name || '—',
+          total: 0,
+          subs: []
+        };
+        ordem.push(k);
+      }
+      const g = grupos[k];
+      const custo = parseFloat(row.cost) || 0;
+      g.total += custo;
+      g.subs.push({ service_name: row.service_name || '—', meter: row.meter || '—', cost: custo });
+    }
+
+    const brl = v => v.toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+    const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    // Renderiza via DOM (evita qualquer problema de escaping em onclick strings)
+    tbody.innerHTML = '';
+    let idx = 0;
+    for (const k of ordem) {
+      const g  = grupos[k];
+      const i  = idx++;
+      const dt = g.cost_date ? g.cost_date.slice(0,10) : '—';
+      const nomeShort = g.nome_recurso.length > 60 ? '…' + g.nome_recurso.slice(-50) : g.nome_recurso;
+
+      // ── linha principal ──
+      const trMain = document.createElement('tr');
+      trMain.style.cssText = 'cursor:pointer;border-bottom:1px solid var(--border);transition:background .12s;';
+      trMain.innerHTML = `
+        <td style="padding:8px 6px;text-align:center;color:var(--text-muted);">
+          <svg class="cdet-chev" viewBox="0 0 12 12" fill="none" width="11" height="11" style="transition:transform .2s;vertical-align:middle;">
+            <path d="M3 4l3 3.5L9 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </td>
+        <td style="padding:8px 10px;font-size:12px;color:var(--text);white-space:nowrap;">${esc(dt)}</td>
+        <td style="padding:8px 10px;font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+          <span title="${esc(g.resource_id)}" style="color:var(--accent);font-size:11px;">${esc(nomeShort)}</span>
+        </td>
+        <td style="padding:8px 10px;font-size:11px;color:var(--text-dim);">${esc(g.resource_type)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:var(--text-dim);">${esc(g.location)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:var(--text-dim);">${esc(g.resource_group_name)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:var(--text-dim);">${esc(g.subscription_name)}</td>
+        <td style="padding:8px 10px;font-size:12px;font-weight:700;color:var(--accent);text-align:right;white-space:nowrap;">${brl(g.total)}</td>`;
+
+      // ── linha de sub-detalhes (oculta por padrão) ──
+      const trSub = document.createElement('tr');
+      trSub.style.display = 'none';
+      trSub.innerHTML = `
+        <td colspan="8" style="padding:0 0 4px 32px;background:rgba(147,51,234,.05);border-bottom:2px solid var(--border);">
+          <table style="width:100%;border-collapse:collapse;">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border);">
+                <th style="padding:5px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:left;">Nome do Serviço</th>
+                <th style="padding:5px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:left;">Meter</th>
+                <th style="padding:5px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:right;">Custo (BRL)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${g.subs.map(s => `
+                <tr style="border-bottom:1px solid rgba(255,255,255,.04);">
+                  <td style="padding:5px 10px;font-size:11px;color:var(--text);">${esc(s.service_name)}</td>
+                  <td style="padding:5px 10px;font-size:11px;color:var(--text-dim);">${esc(s.meter)}</td>
+                  <td style="padding:5px 10px;font-size:11px;font-weight:600;color:var(--accent);text-align:right;">${brl(s.cost)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </td>`;
+
+      // toggle via addEventListener — sem strings no onclick
+      trMain.addEventListener('click', () => {
+        const open = trSub.style.display === 'none';
+        trSub.style.display = open ? 'table-row' : 'none';
+        const chev = trMain.querySelector('.cdet-chev');
+        if (chev) chev.style.transform = open ? 'rotate(-180deg)' : '';
+        trMain.style.background = open ? 'rgba(147,51,234,.08)' : '';
+      });
+      trMain.addEventListener('mouseenter', () => { if (trSub.style.display==='none') trMain.style.background='var(--bg-hover)'; });
+      trMain.addEventListener('mouseleave', () => { if (trSub.style.display==='none') trMain.style.background=''; });
+
+      tbody.appendChild(trMain);
+      tbody.appendChild(trSub);
+    }
+    _atualizarTotalRodape();
+  }
+
+  function _toggleDetalhe() { /* não usado — toggle feito por addEventListener */ }
+
+  // ── Visão Por Serviço ─────────────────────────────────────────────
+  async function _buscarServico() {
+    const tbody = document.getElementById('csvc-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted);font-size:12px;">
+      <span class="cskel" style="width:60%;display:inline-block;"></span></td></tr>`;
+    try {
+      const subs = _subsSel.length ? _subsSel : (_subAtual ? [_subAtual] : []);
+      const rgs  = _rgsSel.length  ? _rgsSel  : (_rgAtual  ? [_rgAtual]  : []);
+      let url = `/calculadora/por-servico?subscription_id=${subs.map(encodeURIComponent).join(',')}`;
+      if (rgs.length)  url += `&resource_group=${rgs.map(encodeURIComponent).join(',')}`;
+      if (_dataInicio) url += `&data_inicio=${_dataInicio}`;
+      if (_dataFim)    url += `&data_fim=${_dataFim}`;
+      const data = await _api('GET', url);
+      if (!Array.isArray(data)) throw new Error(data?.error || 'Resposta inválida');
+      _dadosServico = data;
+      _renderServico();
+    } catch (err) {
+      if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:30px;color:#ff4d6a;font-size:12px;">⚠ ${_esc(err.message)}</td></tr>`;
+    }
+  }
+
+  function _renderServico() {
+    const tbody = document.getElementById('csvc-tbody');
+    if (!tbody) return;
+    if (!_dadosServico.length) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">Nenhum dado encontrado para o período.</td></tr>`;
+      return;
+    }
+    const brl   = v => Number(v || 0).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+    const grand = _dadosServico.reduce((s, r) => s + Number(r.total_brl || 0), 0);
+    tbody.innerHTML = '';
+    _dadosServico.forEach((row, i) => {
+      const pct   = grand > 0 ? (Number(row.total_brl) / grand * 100) : 0;
+      const tr    = document.createElement('tr');
+      tr.style.cssText = 'border-bottom:1px solid var(--border);transition:background .12s;';
+      tr.innerHTML = `
+        <td style="padding:9px 10px;text-align:center;font-size:11px;color:var(--text-muted);">${i+1}</td>
+        <td style="padding:9px 10px;font-size:12px;color:var(--text);">${_esc(row.service_name)}</td>
+        <td style="padding:9px 10px;font-size:12px;color:var(--text-dim);text-align:right;">${Number(row.qtd_recursos||0).toLocaleString('pt-BR')}</td>
+        <td style="padding:9px 10px;font-size:12px;color:var(--text-dim);text-align:right;">${Number(row.qtd_rgs||0).toLocaleString('pt-BR')}</td>
+        <td style="padding:9px 10px;font-size:12px;font-weight:700;color:var(--accent);text-align:right;white-space:nowrap;">${brl(row.total_brl)}</td>
+        <td style="padding:9px 10px;text-align:right;">
+          <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end;">
+            <div style="width:60px;height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;">
+              <div style="height:100%;width:${Math.min(pct,100).toFixed(1)}%;background:var(--accent);border-radius:3px;"></div>
+            </div>
+            <span style="font-size:11px;color:var(--text-dim);white-space:nowrap;">${pct.toFixed(1)}%</span>
+          </div>
+        </td>`;
+      tr.addEventListener('mouseenter', () => { tr.style.background = 'var(--bg-hover)'; });
+      tr.addEventListener('mouseleave', () => { tr.style.background = ''; });
+      tbody.appendChild(tr);
+    });
   }
 
   function _renderLoading() {
@@ -1125,7 +1530,9 @@ const Calculadora = (() => {
       (r.charge_type||'').toLowerCase().includes(_filtroTexto)  ||
       (r.unidade||'').toLowerCase().includes(_filtroTexto)      ||
       (r.pricing_model||'').toLowerCase().includes(_filtroTexto)||
-      (r.resource_group_name||'').toLowerCase().includes(_filtroTexto)
+      (r.resource_group_name||'').toLowerCase().includes(_filtroTexto) ||
+      (r.publisher_type||'').toLowerCase().includes(_filtroTexto) ||
+      (r.publisher_name||'').toLowerCase().includes(_filtroTexto)
     ) : _recursos;
 
     const c = document.getElementById('ccnt');
@@ -1201,15 +1608,17 @@ const Calculadora = (() => {
           ? 'rgba(147,51,234,.1);color:var(--accent)'
           : 'rgba(77,166,255,.1);color:var(--blue,#4da6ff)';
         const pad = temMultiplos ? 'padding-left:28px;' : '';
+        const isMkt = (r.publisher_type||'').toLowerCase() === 'marketplace';
+        const mktBadge = isMkt ? `<span style="display:inline-block;margin-left:5px;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(255,140,66,.18);color:#ff8c42;vertical-align:middle;white-space:nowrap;">MKT</span>` : '';
 
-        rows.push(`<tr style="${sel?'background:rgba(147,51,234,.04);':''}">
+        rows.push(`<tr style="${sel?'background:rgba(147,51,234,.04);':''}${isMkt?'border-left:2px solid rgba(255,140,66,.4);':''}">
           <td style="text-align:center;padding:8px 4px;">
             <input type="checkbox" class="cck" data-rid="${_esc(rid)}" ${sel?'checked':''}
               onchange="Calculadora._check('${_esc(rid)}',this.checked)">
           </td>
           <td style="max-width:200px;padding:8px 10px;${pad}">
-            <div style="font-size:${temMultiplos?'11':'12'}px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${temMultiplos?'var(--text-dim)':'var(--text)'};" title="${_esc(r.resource_id||'')}">${_esc(temMultiplos?(r.meter_categories||r.categoria||nome):nome)}</div>
-            <div style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(r.produto||r.subcategoria||r.regiao||'')}</div>
+            <div style="font-size:${temMultiplos?'11':'12'}px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${temMultiplos?'var(--text-dim)':'var(--text)'};" title="${_esc(r.resource_id||'')}">${_esc(temMultiplos?(r.meter_categories||r.categoria||nome):nome)}${mktBadge}</div>
+            <div style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(r.publisher_name && isMkt ? r.publisher_name : (r.produto||r.subcategoria||r.regiao||''))}</div>
           </td>
           <td style="max-width:140px;padding:8px 10px;">
             <div style="font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(temMultiplos?'':rg)}</div>
@@ -1292,6 +1701,8 @@ const Calculadora = (() => {
   }
 
   function _isConsumo(r) {
+    // Usa tipo_custo quando disponível (dado novo do servidor)
+    if (r?.tipo_custo) return r.tipo_custo === 'periodo' || r.tipo_custo === 'dia';
     const uom = (r?.unidade || '').toLowerCase();
     return !uom.includes('hour') && !uom.includes('hora');
   }
@@ -1317,6 +1728,35 @@ const Calculadora = (() => {
       btn.style.opacity         = n > 0 ? '1'              : '0.5';
     });
     _atualizarBtnIncluir();
+    _atualizarTotalRodape();
+  }
+
+  function _atualizarTotalRodape() {
+    const bar    = document.getElementById('crodape-total');
+    const labelEl= document.getElementById('crodape-label');
+    const valorEl= document.getElementById('crodape-valor');
+    if (!bar || !labelEl || !valorEl) return;
+
+    if (_modoVisao === 'recursos') {
+      const sel = Object.keys(_selecionados);
+      if (!sel.length || !_recursos.length) { bar.style.display = 'none'; return; }
+      let total = 0;
+      for (const rid of sel) {
+        const r = _recursos.find(x => (x._key || x.resource_id) === rid);
+        if (!r) continue;
+        const isBRL = (r.moeda || 'BRL') === 'BRL';
+        total += parseFloat(r.total_billing || 0) * (isBRL ? 1 : _taxaBrl);
+      }
+      labelEl.textContent = `${sel.length} selecionado${sel.length !== 1 ? 's' : ''} · Total cobrado`;
+      valorEl.textContent = _brl(total);
+      bar.style.display   = 'flex';
+    } else {
+      if (!_dadosDetalhe.length) { bar.style.display = 'none'; return; }
+      const total = _dadosDetalhe.reduce((acc, r) => acc + (parseFloat(r.cost) || 0), 0);
+      labelEl.textContent = 'Total do período';
+      valorEl.textContent = _brl(total);
+      bar.style.display   = 'flex';
+    }
   }
 
   function selecionarTodos() {
@@ -1343,6 +1783,7 @@ const Calculadora = (() => {
   function aplicarHorasGlobal() {
     const h = Math.max(1, parseInt(document.getElementById('chglobal')?.value) || 720);
     Object.keys(_selecionados).forEach(rid => { _selecionados[rid] = h; });
+    _horasAplicadas = true;
     _atualizarEstimativa();
     // atualiza cards do overlay se estiver aberto
     const modal = document.getElementById('covmodal');
@@ -1368,17 +1809,21 @@ const Calculadora = (() => {
     painP.style.display    = isManual ? 'none' : '';
 
     if (isManual) {
-      // Trocou para HORAS → limpa todos os períodos acumulados e reaaplica horas globais
+      // Trocou para HORAS → limpa períodos e reseta flag para exigir novo Aplicar
       _periodos = [];
       _horasPeriodoValidas = false;
+      _horasAplicadas = false;
       _renderPeriodos();
       _atualizarBtnIncluir();
-      aplicarHorasGlobal();          // reaplica o valor atual do input de horas
+      const h = Math.max(1, parseInt(document.getElementById('chglobal')?.value) || 720);
+      Object.keys(_selecionados).forEach(rid => { _selecionados[rid] = h; });
+      _atualizarEstimativa();
     } else {
       // Trocou para PERÍODO
       const covModal = document.getElementById('covmodal');
       const overlayOpen = covModal && covModal.style.display !== 'none';
       _periodos = [];
+      _horasAplicadas = false;
       _renderPeriodos();
       // Só limpa recursos se estiver na tabela principal (não no overlay)
       if (!overlayOpen) {
@@ -1401,8 +1846,8 @@ const Calculadora = (() => {
     const fimData = document.getElementById('cperiodo-fim-data');
 
     if (iniData.value) {
-      // Campos já preenchidos — apenas garante que fim data acompanha início
-      if (fimData) fimData.value = iniData.value;
+      // Campos já preenchidos — preserva datas existentes, só preenche fim se vazio
+      if (fimData && !fimData.value) fimData.value = iniData.value;
       _calcHorasPeriodo();
       return;
     }
@@ -1414,7 +1859,7 @@ const Calculadora = (() => {
     const fmtTime = d => `${pad(d.getHours())}:00`;
     iniData.value = fmtDate(now);
     document.getElementById('cperiodo-ini-hora').value = fmtTime(now);
-    if (fimData) fimData.value = fmtDate(now);
+    if (fimData && !fimData.value) fimData.value = fmtDate(now);
     document.getElementById('cperiodo-fim-hora').value = `${pad(now.getHours() + 1 < 24 ? now.getHours() + 1 : 23)}:00`;
     _calcHorasPeriodo();
   }
@@ -1474,9 +1919,17 @@ const Calculadora = (() => {
       return 0;
     }
     const horas = Math.round(diff / 3600000);
-    const horaIni = vIni.slice(11, 16);
-    const horaFim = vFim.slice(11, 16);
-    if (res) { res.style.color = 'var(--accent)'; res.textContent = `= ${horas}h (${horaIni} → ${horaFim})`; }
+    const dias  = Math.floor(horas / 24);
+    const hRest = horas % 24;
+    const durLabel = dias > 0
+      ? (hRest > 0 ? `${dias}d ${hRest}h` : `${dias}d`)
+      : `${horas}h`;
+    const fmtDt = iso => {
+      const [d, t] = iso.split('T');
+      const [y, m, dd] = d.split('-');
+      return `${dd}/${m} ${t ? t.slice(0,5) : ''}`;
+    };
+    if (res) { res.style.color = 'var(--accent)'; res.textContent = `${horas}h (${durLabel}) · ${fmtDt(vIni)} → ${fmtDt(vFim)}`; }
     _horasPeriodoValidas = true;
     _atualizarBtnIncluir();
     return horas;
@@ -1537,6 +1990,7 @@ const Calculadora = (() => {
 
   function _aplicarTotalPeriodos() {
     if (!_periodos.length) return;
+    _horasAplicadas = true;
     const total = _periodos.reduce((s, p) => s + p.horas, 0);
     const tv  = document.getElementById('cperiodo-total-val');
     const dias = Math.floor(total / 24), hRest = total % 24;
@@ -1750,11 +2204,14 @@ const Calculadora = (() => {
     html += '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
       + '<span style="color:var(--text-muted);">Recursos selecionados</span><span>' + itens.length + '</span></div>'
       + '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
-      + '<span style="color:var(--text-muted);">UoM = Hour (unit_price)</span>'
+      + '<span style="color:var(--text-muted);">⚡ Hora / Dia (taxa real)</span>'
       + '<span>' + itens.filter(r => r.isHora).length + '</span></div>'
       + '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
-      + '<span style="color:var(--text-muted);">UoM ≠ Hour (÷30÷24)</span>'
-      + '<span>' + itens.filter(r => !r.isHora).length + '</span></div>'
+      + '<span style="color:var(--blue,#4da6ff);">🔒 Reservas (amortizado)</span>'
+      + '<span>' + itens.filter(r => r.tipo_custo === 'reserva').length + '</span></div>'
+      + '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
+      + '<span style="color:var(--orange,#ff8c42);">📦 Storage/Consumo (est.)</span>'
+      + '<span>' + itens.filter(r => r.tipo_custo === 'periodo').length + '</span></div>'
       + (_estimativa.pct_imposto > 0
         ? '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
           + '<span style="color:var(--text-muted);">+ Imposto (' + _estimativa.pct_imposto + '%)</span>'
@@ -1794,15 +2251,38 @@ const Calculadora = (() => {
   function _buildPDFHtml(p) {
     const linhas = (p.itens || []).map(r => {
       const quantCell = (r.horas || 0).toLocaleString('pt-BR') + ' h';
+      const _plRef = parseFloat(r.retail_price_hora || 0);
+      const _temPL = _plRef > 0;
       const precoCell = r.custo_hora != null
-        ? '<span class="mono">' + _brl(r.custo_hora) + '/h' + (r.isHora ? '' : '*') + '</span>'
+        ? (() => {
+            const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
+            if (tc === 'reserva') {
+              // Amortizado + referência on-demand do PL quando disponível
+              const base = _brl(r.custo_hora) + '/h\xA0🔒';
+              const od   = _temPL ? '\xA0<span style="opacity:.55;font-size:9px;" title="On-demand Price List">📋\xA0' + _brl(_plRef) + '/h</span>' : '';
+              return '<span class="mono" title="Amortizado pelo term da reserva">' + base + od + '</span>';
+            }
+            if (tc === 'periodo') {
+              // Usa PL/mês quando disponível — sem * pois é preço de catálogo real
+              if (_temPL)
+                return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand mensal (Azure Price List)">📋\xA0' + _brl(_plRef) + '/mês</span>';
+              // Fallback billing com * indicando estimativa
+              return '<span class="mono" title="Custo mensal estimado do billing (÷30÷24)">' + _brl(r.custo_mes || r.custo_hora * 720) + '/mês*</span>';
+            }
+            // hora / dia — usa PL/h quando disponível
+            if (_temPL)
+              return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand por hora (Azure Price List)">📋\xA0' + _brl(_plRef) + '/h</span>';
+            return '<span class="mono">' + _brl(r.custo_hora) + '/h</span>';
+          })()
         : '<span class="na">&mdash;</span>';
+      // Cor da coluna Estimado: verde quando PL disponível (qualquer tipo), cinza quando só billing
+      const _corEst = (r.fonte_estimado === 'price_list' || (_temPL && r.tipo_custo !== 'reserva')) ? 'td-green' : 'td-gray';
       return '<tr>'
         + '<td class="td-nm">' + _esc(r.nome) + '</td>'
         + '<td class="td-sm">' + _esc(r.categoria) + '</td>'
         + '<td class="td-sm td-right td-mono">' + quantCell + '</td>'
         + '<td class="td-sm td-right">' + precoCell + '</td>'
-        + '<td class="td-brl ' + (r.isHora ? 'td-green' : 'td-gray') + '">' + _brl(r.estimado_brl) + '</td>'
+        + '<td class="td-brl ' + _corEst + '">' + _brl(r.estimado_brl) + '</td>'
         + '</tr>';
     }).join('');
     const totalFinal = p.total_final || p.total_brl || 0;
@@ -2225,6 +2705,121 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     if (modal) modal.style.display = 'none';
   }
 
+  // ── Reconciliação de valores ─────────────────────────────────────────────────
+  function abrirReconciliacao() {
+    const modal = document.getElementById('crecon-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    _renderReconciliacao();
+  }
+
+  function fecharReconciliacao() {
+    const modal = document.getElementById('crecon-modal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function _onAzureRefInput(val) {
+    const clean = (val || '').replace(/[^\d,]/g, '').replace(',', '.');
+    _azureRefValue = parseFloat(clean) || 0;
+    const dbTotal = _reconciliacao ? _reconciliacao.total_bruto : 0;
+    const dif = _azureRefValue > 0 ? _azureRefValue - dbTotal : null;
+    const difEl  = document.getElementById('crecon-dif-val');
+    const pctEl  = document.getElementById('crecon-dif-pct');
+    const noteEl = document.getElementById('crecon-gap-note');
+    if (difEl) difEl.textContent  = dif !== null ? _brl(Math.abs(dif)) : '—';
+    if (pctEl) pctEl.textContent  = (dif !== null && _azureRefValue > 0)
+      ? '(' + (Math.abs(dif) / _azureRefValue * 100).toFixed(1) + '%)'
+      : '';
+    if (noteEl) noteEl.style.display = (dif !== null && Math.abs(dif) > 1) ? '' : 'none';
+  }
+
+  function _renderReconciliacao() {
+    const body = document.getElementById('crecon-body');
+    if (!body) return;
+
+    if (!_reconciliacao) {
+      body.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-muted);font-size:12px;">
+        ${_recursos.length ? 'Carregando reconciliação...' : 'Execute uma busca primeiro.'}
+      </div>`;
+      return;
+    }
+
+    const r      = _reconciliacao;
+    const brl    = v => _brl(v);
+    const pct    = (v, t) => t > 0 ? (v / t * 100).toFixed(1) + '%' : '—';
+    const dbTotal = r.total_bruto;
+    const dif     = _azureRefValue > 0 ? _azureRefValue - dbTotal : null;
+    const difPct  = (dif !== null && _azureRefValue > 0)
+      ? '(' + (Math.abs(dif) / _azureRefValue * 100).toFixed(1) + '%)'
+      : '';
+
+    const rowsCT = (r.por_tipo || []).map(t => `<tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:7px 10px;font-size:11px;color:var(--text);">${_esc(t.charge_type)}</td>
+        <td style="padding:7px 10px;font-size:11px;color:var(--text-muted);text-align:right;">${parseInt(t.linhas).toLocaleString('pt-BR')}</td>
+        <td style="padding:7px 10px;font-size:12px;font-weight:600;color:var(--text);text-align:right;font-family:'IBM Plex Mono',monospace;">${brl(t.total)}</td>
+        <td style="padding:7px 10px;font-size:11px;color:var(--text-muted);text-align:right;">${pct(t.total, dbTotal)}</td>
+      </tr>`).join('');
+
+    const moedas = (r.por_moeda || []);
+    const multiMoeda = moedas.length > 1 || (moedas.length === 1 && moedas[0].moeda !== 'BRL');
+    const moedasHtml = multiMoeda ? `
+      <div style="margin-top:16px;padding:10px 12px;border-radius:8px;background:rgba(77,166,255,.08);border:1px solid rgba(77,166,255,.2);">
+        <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--blue);margin-bottom:8px;">Moedas no banco</div>
+        ${moedas.map(m => `<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">
+          <span style="color:var(--text-dim);">${_esc(m.moeda)}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;color:var(--blue);">${brl(m.total)}</span>
+        </div>`).join('')}
+        <div style="margin-top:6px;font-size:10px;color:var(--text-muted);">Taxa de câmbio manual aplicada: ${_taxaBrl.toFixed(2)}</div>
+      </div>` : '';
+
+    body.innerHTML = `
+      <!-- Cards: Banco | Azure Ref | Diferença -->
+      <div style="display:flex;gap:10px;margin-bottom:16px;">
+        <div style="flex:1;padding:12px;border-radius:8px;background:rgba(147,51,234,.1);border:1px solid rgba(147,51,234,.25);">
+          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;">Total no Banco</div>
+          <div style="font-size:16px;font-weight:700;color:var(--accent);font-family:'IBM Plex Mono',monospace;">${brl(dbTotal)}</div>
+        </div>
+        <div style="flex:1;padding:12px;border-radius:8px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);">
+          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;">Azure Portal (referência)</div>
+          <input id="crecon-azure-ref" type="text"
+            value="${_azureRefValue > 0 ? brl(_azureRefValue) : ''}"
+            placeholder="ex: 49.745,18"
+            oninput="Calculadora._onAzureRefInput(this.value)"
+            style="width:100%;background:transparent;border:none;border-bottom:1px solid rgba(34,197,94,.4);outline:none;font-size:15px;font-weight:700;color:var(--green);font-family:'IBM Plex Mono',monospace;padding:0;margin-top:2px;"/>
+        </div>
+        <div style="flex:1;padding:12px;border-radius:8px;background:rgba(255,77,106,.08);border:1px solid rgba(255,77,106,.2);">
+          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;">Diferença</div>
+          <div style="display:flex;align-items:baseline;gap:6px;">
+            <div id="crecon-dif-val" style="font-size:16px;font-weight:700;color:var(--red);font-family:'IBM Plex Mono',monospace;">${dif !== null ? brl(Math.abs(dif)) : '—'}</div>
+            <div id="crecon-dif-pct" style="font-size:11px;color:var(--text-muted);">${difPct}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nota gap -->
+      <div id="crecon-gap-note" style="${(dif === null || Math.abs(dif) <= 1) ? 'display:none;' : ''}margin-bottom:14px;padding:10px 14px;border-radius:8px;background:rgba(255,140,66,.08);border:1px solid rgba(255,140,66,.25);font-size:11px;color:var(--text-muted);line-height:1.7;">
+        <strong style="color:#ff8c42;">Por que há diferença?</strong> O CSV de detalhe de uso do Azure <strong style="color:var(--text);">não exporta impostos fiscais brasileiros</strong>
+        (ISS ~5% + PIS/COFINS ~3,65% ≈ 8–11%). Esses tributos aparecem apenas no portal e na fatura, mas
+        <em>não como linhas separadas no arquivo exportado</em>. Para reconciliar completamente,
+        solicite o <strong style="color:var(--text);">relatório de fatura detalhado</strong> (Invoice Details) em vez do Cost Details.
+      </div>
+
+      <!-- Por Charge Type -->
+      <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px;">Por Charge Type</div>
+      <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+        <table style="width:100%;border-collapse:collapse;">
+          <thead><tr style="background:rgba(255,255,255,.04);">
+            <th style="padding:6px 10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:left;">Charge Type</th>
+            <th style="padding:6px 10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:right;">Linhas</th>
+            <th style="padding:6px 10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:right;">Total (BRL)</th>
+            <th style="padding:6px 10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);text-align:right;">%</th>
+          </tr></thead>
+          <tbody>${rowsCT}</tbody>
+        </table>
+      </div>
+      ${moedasHtml}`;
+  }
+
   async function executarPurge() {
     const sel     = document.getElementById('cpurge-sel');
     const res     = document.getElementById('cpurge-result');
@@ -2393,7 +2988,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     }
 
     if (vazio) vazio.style.display = 'none';
-    if (rodape) rodape.style.display = 'flex';
+    if (rodape) rodape.style.display = _horasAplicadas ? 'flex' : 'none';
 
     let totalGeral   = 0;
     let totalCobrado = 0;
@@ -2403,26 +2998,66 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       if (!r) return '';
       const nome = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,40);
       const isBRL = (r.moeda || 'BRL') === 'BRL';
-      const bill  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * _taxaBrl;
+      // RN-005: taxa de câmbio — usa taxa real do export quando disponível (>1 = conversão real)
+      const tcDB  = parseFloat(r.taxa_cambio || 0);
+      const convR = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
+      const bill  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR;
       totalCobrado += bill;
-      const uom   = (r.unidade || '').toLowerCase();
-      const isHora = uom.includes('hour') || uom.includes('hora');
-      const horas  = _selecionados[rid] || 720;
-      let estimado, desc, cor;
+      const uom  = (r.unidade || '').toLowerCase();
+      const tipo = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
+      const horas = _selecionados[rid] || 720;
+      let estimado = 0, desc, cor;
 
-      const chora = parseFloat(r.custo_hora_billing || 0);
-      const choraRel = isBRL ? chora : chora * _taxaBrl;
-      estimado = choraRel * horas;
-      desc = _brl(choraRel) + '/h × ' + horas + 'h';
-      cor = isHora ? 'var(--accent)' : 'var(--blue)';
+      if (_horasAplicadas) {
+        const choraRaw = parseFloat(r.custo_hora_billing || 0);
+        const chora    = isBRL ? choraRaw : choraRaw * convR;
 
-      totalGeral += estimado;
+        // Price List: normaliza retail/h com fator UoM
+        const _uomFpl  = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+        const _retailU = parseFloat(r.retail_price_unit || 0);
+        const _retailH = (tipo === 'hora' || tipo === 'dia') && _retailU > 0
+          ? (_retailU / _uomFpl) * convR : 0;
+        const _choraEst = _retailH > 0 ? _retailH : chora;
+        const _temPL    = _retailH > 0;
+
+        if (tipo === 'reserva') {
+          estimado = chora * horas;
+          desc = '🔒 ' + _brl(chora) + '/h amort. × ' + horas + 'h';
+          cor  = 'var(--blue,#4da6ff)';
+
+        } else if (tipo === 'hora' || tipo === 'dia') {
+          // Usa PL/h quando disponível; senão billing/h
+          estimado = _choraEst * horas;
+          desc = (_temPL ? '📋\xA0' : '') + _brl(_choraEst) + '/h \xD7 ' + horas + 'h';
+          cor  = _temPL ? 'var(--green,#22c55e)' : 'var(--accent)';
+
+        } else {
+          // RN-004: Storage, Bandwidth, Functions — referência mensal
+          // Fallback: quando custo_mes_billing é null (servidor não reiniciado ou dado ausente)
+          //           recalcula a partir de total_billing / dias * 30
+          const _dias  = parseInt(r.dias_ativos || 1) || 1;
+          const mesRaw = parseFloat(r.custo_mes_billing) ||
+                         (parseFloat(r.total_billing || 0) / _dias * 30);
+          const mesBrl   = isBRL ? mesRaw : mesRaw * convR;
+          const custoDia = mesBrl / 30;
+          const dias     = Math.round(horas / 24) || 1;
+          estimado = mesBrl * (horas / 720); // proporcional ao slider global
+          desc = _brl(custoDia) + '/dia \xD7 ' + dias + 'd';
+          cor  = 'var(--orange,#ff8c42)';
+        }
+        totalGeral += estimado;
+      } else {
+        desc = 'Defina as horas ou período e clique Aplicar';
+        cor  = 'var(--text-muted)';
+      }
 
       return '<div style="padding:8px 10px;border-radius:6px;background:var(--bg-hover);border:1px solid var(--border);">'
         + '<div style="font-size:11px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:3px;" title="' + _esc(nome) + '">' + _esc(nome) + '</div>'
         + '<div style="display:flex;justify-content:space-between;align-items:center;gap:4px;">'
         + '<span style="font-size:9px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _esc(desc) + '</span>'
-        + '<span style="font-family:IBM Plex Mono,monospace;font-size:11px;font-weight:600;color:' + cor + ';white-space:nowrap;">' + _brl(estimado) + '</span>'
+        + (_horasAplicadas
+            ? '<span style="font-family:IBM Plex Mono,monospace;font-size:11px;font-weight:600;color:' + cor + ';white-space:nowrap;">' + _brl(estimado) + '</span>'
+            : '<span style="font-family:IBM Plex Mono,monospace;font-size:11px;color:var(--text-muted);white-space:nowrap;">—</span>')
         + '</div>'
         + '</div>';
     }).join('');
@@ -2470,26 +3105,50 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const r   = _recursos.find(x => (x._key||x.resource_id) === rid);
         if (!r) return null;
         const isBRL  = (r.moeda || 'BRL') === 'BRL';
-        const bill   = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * _taxaBrl;
-        const isHora = !_isConsumo(r);
+        // RN-005: taxa real do export quando disponível, senão _taxaBrl do usuário
+        const tcDB2  = parseFloat(r.taxa_cambio || 0);
+        const convR2 = !isBRL ? (tcDB2 > 1 ? tcDB2 : _taxaBrl) : 1;
+        const bill   = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
+        const uom2   = (r.unidade || '').toLowerCase();
+        const tipo2  = r.tipo_custo || (uom2.includes('hour') || uom2.includes('hora') ? 'hora' : 'periodo');
+        const isHora = tipo2 === 'hora' || tipo2 === 'dia';
         const horas  = _selecionados[rid] || 720;
-        const choraRaw = parseFloat(r.custo_hora_billing || 0);
-        const chora    = isBRL ? choraRaw : choraRaw * _taxaBrl;
-        const estimado = chora * horas;
+        const choraRaw  = parseFloat(r.custo_hora_billing || 0);
+        const chora     = isBRL ? choraRaw : choraRaw * convR2;
+        const _diasP    = parseInt(r.dias_ativos || 1) || 1;
+        const mesRaw    = parseFloat(r.custo_mes_billing) ||
+                          (parseFloat(r.total_billing || 0) / _diasP * 30);
+        const custo_mes = isBRL ? mesRaw : mesRaw * convR2;
+        // Price List: retail/h (hora) ou retail/mês (periodo)
+        const _uomFr     = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+        const _retailUr  = parseFloat(r.retail_price_unit || 0);
+        const retailHr   = isHora && _retailUr > 0 ? (_retailUr / _uomFr) * convR2 : 0;
+        const retailMesR = !isHora && tipo2 === 'periodo' && _retailUr > 0
+          ? (_retailUr / _uomFr) * convR2 : 0;
+        const choraEstR  = isHora && retailHr > 0 ? retailHr : chora;
+        // Estimado: PL quando disponível; periodo usa PL/mês proporcional se tiver
+        const estimado   = (tipo2 === 'periodo')
+          ? (retailMesR > 0 ? retailMesR * (horas / 720) : custo_mes * (horas / 720))
+          : choraEstR * horas;
+        const temPLR = retailHr > 0 || retailMesR > 0;
         return {
-          resource_id: rid,
-          nome: r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
-          categoria: r.categoria || '',
+          resource_id:      rid,
+          nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+          categoria:        r.categoria || '',
           consumed_service: r.consumed_service || '',
-          resource_group: r.resource_group_name || '',
-          uom: r.unidade || '',
+          resource_group:   r.resource_group_name || '',
+          uom:              r.unidade || '',
+          tipo_custo:       tipo2,
           isHora,
           horas,
-          custo_hora: chora,
-          dias_ativos: parseInt(r.dias_ativos) || 0,
-          total_cobrado: bill,
-          estimado_brl: estimado,
-          moeda: r.moeda || 'BRL',
+          custo_hora:       chora,
+          retail_price_hora: retailHr || retailMesR,
+          fonte_estimado:   temPLR ? 'price_list' : 'billing',
+          custo_mes:        custo_mes,
+          dias_ativos:      parseInt(r.dias_ativos) || 0,
+          total_cobrado:    bill,
+          estimado_brl:     estimado,
+          moeda:            r.moeda || 'BRL',
         };
       }).filter(Boolean)
     };
@@ -2524,6 +3183,15 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     document.body.style.overflow = '';
   }
 
+  async function _ovGerarEstimativa() {
+    if (!_estimativa || !_estimativa.resultados || !_estimativa.resultados.length) {
+      _toast('Selecione pelo menos um recurso para estimar.', 'error');
+      return;
+    }
+    _fecharConfigStep();
+    await abrirInvoice();
+  }
+
   function _ovRenderRecursos() {
     const container = document.getElementById('cov-recursos');
     if (!container) return;
@@ -2535,15 +3203,24 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const subtit   = r.produto || r.subcategoria || r.regiao || '';
       const isBRL    = (r.moeda || 'BRL') === 'BRL';
       const uom      = (r.unidade || '').toLowerCase();
-      const isHora   = uom.includes('hour') || uom.includes('hora');
+      // RN-001..004: usa tipo_custo do banco; fallback por UoM
+      const tipo     = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
+      const isHora   = tipo === 'hora' || tipo === 'dia';
+      // RN-005: taxa real do export quando >1, senão _taxaBrl
+      const tcDB     = parseFloat(r.taxa_cambio || 0);
+      const convR    = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
       const horas    = _selecionados[rid] || 720;
-      const choraRaw = parseFloat(r.custo_hora_billing || 0);
-      const chora    = isBRL ? choraRaw : choraRaw * _taxaBrl;
-      const estimado = chora * horas;
-      const bill     = isBRL ? parseFloat(r.total_billing || 0) : parseFloat(r.total_billing || 0) * _taxaBrl;
+      const choraRaw  = parseFloat(r.custo_hora_billing || 0);
+      const chora     = choraRaw * convR;
+      const diasAtiv  = parseInt(r.dias_ativos || 1) || 1;
+      const totalBill = parseFloat(r.total_billing || 0);
+      // custo_mes_billing: campo do banco ou fallback total_billing / dias * 30
+      const mesRaw    = parseFloat(r.custo_mes_billing) ||
+                        (totalBill / diasAtiv * 30);
+      const mesBrl    = mesRaw * convR;
+      const bill      = totalBill * convR;
       const qty      = parseFloat(r.total_qty || 0).toLocaleString('pt-BR', {maximumFractionDigits: 4});
-      const cor      = isHora ? 'var(--accent)' : 'var(--blue)';
-      const uomLabel = isHora ? '/h' : '/h*';
+      const cor      = tipo === 'reserva' ? 'var(--blue)' : tipo === 'periodo' ? 'var(--orange)' : 'var(--accent)';
       const cat      = _esc(r.categoria || '');
       const svc      = _esc(r.consumed_service || '');
       const rg       = _esc(r.resource_group_name || '');
@@ -2553,38 +3230,101 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         : 'background:rgba(77,166,255,.1);color:var(--blue)';
       const pm       = _esc(r.pricing_model || '');
 
+      // Horas reais do export (só para UoM horária)
+      const horasReais = parseFloat(r.horas_reais || 0);
+      // Uso parcial: recurso ficou ligado menos de 55% do mês (~400h de 720h)
+      const usoParcial = isHora && horasReais > 0 && horasReais < 400;
+      // Price List: normaliza retail_price_unit para /h (hora) ou /mês (periodo)
+      const uomF       = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+      const retailUnit = parseFloat(r.retail_price_unit || 0);
+      // Para hora/dia: converte para /h usando fator UoM
+      const retailHora = isHora && retailUnit > 0 ? (retailUnit / uomF) * convR : 0;
+      // Para periodo (disco, storage…): retail_price_unit já está em BRL na UoM do price list (/mês)
+      const retailMes  = !isHora && tipo === 'periodo' && retailUnit > 0 ? (retailUnit / uomF) * convR : 0;
+      // Desconto: SQL calcula só para hora/dia; para periodo calculamos aqui
+      const dPctSQL  = parseFloat(r.desconto_pct || 0);
+      const dPctMes  = !isHora && retailMes > 0 && mesBrl > 0
+        ? Math.max(0, parseFloat(((1 - mesBrl / retailMes) * 100).toFixed(1)))
+        : 0;
+      const dPct = dPctSQL > 0 ? dPctSQL : dPctMes;
+      // Economia total no período selecionado
+      const economiaPeriodo = isHora && retailHora > 0
+        ? (retailHora - chora) * horas
+        : (!isHora && retailMes > 0 ? (retailMes - mesBrl) * (horas / 720) : 0);
+      // Custo/h para estimativa hora: usa Price List quando disponível, senão billing
+      const choraEst = isHora && retailHora > 0 ? retailHora : chora;
+      const temPL    = (isHora && retailHora > 0) || (!isHora && retailMes > 0);
+      // Para reserva: on-demand do PL como referência informacional (estimado permanece amortizado)
+      const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? (retailUnit / uomF) * convR : 0;
+      const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
+        ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
+      // Estimado: hora → choraEst × horas | periodo → retailMes proporcional (ou billing) | reserva → amortizado
+      const estimado = (tipo === 'periodo')
+        ? (retailMes > 0 ? retailMes * (horas / 720) : mesBrl * (horas / 720))
+        : choraEst * horas;
+
+      // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
+      let col1Lbl, col1Val, col1Suf, col1Tip = '';
+      if (tipo === 'reserva') {
+        col1Lbl = 'Amort./h 🔒'; col1Val = _brl(chora); col1Suf = '/h';
+      } else if (tipo === 'periodo' && temPL) {
+        // Price List disponível para disco/storage: mostra PL/mês como base
+        col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
+        col1Tip = ' title="Preço on-demand mensal do Azure Price List — base da estimativa"';
+      } else if (tipo === 'periodo') {
+        const custoDia = mesBrl / 30;
+        col1Lbl = 'Custo/dia'; col1Val = _brl(custoDia); col1Suf = '/dia';
+      } else if (temPL) {
+        // Price List disponível para hora/dia: mostra PL/h como base da estimativa
+        col1Lbl = '📋 PL/h'; col1Val = _brl(retailHora); col1Suf = '/h';
+        col1Tip = ' title="Preço on-demand do Azure Price List — base da estimativa"';
+      } else if (tipo === 'dia') {
+        col1Lbl = 'Custo/h·dia'; col1Val = _brl(chora); col1Suf = '/h';
+      } else {
+        col1Lbl = 'Custo/h'; col1Val = _brl(chora); col1Suf = '/h';
+      }
+
+      // Coluna 2: horas do slider (todos os tipos usam o mesmo slider global)
+      const col2Lbl = 'Horas';
+      const col2Val = horas + 'h';
+
       return '<div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:12px 14px;transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--border-light)\'" onmouseout="this.style.borderColor=\'var(--border)\'">'
 
         // Nome + subtítulo
         + '<div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;" title="' + _esc(r.resource_id || nome) + '">' + _esc(nome) + '</div>'
         + (subtit ? '<div style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:8px;">' + _esc(subtit) + '</div>' : '<div style="margin-bottom:6px;"></div>')
 
-        // Badges: categoria, charge_type, rg, consumed_service
+        // Badges: categoria, charge_type, rg, consumed_service, uso parcial
         + '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;">'
         + (cat ? '<span style="font-size:10px;background:var(--accent-dim);color:var(--text-dim);border-radius:4px;padding:2px 7px;">' + cat + '</span>' : '')
         + (ct  ? '<span style="font-size:10px;border-radius:4px;padding:2px 7px;' + ctColor + ';">' + _esc(ct) + '</span>' : '')
         + (rg  ? '<span style="font-size:10px;background:rgba(77,166,255,.08);color:var(--blue);border-radius:4px;padding:2px 7px;">' + rg + '</span>' : '')
         + (svc ? '<span style="font-size:10px;background:var(--bg-card);color:var(--text-dim);border-radius:4px;padding:2px 7px;border:1px solid var(--border);">' + svc + '</span>' : '')
+        + (usoParcial ? '<span style="font-size:10px;background:rgba(255,140,66,.15);color:var(--orange,#ff8c42);border-radius:4px;padding:2px 7px;" title="Recurso ficou ligado menos de 55% do m\xEAs no per\xEDodo importado">⚠ Uso parcial</span>' : '')
         + '</div>'
 
-        // Linha de metadados (unidade · qty · pricing_model)
+        // Linha de metadados (unidade · qty · horas_reais · pricing_model)
         + '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;font-size:10px;color:var(--text-muted);">'
         + (r.unidade ? '<span><span style="opacity:.6;">UoM</span> ' + _esc(r.unidade) + '</span>' : '')
         + (qty !== '0' ? '<span><span style="opacity:.6;">Qtd</span> ' + qty + '</span>' : '')
+        + (isHora && horasReais > 0 ? '<span title="Horas reais consumidas no per\xEDodo (qty \xD7 fator UoM)"><span style="opacity:.6;">H.reais</span> <strong style="color:' + (usoParcial ? 'var(--orange,#ff8c42)' : 'var(--text)') + ';">' + Math.round(horasReais).toLocaleString('pt-BR') + 'h</strong></span>' : '')
         + (pm ? '<span><span style="opacity:.6;">Modelo</span> ' + pm + '</span>' : '')
         + '</div>'
 
-        // Grid de valores: custo/h · horas · cobrado · estimado
+        // Grid de valores: tipo-aware (custo · período · cobrado · estimado)
         + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;">'
 
-        + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;">'
-        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:2px;">Custo/h</div>'
-        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:' + cor + ';">' + _brl(chora) + uomLabel + '</div>'
+        + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;"' + col1Tip + '>'
+        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:' + (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)') + ';margin-bottom:2px;">' + col1Lbl + '</div>'
+        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:' + cor + ';">' + col1Val + '<span style="font-size:9px;">' + col1Suf + '</span></div>'
+        + (temPL && isHora  ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(chora) + '/h</div>' : '')
+        + (temPL && !isHora ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(mesBrl) + '/mês</div>' : '')
+        + (tipo === 'reserva' && retailHoraRsv > 0 ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;" title="Preço on-demand do Price List (sem reserva)">on-dem:\xA0📋\xA0' + _brl(retailHoraRsv) + '/h</div>' : '')
         + '</div>'
 
         + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;">'
-        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:2px;">Horas</div>'
-        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:var(--accent);">' + horas + 'h</div>'
+        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:2px;">' + col2Lbl + '</div>'
+        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:var(--accent);">' + col2Val + '</div>'
         + '</div>'
 
         + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;">'
@@ -2598,6 +3338,32 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '</div>'
 
         + '</div>'
+
+        // ── Linha de economia vs on-demand (hora/dia/periodo com Price List) ────
+        + (dPct > 0
+          ? '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;padding:5px 8px;'
+            + 'background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;">'
+            + '<span style="font-size:10px;color:var(--green,#22c55e);font-weight:600;">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '% desc.</span>'
+            + '<span style="font-size:10px;color:var(--text-muted);flex:1;">vs on-demand'
+            + (isHora && retailHora > 0 ? ' (' + _brl(retailHora) + '/h)' : '')
+            + (!isHora && retailMes > 0 ? ' (' + _brl(retailMes) + '/mês)' : '') + '</span>'
+            + (economiaPeriodo > 0
+              ? '<span style="font-size:10px;color:var(--green,#22c55e);font-family:\'IBM Plex Mono\',monospace;font-weight:700;">'
+                + _brl(economiaPeriodo) + ' ec.</span>'
+              : '')
+            + '</div>'
+          : '')
+        // ── Barra de desconto da reserva vs on-demand ────────────────────────
+        + (tipo === 'reserva' && dPctRsv > 0
+          ? '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;padding:5px 8px;'
+            + 'background:rgba(77,166,255,.08);border:1px solid rgba(77,166,255,.2);border-radius:6px;">'
+            + '<span style="font-size:10px;color:var(--blue,#4da6ff);font-weight:600;">▼\xA0' + dPctRsv.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '% reserva</span>'
+            + '<span style="font-size:10px;color:var(--text-muted);flex:1;">vs on-demand (' + _brl(retailHoraRsv) + '/h)</span>'
+            + '<span style="font-size:10px;color:var(--blue,#4da6ff);font-family:\'IBM Plex Mono\',monospace;font-weight:700;">'
+              + _brl((retailHoraRsv - chora) * horas) + ' ec.</span>'
+            + '</div>'
+          : '')
+
         + '</div>';
     }).join('');
   }
@@ -2708,6 +3474,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     if (info) info.style.display = 'none';
   }
 
+  let _taxaToastTimer = null;
   function _onAdicionaisChange() {
     const ii = document.getElementById('cimposto');
     const ic = document.getElementById('ccondominио');
@@ -2715,16 +3482,141 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     if (ic) localStorage.setItem(_LS_COND, ic.value);
     _atualizarBadgesTaxas();
     _atualizarEstimativa();
+    clearTimeout(_taxaToastTimer);
+    _taxaToastTimer = setTimeout(() => {
+      const vi = parseFloat(ii?.value) || 0;
+      const vc = parseFloat(ic?.value) || 0;
+      const pi = parseFloat(localStorage.getItem(_LS_IMP_PAD)  ?? _TAXA_IMP_DEF);
+      const pc = parseFloat(localStorage.getItem(_LS_COND_PAD) ?? _TAXA_COND_DEF);
+      const diffI = Math.abs(vi - pi) >= 0.01;
+      const diffC = Math.abs(vc - pc) >= 0.01;
+      let msg = 'Taxas atualizadas: Imposto ' + vi + '% · Condomínio ' + vc + '%';
+      if (diffI || diffC) msg += ' ⚠ Diferente do padrão salvo';
+      _toast(msg, diffI || diffC ? 'warn' : 'success');
+    }, 700);
   }
 
   function _custoHora(r, isBRL, taxaBrl) {
-    const mono  = "font-family:'IBM Plex Mono',monospace;";
-    const preco = isBRL ? parseFloat(r.custo_hora_billing || 0) : parseFloat(r.custo_hora_billing || 0) * taxaBrl;
-    const uom   = (r.unidade || '').toLowerCase();
-    const isH   = uom.includes('hour') || uom.includes('hora');
-    const label = isH ? '/h' : '/h*';
-    return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;">' + _brl(preco) + '</div>'
-         + '<div style="font-size:9px;color:var(--text-muted);">' + label + '</div>';
+    const mono = "font-family:'IBM Plex Mono',monospace;";
+    // tipo_custo vem do servidor; fallback para UoM quando dado antigo em cache
+    const uom  = (r.unidade || '').toLowerCase();
+    const tipo = r.tipo_custo || (
+      uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo'
+    );
+    // RN-005 — Taxa de conversão para BRL
+    const tcDB  = parseFloat(r.taxa_cambio || 0);
+    const convR = !isBRL ? (tcDB > 1 ? tcDB : taxaBrl) : 1;
+    const raw   = parseFloat(r.custo_hora_billing || 0);
+    const preco = isBRL ? raw : raw * convR;
+    // Tooltip de moeda
+    const moedaTip = !isBRL
+      ? ` title="${r.moeda||'USD'} × ${(tcDB > 1 ? tcDB : taxaBrl).toFixed(2)} = BRL${tcDB > 1 ? ' (taxa Azure)' : ' (taxa manual)'}"`
+      : '';
+
+    // ── Quantidade cobrada ──────────────────────────────────────────────────────
+    const totalQty = parseFloat(r.total_qty || 0);
+    const horasR   = parseFloat(r.horas_reais || 0);
+    // Helper: gera a linha de quantidade abaixo da taxa (vazia quando qty = 0)
+    const _qLinha = (n, sufixo, cor) => n > 0
+      ? '<div style="font-size:9px;color:' + (cor || 'var(--text-muted)') + ';margin-top:1px;white-space:nowrap;">'
+        + n.toLocaleString('pt-BR', {maximumFractionDigits: 1}) + '\xA0' + sufixo
+        + '</div>'
+      : '';
+
+    if (tipo === 'reserva') {
+      // RN-002: custo amortizado pelo prazo da reserva (1 ou 3 anos)
+      const qLinha     = _qLinha(totalQty, _esc(r.unidade || 'un.'));
+      const _rvUomF    = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+      const _rvRetail  = parseFloat(r.retail_price_unit || 0);
+      const _rvOnDem   = _rvRetail > 0 ? (_rvRetail / _rvUomF) * convR : 0;
+      // Desconto da reserva vs on-demand (quanto você economiza por ter comprado a reserva)
+      const _rvDPct    = _rvOnDem > 0 && preco > 0
+        ? Math.max(0, parseFloat(((1 - preco / _rvOnDem) * 100).toFixed(1))) : 0;
+      const dBadgeRsv  = _rvDPct > 0
+        ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto da reserva vs on-demand retail Azure">▼\xA0' + _rvDPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%\xA0rsv</div>'
+        : '';
+      const plLinhaRsv = _rvOnDem > 0
+        ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(_rvOnDem) + '/h od</div>'
+        : '';
+      return '<div style="' + mono + 'font-size:11px;color:var(--blue,#4da6ff);white-space:nowrap;"' + moedaTip + '>' + _brl(preco) + '</div>'
+           + '<div style="font-size:9px;color:var(--blue,#4da6ff);" title="Amortizado pelo term da reserva (1 ano=8.760h / 3 anos=26.280h)">🔒 amort./h</div>'
+           + dBadgeRsv
+           + plLinhaRsv
+           + qLinha;
+    }
+
+    if (tipo === 'hora') {
+      // RN-001: taxa horária real; prefere horas_reais (qty × fator do SQL)
+      const uomFator   = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+      const h          = horasR > 0 ? Math.round(horasR) : Math.round(totalQty * uomFator);
+      const qLinha     = _qLinha(h, 'h consumidas');
+      // Price List: preço retail/h normalizado pelo fator UoM
+      const retailUnit = parseFloat(r.retail_price_unit || 0);
+      const retailHora = retailUnit > 0 ? (retailUnit / uomFator) * convR : 0;
+      const dPct       = parseFloat(r.desconto_pct || 0);
+      // Linha de desconto (quando há dados do Price List)
+      const dBadge     = dPct > 0
+        ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
+        : '';
+      // Linha do preço retail do Price List
+      const plLinha    = retailHora > 0
+        ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(retailHora) + '/h</div>'
+        : '';
+      return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;"' + moedaTip + '>' + _brl(preco) + '</div>'
+           + '<div style="font-size:9px;color:var(--text-muted);">/h cobrado</div>'
+           + dBadge
+           + plLinha
+           + qLinha;
+    }
+
+    if (tipo === 'dia') {
+      // RN-003: UoM diária convertida para hora
+      const uomFatorD  = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+      const qLinha     = _qLinha(totalQty, 'dias');
+      const retailUnit = parseFloat(r.retail_price_unit || 0);
+      const retailHora = retailUnit > 0 ? (retailUnit / uomFatorD) * convR : 0;
+      const dPct       = parseFloat(r.desconto_pct || 0);
+      const dBadge     = dPct > 0
+        ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
+        : '';
+      const plLinha    = retailHora > 0
+        ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(retailHora) + '/h</div>'
+        : '';
+      return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;"' + moedaTip + '>' + _brl(preco) + '</div>'
+           + '<div style="font-size:9px;color:var(--text-muted);" title="UoM diária ÷ 24">/h (dia)</div>'
+           + dBadge
+           + plLinha
+           + qLinha;
+    }
+
+    // RN-004: Storage, Bandwidth, Functions — custo DIÁRIO (custo_mes ÷ 30)
+    const _diasC   = parseInt(r.dias_ativos || 1) || 1;
+    const mesRaw   = parseFloat(r.custo_mes_billing) ||
+                     (parseFloat(r.total_billing || 0) / _diasC * 30);
+    const mesBrl   = isBRL ? mesRaw : mesRaw * convR;
+    const custoDia = mesBrl / 30;
+    // Remove o prefixo "1 " do UoM para exibir só a unidade: "1 GB" → "GB", "1 Unit" → "Unit"
+    const uomLabel = (r.unidade || '').replace(/^\d+\s+/, '').trim() || 'un.';
+    const qLinha   = _qLinha(totalQty, _esc(uomLabel), 'var(--orange,#ff8c42)');
+    // Price List para periodo (disco, storage…): retail_price_unit já em BRL
+    const _plUomF   = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+    const _plRetail = parseFloat(r.retail_price_unit || 0);
+    const _plMes    = _plRetail > 0 ? (_plRetail / _plUomF) * convR : 0;
+    const _plMesDia = _plMes / 30;
+    const _dPctPer  = _plMes > 0 && mesBrl > 0
+      ? Math.max(0, parseFloat(((1 - mesBrl / _plMes) * 100).toFixed(1)))
+      : 0;
+    const dBadgePer = _dPctPer > 0
+      ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + _dPctPer.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
+      : '';
+    const plMesLinha = _plMes > 0
+      ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand mensal (Price List Azure)">📋\xA0' + _brl(_plMesDia) + '/dia</div>'
+      : '';
+    return '<div style="' + mono + 'font-size:11px;color:var(--orange,#ff8c42);white-space:nowrap;"' + moedaTip + '>' + _brl(custoDia) + '</div>'
+         + '<div style="font-size:9px;color:var(--orange,#ff8c42);" title="Cobrado por consumo (GB, Req…) — custo di\xE1rio = custo mensal \xF7 30">/dia cobrado</div>'
+         + dBadgePer
+         + plMesLinha
+         + qLinha;
   }
 
   return { init, onSubChange, onRgChange, onFiltroChange, onTaxaChange, onBusca, buscarRecursos,
@@ -2735,8 +3627,11 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
            _onAdicionaisChange, _salvarTaxasPadrao, _resetarTaxas,
            _setModoHoras, _calcHorasPeriodo, _sincDataFim, _sincHoraFim, _incluirPeriodo, _removerPeriodo,
            abrirPurge, fecharPurge, executarPurge,
+           abrirReconciliacao, fecharReconciliacao, _onAzureRefInput,
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
-           _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange };
+           _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,
+           _ovGerarEstimativa,
+           _switchVisao, _toggleDetalhe };
 })();

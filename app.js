@@ -297,6 +297,8 @@ function enterApp() {
   _notifInterval = setInterval(loadNotificacoes, 5 * 60 * 1000);
   // Popup de alertas de reservas — exibe uma vez por sessão se houver vencimentos ≤ 90 dias
   setTimeout(checkRsvAlertsPopup, 1200);
+  // Restaura painel de importação se sessão anterior foi encerrada durante/após import
+  setTimeout(checkPendingImportStatus, 1500);
   // Fecha painel ao clicar fora
   document.addEventListener('click', (e) => {
     const wrapper = document.getElementById('notif-wrapper');
@@ -508,7 +510,7 @@ function showView(view) {
   }
   currentView = view;
 
-  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Automática' };
+  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure' };
   document.getElementById('page-title').textContent = titles[view] || view;
 
   const btn = document.getElementById('top-action-btn');
@@ -538,20 +540,25 @@ function openModal() {
 }
 
 // ── API HELPER ────────────────────────────────
-async function api(method, path, body) {
+async function api(method, path, body, timeoutMs = 30000) {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token');
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const res = await fetch(API + path, {
-      method, headers,
+      method, headers, signal: ctrl.signal,
       body: body ? JSON.stringify(body) : undefined
     });
+    clearTimeout(timer);
     if (res.status === 401) { logout(); return; }
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Erro desconhecido');
     return data;
   } catch (e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('Servidor não respondeu em ' + (timeoutMs / 1000) + 's — verifique se o servidor está rodando');
     throw e;
   }
 }
@@ -1404,6 +1411,7 @@ async function manualRefresh() {
     else if (currentView === 'acoes')       await loadAcoes();
     else if (currentView === 'estimativas') await loadEstimativas();
     else if (currentView === 'reservas')    await loadReservas();
+    else if (currentView === 'coleta')      await loadColeta();
     else if (currentView === 'custos')      await loadAzureCosts?.();
   } finally {
     setTimeout(() => { if (icon) icon.classList.remove('spinning'); }, 500);
@@ -1494,14 +1502,33 @@ function updateStatCardsForCloud(cloud) {
 }
 
 // ── INACTIVITY TIMEOUT ────────────────────────
-let _inactivityTimer   = null;
-let _countdownInterval = null;
-let _warningShown      = false;
-const INACTIVITY_MS    = 15 * 60 * 1000;
-const WARNING_SECS     = 60;
+let _inactivityTimer      = null;
+let _countdownInterval    = null;
+let _warningShown         = false;
+let _inactivitySuspended  = false;
+const INACTIVITY_MS       = 15 * 60 * 1000;
+const WARNING_SECS        = 60;
+
+function suspendInactivityTimer() {
+  _inactivitySuspended = true;
+  clearTimeout(_inactivityTimer);
+  // Se o aviso de timeout já estava aparecendo, fechar — iniciar coleta conta como atividade
+  if (_warningShown) {
+    _warningShown = false;
+    clearInterval(_countdownInterval);
+    const modal = document.getElementById('modal-timeout');
+    if (modal) modal.style.display = 'none';
+  }
+}
+
+function resumeInactivityTimer() {
+  _inactivitySuspended = false;
+  resetInactivityTimer();
+}
 
 function resetInactivityTimer() {
   if (_warningShown) return;
+  if (_inactivitySuspended) return;
   clearTimeout(_inactivityTimer);
   _inactivityTimer = setTimeout(showTimeoutWarning, INACTIVITY_MS);
 }
@@ -1707,6 +1734,172 @@ function switchSettingsTab(tab) {
   if (tabEl) tabEl.classList.add('active');
   const panelEl = document.getElementById('stab-' + tab);
   if (panelEl) panelEl.classList.add('active');
+  if (tab === 'coleta') loadColeta();
+  if (tab === 'pricelist') _loadPriceListStatus();
+}
+
+// ── Price List ─────────────────────────────────────────────────────────────────
+async function _loadPriceListStatus() {
+  const sub     = document.getElementById('pl-status-sub');
+  const badge   = document.getElementById('pl-status-badge');
+  const total   = document.getElementById('pl-total');
+  const meters  = document.getElementById('pl-meters');
+  const updated = document.getElementById('pl-updated');
+  if (!sub) return;
+
+  // Sempre USD/global — a API não filtra por região nem por outras moedas de forma confiável
+  const currency = 'USD';
+  const region   = 'global';
+
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res = await fetch(`/api/price-list/status?currency=${currency}&region=${region}`, {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+
+    const tot = parseInt(d.total || 0);
+    total.textContent  = tot.toLocaleString('pt-BR');
+    meters.textContent = parseInt(d.meters || 0).toLocaleString('pt-BR');
+
+    if (d.last_updated) {
+      const dt = new Date(d.last_updated);
+      updated.textContent = dt.toLocaleDateString('pt-BR') + ' '
+        + dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    } else {
+      updated.textContent = 'Nunca';
+    }
+
+    if (d.syncing) {
+      // Mostra progresso em tempo real quando disponível
+      const prog = d.progress;
+      const progTxt = prog && prog.total > 0
+        ? `${prog.total.toLocaleString('pt-BR')} registros importados (página ${prog.pages})...`
+        : 'Sincronização em andamento...';
+      sub.textContent        = progTxt;
+      badge.textContent      = '⏳ Sincronizando';
+      badge.style.background = 'rgba(255,140,66,.15)';
+      badge.style.color      = 'var(--orange,#ff8c42)';
+
+    } else if (tot > 0) {
+      // Sucesso: há dados no banco
+      const lr = d.last_result;
+      const infoExtra = lr ? ` (${(lr.total||0).toLocaleString('pt-BR')} reg · ${lr.pages||0} págs)` : '';
+      sub.textContent        = 'Cache atualizado — preços disponíveis na Calculadora.' + infoExtra;
+      badge.textContent      = '✅ Disponível';
+      badge.style.background = 'rgba(34,197,94,.12)';
+      badge.style.color      = 'var(--green,#22c55e)';
+
+    } else {
+      // Vazio — verifica se há registro de falha
+      const lr = d.last_result;
+      if (lr && lr.ok === false) {
+        // Sync rodou mas falhou
+        sub.textContent        = '❌ Última sync falhou: ' + (lr.error || 'erro desconhecido');
+        badge.textContent      = '❌ Falha';
+        badge.style.background = 'rgba(255,77,106,.12)';
+        badge.style.color      = 'var(--danger,#ff4d6a)';
+      } else {
+        // Nunca foi sincronizado
+        sub.textContent        = 'Nenhum registro — execute a sincronização para importar os preços.';
+        badge.textContent      = '⚠ Vazio';
+        badge.style.background = 'rgba(255,140,66,.12)';
+        badge.style.color      = 'var(--orange,#ff8c42)';
+      }
+    }
+
+    // Retorna o estado para quem chama (usado pelo polling)
+    return { syncing: d.syncing, total: tot, last_result: d.last_result };
+
+  } catch (e) {
+    if (sub) sub.textContent = 'Erro ao consultar status: ' + e.message;
+    return { syncing: false, total: 0, error: e.message };
+  }
+}
+
+let _plPolling = null;
+
+async function syncPriceList() {
+  const btn     = document.getElementById('pl-sync-btn');
+  const prog    = document.getElementById('pl-progress');
+  const progMsg = document.getElementById('pl-progress-msg');
+  const msgEl   = document.getElementById('pl-msg');
+
+  if (btn) btn.disabled = true;
+  if (prog) prog.style.display = 'block';
+  if (progMsg) progMsg.textContent = 'Iniciando importação de preços Azure (USD · global)...';
+  if (msgEl) msgEl.style.display = 'none';
+
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res = await fetch('/api/price-list/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify({})
+    });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.msg || 'Falha ao iniciar sync');
+
+    if (progMsg) progMsg.textContent = 'Importando preços Azure (~100 k registros)… isso leva 5–10 minutos. Pode fechar esta janela — o status atualiza automaticamente.';
+
+    // Poll a cada 8s — aguarda pelo menos 1 ciclo antes de avaliar conclusão
+    // (evita falso-positivo se primeiro poll chegar antes do servidor atualizar _syncingPriceList)
+    let _plPollCount = 0;
+    if (_plPolling) clearInterval(_plPolling);
+    _plPolling = setInterval(async () => {
+      _plPollCount++;
+      const st = await _loadPriceListStatus();
+      if (!st) return;
+
+      // Atualiza mensagem de progresso enquanto sincronizando
+      if (st.syncing) {
+        const badge = document.getElementById('pl-status-badge');
+        if (badge && progMsg) progMsg.textContent = badge.textContent.includes('Sincronizando')
+          ? document.getElementById('pl-status-sub')?.textContent || 'Importando...'
+          : 'Importando...';
+        return; // continua polling
+      }
+
+      // Aguarda pelo menos 2 ciclos antes de considerar finalizado
+      // (garante que _syncingPriceList virou true no servidor antes de comparar)
+      if (_plPollCount < 2) return;
+
+      // Sync terminou — determina sucesso ou falha
+      clearInterval(_plPolling);
+      _plPolling = null;
+      if (btn) btn.disabled = false;
+      if (prog) prog.style.display = 'none';
+
+      const sucesso = st.total > 0;
+      if (msgEl) {
+        msgEl.style.display = 'block';
+        if (sucesso) {
+          msgEl.innerHTML = '<div style="padding:10px 14px;background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.25);border-radius:8px;font-size:13px;color:var(--green,#22c55e);">'
+            + '✅ Price List sincronizado! ' + st.total.toLocaleString('pt-BR') + ' registros importados. '
+            + 'Abra a Calculadora para ver os descontos.</div>';
+        } else {
+          const errMsg = st.last_result?.error || 'Nenhum registro importado — verifique o console do servidor.';
+          msgEl.innerHTML = '<div style="padding:10px 14px;background:rgba(255,77,106,.10);border:1px solid rgba(255,77,106,.2);border-radius:8px;font-size:13px;color:var(--danger,#ff4d6a);">'
+            + '❌ Sync finalizado sem dados. ' + errMsg + '</div>';
+        }
+      }
+    }, 8000);
+
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    if (prog) prog.style.display = 'none';
+    if (msgEl) {
+      msgEl.style.display = 'block';
+      msgEl.innerHTML = '<div style="padding:10px 14px;background:rgba(255,77,106,.10);border:1px solid rgba(255,77,106,.2);border-radius:8px;font-size:13px;color:var(--danger,#ff4d6a);">'
+        + '❌ Erro: ' + e.message + '</div>';
+    }
+  }
+}
+
+function closeSettingsModal() {
+  document.getElementById('modal-settings').classList.remove('open');
+  if (_coletaPolling) { clearInterval(_coletaPolling); _coletaPolling = null; }
 }
 
 async function renderUsersList() {
@@ -2573,46 +2766,606 @@ async function deleteReserva(id) {
   } catch { showToast('Erro ao excluir', 'error'); }
 }
 
+// ── IMPORT STATUS — persistência entre sessões ─────────────────────────────────
+
+function fecharPainelImport() {
+  const p = document.getElementById('cimport-panel');
+  if (p) p.style.display = 'none';
+  localStorage.removeItem('finops_import_status');
+}
+
+// Polling de um job que já está rodando no servidor (chamado após retorno ao app)
+async function _pollImportLive(job) {
+  _ensureCalcIniciado();
+  const panel    = document.getElementById('cimport-panel');
+  const title    = document.getElementById('cimport-title');
+  const fillEl   = document.getElementById('cimport-geral-fill');
+  const atualEl  = document.getElementById('cimport-arquivo-atual');
+  const resumo   = document.getElementById('cimport-resumo');
+  const closeBtn = document.getElementById('cimport-close');
+  const pctEl    = document.getElementById('cimport-geral-pct');
+  if (!panel) return;
+
+  panel.style.display    = 'block';
+  resumo.style.display   = 'none';
+  closeBtn.style.display = 'none';
+  fillEl.style.background= 'var(--accent)';
+  pctEl.textContent      = job.total > 1 ? `${job.idx} / ${job.total}` : '';
+  title.style.color      = 'var(--text)';
+  title.textContent      = `Importando ${job.arquivo}...`;
+
+  const token     = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+  const baseWidth = job.total > 1 ? ((job.idx - 1) / job.total) * 100 : 0;
+  const slice     = job.total > 1 ? 100 / job.total : 100;
+
+  while (true) {
+    await new Promise(r => setTimeout(r, 900));
+    try {
+      const r = await fetch(window.location.origin + '/api/azure-costs/import-status', {
+        headers: { 'Authorization': 'Bearer ' + token },
+      });
+      if (!r.ok) break;
+      const { job: j } = await r.json();
+      if (!j || j.id !== job.id) break;
+
+      const processado = (j.inseridos || 0) + (j.atualizados || 0) + (j.erros || 0);
+      const total      = j.linhas || 0;
+      const localPct   = total > 0 ? Math.min(processado / total, 0.99) : 0;
+      fillEl.style.width = Math.round(baseWidth + localPct * slice) + '%';
+
+      const subLabel = j.subArquivo ? ` · ${j.subArquivo}` : '';
+      atualEl.textContent = total > 0
+        ? `${j.arquivo}${subLabel} · ${processado.toLocaleString('pt-BR')} / ${total.toLocaleString('pt-BR')}`
+        : `${j.arquivo}${subLabel} · carregando...`;
+
+      if (j.status !== 'running') {
+        job = j;
+        break;
+      }
+    } catch (_) { break; }
+  }
+
+  // Exibir resultado final
+  fillEl.style.width     = '100%';
+  closeBtn.style.display = '';
+  pctEl.textContent      = '';
+  atualEl.textContent    = '';
+  resumo.style.display   = 'block';
+
+  if (job.status === 'done') {
+    title.textContent      = '✅ Importação concluída';
+    title.style.color      = 'var(--green)';
+    fillEl.style.background= 'var(--green)';
+    resumo.innerHTML = `${job.arquivo} · <strong style="color:var(--green)">${(job.inseridos||0).toLocaleString('pt-BR')}</strong> novos · ${(job.erros||0).toLocaleString('pt-BR')} ignorados`;
+  } else if (job.status === 'error') {
+    title.textContent      = '⚠️ Erro na importação';
+    title.style.color      = 'var(--danger)';
+    fillEl.style.background= 'var(--danger)';
+    resumo.innerHTML = `${job.arquivo}: ${job.erro || 'erro desconhecido'}`;
+  } else {
+    title.textContent      = '⚠️ Importação interrompida';
+    title.style.color      = '#f9e2af';
+    fillEl.style.background= '#f9e2af';
+    resumo.innerHTML = `Não foi possível obter o status. Verifique os dados importados.`;
+  }
+
+  localStorage.removeItem('finops_import_status');
+}
+
+async function checkPendingImportStatus() {
+  // Verificar servidor primeiro — pode haver job ainda em andamento
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const r = await fetch(window.location.origin + '/api/azure-costs/import-status', {
+      headers: { 'Authorization': 'Bearer ' + token },
+    });
+    if (r.ok) {
+      const { job } = await r.json();
+      if (job) {
+        const ttl = 2 * 60 * 60 * 1000;
+        const ts  = job.concluido || job.iniciado || 0;
+        if (job.status === 'running' || Date.now() - ts < ttl) {
+          localStorage.removeItem('finops_import_status');
+          if (job.status === 'running') {
+            _pollImportLive(job);
+          } else {
+            // Job já concluído no servidor — mostrar resultado estático
+            _ensureCalcIniciado();
+            const panel    = document.getElementById('cimport-panel');
+            const title    = document.getElementById('cimport-title');
+            const fillEl   = document.getElementById('cimport-geral-fill');
+            const atualEl  = document.getElementById('cimport-arquivo-atual');
+            const resumo   = document.getElementById('cimport-resumo');
+            const closeBtn = document.getElementById('cimport-close');
+            const pctEl    = document.getElementById('cimport-geral-pct');
+            if (!panel) return;
+            pctEl.textContent      = '';
+            atualEl.textContent    = '';
+            fillEl.style.width     = '100%';
+            closeBtn.style.display = '';
+            resumo.style.display   = 'block';
+            if (job.status === 'done') {
+              title.textContent      = '✅ Importação concluída';
+              title.style.color      = 'var(--green)';
+              fillEl.style.background= 'var(--green)';
+              resumo.innerHTML = `${job.arquivo} · <strong style="color:var(--green)">${(job.inseridos||0).toLocaleString('pt-BR')}</strong> novos · ${(job.erros||0).toLocaleString('pt-BR')} ignorados`;
+            } else {
+              title.textContent      = '⚠️ Erro na importação';
+              title.style.color      = 'var(--danger)';
+              fillEl.style.background= 'var(--danger)';
+              resumo.innerHTML = `${job.arquivo}: ${job.erro || 'erro desconhecido'}`;
+            }
+            panel.style.display = 'block';
+          }
+          return;
+        }
+      }
+    }
+  } catch (_) { /* servidor indisponível — cair para localStorage */ }
+
+  // Fallback: localStorage (jobs de sessões anteriores sem estado no servidor)
+  const raw = localStorage.getItem('finops_import_status');
+  if (!raw) return;
+  try {
+    const s  = JSON.parse(raw);
+    const ts = s.completed || s.started || 0;
+    if (Date.now() - ts > 2 * 60 * 60 * 1000) {
+      localStorage.removeItem('finops_import_status');
+      return;
+    }
+    _ensureCalcIniciado();
+    const panel    = document.getElementById('cimport-panel');
+    const title    = document.getElementById('cimport-title');
+    const fillEl   = document.getElementById('cimport-geral-fill');
+    const atualEl  = document.getElementById('cimport-arquivo-atual');
+    const resumo   = document.getElementById('cimport-resumo');
+    const closeBtn = document.getElementById('cimport-close');
+    const pctEl    = document.getElementById('cimport-geral-pct');
+    if (!panel) return;
+
+    pctEl.textContent      = '';
+    atualEl.textContent    = '';
+    fillEl.style.width     = '100%';
+    closeBtn.style.display = '';
+
+    if (s.status === 'running') {
+      title.textContent      = '⚠️ Importação interrompida';
+      title.style.color      = '#f9e2af';
+      fillEl.style.background= '#f9e2af';
+      resumo.style.display   = 'block';
+      resumo.innerHTML       = `Navegador fechado durante a importação de ${s.files} arquivo${s.files !== 1 ? 's' : ''}. Reimporte os arquivos.`;
+    } else {
+      const ok               = s.status === 'done';
+      title.textContent      = ok ? '✅ Importação concluída' : `⚠️ ${s.concluidos} ok · ${s.falhas} com erro`;
+      title.style.color      = ok ? 'var(--green)' : '#f9e2af';
+      fillEl.style.background= ok ? 'var(--green)' : '#f9e2af';
+      resumo.style.display   = 'block';
+      resumo.innerHTML       = `${s.concluidos} arquivo${s.concluidos !== 1 ? 's' : ''} · <strong style="color:var(--green)">${(s.inserted||0).toLocaleString('pt-BR')}</strong> novos · ${(s.errors||0).toLocaleString('pt-BR')} ignorados`;
+    }
+    panel.style.display = 'block';
+  } catch (_) {
+    localStorage.removeItem('finops_import_status');
+  }
+}
+
+// ── DADOS AZURE — wrappers para funções da Calculadora ────────────────────────
+
+function _ensureCalcIniciado() {
+  if (!document.getElementById('cpurge-modal')) Calculadora.init();
+  // Modals injected inside #view-calculadora won't render when that view is display:none,
+  // even with position:fixed. Reparent them to body on first use from another view.
+  ['cpurge-modal', 'cdiag-modal'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && el.closest('#view-calculadora')) document.body.appendChild(el);
+  });
+  // Import progress panel: reparent so position:fixed works outside the hidden calculadora view.
+  const panel = document.getElementById('cimport-panel');
+  if (panel && panel.closest('#view-calculadora')) document.body.appendChild(panel);
+}
+
+function abrirDiagnosticoAzure() {
+  _ensureCalcIniciado();
+  Calculadora.abrirDiagnostico();
+}
+
+function abrirPurgeAzure() {
+  _ensureCalcIniciado();
+  Calculadora.abrirPurge();
+}
+
 // ── COLETA AUTOMÁTICA ─────────────────────────
 let _coletaPolling = null;
 
 async function loadColeta() {
-  try {
-    const cfg = await api('GET', '/azure-coleta/config');
-    if (cfg) {
-      document.getElementById('coleta-tenant-id').value = cfg.tenant_id || '';
-      document.getElementById('coleta-client-id').value = cfg.client_id || '';
-      document.getElementById('coleta-dia').value = cfg.dia_execucao ?? 5;
-      document.getElementById('coleta-ativo').checked = !!cfg.ativo;
-      const gran = document.getElementById('coleta-granularidade');
-      gran.value = String(cfg.granularidade_dias ?? 7);
-      if (!gran.value) gran.value = '7';
-    }
-  } catch (e) { /* sem config ainda — formulário vazio */ }
+  await loadSPList();
+  await loadStorageList();
   await loadColetaStatus();
-  await loadColetaHistorico();
+  await loadColetaHistorico(_coletaTabAtual);
+  _loadColetaApiSPSelect();
+  // Feedback de upload para Import Manual
+  const cfileEl = document.getElementById('cfile');
+  if (cfileEl && !cfileEl._monHook) {
+    cfileEl._monHook = true;
+    cfileEl.addEventListener('change', function() {
+      const panel = document.getElementById('mon-upload-manual');
+      if (!panel || !this.files || !this.files.length) return;
+      const nome = this.files.length === 1 ? this.files[0].name : `${this.files.length} arquivo(s)`;
+      const el = document.getElementById('mon-upload-nome');
+      const st = document.getElementById('mon-upload-status');
+      if (el) el.textContent = nome;
+      if (st) st.textContent = 'Processando — aguarde o painel de progresso...';
+      const bar = document.getElementById('mon-upload-bar');
+      const pct = document.getElementById('mon-upload-pct');
+      if (bar) bar.style.width = '0%';
+      if (pct) pct.textContent = '0%';
+      panel.style.display = '';
+      // Esconde quando painel do Calculadora aparecer ou após 5s
+      let pctVal = 0;
+      const tick = setInterval(() => {
+        pctVal = Math.min(pctVal + 15, 90);
+        if (bar) bar.style.width = pctVal + '%';
+        if (pct) pct.textContent = pctVal + '%';
+      }, 200);
+      setTimeout(() => { clearInterval(tick); panel.style.display = 'none'; }, 5000);
+    });
+  }
+}
+
+function switchColetaTab(tab) {
+  _coletaTabAtual = tab;
+  ['api', 'storage', 'manual'].forEach(t => {
+    const panel = document.getElementById(`ctab-panel-${t}`);
+    const btn   = document.getElementById(`ctab-btn-${t}`);
+    const active = t === tab;
+    if (panel) panel.style.display = active ? '' : 'none';
+    if (btn) {
+      btn.style.color             = active ? 'var(--accent)' : 'var(--text-muted)';
+      btn.style.borderBottomColor = active ? 'var(--accent)' : 'transparent';
+    }
+  });
+  if (tab === 'api') _initColetaApiTab();
+  loadColetaHistorico(tab);
+}
+
+function _initColetaApiTab() {
+  const hoje = new Date();
+  const ini  = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+  const fim  = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+  const iniEl = document.getElementById('tab-api-inicio');
+  const fimEl = document.getElementById('tab-api-fim');
+  if (iniEl && !iniEl.value) iniEl.value = ini.toISOString().slice(0, 10);
+  if (fimEl && !fimEl.value) fimEl.value = fim.toISOString().slice(0, 10);
+  _loadColetaApiSPSelect();
+}
+
+let _coletaApiSPCache = [];
+let _apiModoAtual = 'billing_profile';
+
+function _setTabApiPeriodo(tipo) {
+  // Highlight chip ativo
+  ['mc','ma','ont','7d','30d','cust'].forEach(k => {
+    const el = document.getElementById(`tab-preset-${k}`);
+    if (el) { el.style.borderColor = ''; el.style.color = ''; el.style.background = ''; }
+  });
+  const mapKey = { mes_atual:'mc', mes_anterior:'ma', ontem:'ont', '7dias':'7d', '30dias':'30d', custom:'cust' };
+  const active = document.getElementById(`tab-preset-${mapKey[tipo]}`);
+  if (active) { active.style.borderColor = 'var(--accent)'; active.style.color = 'var(--accent)'; active.style.background = 'rgba(147,51,234,.08)'; }
+
+  const hoje = new Date();
+  const fmt  = d => d.toISOString().slice(0, 10);
+  let ini, fim;
+  if (tipo === 'mes_atual') {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+    fim = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+  } else if (tipo === 'mes_anterior') {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+    fim = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
+  } else if (tipo === 'ontem') {
+    const ontem = new Date(hoje); ontem.setDate(hoje.getDate() - 1);
+    ini = ontem; fim = ontem;
+  } else if (tipo === '7dias') {
+    ini = new Date(hoje); ini.setDate(hoje.getDate() - 6); fim = hoje;
+  } else if (tipo === '30dias') {
+    ini = new Date(hoje); ini.setDate(hoje.getDate() - 29); fim = hoje;
+  } else {
+    // custom — só abre os campos, não preenche
+    return;
+  }
+  const iniEl = document.getElementById('tab-api-inicio');
+  const fimEl = document.getElementById('tab-api-fim');
+  if (iniEl) iniEl.value = fmt(ini);
+  if (fimEl) fimEl.value = fmt(fim);
+  // aviso período longo
+  if (ini && fim) {
+    const dias = (fim - ini) / 86400000;
+    const av = document.getElementById('tab-api-aviso');
+    if (av) av.style.display = dias > 31 ? '' : 'none';
+  }
+}
+
+function _switchApiModo(modo) {
+  _apiModoAtual = modo;
+  const isBP = modo === 'billing_profile';
+  const bpFields  = document.getElementById('tab-api-bp-fields');
+  const schedWrap = document.getElementById('tab-api-agendamento-wrap');
+  if (bpFields)  bpFields.style.display  = isBP ? '' : 'none';
+  if (subFields) subFields.style.display = isBP ? 'none' : '';
+  if (schedWrap) schedWrap.style.display = isBP ? '' : 'none';
+  if (spLabel)   spLabel.textContent     = isBP ? 'Service Principal (com Billing IDs)' : 'Service Principal';
+  // Recarrega o select com o filtro correto
+  _loadColetaApiSPSelect();
+}
+
+async function _loadColetaApiSPSelect() {
+  const sel = document.getElementById('tab-api-sp-select');
+  if (!sel) return;
+  try {
+    const sps = await api('GET', '/azure-coleta/sps');
+    _coletaApiSPCache = sps;
+
+    // Botões rápidos de wizard no topo da aba API
+    const wrap = document.getElementById('api-wizard-sp-wrap');
+    if (wrap) {
+      const ativas = sps.filter(s => s.ativo);
+      if (ativas.length) {
+        wrap.innerHTML = `<div class="stat-card" style="padding:16px 20px">
+          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px">Coleta Guiada — selecione a SP e inicie o wizard</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            ${ativas.map(s => `
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px">
+                <div>
+                  <span style="font-size:13px;font-weight:600;color:var(--text)">${s.nome}</span>
+                  <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${s.billing_account_id ? 'Billing Profile (MCA)' : ''}</span>
+                </div>
+                <button class="btn-primary" style="font-size:12px;padding:6px 16px;white-space:nowrap" onclick="abrirColetaAPI(${s.id})">
+                  ▶ Iniciar Coleta
+                </button>
+              </div>`).join('')}
+          </div>
+        </div>`;
+      } else {
+        wrap.innerHTML = '';
+      }
+    }
+    const isBP = _apiModoAtual === 'billing_profile';
+
+    if (isBP) {
+      const valid   = sps.filter(s => s.billing_account_id && s.billing_profile_id && s.ativo);
+      const semBill = sps.filter(s => s.ativo && (!s.billing_account_id || !s.billing_profile_id));
+      if (!valid.length) {
+        sel.innerHTML = '<option value="">Nenhuma SP com Billing IDs configurados</option>';
+        const info = document.getElementById('tab-api-sp-info');
+        if (info) {
+          if (semBill.length) {
+            info.innerHTML = `<span style="color:var(--orange);font-weight:600">⚠ ${semBill.length} SP(s) ativa(s) sem Billing IDs:</span><br>` +
+              semBill.map(s =>
+                `<span style="color:var(--text-muted)">${s.nome}</span> ` +
+                `<button onclick="openSPModal(${s.id})" style="font-size:10px;padding:2px 8px;border-radius:5px;background:var(--accent);color:#fff;border:none;cursor:pointer;margin-left:4px">Completar</button>`
+              ).join('<br>') +
+              `<br><span style="color:var(--text-muted);font-size:10px">Preencha Billing Account ID e Billing Profile ID no cadastro da SP.</span>`;
+          } else {
+            info.innerHTML = '<span style="color:var(--orange)">Nenhuma SP ativa. Cadastre uma SP na aba "Via Storage" → Service Principals.</span>';
+          }
+        }
+        return;
+      }
+      sel.innerHTML = valid.map(s => `<option value="${s.id}">${s.nome}</option>`).join('');
+    } else {
+      // Subscription direta — qualquer SP ativa
+      const ativas = sps.filter(s => s.ativo);
+      if (!ativas.length) {
+        sel.innerHTML = '<option value="">Nenhuma SP ativa configurada</option>';
+        return;
+      }
+      sel.innerHTML = ativas.map(s => `<option value="${s.id}">${s.nome}</option>`).join('');
+    }
+    _updateTabApiSpInfo(parseInt(sel.value));
+  } catch (e) {
+    sel.innerHTML = '<option value="">Erro ao carregar SPs</option>';
+  }
+}
+
+function _updateTabApiSpInfoEvt(selectEl) {
+  _updateTabApiSpInfo(parseInt(selectEl.value));
+}
+
+function _updateTabApiSpInfo(spId) {
+  const sp = _coletaApiSPCache.find(s => s.id === spId);
+  const el = document.getElementById('tab-api-sp-info');
+  if (!el) return;
+  if (!sp) { el.innerHTML = '—'; return; }
+  el.innerHTML = `<span style="color:var(--accent);font-weight:600">${sp.nome}</span><br>
+    <span style="color:var(--text-muted)">BA: ${sp.billing_account_id || '—'}</span><br>
+    <span style="color:var(--text-muted)">BP: ${sp.billing_profile_id || '—'}</span>`;
+
+  // Popula painel de agendamento com dados da SP selecionada
+  const temSched = sp.auto_coleta && sp.hora_execucao != null && sp.dias_semana;
+  document.getElementById('api-auto-ativo').checked = !!temSched;
+  document.getElementById('api-sched-body').style.display = temSched ? '' : 'none';
+  if (sp.hora_execucao != null) document.getElementById('api-hora-exec').value = sp.hora_execucao;
+  if (sp.granularidade_dias)   document.getElementById('api-granularidade').value = sp.granularidade_dias;
+  _setDiasChecked('api-dia', sp.dias_semana || null);
+  document.getElementById('api-proxima-wrap').textContent = _proximaLabel(sp.proxima_coleta);
+}
+
+async function executarColetaAPITab() {
+  const sel    = document.getElementById('tab-api-sp-select');
+  const spId   = sel?.value;
+  const inicio = document.getElementById('tab-api-inicio').value;
+  const fim    = document.getElementById('tab-api-fim').value;
+  if (!spId)           { showToast('Selecione uma Service Principal', 'error'); return; }
+  if (!inicio || !fim) { showToast('Selecione um período antes de coletar', 'error'); return; }
+
+  const dias = (new Date(fim) - new Date(inicio)) / 86400000;
+  const av = document.getElementById('tab-api-aviso');
+  if (av) av.style.display = dias > 31 ? '' : 'none';
+
+  const btn = document.getElementById('tab-api-btn');
+  btn.disabled = true; btn.textContent = 'Iniciando...';
+
+  try {
+    const sp = _coletaApiSPCache.find(s => s.id === parseInt(spId));
+    if (!sp) throw new Error('SP não encontrada');
+    const body = {
+      modo:               'billing_profile',
+      data_inicio:        inicio,
+      data_fim:           fim,
+      billing_account_id: sp.billing_account_id,
+      billing_profile_id: sp.billing_profile_id,
+    };
+    await api('POST', `/azure-coleta/sps/${spId}/coletar-api`, body);
+    showToast('Coleta via API iniciada — acompanhe o monitor abaixo', 'success');
+    setTimeout(() => { loadColetaStatus(); loadColetaHistorico(_coletaTabAtual); }, 500);
+  } catch (e) {
+    showToast('Erro: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<svg viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:inline;margin-right:6px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg>Coletar agora via API';
+  }
 }
 
 async function loadColetaStatus() {
   try {
     const s = await api('GET', '/azure-coleta/status');
-    const badge = document.getElementById('coleta-status-badge');
-    const execBtn = document.getElementById('coleta-exec-btn');
+    const badge     = document.getElementById('coleta-status-badge');
+    const execBtn   = document.getElementById('coleta-exec-btn');
+    const cancelBtn = document.getElementById('coleta-cancel-btn');
+    const monitor   = document.getElementById('coleta-monitor');
 
     if (s.em_execucao) {
-      badge.textContent = 'Em Execução';
-      badge.style.background = 'rgba(255,140,66,.15)';
-      badge.style.color = 'var(--orange)';
-      execBtn.disabled = true;
-      execBtn.textContent = 'Executando...';
-      if (!_coletaPolling) _coletaPolling = setInterval(loadColetaStatus, 8000);
+      const isCanceling = s.cancelando;
+      const tipo = (s.progresso && s.progresso.tipo) || 'storage';
+
+      // Mover monitor para dentro da aba correta e trocar de aba automaticamente
+      const anchorId = `mon-anchor-${tipo}`;
+      const anchor   = document.getElementById(anchorId);
+      if (anchor && monitor && monitor.parentNode !== anchor) {
+        anchor.appendChild(monitor);
+        switchColetaTab(tipo);
+      }
+
+      // Atualizar badge de tipo
+      const tipoBadge = document.getElementById('mon-tipo-badge');
+      if (tipoBadge) tipoBadge.textContent = tipo === 'api' ? 'API Oficial' : 'Via Storage';
+
+      // Atualizar Circuit Breaker (apenas para coleta API)
+      const cbRow = document.getElementById('mon-cb-row');
+      if (cbRow) {
+        if (tipo === 'api' && s.circuit_breaker) {
+          cbRow.style.display = 'flex';
+          const cb = s.circuit_breaker;
+          const cbBadge = document.getElementById('mon-cb-badge');
+          const cbColors = { CLOSED: 'var(--green)', OPEN: 'var(--danger)', HALF_OPEN: 'var(--orange)' };
+          const cbBg     = { CLOSED: 'rgba(34,197,94,.15)', OPEN: 'rgba(255,77,106,.15)', HALF_OPEN: 'rgba(255,140,66,.15)' };
+          if (cbBadge) {
+            cbBadge.textContent = cb.state;
+            cbBadge.style.color = cbColors[cb.state] || 'var(--text)';
+            cbBadge.style.background = cbBg[cb.state] || 'transparent';
+          }
+          const cbFail = document.getElementById('mon-cb-failures');
+          if (cbFail) cbFail.textContent = cb.failures ? `${cb.failures} falha(s)` : '';
+          const cbUntil = document.getElementById('mon-cb-until');
+          if (cbUntil) cbUntil.textContent = cb.open_until ? `bloqueado até ${new Date(cb.open_until).toLocaleTimeString('pt-BR')}` : '';
+        } else {
+          cbRow.style.display = 'none';
+        }
+      }
+
+      // Atualizar botão cancelar inline no monitor
+      const monCancelBtn = document.getElementById('mon-cancel-btn');
+      if (monCancelBtn) {
+        monCancelBtn.disabled = isCanceling;
+        monCancelBtn.textContent = isCanceling ? 'Cancelando...' : '✕ Cancelar';
+      }
+
+      if (badge) {
+        badge.textContent = isCanceling ? 'Cancelando...' : 'Em Execução';
+        badge.style.background = isCanceling ? 'rgba(255,77,106,.15)' : 'rgba(255,140,66,.15)';
+        badge.style.color = isCanceling ? 'var(--danger)' : 'var(--orange)';
+      }
+      if (execBtn) { execBtn.disabled = true; execBtn.style.display = 'none'; }
+      if (cancelBtn) {
+        cancelBtn.style.display = '';
+        cancelBtn.disabled = isCanceling;
+        cancelBtn.textContent = isCanceling ? 'Cancelando...' : '✕ Cancelar';
+      }
+      if (monitor) monitor.style.display = '';
+      if (!_coletaPolling) _coletaPolling = setInterval(loadColetaStatus, 3000);
+
+      // Populate monitor
+      const p = s.progresso || {};
+      const fase = document.getElementById('mon-fase');
+      const sub  = document.getElementById('mon-sub');
+      const chunk = document.getElementById('mon-chunk');
+      const pBar = document.getElementById('mon-progress-bar');
+      const pTxt = document.getElementById('mon-progress-txt');
+      const ins  = document.getElementById('mon-ins');
+      const upd  = document.getElementById('mon-upd');
+      const err  = document.getElementById('mon-err');
+      const log  = document.getElementById('mon-log');
+
+      if (fase)  fase.textContent  = p.fase || 'Iniciando...';
+      if (sub)   sub.textContent   = p.sub_atual || '—';
+      if (chunk) chunk.textContent = p.chunk_atual ? `Chunk: ${p.chunk_atual}` : (p.chunk_idx ? `Chunk ${p.chunk_idx}/${p.chunk_total}` : '—');
+      if (ins)   ins.textContent   = (p.ins || 0).toLocaleString('pt-BR');
+      if (upd)   upd.textContent   = (p.upd || 0).toLocaleString('pt-BR');
+      if (err)   err.textContent   = (p.err || 0).toLocaleString('pt-BR');
+      if (pTxt && pBar) {
+        const total = p.sub_total || 0;
+        const done  = p.sub_idx   || 0;
+        pTxt.textContent = `${done} / ${total}`;
+        pBar.style.width = total > 0 ? `${Math.min(100, Math.round((done / total) * 100))}%` : '0%';
+      }
+      if (log && p.log && p.log.length) {
+        log.innerHTML = p.log.map(e =>
+          `<div><span style="color:var(--accent);opacity:.6">${e.ts}</span> ${e.msg.replace(/</g,'&lt;')}</div>`
+        ).join('');
+        log.scrollTop = log.scrollHeight;
+      }
     } else {
-      badge.textContent = 'Ocioso';
-      badge.style.background = 'rgba(34,197,94,.12)';
-      badge.style.color = 'var(--green)';
-      execBtn.disabled = false;
-      execBtn.innerHTML = '<svg viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:inline;margin-right:5px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg> Executar Agora';
-      if (_coletaPolling) { clearInterval(_coletaPolling); _coletaPolling = null; }
+      if (badge) {
+        badge.textContent = 'Ocioso';
+        badge.style.background = 'rgba(34,197,94,.12)';
+        badge.style.color = 'var(--green)';
+      }
+      if (execBtn) {
+        execBtn.disabled = false;
+        execBtn.style.display = '';
+        execBtn.innerHTML = '<svg viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:inline;margin-right:5px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg> Executar Storage';
+      }
+      if (cancelBtn) cancelBtn.style.display = 'none';
+      if (_coletaPolling) {
+        clearInterval(_coletaPolling);
+        _coletaPolling = null;
+        resumeInactivityTimer();
+      }
+
+      // Mantém monitor visível com estado final — usuário fecha manualmente
+      if (monitor && monitor.style.display !== 'none') {
+        const closeBtn = document.getElementById('mon-close-btn');
+        const monCancelBtn = document.getElementById('mon-cancel-btn');
+        if (closeBtn)    closeBtn.style.display    = '';
+        if (monCancelBtn) monCancelBtn.style.display = 'none';
+
+        const hist   = s.ultimo;
+        const status = hist?.status || 'concluido';
+        const isOk   = status === 'concluido';
+        const cor    = isOk ? 'var(--green)' : (status === 'cancelado' ? 'var(--orange)' : 'var(--danger)');
+        const label  = isOk ? '✓ Concluído' : (status === 'cancelado' ? '⊘ Cancelado' : '✗ Erro');
+
+        const fase = document.getElementById('mon-fase');
+        if (fase) {
+          fase.textContent  = label + (hist?.mensagem ? ' — ' + hist.mensagem : '');
+          fase.style.color  = cor;
+          fase.style.fontWeight = '600';
+        }
+        const tipoBadge = document.getElementById('mon-tipo-badge');
+        if (tipoBadge) {
+          tipoBadge.textContent   = label;
+          tipoBadge.style.color   = cor;
+          tipoBadge.style.background = isOk ? 'rgba(34,197,94,.15)' : 'rgba(255,77,106,.15)';
+        }
+      }
     }
 
     const hist = s.ultimo;
@@ -2620,71 +3373,987 @@ async function loadColetaStatus() {
       const dt = hist.iniciado_em ? new Date(hist.iniciado_em).toLocaleString('pt-BR') : '—';
       document.getElementById('coleta-ultima-exec').textContent = dt;
       document.getElementById('coleta-ultima-msg').textContent = hist.mensagem || '—';
-      const ins = (hist.linhas_inseridas ?? 0) + (hist.linhas_atualizadas ?? 0);
-      document.getElementById('coleta-ultima-linhas').textContent = ins.toLocaleString('pt-BR') + ' registros';
+      const linhas = (hist.linhas_inseridas ?? 0) + (hist.linhas_atualizadas ?? 0);
+      document.getElementById('coleta-ultima-linhas').textContent = linhas.toLocaleString('pt-BR') + ' registros';
     }
   } catch (e) {
-    document.getElementById('coleta-status-badge').textContent = 'Indisponível';
+    const badge = document.getElementById('coleta-status-badge');
+    if (badge) badge.textContent = 'Indisponível';
   }
 }
 
-async function saveColetaConfig() {
-  const tenant_id = document.getElementById('coleta-tenant-id').value.trim();
-  const client_id = document.getElementById('coleta-client-id').value.trim();
-  const client_secret = document.getElementById('coleta-client-secret').value;
-  const ativo = document.getElementById('coleta-ativo').checked;
-  const dia_execucao = parseInt(document.getElementById('coleta-dia').value) || 5;
-  const granularidade_dias = parseInt(document.getElementById('coleta-granularidade').value) || 7;
-  if (!tenant_id || !client_id) { showToast('Preencha Tenant ID e Client ID', 'error'); return; }
-  try {
-    await api('POST', '/azure-coleta/config', { tenant_id, client_id, client_secret, ativo, dia_execucao, granularidade_dias });
-    document.getElementById('coleta-client-secret').value = '';
-    showToast('Configuração salva', 'success');
-  } catch (e) { showToast('Erro ao salvar: ' + e.message, 'error'); }
+function fecharMonitor() {
+  const monitor = document.getElementById('coleta-monitor');
+  if (monitor) monitor.style.display = 'none';
+  const closeBtn = document.getElementById('mon-close-btn');
+  if (closeBtn) closeBtn.style.display = 'none';
+  const fase = document.getElementById('mon-fase');
+  if (fase) { fase.style.color = ''; fase.style.fontWeight = ''; }
 }
 
-async function testColetaConexao() {
-  const res = document.getElementById('coleta-test-result');
-  res.style.display = 'block';
-  res.style.background = 'rgba(147,51,234,.1)';
-  res.style.color = 'var(--text-dim)';
-  res.textContent = 'Testando conexão com Azure...';
+async function cancelarColeta() {
+  const btn = document.getElementById('coleta-cancel-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cancelando...'; }
   try {
-    const r = await api('POST', '/azure-coleta/testar');
-    res.style.background = 'rgba(34,197,94,.1)';
-    res.style.color = 'var(--green)';
-    const preview = (r.preview || []).join(', ');
-    res.textContent = `Conexão OK · ${r.subscriptions} subscription(s) encontrada(s)${preview ? ': ' + preview : ''}`;
-  } catch (e) {
-    res.style.background = 'rgba(255,77,106,.1)';
-    res.style.color = 'var(--danger)';
-    res.textContent = 'Falha: ' + e.message;
-  }
-}
-
-async function executarColetaAgora() {
-  if (!confirm('Iniciar coleta agora? Isso irá coletar os custos do mês anterior de todas as subscriptions do tenant.')) return;
-  try {
-    await api('POST', '/azure-coleta/executar');
-    showToast('Coleta iniciada em background', 'success');
+    await api('POST', '/azure-coleta/cancelar');
+    showToast('Cancelamento solicitado — aguardando próxima verificação', 'warn');
     setTimeout(loadColetaStatus, 1500);
+  } catch (e) {
+    showToast('Erro ao cancelar: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '✕ Cancelar'; }
+  }
+}
+
+// ── Service Principals CRUD ────────────────────────────────────────────────────
+
+async function loadSPList() {
+  const tbody = document.getElementById('sp-list-tbody');
+  try {
+    const sps = await api('GET', '/azure-coleta/sps');
+    if (!sps || !sps.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhuma SP cadastrada. Clique em "+ Nova SP".</td></tr>'; return; }
+    tbody.innerHTML = sps.map(sp => {
+      const exp   = sp.expiracao_secret ? new Date(sp.expiracao_secret) : null;
+      const hoje  = new Date(); hoje.setHours(0,0,0,0);
+      const dias  = exp ? Math.floor((exp - hoje) / 86400000) : null;
+      let expBadge = '—';
+      if (exp) {
+        const dt = exp.toLocaleDateString('pt-BR');
+        if (dias < 0)  expBadge = `<span style="color:var(--danger);font-weight:600">${dt} (Expirado)</span>`;
+        else if (dias <= 30) expBadge = `<span style="color:var(--orange);font-weight:600">${dt} (${dias}d)</span>`;
+        else expBadge = `<span style="color:var(--green)">${dt}</span>`;
+      }
+      const tid = sp.tenant_id ? sp.tenant_id.slice(0,8)+'…' : '—';
+      const cid = sp.client_id ? sp.client_id.slice(0,8)+'…' : '—';
+      const nomeBadge = sp.is_padrao
+        ? `${sp.nome || '—'} <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:8px;background:rgba(147,51,234,.18);color:var(--accent);border:1px solid rgba(147,51,234,.35)">PADRÃO</span>`
+        : sp.nome || '—';
+      const atvStyle = sp.ativo ? '' : 'opacity:0.45;';
+      const padBtn = sp.is_padrao
+        ? `<button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px;border-color:var(--accent);color:var(--accent);cursor:default" disabled title="Esta SP já é a padrão">★ Padrão</button>`
+        : `<button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="definirSPPadrao(${sp.id})" title="Definir como SP padrão para coletas">☆ Padrão</button>`;
+      return `<tr style="${atvStyle}">
+        <td style="font-size:12px;font-weight:600;color:var(--text)">${nomeBadge}</td>
+        <td style="font-family:monospace;font-size:11px;color:var(--text-dim)">${tid}</td>
+        <td style="font-family:monospace;font-size:11px;color:var(--text-dim)">${cid}</td>
+        <td style="font-size:11px">${expBadge}</td>
+        <td style="text-align:center">
+          <label class="toggle-switch" style="margin:0"><input type="checkbox" ${sp.ativo?'checked':''} onchange="toggleSPAtivo(${sp.id},this.checked)"><span class="toggle-slider"></span></label>
+        </td>
+        <td style="white-space:nowrap;text-align:right">
+          ${padBtn}
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="testarSP(${sp.id})">Testar</button>
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px;border-color:var(--accent);color:var(--accent)" onclick="abrirColetaAPI(${sp.id})">⬇ Coletar</button>
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="openSPModal(${sp.id})">✏</button>
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;border-color:var(--danger);color:var(--danger)" onclick="deleteSP(${sp.id},'${(sp.nome||'SP').replace(/'/g,"\\'")}')">🗑</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Erro: ${e.message}</td></tr>`; }
+}
+
+function openSPModal(id) {
+  const modal = document.getElementById('modal-sp');
+  document.getElementById('modal-sp-titulo').textContent = id ? 'Editar Service Principal' : 'Nova Service Principal';
+  document.getElementById('sp-edit-id').value         = id || '';
+  document.getElementById('sp-nome').value             = '';
+  document.getElementById('sp-tenant-id').value        = '';
+  document.getElementById('sp-client-id').value        = '';
+  document.getElementById('sp-client-secret').value    = '';
+  document.getElementById('sp-expiracao').value        = '';
+  document.getElementById('sp-billing-account').value  = '';
+  document.getElementById('sp-billing-profile').value  = '';
+  document.getElementById('sp-ativo').checked          = true;
+  // Reseta destaque da seção de Billing
+  const _bSec = document.getElementById('sp-billing-section');
+  const _bLbl = document.getElementById('sp-billing-section-lbl');
+  if (_bSec) { _bSec.style.borderColor = ''; _bSec.style.background = ''; }
+  if (_bLbl) _bLbl.style.color = 'var(--accent)';
+  if (id) {
+    api('GET', '/azure-coleta/sps').then(sps => {
+      const sp = sps.find(s => s.id === id);
+      if (!sp) return;
+      document.getElementById('sp-nome').value            = sp.nome || '';
+      document.getElementById('sp-tenant-id').value       = sp.tenant_id || '';
+      document.getElementById('sp-client-id').value       = sp.client_id || '';
+      document.getElementById('sp-expiracao').value       = sp.expiracao_secret ? sp.expiracao_secret.slice(0,10) : '';
+      document.getElementById('sp-billing-account').value = sp.billing_account_id || '';
+      document.getElementById('sp-billing-profile').value = sp.billing_profile_id || '';
+      document.getElementById('sp-ativo').checked         = sp.ativo;
+      if (sp.dia_execucao)       document.getElementById('sp-dia').value           = sp.dia_execucao;
+      if (sp.granularidade_dias) document.getElementById('sp-granularidade').value = sp.granularidade_dias;
+      // Destaca seção de Billing se os campos estiverem vazios
+      const billSec = document.getElementById('sp-billing-section');
+      if (billSec) {
+        const faltaBilling = !sp.billing_account_id || !sp.billing_profile_id;
+        billSec.style.borderColor = faltaBilling ? 'rgba(255,140,66,.6)' : '';
+        billSec.style.background  = faltaBilling ? 'rgba(255,140,66,.05)' : '';
+        const lbl = document.getElementById('sp-billing-section-lbl');
+        if (lbl) lbl.style.color = faltaBilling ? 'var(--orange)' : 'var(--accent)';
+      }
+    }).catch(() => {});
+  }
+  modal.classList.add('open');
+}
+
+function closeSPModal() { document.getElementById('modal-sp').classList.remove('open'); }
+
+async function saveSP() {
+  const id     = document.getElementById('sp-edit-id').value;
+  const body   = {
+    nome:               document.getElementById('sp-nome').value.trim(),
+    tenant_id:          document.getElementById('sp-tenant-id').value.trim(),
+    client_id:          document.getElementById('sp-client-id').value.trim(),
+    client_secret:      document.getElementById('sp-client-secret').value,
+    expiracao_secret:   document.getElementById('sp-expiracao').value || null,
+    billing_account_id: document.getElementById('sp-billing-account').value.trim() || null,
+    billing_profile_id: document.getElementById('sp-billing-profile').value.trim() || null,
+    ativo:              document.getElementById('sp-ativo').checked,
+    dia_execucao:       parseInt(document.getElementById('sp-dia').value) || 5,
+    granularidade_dias: parseInt(document.getElementById('sp-granularidade').value) || 7,
+  };
+  if (!body.nome || !body.tenant_id || !body.client_id) { showToast('Preencha Nome, Tenant ID e Client ID', 'error'); return; }
+  try {
+    if (id) await api('PUT', `/azure-coleta/sps/${id}`, body);
+    else    await api('POST', '/azure-coleta/sps', body);
+    showToast('SP salva com sucesso', 'success');
+    closeSPModal();
+    loadSPList();
   } catch (e) { showToast('Erro: ' + e.message, 'error'); }
 }
 
-async function loadColetaHistorico() {
-  const tbody = document.getElementById('coleta-hist-tbody');
+async function deleteSP(id, nome) {
+  if (!confirm(`Excluir a SP "${nome}"? Essa ação não pode ser desfeita.`)) return;
+  try { await api('DELETE', `/azure-coleta/sps/${id}`); showToast('SP excluída', 'success'); loadSPList(); }
+  catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function toggleSPAtivo(id, ativo) {
+  try { await api('PATCH', `/azure-coleta/sps/${id}/ativo`, { ativo }); loadSPList(); }
+  catch (e) { showToast('Erro: ' + e.message, 'error'); loadSPList(); }
+}
+
+async function definirSPPadrao(id) {
   try {
-    const rows = await api('GET', '/azure-coleta/historico');
+    await api('PATCH', `/azure-coleta/sps/${id}/padrao`);
+    showToast('SP definida como padrão', 'success');
+    loadSPList();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function abrirColetaAPI(spId) {
+  spId = parseInt(spId);
+  let sp = _coletaApiSPCache.find(s => s.id === spId);
+  if (!sp) {
+    try {
+      const lista = await api('GET', '/azure-coleta/sps');
+      _coletaApiSPCache = lista || [];
+      sp = _coletaApiSPCache.find(s => s.id === spId);
+    } catch (_) {}
+  }
+  if (!sp) { showToast('SP não encontrada', 'error'); return; }
+  _wizardAbrir(spId, sp);
+}
+
+// ── Wizard de Coleta via API ──────────────────────────────────────────────────
+let _wizard = null;
+
+function _wizardAbrir(spId, sp) {
+  const isBP = !!(sp.billing_account_id && sp.billing_profile_id);
+  _wizard = {
+    spId,
+    sp,
+    modo:  isBP ? 'billing_profile' : 'subscription',
+    scope: isBP ? 'billing_profile' : 'subscriptions', // 'billing_profile' = tudo | 'subscriptions' = seleção
+    subs: [],
+    selectedSubs: new Set(),
+    rgs: [],
+    selectedRGs: new Set(),
+    inicio: '',
+    fim: '',
+  };
+  // Mostrar/ocultar seletor de escopo
+  const scopeSel = document.getElementById('wizard-scope-selector');
+  if (scopeSel) scopeSel.style.display = isBP ? '' : 'none';
+  _wizardSetScope(isBP ? 'billing_profile' : 'subscriptions');
+  document.getElementById('modal-wizard-coleta').classList.add('open');
+  _wizardShowStep(1);
+  _wizardCarregarSubs();
+}
+
+function _wizardSetScope(scope) {
+  if (!_wizard) return;
+  _wizard.scope = scope;
+  const isBP = scope === 'billing_profile';
+
+  // Estilo dos botões
+  const btnBP   = document.getElementById('wizard-scope-bp');
+  const btnSubs = document.getElementById('wizard-scope-subs');
+  if (btnBP) {
+    btnBP.style.borderColor = isBP ? 'var(--accent)' : 'var(--border)';
+    btnBP.style.background  = isBP ? 'var(--accent)' : 'transparent';
+    btnBP.style.color       = isBP ? '#fff' : 'var(--text-muted)';
+  }
+  if (btnSubs) {
+    btnSubs.style.borderColor = !isBP ? 'var(--accent)' : 'var(--border)';
+    btnSubs.style.background  = !isBP ? 'rgba(147,51,234,.1)' : 'transparent';
+    btnSubs.style.color       = !isBP ? 'var(--accent)' : 'var(--text-muted)';
+  }
+
+  // Lista de subscriptions: oculta no modo BP completo
+  const subsWrap  = document.getElementById('wizard-subs-wrap');
+  const subsLabel = document.getElementById('wizard-subs-label');
+  if (subsWrap) subsWrap.style.display = isBP ? 'none' : 'flex';
+
+  // Botão Próximo: habilitado direto para BP completo
+  const btnNext = document.getElementById('wizard-btn-next-1');
+  if (btnNext) {
+    if (isBP) {
+      btnNext.disabled = false;
+    } else {
+      btnNext.disabled = (_wizard.selectedSubs.size === 0);
+    }
+  }
+}
+
+function fecharWizardColeta() {
+  _wizardResetBtn();
+  document.getElementById('modal-wizard-coleta').classList.remove('open');
+  _wizard = null;
+}
+
+function _wizardShowStep(step) {
+  for (let i = 1; i <= 4; i++) {
+    const el  = document.getElementById(`wizard-step-${i}`);
+    const dot = document.getElementById(`wizard-dot-${i}`);
+    const lbl = document.getElementById(`wizard-lbl-${i}`);
+    const ln  = document.getElementById(`wizard-line-${i}`);
+    if (el)  el.style.display  = i === step ? 'flex' : 'none';
+    if (dot) {
+      const done   = i < step;
+      const active = i === step;
+      dot.style.background = active ? 'var(--accent)' : (done ? 'var(--green)' : 'var(--border)');
+      dot.style.color      = (active || done) ? '#fff' : 'var(--text-muted)';
+      dot.textContent      = done ? '✓' : String(i);
+    }
+    if (lbl) lbl.style.color = i === step ? 'var(--accent)' : 'var(--text-muted)';
+    if (ln)  ln.style.background = i < step ? 'var(--green)' : 'var(--border)';
+  }
+  if (_wizard) _wizard._step = step;
+}
+
+async function _wizardCarregarSubs() {
+  document.getElementById('wizard-subs-list').innerHTML =
+    '<div style="color:var(--text-muted);font-size:13px;padding:24px 0;text-align:center">🔍 Buscando assinaturas do tenant...</div>';
+  document.getElementById('wizard-btn-next-1').disabled = true;
+  try {
+    const data = await api('POST', `/azure-coleta/sps/${_wizard.spId}/listar-subs`, {});
+    _wizard.subs = data.subs || [];
+    _wizardRenderSubs(data.fonte);
+  } catch (e) {
+    document.getElementById('wizard-subs-list').innerHTML =
+      `<div style="color:var(--danger);font-size:13px;padding:16px 0">❌ Erro ao buscar assinaturas: ${e.message}</div>`;
+  }
+}
+
+function _wizardRenderSubs(fonte) {
+  const subs = _wizard.subs;
+  if (!subs.length) {
+    document.getElementById('wizard-subs-list').innerHTML =
+      '<div style="color:var(--text-muted);font-size:13px;padding:16px 0">Nenhuma assinatura encontrada. Verifique as permissões da SP.</div>';
+    return;
+  }
+  _wizard.selectedSubs = new Set(subs.map(s => s.subscriptionId));
+  const fonteLabel = { tenant: 'do tenant Azure', billing_profile: 'do Billing Profile', cache: 'do banco local' }[fonte] || '';
+  const fonteColor = fonte === 'cache' ? 'var(--orange)' : 'var(--green)';
+  let html = `
+  <input type="text" id="wizard-subs-search" placeholder="🔍 Pesquisar assinatura..." oninput="_wizardFiltrar('subs')"
+    style="width:100%;box-sizing:border-box;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-hover);color:var(--text);font-size:13px;margin-bottom:10px;outline:none">
+  <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+    <button class="btn-ghost" style="font-size:11px;padding:2px 10px" onclick="_wizardSelTodas('subs',true)">Todas</button>
+    <button class="btn-ghost" style="font-size:11px;padding:2px 10px" onclick="_wizardSelTodas('subs',false)">Limpar</button>
+    <span style="color:var(--text-muted);font-size:11px;margin-left:auto">
+      <span style="color:${fonteColor}">●</span> ${subs.length} assinatura(s) ${fonteLabel}
+    </span>
+  </div>
+  <div id="wizard-subs-counter" style="font-size:11px;color:var(--accent);margin-bottom:8px;font-weight:600">${subs.length} selecionada(s)</div>
+  <div id="wizard-subs-items" style="display:flex;flex-direction:column;gap:4px">`;
+  for (const s of subs) {
+    const id      = s.subscriptionId.replace(/'/g, '');
+    const nomeLow = s.nome.toLowerCase();
+    const idLow   = id.toLowerCase();
+    html += `<label data-nome="${nomeLow}" data-id="${idLow}" style="display:flex;align-items:flex-start;gap:10px;padding:9px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:border-color .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+      <input type="checkbox" value="${id}" checked style="margin-top:3px;flex-shrink:0;accent-color:var(--accent)" onchange="_wizardToggleItem('subs','${id}',this.checked)">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;color:var(--text);font-weight:600">${s.nome}</div>
+        <div style="font-size:11px;color:var(--text-muted);font-family:monospace">${id}</div>
+      </div>
+    </label>`;
+  }
+  html += '</div>';
+  document.getElementById('wizard-subs-list').innerHTML = html;
+  document.getElementById('wizard-btn-next-1').disabled = false;
+  setTimeout(() => document.getElementById('wizard-subs-search')?.focus(), 100);
+}
+
+function _wizardToggleItem(tipo, valor, checked) {
+  const set = tipo === 'subs' ? _wizard.selectedSubs : _wizard.selectedRGs;
+  if (checked) set.add(valor); else set.delete(valor);
+  if (tipo === 'subs') {
+    document.getElementById('wizard-btn-next-1').disabled = _wizard.selectedSubs.size === 0;
+    const c = document.getElementById('wizard-subs-counter');
+    if (c) c.textContent = `${_wizard.selectedSubs.size} selecionada(s)`;
+  } else {
+    _wizardAtualizarContadores();
+  }
+}
+
+function _wizardSelTodas(tipo, sel) {
+  const lista  = tipo === 'subs' ? _wizard.subs : _wizard.rgs;
+  const campo  = tipo === 'subs' ? 'subscriptionId' : 'name';
+  const set    = tipo === 'subs' ? _wizard.selectedSubs : _wizard.selectedRGs;
+  // Checkboxes podem estar em rgs-items (fora de rgs-list) — busca em ambos
+  const listId = tipo === 'subs' ? 'wizard-subs-list' : 'wizard-rgs-items';
+  set.clear();
+  if (sel) lista.forEach(i => set.add(i[campo]));
+  document.querySelectorAll(`#${listId} input[type=checkbox]`).forEach(cb => { cb.checked = sel; });
+  if (tipo === 'subs') {
+    document.getElementById('wizard-btn-next-1').disabled = set.size === 0;
+    const c = document.getElementById('wizard-subs-counter');
+    if (c) c.textContent = `${set.size} selecionada(s)`;
+  } else {
+    _wizardAtualizarContadores();
+  }
+}
+
+function _wizardFiltrar(tipo) {
+  const searchId = tipo === 'subs' ? 'wizard-subs-search' : 'wizard-rgs-search';
+  const itemsId  = tipo === 'subs' ? 'wizard-subs-items'  : 'wizard-rgs-items';
+  const termo = (document.getElementById(searchId)?.value || '').toLowerCase().trim();
+  const labels = document.querySelectorAll(`#${itemsId} label`);
+  let visiveis = 0;
+  labels.forEach(lbl => {
+    const nome = lbl.dataset.nome || '';
+    const id   = lbl.dataset.id   || '';
+    const ok   = !termo || nome.includes(termo) || id.includes(termo);
+    lbl.style.display = ok ? '' : 'none';
+    if (ok) visiveis++;
+  });
+  // Atualiza contador de visíveis ao lado do campo
+  const countEl = tipo === 'subs'
+    ? document.getElementById('wizard-subs-counter')
+    : null;
+  if (countEl && termo) {
+    const sel = tipo === 'subs' ? _wizard.selectedSubs.size : _wizard.selectedRGs.size;
+    countEl.textContent = `${sel} selecionada(s) · ${visiveis} visível(is)`;
+  } else if (countEl) {
+    countEl.textContent = `${_wizard.selectedSubs.size} selecionada(s)`;
+  }
+}
+
+function _wizardAtualizarContadores() {
+  const subLbl = document.getElementById('wizard-sel-subs-label');
+  const rgLbl  = document.getElementById('wizard-sel-rgs-label');
+  if (subLbl) subLbl.textContent = `${_wizard?.selectedSubs?.size ?? 0} assinatura(s) selecionada(s)`;
+  if (rgLbl) {
+    const total = _wizard?.rgs?.length ?? 0;
+    const sel   = _wizard?.selectedRGs?.size ?? 0;
+    rgLbl.textContent = total > 0 ? `${sel} de ${total} RG(s) selecionado(s)` : '0 RG(s)';
+  }
+}
+
+async function wizardNext1() {
+  if (_wizard.scope === 'billing_profile') {
+    _wizard.selectedSubs = new Set();
+    _wizard.selectedRGs  = new Set();
+    _wizard.rgs          = [];
+    _wizardAtualizarContadores();
+    wizardNext2(); // pula seleção de RGs — coleta todo o Billing Profile
+    return;
+  }
+  if (_wizard.selectedSubs.size === 0) { showToast('Selecione ao menos uma assinatura', 'error'); return; }
+  _wizardShowStep(2);
+  _wizardAtualizarContadores();
+  await _wizardCarregarRGs();
+}
+
+async function _wizardCarregarRGs() {
+  document.getElementById('wizard-rgs-list').innerHTML =
+    '<div style="color:var(--text-muted);font-size:13px;padding:24px 0;text-align:center">Buscando Resource Groups...</div>';
+  document.getElementById('wizard-btn-next-2').disabled = true;
+  try {
+    const data = await api('POST', `/azure-coleta/sps/${_wizard.spId}/listar-rgs`, {
+      subscription_ids: [..._wizard.selectedSubs],
+    });
+    _wizard.rgs = data.rgs || [];
+    _wizardRenderRGs(data.fonte);
+  } catch (e) {
+    document.getElementById('wizard-rgs-list').innerHTML =
+      `<div style="color:var(--danger);font-size:13px;padding:16px 0">Erro: ${e.message}</div>`;
+    document.getElementById('wizard-btn-next-2').disabled = false;
+  }
+}
+
+function _wizardRenderRGs(fonte) {
+  const rgs = _wizard.rgs;
+  const ctrlEl = document.getElementById('wizard-rgs-controls');
+  const listEl = document.getElementById('wizard-rgs-list');
+
+  if (!rgs.length) {
+    if (ctrlEl) ctrlEl.innerHTML = '';
+    if (listEl) listEl.innerHTML =
+      '<div style="color:var(--text-muted);font-size:13px;padding:16px 0;line-height:1.6">Nenhum Resource Group encontrado.<br>Todos os RGs das assinaturas selecionadas serão coletados.</div>';
+    document.getElementById('wizard-btn-next-2').disabled = false;
+    _wizardAtualizarContadores();
+    return;
+  }
+
+  _wizard.selectedRGs = new Set(rgs.map(r => r.name));
+  const fonteLabel = fonte === 'cache' ? '(banco local)' : fonte === 'arm' ? '(API Azure)' : '';
+  const fonteColor = fonte === 'cache' ? 'var(--orange)' : 'var(--green)';
+
+  // Controles fixos — fora do scroll
+  if (ctrlEl) ctrlEl.innerHTML = `
+    <input type="text" id="wizard-rgs-search" placeholder="🔍 Pesquisar resource group..." oninput="_wizardFiltrar('rgs')"
+      style="width:100%;box-sizing:border-box;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-hover);color:var(--text);font-size:13px;margin-bottom:8px;outline:none">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <button class="btn-ghost" style="font-size:11px;padding:2px 10px" onclick="_wizardSelTodas('rgs',true)">Todos</button>
+      <button class="btn-ghost" style="font-size:11px;padding:2px 10px" onclick="_wizardSelTodas('rgs',false)">Limpar</button>
+      <span style="font-size:11px;margin-left:auto"><span style="color:${fonteColor}">●</span> <span style="color:var(--text-muted)">${rgs.length} RG(s) ${fonteLabel}</span></span>
+    </div>`;
+
+  // Itens na área scrollável
+  let html = '<div id="wizard-rgs-items" style="display:flex;flex-direction:column;gap:4px">';
+  for (const r of rgs) {
+    const nameEsc = r.name.replace(/'/g, '');
+    const nameLow = r.name.toLowerCase();
+    const subLow  = (r.subscriptionId || '').toLowerCase();
+    html += `<label data-nome="${nameLow}" data-id="${subLow}" style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:border-color .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+      <input type="checkbox" value="${nameEsc}" checked style="flex-shrink:0;accent-color:var(--accent)" onchange="_wizardToggleItem('rgs','${nameEsc}',this.checked)">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name}</div>
+        <div style="font-size:10px;color:var(--text-muted);font-family:monospace">${r.subscriptionId || ''}</div>
+      </div>
+    </label>`;
+  }
+  html += '</div>';
+  if (listEl) listEl.innerHTML = html;
+
+  document.getElementById('wizard-btn-next-2').disabled = false;
+  _wizardAtualizarContadores();
+  setTimeout(() => document.getElementById('wizard-rgs-search')?.focus(), 100);
+}
+
+function wizardNext2() {
+  _wizardShowStep(3);
+  const hoje = new Date();
+  const ini  = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+  const fim  = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+  const iniEl = document.getElementById('wizard-inicio');
+  const fimEl = document.getElementById('wizard-fim');
+  if (!iniEl.value) iniEl.value = ini.toISOString().slice(0, 10);
+  if (!fimEl.value) fimEl.value = fim.toISOString().slice(0, 10);
+}
+
+function _wizardSetPeriodo(tipo) {
+  const hoje = new Date();
+  let ini, fim;
+  if (tipo === 'mes_atual') {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+    fim = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+  } else if (tipo === 'mes_anterior') {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+    fim = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
+  } else {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth() - 2, 1);
+    fim = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+  }
+  document.getElementById('wizard-inicio').value = ini.toISOString().slice(0, 10);
+  document.getElementById('wizard-fim').value    = fim.toISOString().slice(0, 10);
+}
+
+function wizardNext3() {
+  const inicio = document.getElementById('wizard-inicio').value;
+  const fim    = document.getElementById('wizard-fim').value;
+  if (!inicio || !fim) { showToast('Informe as datas de início e fim', 'error'); return; }
+  if (inicio > fim)    { showToast('Data início deve ser anterior ao fim', 'error'); return; }
+  _wizard.inicio = inicio;
+  _wizard.fim    = fim;
+
+  const isBPScope  = _wizard.scope === 'billing_profile';
+  const totalRGs   = _wizard.selectedRGs.size;
+  const todosRGs   = isBPScope || totalRGs === _wizard.rgs.length || _wizard.rgs.length === 0;
+  const totalSubs  = _wizard.selectedSubs.size;
+
+  const subsRow = isBPScope
+    ? `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--text-muted);font-size:13px">Escopo</span>
+        <span style="color:var(--accent);font-size:13px;font-weight:600">Billing Profile — todas as subscriptions</span>
+       </div>`
+    : `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--text-muted);font-size:13px">Assinaturas</span>
+        <span style="color:var(--accent);font-size:13px;font-weight:600">${totalSubs} selecionada(s)</span>
+       </div>
+       <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--text-muted);font-size:13px">Resource Groups</span>
+        <span style="color:var(--accent);font-size:13px;font-weight:600">${todosRGs ? 'Todos' : `${totalRGs} selecionado(s)`}</span>
+       </div>`;
+
+  document.getElementById('wizard-summary').innerHTML = `
+    <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">
+      <span style="color:var(--text-muted);font-size:13px">Service Principal</span>
+      <span style="color:var(--text);font-size:13px;font-weight:500">${_wizard.sp?.nome || _wizard.spId}</span>
+    </div>
+    ${subsRow}
+    <div style="display:flex;justify-content:space-between;padding:4px 0">
+      <span style="color:var(--text-muted);font-size:13px">Período</span>
+      <span style="color:var(--text);font-size:13px;font-weight:500">${inicio} → ${fim}</span>
+    </div>`;
+  _wizardShowStep(4);
+}
+
+function _wizardSchedToggle(el) {
+  const body = document.getElementById('wizard-sched-body');
+  if (body) body.style.display = el.checked ? 'flex' : 'none';
+  if (el.checked) _wizardSchedProxima();
+}
+
+function _wizardSchedProxima() {
+  const hora  = parseInt(document.getElementById('wizard-sched-hora')?.value || 3);
+  const dias  = [...document.querySelectorAll('.wiz-dia:checked')].map(c => parseInt(c.value));
+  const p     = _computeProximaJS(hora, dias);
+  const el    = document.getElementById('wizard-sched-proxima');
+  if (el) el.textContent = _proximaLabel(p);
+}
+
+function wizardBack(step) {
+  _wizardResetBtn();
+  _wizardShowStep(step);
+}
+
+function _wizardResetBtn() {
+  const btn = document.getElementById('wizard-btn-start');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = '▶ Iniciar Coleta';
+}
+
+async function wizardIniciarColeta() {
+  const btn = document.getElementById('wizard-btn-start');
+  if (!btn || btn.disabled) return; // evita double-click
+  btn.disabled = true;
+  btn.textContent = 'Iniciando...';
+
+  // Safety: restaura o botão após 30s no pior caso
+  const safetyTimer = setTimeout(() => {
+    _wizardResetBtn();
+    showToast('Servidor não respondeu — verifique o status da coleta e tente novamente', 'error');
+  }, 30_000);
+
+  try {
+    // Verificar se já há coleta em execução
+    let statusAtual;
+    try { statusAtual = await api('GET', '/azure-coleta/status', null, 8000); } catch (_) {}
+    if (statusAtual?.em_execucao) {
+      throw new Error('Já existe uma coleta em execução. Aguarde terminar ou cancele antes de iniciar outra.');
+    }
+
+    const isBP     = _wizard.modo === 'billing_profile';
+    const todosRGs = _wizard.rgs.length === 0 || _wizard.selectedRGs.size === _wizard.rgs.length;
+    const metricEl = document.querySelector('input[name="wizard-metric"]:checked');
+    const body = {
+      modo:             _wizard.modo,
+      data_inicio:      _wizard.inicio,
+      data_fim:         _wizard.fim,
+      subscription_ids: [..._wizard.selectedSubs],
+      resource_groups:  todosRGs ? [] : [..._wizard.selectedRGs],
+      metric:           metricEl ? metricEl.value : 'ActualCost',
+    };
+    if (isBP) {
+      body.billing_account_id = _wizard.sp.billing_account_id;
+      body.billing_profile_id = _wizard.sp.billing_profile_id;
+    }
+
+    await api('POST', `/azure-coleta/sps/${_wizard.spId}/coletar-api`, body, 15000);
+
+    // Salvar agendamento se configurado no wizard
+    const schedAtivo = document.getElementById('wizard-sched-ativo')?.checked;
+    if (schedAtivo) {
+      const hora   = parseInt(document.getElementById('wizard-sched-hora')?.value || 3);
+      const diasSel = [...document.querySelectorAll('.wiz-dia:checked')].map(c => c.value);
+      const janela = parseInt(document.getElementById('wizard-sched-janela')?.value || 7);
+      if (diasSel.length) {
+        try {
+          await api('PUT', `/azure-coleta/sps/${_wizard.spId}/agendamento`, {
+            auto_coleta:   true,
+            hora_execucao: hora,
+            dias_semana:   diasSel.join(','),
+          });
+          await api('PUT', `/azure-coleta/sps/${_wizard.spId}`, { granularidade_dias: janela });
+        } catch (_) {}
+      }
+    }
+
+    clearTimeout(safetyTimer);
+    fecharWizardColeta();
+    showView('coleta');
+    switchColetaTab('api');
+    showToast('Coleta iniciada' + (schedAtivo ? ' e agendamento salvo' : '') + ' — acompanhe o monitor abaixo', 'success');
+    setTimeout(() => { loadColetaStatus(); loadColetaHistorico(_coletaTabAtual); }, 600);
+  } catch (e) {
+    clearTimeout(safetyTimer);
+    showToast('Erro: ' + e.message, 'error');
+    _wizardResetBtn();
+  }
+}
+
+async function testarSP(id) {
+  showToast('Testando autenticação...', 'info');
+  try {
+    const r = await api('POST', `/azure-coleta/sps/${id}/testar`);
+    const res = r.results || {};
+    const mgmt = res.management;
+    const stg  = res.storage;
+    const linhas = [];
+    if (mgmt) linhas.push(mgmt.msg);
+    if (stg)  linhas.push(stg.msg);
+    const tipo = mgmt?.ok ? 'success' : 'error';
+    showToast(linhas.join(' | ') || '✔ Credenciais válidas', tipo);
+  } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+}
+
+async function executarStorageAtivo() {
+  try {
+    const storages = await api('GET', '/azure-coleta/storages');
+    const ativo = (storages || []).find(s => s.ativo);
+    if (!ativo) { showToast('Nenhum Storage ativo cadastrado', 'error'); return; }
+    if (!confirm(`Iniciar coleta do Storage "${ativo.nome}" agora?`)) return;
+    suspendInactivityTimer();
+    await api('POST', `/azure-coleta/storages/${ativo.id}/executar`);
+    showToast('Coleta Storage iniciada', 'success');
+    setTimeout(loadColetaStatus, 1000);
+    setTimeout(loadColetaHistorico, 2000);
+  } catch (e) { resumeInactivityTimer(); showToast('Erro: ' + e.message, 'error'); }
+}
+
+// ── Storage CRUD ───────────────────────────────────────────────────────────────
+
+async function loadStorageList() {
+  const tbody = document.getElementById('storage-list-tbody');
+  try {
+    const storages = await api('GET', '/azure-coleta/storages');
+    if (!storages || !storages.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum Storage cadastrado. Clique em "+ Novo Storage".</td></tr>'; return; }
+    tbody.innerHTML = storages.map(s => `<tr>
+      <td style="font-size:12px;font-weight:600;color:var(--text)">${s.nome || '—'}</td>
+      <td style="font-size:12px;color:var(--text-dim)">${s.storage_account || '—'}</td>
+      <td style="font-size:12px;color:var(--text-dim)">${s.storage_container || '—'}</td>
+      <td style="font-size:11px;color:var(--text-muted)">${s.storage_prefix || '—'}</td>
+      <td style="text-align:center">
+        <label class="toggle-switch" style="margin:0"><input type="checkbox" ${s.ativo?'checked':''} onchange="toggleStorageAtivo(${s.id},this.checked)"><span class="toggle-slider"></span></label>
+      </td>
+      <td style="white-space:nowrap;text-align:right">
+        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="testarStorageDireto(${s.id})">Testar</button>
+        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px;border-color:var(--green);color:var(--green)" onclick="executarStorage(${s.id})">▶</button>
+        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="openStorageModal(${s.id})">✏</button>
+        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;border-color:var(--danger);color:var(--danger)" onclick="deleteStorage(${s.id},'${(s.nome||'Storage').replace(/'/g,"\\'")}')">🗑</button>
+      </td>
+    </tr>`).join('');
+  } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Erro: ${e.message}</td></tr>`; }
+}
+
+let _storageCache = [];
+// ── helpers de agendamento ────────────────────────────────────────────────────
+function _computeProximaJS(hora, diasArr) {
+  if (hora == null || !diasArr.length) return null;
+  const now = new Date();
+  for (let offset = 0; offset <= 7; offset++) {
+    const c = new Date(now);
+    c.setDate(now.getDate() + offset);
+    c.setHours(hora, 0, 0, 0);
+    if (diasArr.includes(c.getDay()) && c > now) return c;
+  }
+  return null;
+}
+
+function _proximaLabel(proxima) {
+  if (!proxima) return '';
+  const d = new Date(proxima);
+  const hoje = new Date();
+  const amanha = new Date(hoje); amanha.setDate(hoje.getDate() + 1);
+  const label = d.toDateString() === hoje.toDateString() ? 'Hoje'
+              : d.toDateString() === amanha.toDateString() ? 'Amanhã'
+              : d.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' });
+  return `Próxima: ${label} às ${String(d.getHours()).padStart(2,'0')}:00`;
+}
+
+function _getDiasChecked(cls) {
+  return [...document.querySelectorAll(`.${cls}:checked`)].map(el => parseInt(el.value));
+}
+
+function _setDiasChecked(cls, diasStr) {
+  const dias = diasStr ? diasStr.split(',').map(Number) : [];
+  document.querySelectorAll(`.${cls}`).forEach(el => {
+    el.checked = !diasStr || dias.includes(parseInt(el.value));
+  });
+}
+
+function _onStorageAutoToggle(el) {
+  document.getElementById('storage-sched-body').style.display = el.checked ? '' : 'none';
+  if (el.checked) _updateStorageProxima();
+}
+
+function _updateStorageProxima() {
+  const hora  = parseInt(document.getElementById('storage-hora-exec').value);
+  const dias  = _getDiasChecked('storage-dia');
+  const p     = _computeProximaJS(hora, dias);
+  document.getElementById('storage-proxima-wrap').textContent = _proximaLabel(p);
+}
+
+function _onApiAutoToggle(el) {
+  document.getElementById('api-sched-body').style.display = el.checked ? '' : 'none';
+  if (el.checked) _updateApiProxima();
+}
+
+function _updateApiProxima() {
+  const hora  = parseInt(document.getElementById('api-hora-exec').value);
+  const dias  = _getDiasChecked('api-dia');
+  const p     = _computeProximaJS(hora, dias);
+  document.getElementById('api-proxima-wrap').textContent = _proximaLabel(p);
+}
+
+// ── storage modal ─────────────────────────────────────────────────────────────
+function openStorageModal(id) {
+  document.getElementById('modal-storage-titulo').textContent = id ? 'Editar Storage' : 'Novo Storage Account';
+  document.getElementById('storage-edit-id').value   = id || '';
+  document.getElementById('storage-nome').value      = '';
+  document.getElementById('storage-account').value   = '';
+  document.getElementById('storage-container').value = '';
+  document.getElementById('storage-prefix').value    = '';
+  document.getElementById('storage-ativo').checked   = true;
+  document.getElementById('storage-auto-ativo').checked = false;
+  document.getElementById('storage-sched-body').style.display = 'none';
+  document.getElementById('storage-hora-exec').value = '3';
+  document.getElementById('storage-proxima-wrap').textContent = '';
+  _setDiasChecked('storage-dia', null);
+  document.getElementById('storage-test-result').style.display = 'none';
+
+  // Popular dropdown de SPs
+  api('GET', '/azure-coleta/sps').then(sps => {
+    const sel = document.getElementById('storage-sp-id');
+    sel.innerHTML = '<option value="">— Usar primeira SP ativa (padrão) —</option>';
+    (sps || []).forEach(sp => {
+      const opt = document.createElement('option');
+      opt.value = sp.id;
+      opt.textContent = `${sp.nome} (${sp.client_id || '—'})`;
+      sel.appendChild(opt);
+    });
+    if (id) {
+      api('GET', '/azure-coleta/storages').then(storages => {
+        const s = storages.find(x => x.id === id);
+        if (!s) return;
+        document.getElementById('storage-nome').value      = s.nome || '';
+        document.getElementById('storage-account').value   = s.storage_account || '';
+        document.getElementById('storage-container').value = s.storage_container || '';
+        document.getElementById('storage-prefix').value    = s.storage_prefix || '';
+        document.getElementById('storage-ativo').checked   = s.ativo;
+        sel.value = s.sp_id || '';
+        const temSched = s.hora_execucao != null && s.dias_semana;
+        document.getElementById('storage-auto-ativo').checked = temSched;
+        document.getElementById('storage-sched-body').style.display = temSched ? '' : 'none';
+        if (temSched) {
+          document.getElementById('storage-hora-exec').value = s.hora_execucao;
+          _setDiasChecked('storage-dia', s.dias_semana);
+          document.getElementById('storage-proxima-wrap').textContent = _proximaLabel(s.proxima_coleta);
+        }
+      }).catch(() => {});
+    }
+  }).catch(() => {});
+
+  document.getElementById('modal-storage').classList.add('open');
+}
+
+function closeStorageModal() { document.getElementById('modal-storage').classList.remove('open'); }
+
+async function saveStorage() {
+  const id    = document.getElementById('storage-edit-id').value;
+  const spVal = document.getElementById('storage-sp-id').value;
+  const body  = {
+    nome:              document.getElementById('storage-nome').value.trim(),
+    storage_account:   document.getElementById('storage-account').value.trim(),
+    storage_container: document.getElementById('storage-container').value.trim(),
+    storage_prefix:    document.getElementById('storage-prefix').value.trim(),
+    ativo:             document.getElementById('storage-ativo').checked,
+    sp_id:             spVal ? parseInt(spVal) : null,
+  };
+  if (!body.storage_account || !body.storage_container) { showToast('Preencha Storage Account e Container', 'error'); return; }
+
+  const autoAtivo = document.getElementById('storage-auto-ativo').checked;
+  const schedBody = autoAtivo ? {
+    hora_execucao: parseInt(document.getElementById('storage-hora-exec').value),
+    dias_semana:   _getDiasChecked('storage-dia').join(',') || null
+  } : { hora_execucao: null, dias_semana: null };
+
+  if (autoAtivo && !schedBody.dias_semana) { showToast('Selecione ao menos um dia da semana', 'error'); return; }
+
+  const _diasNm = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const confirmMsg = autoAtivo
+    ? `Confirma o agendamento para "${body.nome || 'Storage'}"?\n\nHorário: ${schedBody.hora_execucao}h\nDias: ${schedBody.dias_semana.split(',').map(d => _diasNm[+d]).join(', ')}`
+    : `Confirma a remoção do agendamento automático de "${body.nome || 'Storage'}"?`;
+  if (!confirm(confirmMsg)) return;
+
+  try {
+    let storageId = id ? parseInt(id) : null;
+    if (id) {
+      await api('PUT', `/azure-coleta/storages/${id}`, body);
+    } else {
+      const r = await api('POST', '/azure-coleta/storages', body);
+      storageId = r && r.id;
+    }
+    if (storageId) {
+      await api('PUT', `/azure-coleta/storages/${storageId}/agendamento`, schedBody);
+    }
+    showToast('Storage salvo', 'success');
+    closeStorageModal();
+    loadStorageList();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function salvarAgendamentoAPI() {
+  const spId = parseInt(document.getElementById('tab-api-sp-select').value);
+  if (!spId) { showToast('Selecione uma Service Principal', 'error'); return; }
+  const autoAtivo = document.getElementById('api-auto-ativo').checked;
+  const body = {
+    auto_coleta:   autoAtivo,
+    hora_execucao: autoAtivo ? parseInt(document.getElementById('api-hora-exec').value) : null,
+    dias_semana:   autoAtivo ? (_getDiasChecked('api-dia').join(',') || null) : null
+  };
+  if (autoAtivo && !body.dias_semana) { showToast('Selecione ao menos um dia da semana', 'error'); return; }
+  // salva granularidade também
+  const gran = parseInt(document.getElementById('api-granularidade').value);
+
+  const _diasNm2    = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const spNome      = document.querySelector('#tab-api-sp-select option:checked')?.textContent || 'SP';
+  const confirmMsg2 = autoAtivo
+    ? `Confirma o agendamento para "${spNome}"?\n\nHorário: ${body.hora_execucao}h\nDias: ${body.dias_semana.split(',').map(d => _diasNm2[+d]).join(', ')}\nJanela: ${gran} dias`
+    : `Confirma a remoção do agendamento automático de "${spNome}"?`;
+  if (!confirm(confirmMsg2)) return;
+
+  try {
+    await api('PUT', `/azure-coleta/sps/${spId}/agendamento`, body);
+    await api('PUT', `/azure-coleta/sps/${spId}`, { granularidade_dias: gran });
+    showToast(autoAtivo ? 'Agendamento salvo' : 'Agendamento removido', 'success');
+    _updateApiProxima();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function deleteStorage(id, nome) {
+  if (!confirm(`Excluir o Storage "${nome}"?`)) return;
+  try { await api('DELETE', `/azure-coleta/storages/${id}`); showToast('Storage excluído', 'success'); loadStorageList(); }
+  catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function toggleStorageAtivo(id, ativo) {
+  try { await api('PUT', `/azure-coleta/storages/${id}`, { ativo }); loadStorageList(); }
+  catch (e) { showToast('Erro: ' + e.message, 'error'); loadStorageList(); }
+}
+
+async function testarStorageDireto(id) {
+  showToast('Testando conexão com Storage...', 'info');
+  try {
+    const r = await api('POST', `/azure-coleta/storages/${id}/testar`);
+    showToast(`✔ ${r.total} arquivo(s) · ${r.totalSizeMB} MB`, 'success');
+  } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+}
+
+async function testarStorageModal() {
+  const res = document.getElementById('storage-test-result');
+  res.style.display = '';
+  res.style.color = 'var(--text-dim)';
+  res.textContent = 'Testando...';
+  const id = document.getElementById('storage-edit-id').value;
+  if (!id) { res.style.color = 'var(--text-muted)'; res.textContent = 'Salve primeiro para testar.'; return; }
+  try {
+    const r = await api('POST', `/azure-coleta/storages/${id}/testar`);
+    res.style.color = 'var(--green)';
+    res.textContent = `✔ OK · ${r.total} arquivo(s) CSV/Parquet · ${r.totalSizeMB} MB`;
+  } catch (e) { res.style.color = 'var(--danger)'; res.textContent = 'Falha: ' + e.message; }
+}
+
+async function executarStorage(id) {
+  if (!confirm('Iniciar coleta Storage agora?')) return;
+  try {
+    suspendInactivityTimer();
+    await api('POST', `/azure-coleta/storages/${id}/executar`);
+    showToast('Coleta Storage iniciada', 'success');
+    setTimeout(loadColetaStatus, 1000);
+    setTimeout(loadColetaHistorico, 2000);
+  } catch (e) { resumeInactivityTimer(); showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function limparHistoricoColeta() {
+  if (!confirm('Limpar todo o histórico de execuções? Essa ação não pode ser desfeita.')) return;
+  try {
+    await api('DELETE', '/azure-coleta/historico');
+    showToast('Histórico limpo', 'success');
+    loadColetaHistorico(_coletaTabAtual);
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+let _historicoCache = [];
+let _coletaTabAtual = 'api';
+
+async function loadColetaHistorico(tipo) {
+  const tab   = tipo || _coletaTabAtual || 'api';
+  const tbody = document.getElementById('coleta-hist-tbody');
+  const thead = document.getElementById('coleta-hist-thead');
+
+  if (tab === 'manual') {
+    // Histórico de imports manuais (fonte: azure_costs por arquivo)
+    if (thead) thead.innerHTML = '<tr><th>Importado em</th><th>Arquivo</th><th style="text-align:right">Linhas</th><th>Período</th><th style="text-align:right">Total Cobrado</th><th>Moeda</th></tr>';
+    try {
+      const rows = await api('GET', '/azure-costs/imports');
+      _historicoCache = [];
+      if (!rows || !rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum import manual registrado</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(r => {
+        const imp  = r.importado_em ? new Date(r.importado_em).toLocaleString('pt-BR') : '—';
+        const arq  = (r.arquivo_origem || '—').split('/').pop().split('\\').pop();
+        const lin  = Number(r.linhas || 0).toLocaleString('pt-BR');
+        const pIni = r.periodo_inicio ? new Date(r.periodo_inicio).toLocaleDateString('pt-BR') : '—';
+        const pFim = r.periodo_fim    ? new Date(r.periodo_fim).toLocaleDateString('pt-BR')    : '—';
+        const tot  = r.total_billing  != null ? Number(r.total_billing).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '—';
+        return `<tr>
+          <td style="font-size:11px;white-space:nowrap">${imp}</td>
+          <td style="font-size:11px;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${arq}">${arq}</td>
+          <td style="text-align:right;font-size:12px;color:var(--green)">${lin}</td>
+          <td style="font-size:11px;color:var(--text-dim)">${pIni} → ${pFim}</td>
+          <td style="text-align:right;font-size:12px;color:var(--accent)">${tot}</td>
+          <td style="font-size:11px;color:var(--text-muted)">${r.moeda || '—'}</td>
+        </tr>`;
+      }).join('');
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Erro ao carregar histórico</td></tr>`;
+    }
+    return;
+  }
+
+  // API ou Storage
+  if (thead) thead.innerHTML = '<tr><th>Início</th><th>Status</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>';
+  try {
+    const rows = await api('GET', `/azure-coleta/historico?tipo=${tab}`);
+    _historicoCache = rows || [];
     if (!rows || !rows.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Nenhuma execução registrada</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Nenhuma execução registrada</td></tr>';
       return;
     }
     const statusColors = {
-      concluido: { bg: 'rgba(34,197,94,.12)', color: 'var(--green)', label: 'Concluído' },
-      executando: { bg: 'rgba(255,140,66,.12)', color: 'var(--orange)', label: 'Executando' },
-      erro: { bg: 'rgba(255,77,106,.12)', color: 'var(--danger)', label: 'Erro' }
+      concluido:  { bg: 'rgba(34,197,94,.12)',   color: 'var(--green)',  label: 'Concluído' },
+      cancelado:  { bg: 'rgba(255,140,66,.12)',   color: 'var(--orange)', label: 'Cancelado' },
+      executando: { bg: 'rgba(255,140,66,.12)',   color: 'var(--orange)', label: 'Executando' },
+      erro:       { bg: 'rgba(255,77,106,.12)',   color: 'var(--danger)', label: 'Erro' }
     };
-    tbody.innerHTML = rows.map(r => {
+    tbody.innerHTML = rows.map((r, idx) => {
       const sc = statusColors[r.status] || { bg: 'rgba(147,51,234,.12)', color: 'var(--accent)', label: r.status };
       const inicio = r.iniciado_em ? new Date(r.iniciado_em).toLocaleString('pt-BR') : '—';
       let dur = '—';
@@ -2693,25 +4362,82 @@ async function loadColetaHistorico() {
         const s = Math.round(ms / 1000);
         dur = s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
       }
-      const tipo = (r.detalhes && r.detalhes.modo) ? (r.detalhes.modo === 'manual' ? 'Manual' : 'Automático') : 'Automático';
-      const ins = (r.linhas_inseridas ?? 0).toLocaleString('pt-BR');
-      const upd = (r.linhas_atualizadas ?? 0).toLocaleString('pt-BR');
-      const err = (r.linhas_erro ?? 0).toLocaleString('pt-BR');
-      const subs = `${r.subs_ok ?? 0}/${r.subs_total ?? 0}`;
-      const msg = r.mensagem || '—';
+      const ins  = (r.linhas_inseridas    ?? 0).toLocaleString('pt-BR');
+      const upd  = (r.linhas_atualizadas  ?? 0).toLocaleString('pt-BR');
+      const err  = (r.linhas_erro         ?? 0).toLocaleString('pt-BR');
+      const msg  = r.mensagem || '—';
+      const temLog = r.detalhes && (typeof r.detalhes === 'object' ? r.detalhes.log : false);
+      const logBtn = temLog
+        ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--accent);color:var(--accent)" onclick="verDetalhesColeta(${idx})" title="Ver log passo a passo">📋 Log</button>`
+        : `<span style="font-size:10px;color:var(--text-muted)">—</span>`;
       return `<tr>
         <td style="font-size:11px;white-space:nowrap">${inicio}</td>
-        <td style="font-size:11px">${tipo}</td>
         <td><span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:${sc.bg};color:${sc.color}">${sc.label}</span></td>
-        <td style="text-align:right;font-size:12px">${subs}</td>
         <td style="text-align:right;font-size:12px;color:var(--green)">${ins}</td>
         <td style="text-align:right;font-size:12px;color:var(--accent)">${upd}</td>
         <td style="text-align:right;font-size:12px;color:${r.linhas_erro > 0 ? 'var(--danger)' : 'var(--text-muted)'}">${err}</td>
         <td style="font-size:11px">${dur}</td>
         <td style="font-size:10px;color:var(--text-dim);max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${msg.replace(/"/g,'&quot;')}">${msg}</td>
+        <td style="text-align:center">${logBtn}</td>
       </tr>`;
     }).join('');
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty-state">Erro ao carregar histórico</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="empty-state">Erro ao carregar histórico</td></tr>`;
   }
 }
+
+function verDetalhesColeta(idx) {
+  const r = _historicoCache[idx];
+  if (!r) return;
+  const det = typeof r.detalhes === 'object' ? r.detalhes : (typeof r.detalhes === 'string' ? JSON.parse(r.detalhes) : {});
+  const log = det.log || [];
+  const modal = document.getElementById('modal-coleta-det');
+  const sc = { concluido: { color: 'var(--green)', label: 'Concluído' }, erro: { color: 'var(--danger)', label: 'Erro' }, cancelado: { color: 'var(--orange)', label: 'Cancelado' }, executando: { color: 'var(--orange)', label: 'Executando' } };
+  const st = sc[r.status] || { color: 'var(--accent)', label: r.status };
+  const inicio = r.iniciado_em ? new Date(r.iniciado_em).toLocaleString('pt-BR') : '—';
+  let dur = '—';
+  if (r.iniciado_em && r.concluido_em) {
+    const ms = new Date(r.concluido_em) - new Date(r.iniciado_em);
+    const s = Math.round(ms / 1000);
+    dur = s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
+  }
+  const tipo = det.tipo === 'api' ? 'API Oficial' : det.tipo === 'storage' ? 'Via Storage' : '—';
+  document.getElementById('coleta-det-meta').innerHTML = `
+    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:14px;padding:12px 14px;background:rgba(147,51,234,.08);border-radius:10px;border:1px solid var(--border)">
+      <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Início</div><div style="font-size:12px">${inicio}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Duração</div><div style="font-size:12px">${dur}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Status</div><div style="font-size:12px;font-weight:600;color:${st.color}">${st.label}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Tipo</div><div style="font-size:12px">${tipo}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Inseridos</div><div style="font-size:12px;color:var(--green);font-weight:600">${(r.linhas_inseridas??0).toLocaleString('pt-BR')}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Atualizados</div><div style="font-size:12px;color:var(--accent);font-weight:600">${(r.linhas_atualizadas??0).toLocaleString('pt-BR')}</div></div>
+      ${r.linhas_erro > 0 ? `<div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Erros</div><div style="font-size:12px;color:var(--danger);font-weight:600">${r.linhas_erro.toLocaleString('pt-BR')}</div></div>` : ''}
+    </div>
+    ${r.mensagem ? `<div style="font-size:11px;color:var(--text-dim);margin-bottom:12px;padding:8px 12px;background:rgba(255,255,255,.03);border-radius:8px;border:1px solid var(--border)">${r.mensagem}</div>` : ''}`;
+  if (!log.length) {
+    document.getElementById('coleta-det-log').innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:12px">Nenhum log disponível para esta execução.<br><span style="font-size:10px">Logs são salvos a partir desta versão.</span></div>';
+  } else {
+    const _stepIcon = msg => {
+      if (msg.startsWith('ERRO') || msg.startsWith('Erro') || msg.includes('falhou')) return { icon: '✗', color: 'var(--danger)' };
+      if (msg.startsWith('Concluí') || msg.includes('inserido') || msg.includes('✅') || msg.startsWith('OK')) return { icon: '✓', color: 'var(--green)' };
+      if (msg.includes('Baixando') || msg.includes('Lendo') || msg.includes('Processando') || msg.includes('Aguard')) return { icon: '⟳', color: 'var(--accent)' };
+      if (msg.includes('⚠') || msg.includes('cancelad')) return { icon: '!', color: 'var(--orange)' };
+      return { icon: '›', color: 'var(--text-muted)' };
+    };
+    document.getElementById('coleta-det-log').innerHTML = `
+      <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;letter-spacing:.05em;text-transform:uppercase">${log.length} entradas de log</div>
+      <div style="display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;padding-right:4px">
+        ${log.map(l => {
+          const si = _stepIcon(l.msg);
+          return `<div style="display:flex;gap:8px;align-items:flex-start;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,.025);font-size:11px">
+            <span style="color:var(--text-muted);font-family:monospace;white-space:nowrap;padding-top:1px;min-width:52px">${l.ts}</span>
+            <span style="color:${si.color};font-weight:700;min-width:10px;padding-top:1px">${si.icon}</span>
+            <span style="color:var(--text);line-height:1.4;word-break:break-word">${l.msg.replace(/</g,'&lt;')}</span>
+          </div>`;
+        }).join('')}
+      </div>`;
+  }
+  modal.classList.add('open');
+}
+
+function fecharDetalhesColeta() { document.getElementById('modal-coleta-det').classList.remove('open'); }
+

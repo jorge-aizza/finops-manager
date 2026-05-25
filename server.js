@@ -132,7 +132,23 @@ const app = express();
 // ─── SECURITY HEADERS ────────────────────────────────────────────────────────
 try {
   const helmet = require('helmet');
-  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc:     ["'self'"],
+        scriptSrc:      ["'self'", "'unsafe-inline'"],   // unsafe-inline necessário para onclick= no SPA
+        styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
+        imgSrc:         ["'self'", 'data:'],
+        connectSrc:     ["'self'", 'https://prices.azure.com'],  // Price List API
+        frameSrc:       ["'none'"],
+        objectSrc:      ["'none'"],
+        upgradeInsecureRequests: [],
+      }
+    },
+    hsts: { maxAge: 31536000, includeSubDomains: true },  // 1 ano
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  }));
 } catch { console.warn('  helmet nao instalado — execute: npm install helmet'); }
 
 // ─── RATE LIMITING ───────────────────────────────────────────────────────────
@@ -150,9 +166,24 @@ app.use(cors({
   origin: ALLOWED_ORIGIN || true,  // Em produção, defina ALLOWED_ORIGIN=https://seu-dominio.com
   credentials: true
 }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(express.static(__dirname));
+app.use(express.json({ limit: '10mb' }));           // 50 MB era excessivo para JSON; uploads usam multer
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// ─── STATIC FILES — apenas arquivos públicos explícitos ──────────────────────
+// IMPORTANTE: NÃO usar express.static(__dirname) — exporia server.js, .env.key, etc.
+const _PUBLIC_FILES = {
+  '/app.js':          { file: 'app.js',          mime: 'application/javascript' },
+  '/calculadora.js':  { file: 'calculadora.js',  mime: 'application/javascript' },
+  '/styles.css':      { file: 'styles.css',       mime: 'text/css' },
+  '/favicon.svg':     { file: 'favicon.svg',      mime: 'image/svg+xml' },
+};
+app.get(Object.keys(_PUBLIC_FILES), (req, res) => {
+  const entry = _PUBLIC_FILES[req.path];
+  if (!entry) return res.status(404).end();
+  res.setHeader('Content-Type', entry.mime);
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(__dirname, entry.file));
+});
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 // ─── DB ──────────────────────────────────────────────────────────────────────
@@ -188,7 +219,17 @@ function getDbConfig() {
 
 function createPool(cfg) {
   if (pool) { try { pool.end(); } catch {} }
-  pool = new Pool({ ...cfg, connectionTimeoutMillis: 10000 });
+  pool = new Pool({
+    ...cfg,
+    max:                    10,     // máximo de conexões simultâneas
+    min:                    2,      // mínimo mantido aquecido
+    connectionTimeoutMillis: 10000, // timeout ao adquirir conexão
+    idleTimeoutMillis:      30000,  // fecha conexões ociosas após 30s
+    allowExitOnIdle:        false,  // pool não impede shutdown manual
+  });
+  pool.on('error', (err) => {
+    console.error('[Pool] Erro inesperado em cliente ocioso:', err.message);
+  });
   return pool;
 }
 
@@ -1583,6 +1624,8 @@ async function ensureAzureCostsTable() {
         benefit_id                       VARCHAR(200),
         benefit_name                     VARCHAR(500),
         provider                         VARCHAR(200),
+        resource_name                    VARCHAR(500),
+        resource_type                    VARCHAR(200),
         importado_em                     TIMESTAMP DEFAULT NOW(),
         arquivo_origem                   VARCHAR(500)
       );
@@ -1597,6 +1640,17 @@ async function ensureAzureCostsTable() {
       if (chk.rows[0]?.data_type === 'uuid') {
         console.log(`[Migration] Convertendo coluna ${col}: UUID → VARCHAR(200)`);
         await c.query(`ALTER TABLE azure_costs ALTER COLUMN ${col} TYPE VARCHAR(200) USING ${col}::text`);
+      }
+    }
+
+    // 3a) Adicionar colunas resource_name e resource_type se não existirem
+    for (const [col, def] of [['resource_name','VARCHAR(500)'],['resource_type','VARCHAR(200)']]) {
+      const chkCol = await c.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_name='azure_costs' AND column_name=$1`, [col]
+      );
+      if (chkCol.rowCount === 0) {
+        await c.query(`ALTER TABLE azure_costs ADD COLUMN ${col} ${def}`);
+        console.log(`[Migration] Coluna ${col} adicionada à azure_costs`);
       }
     }
 
@@ -1623,14 +1677,37 @@ async function ensureAzureCostsTable() {
       CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_upper ON azure_costs(subscription_id, UPPER(resource_group_name));
     `);
 
-    // 5) Índice único funcional para deduplicação — COALESCE trata NULLs
-    //    (NULL ≠ NULL em constraints normais — sem COALESCE o ON CONFLICT nunca dispara)
+    // 5) Índice único funcional para deduplicação — COALESCE em TODAS as colunas nullable
+    //    Inclui subscription_id e resource_id (antes sem COALESCE — linhas NULL se duplicavam)
     try {
+      // Migração: recriar índice se definição antiga não cobria subscription_id/resource_id
+      const oldIdx = await c.query(`
+        SELECT indexdef FROM pg_indexes
+        WHERE tablename = 'azure_costs' AND indexname = 'idx_azure_costs_dedup'
+      `);
+      const precisaRecriar = oldIdx.rowCount > 0 &&
+        !oldIdx.rows[0].indexdef.includes('COALESCE(subscription_id');
+      if (precisaRecriar) {
+        console.log('[Azure] Migrando índice de deduplicação para COALESCE completo...');
+        // Remover duplicatas com a nova chave antes de criar o índice
+        await c.query(`
+          DELETE FROM azure_costs a
+          USING azure_costs b
+          WHERE a.id > b.id
+            AND COALESCE(a.subscription_id,'') = COALESCE(b.subscription_id,'')
+            AND COALESCE(a.resource_id,'')     = COALESCE(b.resource_id,'')
+            AND a.cost_date                    = b.cost_date
+            AND COALESCE(a.meter_id,'')        = COALESCE(b.meter_id,'')
+            AND COALESCE(a.charge_type,'')     = COALESCE(b.charge_type,'')
+            AND COALESCE(a.quantity,0)         = COALESCE(b.quantity,0)
+        `);
+        await c.query(`DROP INDEX IF EXISTS idx_azure_costs_dedup`);
+      }
       await c.query(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_costs_dedup
         ON azure_costs(
-          subscription_id,
-          resource_id,
+          COALESCE(subscription_id, ''),
+          COALESCE(resource_id, ''),
           cost_date,
           COALESCE(meter_id, ''),
           COALESCE(charge_type, ''),
@@ -1639,7 +1716,6 @@ async function ensureAzureCostsTable() {
       `);
       console.log('[Azure] Índice de deduplicação criado/verificado ✅');
     } catch (errIdx) {
-      // Falha se ainda houver duplicatas no banco — usuário precisa rodar o script de limpeza
       console.warn('[Azure] ⚠ Índice de deduplicação não criado (provável duplicata existente):', errIdx.message);
       console.warn('[Azure] Execute a query de limpeza de duplicatas e reinicie o servidor.');
     }
@@ -1711,6 +1787,216 @@ async function _refreshAzureCache() {
   } finally {
     c.release();
     _cacheRefreshing = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AZURE RETAIL PRICE LIST — cache local da API pública de preços
+// https://prices.azure.com/api/retail/prices
+// ═══════════════════════════════════════════════════════════════════════════════
+let _priceListReady = false;
+
+async function ensurePriceListTable() {
+  if (_priceListReady) return;
+  const c = await pool.connect();
+  try {
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS azure_price_list (
+        meter_id         VARCHAR(200)  NOT NULL,
+        currency_code    VARCHAR(10)   NOT NULL DEFAULT 'BRL',
+        arm_region_name  VARCHAR(100)  NOT NULL DEFAULT 'brazilsouth',
+        retail_price     NUMERIC(20,10),
+        unit_price       NUMERIC(20,10),
+        unit_of_measure  VARCHAR(100),
+        product_name     VARCHAR(500),
+        sku_name         VARCHAR(500),
+        service_name     VARCHAR(200),
+        service_family   VARCHAR(200),
+        type             VARCHAR(50),
+        reservation_term VARCHAR(20) NOT NULL DEFAULT '',
+        effective_start  DATE,
+        updated_at       TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (meter_id, currency_code, arm_region_name, type, reservation_term)
+      );
+      CREATE INDEX IF NOT EXISTS idx_pricelist_meter        ON azure_price_list (meter_id);
+      CREATE INDEX IF NOT EXISTS idx_pricelist_meter_lower  ON azure_price_list (LOWER(meter_id));
+      CREATE INDEX IF NOT EXISTS idx_pricelist_service      ON azure_price_list (service_name);
+      CREATE INDEX IF NOT EXISTS idx_pricelist_region       ON azure_price_list (arm_region_name);
+      CREATE INDEX IF NOT EXISTS idx_pricelist_type         ON azure_price_list (type);
+      CREATE TABLE IF NOT EXISTS azure_price_list_meta (
+        key        VARCHAR(100) PRIMARY KEY,
+        value      TEXT,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+    // Migração: garante índices funcionais em instâncias já existentes
+    await c.query(`
+      CREATE INDEX IF NOT EXISTS idx_pricelist_meter_lower ON azure_price_list (LOWER(meter_id));
+      CREATE INDEX IF NOT EXISTS idx_pricelist_type        ON azure_price_list (type);
+    `).catch(() => {}); // silencia se já existir ou se a tabela ainda não tiver dados
+    _priceListReady = true;
+    console.log('[PriceList] Tabela pronta ✅');
+  } catch (err) {
+    console.warn('[PriceList] Erro ao criar tabela:', err.message);
+  } finally {
+    c.release();
+  }
+}
+
+// Busca uma URL e retorna JSON — usado para paginar a Retail Prices API
+function _fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? require('https') : require('http');
+    const req = mod.get(url, { headers: { Accept: 'application/json' } }, res => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(new Error('JSON inválido na Retail Prices API: ' + e.message)); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout na Retail Prices API')); });
+  });
+}
+
+let _syncingPriceList = false;
+// Progresso em memória — exposto pelo /api/price-list/status em tempo real
+let _syncProgress = { pages: 0, total: 0, started: null, error: null, finished: null };
+
+// Grava resultado da sync no meta (usa conexão própria, fora de qualquer transação)
+async function _gravaMeta(key, value) {
+  try {
+    await pool.query(`
+      INSERT INTO azure_price_list_meta (key, value, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [key, typeof value === 'string' ? value : JSON.stringify(value)]);
+  } catch (e) {
+    console.warn('[PriceList] Aviso: não foi possível gravar meta:', e.message);
+  }
+}
+
+// Busca uma página da Retail Prices API e retorna { items, nextLink, currency_used }
+// Fallback automático: se a moeda solicitada retorna 0 itens, tenta USD
+async function _fetchPriceListPage(urlOrFilter) {
+  const data = await _fetchJson(urlOrFilter);
+  return { items: data.Items || [], nextLink: data.NextPageLink || null };
+}
+
+function _buildPriceListUrl(currency) {
+  // Nota: armRegionName NÃO é filtrado aqui — a Azure Retail Prices API retorna
+  // 0 itens para 'brazilsouth' quando esse filtro é aplicado.
+  // Os preços são globais (em USD); o meter_id é único mundialmente, portanto
+  // o JOIN com azure_costs funciona sem filtrar por região na price list.
+  const f = encodeURIComponent(`currencyCode eq '${currency}'`);
+  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}`;
+}
+
+async function _syncPriceList(requestedCurrency = 'USD') {
+  if (_syncingPriceList) return { ok: false, msg: 'Sincronização já em andamento' };
+  _syncingPriceList = true;
+  _syncProgress = { pages: 0, total: 0, started: new Date().toISOString(), error: null, finished: null };
+
+  let total = 0, pages = 0;
+  // arm_region_name armazenado como 'global' pois não filtramos por região —
+  // a Azure Retail Prices API retorna 0 itens para qualquer armRegionName específico.
+  const ARM_REGION = 'global';
+  // Chave de meta fora do try para ficar acessível no catch
+  const resultKey = `last_result_${requestedCurrency}_${ARM_REGION}`;
+
+  try {
+    await ensurePriceListTable();
+
+    // A Retail Prices API só funciona de forma confiável com USD.
+    // BRL retorna Items vazio — usamos USD diretamente e convertemos via taxa_cambio no SQL.
+    const currency = 'USD';
+    console.log(`[PriceList] Iniciando sync — currency: ${currency}, sem filtro de região`);
+
+    const probe = await _fetchPriceListPage(_buildPriceListUrl(currency));
+    console.log(`[PriceList] Primeira página → ${probe.items.length} item(s)`);
+
+    if (probe.items.length === 0) {
+      throw new Error('Nenhum dado retornado pela Azure Retail Prices API. Verifique conectividade com prices.azure.com');
+    }
+
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      // Limpa registros anteriores para essa moeda
+      await c.query(`DELETE FROM azure_price_list WHERE currency_code = $1`, [currency]);
+
+      let currentItems = probe.items;
+      let nextLink     = probe.nextLink;
+
+      while (true) {
+        pages++;
+
+        for (const item of currentItems) {
+          if (!item.meterId) continue;
+          await c.query(`
+            INSERT INTO azure_price_list
+              (meter_id, currency_code, arm_region_name, retail_price, unit_price,
+               unit_of_measure, product_name, sku_name, service_name, service_family,
+               type, reservation_term, effective_start, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
+            ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
+            DO UPDATE SET
+              retail_price    = EXCLUDED.retail_price,
+              unit_price      = EXCLUDED.unit_price,
+              product_name    = EXCLUDED.product_name,
+              sku_name        = EXCLUDED.sku_name,
+              effective_start = EXCLUDED.effective_start,
+              updated_at      = NOW()
+          `, [
+            item.meterId,
+            currency, ARM_REGION,
+            item.retailPrice   ?? 0,
+            item.unitPrice     ?? 0,
+            item.unitOfMeasure ?? null,
+            item.productName   ?? null,
+            item.skuName       ?? null,
+            item.serviceName   ?? null,
+            item.serviceFamily ?? null,
+            item.type          ?? 'Consumption',
+            item.reservationTerm ?? '',
+            item.effectiveStartDate ? item.effectiveStartDate.slice(0, 10) : null
+          ]);
+          total++;
+        }
+
+        _syncProgress.pages = pages;
+        _syncProgress.total = total;
+        if (pages % 50 === 0)
+          console.log(`[PriceList] Página ${pages} — ${total} registros...`);
+
+        if (!nextLink) break;
+        const next = await _fetchPriceListPage(nextLink);
+        currentItems = next.items;
+        nextLink     = next.nextLink;
+      }
+
+      await c.query('COMMIT');
+      _syncProgress.finished = new Date().toISOString();
+      console.log(`[PriceList] ✅ Sync concluído: ${total} registros em ${pages} páginas`);
+
+      await _gravaMeta(resultKey, { ok: true, total, pages, currency, region: ARM_REGION, ts: _syncProgress.finished });
+      return { ok: true, total, pages, currency, region: ARM_REGION };
+
+    } catch (err) {
+      await c.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
+  } catch (err) {
+    _syncProgress.error    = err.message;
+    _syncProgress.finished = new Date().toISOString();
+    console.error(`[PriceList] ❌ Sync falhou: ${err.message}`);
+    await _gravaMeta(resultKey, { ok: false, error: err.message, total, pages, ts: _syncProgress.finished });
+    throw err;
+  } finally {
+    _syncingPriceList = false;
   }
 }
 
@@ -1790,11 +2076,18 @@ function _toDate(v) {
     const s = v.trim();
     if (!s) return null;
     try {
-      // DD/MM/YYYY — formato padrão do Azure Cost Management Brasil/Europa
-      // Deve ser testado ANTES de new Date() porque JS interpreta como MM/DD (US)
-      const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (dmy) {
-        const iso = `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+      // M/D/YYYY ou MM/DD/YYYY (Azure portal — US) ou DD/MM/YYYY (europeu)
+      // Auto-detect: se o 2º segmento > 12 ele é o dia → MM/DD/YYYY (Azure padrão)
+      //              se o 1º segmento > 12 ele é o dia → DD/MM/YYYY (europeu)
+      //              ambos ≤ 12 (ambíguo) → padrão Azure MM/DD/YYYY
+      const slash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (slash) {
+        const a = parseInt(slash[1]), b = parseInt(slash[2]);
+        let month, day;
+        if (b > 12) { month = slash[1]; day = slash[2]; }       // MM/DD
+        else if (a > 12) { day = slash[1]; month = slash[2]; }  // DD/MM
+        else { month = slash[1]; day = slash[2]; }               // ambíguo → MM/DD (Azure)
+        const iso = `${slash[3]}-${month.padStart(2,'0')}-${day.padStart(2,'0')}`;
         const d = new Date(iso);
         return isNaN(d.getTime()) ? null : iso;
       }
@@ -1888,56 +2181,58 @@ function _mapRow(row, nomeArquivo) {
     billing_period_start_date:       _toDate(row.billingPeriodStartDate),
     service_period_end_date:         _toDate(row.servicePeriodEndDate),
     service_period_start_date:       _toDate(row.servicePeriodStartDate),
-    cost_date:                       _toDate(row.date || row.Date),
-    service_family:                  _toStr(row.serviceFamily),
-    product_order_id:                _toStr(row.productOrderId),
-    product_order_name:              _toStr(row.productOrderName),
-    consumed_service:                _toStr(row.consumedService),
-    meter_id:                        _toStr(row.meterId),
-    meter_name:                      _toStr(row.meterName),
-    meter_category:                  _toStr(row.meterCategory),
-    meter_sub_category:              _toStr(row.meterSubCategory),
-    meter_region:                    _toStr(row.meterRegion),
-    product_id:                      _toStr(row.ProductId),
-    product_name:                    _toStr(row.ProductName),
-    subscription_id:                 _toStr(row.SubscriptionId),
-    subscription_name:               _toStr(row.subscriptionName),
-    publisher_type:                  _toStr(row.publisherType),
-    publisher_id:                    _toStr(row.publisherId),
-    publisher_name:                  _toStr(row.publisherName),
-    resource_group_name:             _toStr(row.resourceGroupName),
-    resource_id:                     row.ResourceId ? String(row.ResourceId).slice(0,2000) : null,
-    resource_location:               _toStr(row.resourceLocation),
-    location:                        _toStr(row.location),
-    effective_price:                 _toNum(row.effectivePrice),
-    quantity:                        _toNum(row.quantity),
-    unit_of_measure:                 _toStr(row.unitOfMeasure),
-    charge_type:                     _toStr(row.chargeType),
-    billing_currency:                _toStr(row.billingCurrency),
-    pricing_currency:                _toStr(row.pricingCurrency),
-    cost_in_billing_currency:        _toNum(row.costInBillingCurrency),
-    cost_in_pricing_currency:        _toNum(row.costInPricingCurrency),
-    cost_in_usd:                     _toNum(row.costInUsd),
-    payg_cost_in_billing_currency:   _toNum(row.paygCostInBillingCurrency),
-    payg_cost_in_usd:                _toNum(row.paygCostInUsd),
-    exchange_rate_pricing_to_billing:_toNum(row.exchangeRatePricingToBilling),
+    cost_date:                       _toDate(row.date || row.Date || row.usageDate || row.UsageDate || row.serviceDate || row.ServiceDate),
+    service_family:                  _toStr(row.serviceFamily      || row.ServiceFamily),
+    product_order_id:                _toStr(row.productOrderId     || row.ProductOrderId),
+    product_order_name:              _toStr(row.productOrderName   || row.ProductOrderName),
+    consumed_service:                _toStr(row.consumedService    || row.ConsumedService),
+    meter_id:                        _toStr(row.meterId            || row.MeterId),
+    meter_name:                      _toStr(row.meterName          || row.MeterName),
+    meter_category:                  _toStr(row.meterCategory      || row.MeterCategory),
+    meter_sub_category:              _toStr(row.meterSubCategory   || row.MeterSubCategory),
+    meter_region:                    _toStr(row.meterRegion        || row.MeterRegion),
+    product_id:                      _toStr(row.productId          || row.ProductId),
+    product_name:                    _toStr(row.productName        || row.ProductName),
+    subscription_id:                 _toStr(row.subscriptionId     || row.SubscriptionId),
+    subscription_name:               _toStr(row.subscriptionName   || row.SubscriptionName),
+    publisher_type:                  _toStr(row.publisherType      || row.PublisherType),
+    publisher_id:                    _toStr(row.publisherId        || row.PublisherId),
+    publisher_name:                  _toStr(row.publisherName      || row.PublisherName),
+    resource_group_name:             _toStr(row.resourceGroupName  || row.ResourceGroupName || row.resourceGroup || row.ResourceGroup),
+    resource_id:                     (() => { const v = row.resourceId || row.ResourceId || row.instanceId || row.InstanceId; return v ? String(v).slice(0,2000) : null; })(),
+    resource_name:                   _toStr(row.resourceName       || row.ResourceName),
+    resource_type:                   _toStr(row.resourceType       || row.ResourceType),
+    resource_location:               _toStr(row.resourceLocation   || row.ResourceLocation),
+    location:                        _toStr(row.location           || row.Location),
+    effective_price:                 _toNum(row.effectivePrice      ?? row.EffectivePrice),
+    quantity:                        _toNum(row.quantity            ?? row.Quantity),
+    unit_of_measure:                 _toStr(row.unitOfMeasure      || row.UnitOfMeasure),
+    charge_type:                     _toStr(row.chargeType         || row.ChargeType),
+    billing_currency:                _toStr(row.billingCurrency    || row.BillingCurrency || row.currency || row.Currency),
+    pricing_currency:                _toStr(row.pricingCurrency    || row.PricingCurrency),
+    cost_in_billing_currency:        _toNum(row.costInBillingCurrency ?? row.CostInBillingCurrency ?? row.extendedCost ?? row.ExtendedCost ?? row.preTaxCost ?? row.PreTaxCost ?? row.cost ?? row.Cost),
+    cost_in_pricing_currency:        _toNum(row.costInPricingCurrency ?? row.CostInPricingCurrency),
+    cost_in_usd:                     _toNum(row.costInUsd          ?? row.CostInUsd),
+    payg_cost_in_billing_currency:   _toNum(row.paygCostInBillingCurrency ?? row.PaygCostInBillingCurrency),
+    payg_cost_in_usd:                _toNum(row.paygCostInUsd      ?? row.PaygCostInUsd),
+    exchange_rate_pricing_to_billing:_toNum(row.exchangeRatePricingToBilling ?? row.ExchangeRatePricingToBilling),
     exchange_rate_date:              _toDate(row.exchangeRateDate),
     is_azure_credit_eligible:        _toBool(row.isAzureCreditEligible),
     service_info1:                   _toStr(row.serviceInfo1),
     service_info2:                   _toStr(row.serviceInfo2),
     additional_info:                 _toJson(row.additionalInfo),
     tags:                            _toJson(row.tags),
-    payg_price:                      _toNum(row.PayGPrice),
-    frequency:                       _toStr(row.frequency),
-    term:                            _toStr(row.term),
-    reservation_id:                  _toStr(row.reservationId),
-    reservation_name:                _toStr(row.reservationName),
-    pricing_model:                   _toStr(row.pricingModel),
-    unit_price:                      _toNum(row.unitPrice),
-    cost_allocation_rule_name:       _toStr(row.costAllocationRuleName),
-    benefit_id:                      _toStr(row.benefitId),
-    benefit_name:                    _toStr(row.benefitName),
-    provider:                        _toStr(row.provider),
+    unit_price:                      _toNum(row.unitPrice           ?? row.UnitPrice),
+    payg_price:                      _toNum(row.PayGPrice           ?? row.paygPrice          ?? row.payGPrice),
+    frequency:                       _toStr(row.frequency          || row.Frequency),
+    term:                            _toStr(row.term               || row.Term),
+    reservation_id:                  _toStr(row.reservationId      || row.ReservationId),
+    reservation_name:                _toStr(row.reservationName    || row.ReservationName),
+    pricing_model:                   _toStr(row.pricingModel       || row.PricingModel),
+    cost_allocation_rule_name:       _toStr(row.costAllocationRuleName || row.CostAllocationRuleName),
+    benefit_id:                      _toStr(row.benefitId          || row.BenefitId),
+    benefit_name:                    _toStr(row.benefitName        || row.BenefitName),
+    provider:                        _toStr(row.provider           || row.Provider),
     arquivo_origem:                  nomeArquivo,
   };
 }
@@ -2013,74 +2308,80 @@ function _lerCSV(filePath) {
 
 // ── Mapear linha CSV (camelCase Azure) → objeto DB ───────────────────────────
 function _mapRowCSV(row, nomeArquivo) {
-  // CSV do Azure usa cabeçalhos camelCase idênticos ao parquet
-  // mas entrega tudo como string — sem problemas de Buffer/INT96
+  // Suporta camelCase, PascalCase, "Title case" (MCA) e EA legacy
+  // Lookup helper: percorre até 6 nomes, retorna o primeiro não-nulo/vazio
+  const _p = (...keys) => { for (const k of keys) { const v = row[k]; if (v != null && v !== '') return v; } return null; };
+  const p = (a, b, c) => _p(a, b, c);
+  const n = (a, b, c) => _toNum(row[a] ?? row[b] ?? (c ? row[c] : undefined));
+  const d = (a, b, c) => _toDate(row[a] || row[b] || (c ? row[c] : null));
   return {
-    invoice_id:                      row.invoiceId              || null,
-    previous_invoice_id:             row.previousInvoiceId      || null,
-    billing_account_id:              row.billingAccountId       || null,
-    billing_account_name:            row.billingAccountName     || null,
-    billing_profile_id:              row.billingProfileId       || null,
-    billing_profile_name:            row.billingProfileName     || null,
-    invoice_section_id:              row.invoiceSectionId       || null,
-    invoice_section_name:            row.invoiceSectionName     || null,
-    reseller_name:                   row.resellerName           || null,
-    reseller_mpn_id:                 row.resellerMpnId          || null,
-    cost_center:                     row.costCenter             || null,
-    billing_period_end_date:         _toDate(row.billingPeriodEndDate),
-    billing_period_start_date:       _toDate(row.billingPeriodStartDate),
-    service_period_end_date:         _toDate(row.servicePeriodEndDate),
-    service_period_start_date:       _toDate(row.servicePeriodStartDate),
-    cost_date:                       _toDate(row.date || row.Date),
-    service_family:                  row.serviceFamily          || null,
-    product_order_id:                row.productOrderId         || null,
-    product_order_name:              row.productOrderName       || null,
-    consumed_service:                row.consumedService        || null,
-    meter_id:                        row.meterId                || null,
-    meter_name:                      row.meterName              || null,
-    meter_category:                  row.meterCategory          || null,
-    meter_sub_category:              row.meterSubCategory       || null,
-    meter_region:                    row.meterRegion            || null,
-    product_id:                      row.ProductId              || null,
-    product_name:                    row.ProductName            || null,
-    subscription_id:                 row.SubscriptionId         || null,
-    subscription_name:               row.subscriptionName       || null,
-    publisher_type:                  row.publisherType          || null,
-    publisher_id:                    row.publisherId            || null,
-    publisher_name:                  row.publisherName          || null,
-    resource_group_name:             row.resourceGroupName      || null,
-    resource_id:                     row.ResourceId             || null,
-    resource_location:               row.resourceLocation       || null,
-    location:                        row.location               || null,
-    effective_price:                 _toNum(row.effectivePrice),
-    quantity:                        _toNum(row.quantity),
-    unit_of_measure:                 row.unitOfMeasure          || null,
-    charge_type:                     row.chargeType             || null,
-    billing_currency:                row.billingCurrency        || null,
-    pricing_currency:                row.pricingCurrency        || null,
-    cost_in_billing_currency:        _toNum(row.costInBillingCurrency),
-    cost_in_pricing_currency:        _toNum(row.costInPricingCurrency),
-    cost_in_usd:                     _toNum(row.costInUsd),
-    payg_cost_in_billing_currency:   _toNum(row.paygCostInBillingCurrency),
-    payg_cost_in_usd:                _toNum(row.paygCostInUsd),
-    exchange_rate_pricing_to_billing:_toNum(row.exchangeRatePricingToBilling),
-    exchange_rate_date:              _toDate(row.exchangeRateDate),
-    is_azure_credit_eligible:        _toBool(row.isAzureCreditEligible),
-    service_info1:                   row.serviceInfo1           || null,
-    service_info2:                   row.serviceInfo2           || null,
-    additional_info:                 row.additionalInfo         || null,
-    tags:                            row.tags                   || null,
-    payg_price:                      _toNum(row.PayGPrice),
-    frequency:                       row.frequency              || null,
-    term:                            row.term                   || null,
-    reservation_id:                  row.reservationId          || null,
-    reservation_name:                row.reservationName        || null,
-    pricing_model:                   row.pricingModel           || null,
-    unit_price:                      _toNum(row.unitPrice),
-    cost_allocation_rule_name:       row.costAllocationRuleName || null,
-    benefit_id:                      row.benefitId              || null,
-    benefit_name:                    row.benefitName            || null,
-    provider:                        row.provider               || null,
+    invoice_id:                      p('invoiceId',                    'InvoiceId',                    'Invoice ID'),
+    previous_invoice_id:             p('previousInvoiceId',            'PreviousInvoiceId',            'Previous Invoice ID'),
+    billing_account_id:              p('billingAccountId',             'BillingAccountId',             'Billing Account ID'),
+    billing_account_name:            p('billingAccountName',           'BillingAccountName',           'Billing Account Name'),
+    billing_profile_id:              p('billingProfileId',             'BillingProfileId',             'Billing Profile ID'),
+    billing_profile_name:            p('billingProfileName',           'BillingProfileName',           'Billing Profile Name'),
+    invoice_section_id:              p('invoiceSectionId',             'InvoiceSectionId',             'Invoice Section ID'),
+    invoice_section_name:            p('invoiceSectionName',           'InvoiceSectionName',           'Invoice Section Name'),
+    reseller_name:                   p('resellerName',                 'ResellerName',                 'Reseller Name'),
+    reseller_mpn_id:                 p('resellerMpnId',                'ResellerMpnId',                'Reseller MPN ID'),
+    cost_center:                     p('costCenter',                   'CostCenter',                   'Cost Center'),
+    billing_period_end_date:         d('billingPeriodEndDate',         'BillingPeriodEndDate',         'Billing Period End Date'),
+    billing_period_start_date:       d('billingPeriodStartDate',       'BillingPeriodStartDate',       'Billing Period Start Date'),
+    service_period_end_date:         d('servicePeriodEndDate',         'ServicePeriodEndDate',         'Service Period End Date'),
+    service_period_start_date:       d('servicePeriodStartDate',       'ServicePeriodStartDate',       'Service Period Start Date'),
+    cost_date:                       _toDate(_p('date','Date','usageDate','UsageDate','Usage Date','serviceDate','ServiceDate','Service Date')),
+    service_family:                  p('serviceFamily',                'ServiceFamily',                'Service Family'),
+    product_order_id:                p('productOrderId',               'ProductOrderId',               'Product Order ID'),
+    product_order_name:              p('productOrderName',             'ProductOrderName',             'Product Order Name'),
+    consumed_service:                _p('consumedService','ConsumedService','Consumed Service','consumed service'),
+    meter_id:                        p('meterId',                      'MeterId',                      'Meter ID'),
+    meter_name:                      _p('meterName','MeterName','Meter Name','meter name','ServiceName','serviceName','Service Name'),
+    meter_category:                  _p('meterCategory','MeterCategory','Meter Category','meter category','MeterCategories','ServiceCategory','serviceCategory','Service Category'),
+    meter_sub_category:              p('meterSubCategory',             'MeterSubCategory',             'Meter Sub Category') || p('meterSubcategory', 'MeterSubcategory'),
+    meter_region:                    p('meterRegion',                  'MeterRegion',                  'Meter Region'),
+    product_id:                      p('productId',                    'ProductId',                    'Product ID'),
+    product_name:                    p('productName',                  'ProductName',                  'Product Name'),
+    subscription_id:                 p('subscriptionId',               'SubscriptionId',               'Subscription ID'),
+    subscription_name:               p('subscriptionName',             'SubscriptionName',             'Subscription Name'),
+    publisher_type:                  p('publisherType',                'PublisherType',                'Publisher Type'),
+    publisher_id:                    p('publisherId',                  'PublisherId',                  'Publisher ID'),
+    publisher_name:                  p('publisherName',                'PublisherName',                'Publisher Name'),
+    resource_group_name:             _p('resourceGroupName','ResourceGroupName','Resource Group Name','resource group name','ResourceGroup','resourceGroup','Resource Group'),
+    resource_id:                     _p('resourceId','ResourceId','Resource ID','resource id','instanceId','InstanceId','Instance ID','resourceGuid','ResourceGuid'),
+    resource_name:                   p('resourceName',                 'ResourceName',                 'Resource Name'),
+    resource_type:                   p('resourceType',                 'ResourceType',                 'Resource Type'),
+    resource_location:               p('resourceLocation',             'ResourceLocation',             'Resource Location'),
+    location:                        p('location',                     'Location'),
+    effective_price:                 n('effectivePrice',               'EffectivePrice',               'Effective Price'),
+    quantity:                        n('quantity',                     'Quantity'),
+    unit_of_measure:                 _p('unitOfMeasure','UnitOfMeasure','Unit Of Measure','Unit of Measure','unit of measure','UoM','unitPrice_UoM'),
+    charge_type:                     p('chargeType',                   'ChargeType',                   'Charge type') || row['Charge Type'] || null,
+    billing_currency:                p('billingCurrency',              'BillingCurrency',              'Billing Currency') || p('currency', 'Currency'),
+    pricing_currency:                p('pricingCurrency',              'PricingCurrency',              'Pricing Currency'),
+    cost_in_billing_currency:        _toNum(_p('costInBillingCurrency','CostInBillingCurrency','Cost in billing currency','Cost In Billing Currency','ExtendedCost','extendedCost','PreTaxCost','preTaxCost','Cost','cost')),
+    cost_in_pricing_currency:        n('costInPricingCurrency',        'CostInPricingCurrency',        'Cost in pricing currency'),
+    cost_in_usd:                     n('costInUsd',                    'CostInUsd',                    'Cost in USD'),
+    payg_cost_in_billing_currency:   n('paygCostInBillingCurrency',    'PaygCostInBillingCurrency',    'PayG Cost in billing currency'),
+    payg_cost_in_usd:                n('paygCostInUsd',                'PaygCostInUsd',                'PayG Cost in USD'),
+    exchange_rate_pricing_to_billing:n('exchangeRatePricingToBilling', 'ExchangeRatePricingToBilling', 'Exchange Rate Pricing To Billing'),
+    exchange_rate_date:              d('exchangeRateDate',             'ExchangeRateDate',             'Exchange Rate Date'),
+    is_azure_credit_eligible:        _toBool(row.isAzureCreditEligible || row.IsAzureCreditEligible || row['Is Azure Credit Eligible']),
+    service_info1:                   p('serviceInfo1',                 'ServiceInfo1',                 'Service Info1'),
+    service_info2:                   p('serviceInfo2',                 'ServiceInfo2',                 'Service Info2'),
+    additional_info:                 row.additionalInfo || row.AdditionalInfo || row['Additional Info'] || null,
+    tags:                            row.tags           || row.Tags           || null,
+    payg_price:                      n('payGPrice',                    'PayGPrice') || _toNum(row.paygPrice) || _toNum(row['PayG Price']),
+    frequency:                       p('frequency',                    'Frequency'),
+    term:                            p('term',                         'Term'),
+    reservation_id:                  p('reservationId',                'ReservationId',                'Reservation ID'),
+    reservation_name:                p('reservationName',              'ReservationName',              'Reservation Name'),
+    pricing_model:                   p('pricingModel',                 'PricingModel',                 'Pricing Model'),
+    unit_price:                      n('unitPrice',                    'UnitPrice',                    'Unit Price'),
+    cost_allocation_rule_name:       p('costAllocationRuleName',       'CostAllocationRuleName',       'Cost Allocation Rule Name'),
+    benefit_id:                      p('benefitId',                    'BenefitId',                    'Benefit ID'),
+    benefit_name:                    p('benefitName',                  'BenefitName',                  'Benefit Name'),
+    provider:                        p('provider',                     'Provider'),
     arquivo_origem:                  nomeArquivo,
   };
 }
@@ -2119,6 +2420,217 @@ except Exception as e:
   });
 }
 
+// ── Background import job state ──────────────────────────────────────────────
+let _importJob = null;
+// { id, arquivo, idx, total, status:'running'|'done'|'error',
+//   linhas, inseridos, atualizados, erros, subArquivo, erro, iniciado, concluido }
+
+async function _processarImport(tmpPath, originalname, jobId) {
+  const fs   = require('fs');
+  const path = require('path');
+  let csvGerado    = null;
+  const tmpZipFiles = [];
+  let totalLinhas = 0, totalIns = 0, totalUpd = 0, totalErr = 0;
+
+  function upd(fields) {
+    if (_importJob && _importJob.id === jobId) Object.assign(_importJob, fields);
+  }
+
+  // Insert a batch of rows and update job progress counters
+  async function _inserirLinhas(rows, mapFn, nomeArq, sql, COLS) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      let spCount = 0;
+      for (let i = 0; i < rows.length; i += 200) {
+        for (const rawRow of rows.slice(i, i + 200)) {
+          const sp = `sp_${spCount++}`;
+          try {
+            await client.query(`SAVEPOINT ${sp}`);
+            const m      = mapFn(rawRow, nomeArq);
+            const values = COLS.map(col => m[col] ?? null);
+            const r      = await client.query(sql, values);
+            await client.query(`RELEASE SAVEPOINT ${sp}`);
+            if (r.rowCount > 0) totalIns++; else totalUpd++;
+          } catch (e) {
+            await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+            await client.query(`RELEASE SAVEPOINT ${sp}`);
+            totalErr++;
+          }
+        }
+        upd({ inseridos: totalIns, atualizados: totalUpd, erros: totalErr });
+      }
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; }
+    finally { client.release(); }
+  }
+
+  try {
+    const nomeOriginal = originalname.toLowerCase();
+    const isCSV     = nomeOriginal.endsWith('.csv');
+    const isParquet = nomeOriginal.endsWith('.parquet');
+    const isZIP     = nomeOriginal.endsWith('.zip');
+
+    if (!isCSV && !isParquet && !isZIP) {
+      upd({ status: 'error', erro: 'Formato não suportado', concluido: Date.now() });
+      return;
+    }
+
+    const COLS = Object.keys(_mapRowCSV({}, ''));
+    const ph   = COLS.map((_, i) => `$${i + 1}`).join(', ');
+    const updateCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
+    const sqlUpsert = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})
+      ON CONFLICT (COALESCE(subscription_id,''), COALESCE(resource_id,''), cost_date,
+                   COALESCE(meter_id,''), COALESCE(charge_type,''), COALESCE(quantity,0))
+      DO UPDATE SET ${updateCols.map(c => `${c} = EXCLUDED.${c}`).join(', ')}`;
+    const sqlInsert = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT DO NOTHING`;
+
+    let temConstraint = false;
+    try {
+      const ck = await pool.query(`SELECT 1 FROM pg_indexes WHERE tablename='azure_costs' AND indexname='idx_azure_costs_dedup' LIMIT 1`);
+      temConstraint = ck.rowCount > 0;
+    } catch (_) {}
+    const sql = temConstraint ? sqlUpsert : sqlInsert;
+
+    if (isZIP) {
+      const AdmZip = require('adm-zip');
+      const tmpDir = path.dirname(tmpPath);
+      let zip;
+      try { zip = new AdmZip(tmpPath); }
+      catch (e) { upd({ status: 'error', erro: `ZIP inválido: ${e.message}`, concluido: Date.now() }); return; }
+
+      const entradas = zip.getEntries().filter(e => {
+        const n = e.entryName.toLowerCase();
+        if (n.includes('..')) return false;
+        return n.endsWith('.csv') || n.endsWith('.parquet');
+      });
+
+      if (!entradas.length) {
+        upd({ status: 'error', erro: 'O ZIP não contém arquivos .csv ou .parquet válidos.', concluido: Date.now() });
+        return;
+      }
+
+      console.log(`[Azure Import] ZIP com ${entradas.length} arquivo(s):`, entradas.map(e => e.entryName).join(', '));
+
+      for (const entrada of entradas) {
+        const nomeArq  = path.basename(entrada.entryName);
+        const destPath = path.join(tmpDir, `zip_${Date.now()}_${nomeArq}`);
+        tmpZipFiles.push(destPath);
+        upd({ subArquivo: nomeArq });
+
+        try { zip.extractEntryTo(entrada, tmpDir, false, true, false, `zip_${Date.now()}_${nomeArq}`); }
+        catch (e) { console.warn(`[Azure Import] Falha ao extrair ${nomeArq}:`, e.message); continue; }
+
+        let arquivoExtraido = destPath;
+        if (!fs.existsSync(arquivoExtraido)) {
+          const alt = path.join(tmpDir, nomeArq);
+          if (fs.existsSync(alt)) arquivoExtraido = alt;
+          else { console.warn(`[Azure Import] Arquivo extraído não encontrado: ${nomeArq}`); continue; }
+        }
+
+        let rows = [], mapFn = _mapRowCSV;
+        if (nomeArq.endsWith('.csv')) {
+          rows = await _lerCSV(arquivoExtraido);
+        } else {
+          let tmpCsv = null;
+          try {
+            tmpCsv = await _parquetParaCSV(arquivoExtraido);
+            if (tmpCsv && fs.existsSync(tmpCsv)) rows = await _lerCSV(tmpCsv);
+          } catch (_) { tmpCsv = null; }
+          if (!rows.length) {
+            let parquet;
+            try { parquet = require('@dsnp/parquetjs'); } catch (_) {}
+            if (!parquet) { try { parquet = require('parquetjs-lite'); } catch (_) {} }
+            if (parquet) {
+              const reader = await parquet.ParquetReader.openFile(arquivoExtraido);
+              const cursor = reader.getCursor();
+              let record;
+              while ((record = await cursor.next()) !== null) rows.push(record);
+              await reader.close();
+              mapFn = _mapRow;
+            }
+          }
+          if (tmpCsv) try { fs.unlinkSync(tmpCsv); } catch (_) {}
+        }
+
+        if (!rows.length) { console.warn(`[Azure Import] ${nomeArq} sem dados válidos, ignorado.`); continue; }
+        totalLinhas += rows.length;
+        upd({ linhas: totalLinhas });
+        await _inserirLinhas(rows, mapFn, nomeArq, sql, COLS);
+      }
+
+    } else {
+      let rows = [], mapFn = _mapRowCSV;
+
+      if (isCSV) {
+        console.log('[Azure Import] Lendo CSV:', originalname);
+        rows  = await _lerCSV(tmpPath);
+      } else {
+        console.log('[Azure Import] Lendo Parquet:', originalname);
+        try {
+          csvGerado = await _parquetParaCSV(tmpPath);
+          if (csvGerado && fs.existsSync(csvGerado)) {
+            console.log('[Azure Import] Parquet convertido via pyarrow ✅');
+            rows = await _lerCSV(csvGerado);
+          }
+        } catch (pyErr) {
+          console.warn('[Azure Import] pyarrow falhou, tentando parquetjs:', pyErr.message);
+          csvGerado = null;
+        }
+        if (!rows.length) {
+          let parquet;
+          try { parquet = require('@dsnp/parquetjs'); } catch (_) {}
+          if (!parquet) { try { parquet = require('parquetjs-lite'); } catch (_) {} }
+          if (parquet) {
+            const reader = await parquet.ParquetReader.openFile(tmpPath);
+            const cursor = reader.getCursor();
+            let record;
+            while ((record = await cursor.next()) !== null) rows.push(record);
+            await reader.close();
+            mapFn = _mapRow;
+            console.warn('[Azure Import] Usando parquetjs (limitações possíveis)');
+          } else {
+            upd({ status: 'error', erro: 'Não foi possível ler o arquivo Parquet. Exporte como CSV ou instale @dsnp/parquetjs', concluido: Date.now() });
+            return;
+          }
+        }
+      }
+
+      if (!rows.length) {
+        upd({ status: 'error', erro: 'Arquivo vazio ou sem dados válidos.', concluido: Date.now() });
+        return;
+      }
+
+      console.log(`[Azure Import] ${rows.length} linhas lidas.`);
+      totalLinhas = rows.length;
+      upd({ linhas: totalLinhas });
+      await _inserirLinhas(rows, mapFn, originalname, sql, COLS);
+    }
+
+    // Log charge_type breakdown para diagnóstico
+    try {
+      const rCT = await pool.query(`
+        SELECT COALESCE(charge_type,'(sem tipo)') AS ct, COUNT(*) AS n
+        FROM azure_costs GROUP BY charge_type ORDER BY n DESC LIMIT 20`);
+      const breakdown = rCT.rows.map(r => `${r.ct}:${r.n}`).join(', ');
+      console.log(`[Azure Import] Charge types no banco: ${breakdown}`);
+      upd({ charge_types: rCT.rows.map(r => ({ tipo: r.ct, linhas: parseInt(r.n) })) });
+    } catch (_) {}
+
+    console.log(`[Azure Import] Concluído: ${totalIns} inseridos, ${totalUpd} atualizados, ${totalErr} erros / ${totalLinhas} linhas`);
+    _refreshAzureCache().catch(e => console.warn('[Azure] Falha ao atualizar cache pós-import:', e.message));
+    upd({ status: 'done', inseridos: totalIns, atualizados: totalUpd, erros: totalErr, linhas: totalLinhas, concluido: Date.now() });
+
+  } catch (err) {
+    console.error('[Azure Import] Erro no processamento em background:', err);
+    upd({ status: 'error', erro: err.message, concluido: Date.now() });
+  } finally {
+    if (tmpPath)   try { fs.unlinkSync(tmpPath);   } catch (_) {}
+    if (csvGerado) try { fs.unlinkSync(csvGerado); } catch (_) {}
+    for (const f of tmpZipFiles) try { fs.unlinkSync(f); } catch (_) {}
+  }
+}
+
 if (_multer) {
   const _storage = _multer.diskStorage({
     destination: (_, __, cb) => cb(null, _uploadDir),
@@ -2137,11 +2649,14 @@ if (_multer) {
     },
   });
 
+  // Status do job de importação em andamento ou último concluído
+  app.get('/api/azure-costs/import-status', authMiddleware, (req, res) => {
+    res.json({ job: _importJob });
+  });
+
   app.post('/api/azure-costs/import', authMiddleware, dbMiddleware, (req, res, next) => {
-    // Desabilitar o timeout padrão para arquivos grandes
     req.setTimeout(0);
     res.setTimeout(0);
-
     _upload.single('arquivo')(req, res, (err) => {
       if (err) {
         if (err.code === 'LIMIT_FILE_SIZE') {
@@ -2153,293 +2668,89 @@ if (_multer) {
       }
       next();
     });
-  }, async (req, res) => {
-    const tmpPath    = req.file?.path;
-    let   csvGerado  = null;
-    const tmpZipFiles = []; // arquivos extraídos do ZIP para limpar depois
-    try {
-      if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+  }, (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
 
-      const nomeOriginal = req.file.originalname.toLowerCase();
-      const isCSV        = nomeOriginal.endsWith('.csv');
-      const isParquet    = nomeOriginal.endsWith('.parquet');
-      const isZIP        = nomeOriginal.endsWith('.zip');
-
-      if (!isCSV && !isParquet && !isZIP) {
-        return res.status(400).json({ error: 'Formato não suportado. Envie um arquivo .csv, .parquet ou .zip do Azure Cost Management.' });
-      }
-
-      // ── ZIP: extrair arquivos CSV/Parquet e processar cada um ──────
-      if (isZIP) {
-        const AdmZip = require('adm-zip');
-        const fs     = require('fs');
-        const path   = require('path');
-        const tmpDir = path.dirname(tmpPath);
-
-        let zip;
-        try { zip = new AdmZip(tmpPath); }
-        catch (e) { return res.status(400).json({ error: `ZIP inválido ou corrompido: ${e.message}` }); }
-
-        const entradas = zip.getEntries().filter(e => {
-          const n = e.entryName.toLowerCase();
-          // Proteção contra zip-slip: rejeitar caminhos com ..
-          if (n.includes('..')) return false;
-          return n.endsWith('.csv') || n.endsWith('.parquet');
-        });
-
-        if (!entradas.length) {
-          return res.status(400).json({ error: 'O ZIP não contém arquivos .csv ou .parquet válidos.' });
-        }
-
-        console.log(`[Azure Import] ZIP com ${entradas.length} arquivo(s):`, entradas.map(e => e.entryName).join(', '));
-
-        let totalInseridos = 0, totalAtualizados = 0, totalErros = 0, totalLinhas = 0;
-        const todosErrosMsgs = [];
-
-        // Verificar índice de deduplicação uma única vez
-        let temConstraint = false;
-        try {
-          const ck = await pool.query(`SELECT 1 FROM pg_indexes WHERE tablename='azure_costs' AND indexname='idx_azure_costs_dedup' LIMIT 1`);
-          temConstraint = ck.rowCount > 0;
-        } catch (_) {}
-
-        const COLS = Object.keys(_mapRowCSV({}, ''));
-        const ph   = COLS.map((_, i) => `$${i + 1}`).join(', ');
-        const updateCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
-        const sqlUpsert = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})
-          ON CONFLICT (subscription_id, resource_id, cost_date, COALESCE(meter_id,''), COALESCE(charge_type,''), COALESCE(quantity,0))
-          DO UPDATE SET ${updateCols.map(c => `${c} = EXCLUDED.${c}`).join(', ')}`;
-        const sqlInsert = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT DO NOTHING`;
-        const sql = temConstraint ? sqlUpsert : sqlInsert;
-
-        for (const entrada of entradas) {
-          const nomeArq  = path.basename(entrada.entryName);
-          const destPath = path.join(tmpDir, `zip_${Date.now()}_${nomeArq}`);
-          tmpZipFiles.push(destPath);
-
-          try {
-            zip.extractEntryTo(entrada, tmpDir, false, true, false, `zip_${Date.now()}_${nomeArq}`);
-          } catch (e) {
-            console.warn(`[Azure Import] Falha ao extrair ${nomeArq}:`, e.message);
-            continue;
-          }
-
-          // Encontrar o arquivo extraído (adm-zip pode criar com nome ligeiramente diferente)
-          let arquivoExtraido = destPath;
-          if (!fs.existsSync(arquivoExtraido)) {
-            // Tentar pelo nome original dentro do tmpDir
-            const alt = path.join(tmpDir, nomeArq);
-            if (fs.existsSync(alt)) arquivoExtraido = alt;
-            else { console.warn(`[Azure Import] Arquivo extraído não encontrado: ${nomeArq}`); continue; }
-          }
-
-          let rows = [], mapFn = _mapRowCSV;
-          if (nomeArq.endsWith('.csv')) {
-            rows  = await _lerCSV(arquivoExtraido);
-          } else {
-            let tmpCsv = null;
-            try {
-              tmpCsv = await _parquetParaCSV(arquivoExtraido);
-              if (tmpCsv && fs.existsSync(tmpCsv)) { rows = await _lerCSV(tmpCsv); }
-            } catch (_) { tmpCsv = null; }
-            if (!rows.length) {
-              let parquet;
-              try { parquet = require('@dsnp/parquetjs'); } catch (_) {}
-              if (!parquet) { try { parquet = require('parquetjs-lite'); } catch (_) {} }
-              if (parquet) {
-                const reader = await parquet.ParquetReader.openFile(arquivoExtraido);
-                const cursor = reader.getCursor();
-                let record;
-                while ((record = await cursor.next()) !== null) rows.push(record);
-                await reader.close();
-                mapFn = _mapRow;
-              }
-            }
-            if (tmpCsv) try { fs.unlinkSync(tmpCsv); } catch (_) {}
-          }
-
-          if (!rows.length) { console.warn(`[Azure Import] ${nomeArq} sem dados válidos, ignorado.`); continue; }
-
-          console.log(`[Azure Import] ${nomeArq}: ${rows.length} linhas`);
-          totalLinhas += rows.length;
-
-          const client = await pool.connect();
-          try {
-            await client.query('BEGIN');
-            let spCount = 0;
-            for (let i = 0; i < rows.length; i += 200) {
-              for (const rawRow of rows.slice(i, i + 200)) {
-                const sp = `sp_${spCount++}`;
-                try {
-                  await client.query(`SAVEPOINT ${sp}`);
-                  const m      = mapFn(rawRow, nomeArq);
-                  const values = COLS.map(col => m[col] ?? null);
-                  const r      = await client.query(sql, values);
-                  await client.query(`RELEASE SAVEPOINT ${sp}`);
-                  if (r.rowCount > 0) totalInseridos++; else totalAtualizados++;
-                } catch (e) {
-                  await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-                  await client.query(`RELEASE SAVEPOINT ${sp}`);
-                  totalErros++;
-                  if (todosErrosMsgs.length < 5) todosErrosMsgs.push(e.message);
-                }
-              }
-            }
-            await client.query('COMMIT');
-          } catch (e) { await client.query('ROLLBACK'); throw e; }
-          finally { client.release(); }
-        }
-
-        _refreshAzureCache().catch(e => console.warn('[Azure] Falha ao atualizar cache pós-import:', e.message));
-        return res.json({
-          message:    `ZIP processado (${entradas.length} arquivo${entradas.length > 1 ? 's' : ''}): ${totalInseridos} novos, ${totalAtualizados} atualizados, ${totalErros} ignorados.`,
-          total:      totalLinhas,
-          inseridos:  totalInseridos,
-          atualizados: totalAtualizados,
-          erros:      totalErros,
-          erros_detalhe: todosErrosMsgs,
-        });
-      }
-
-      let rows = [];
-      let mapFn = _mapRowCSV;
-
-      if (isCSV) {
-        // ── CSV: leitura streaming, suporta arquivos de qualquer tamanho
-        console.log('[Azure Import] Lendo CSV:', req.file.originalname);
-        rows = await _lerCSV(tmpPath);
-        mapFn = _mapRowCSV;
-
-      } else {
-        // ── Parquet: tentar converter para CSV via Python/pyarrow primeiro
-        console.log('[Azure Import] Lendo Parquet:', req.file.originalname);
-        const fs = require('fs');
-
-        try {
-          csvGerado = await _parquetParaCSV(tmpPath);
-          if (csvGerado && fs.existsSync(csvGerado)) {
-            console.log('[Azure Import] Parquet convertido para CSV via pyarrow ✅');
-            rows  = await _lerCSV(csvGerado);
-            mapFn = _mapRowCSV;
-          }
-        } catch (pyErr) {
-          console.warn('[Azure Import] pyarrow falhou, tentando parquetjs:', pyErr.message);
-          csvGerado = null;
-        }
-
-        // Fallback: parquetjs (com limitações para INT96/Decimal)
-        if (!rows.length) {
-          let parquet;
-          try { parquet = require('@dsnp/parquetjs'); } catch (_) {}
-          if (!parquet) { try { parquet = require('parquetjs-lite'); } catch (_) {} }
-
-          if (parquet) {
-            const reader = await parquet.ParquetReader.openFile(tmpPath);
-            const cursor = reader.getCursor();
-            let record;
-            while ((record = await cursor.next()) !== null) rows.push(record);
-            await reader.close();
-            mapFn = _mapRow; // usa mapeamento com suporte a Buffer/INT96
-            console.warn('[Azure Import] Usando parquetjs (datas e decimais podem ter limitações)');
-          } else {
-            return res.status(500).json({
-              error: 'Não foi possível ler o arquivo Parquet.\n' +
-                     'Exporte os dados como CSV no Azure Cost Management ou instale: npm install @dsnp/parquetjs'
-            });
-          }
-        }
-      }
-
-      if (!rows.length) return res.status(400).json({ error: 'Arquivo vazio ou sem dados válidos.' });
-
-      console.log(`[Azure Import] ${rows.length} linhas lidas. Amostra da 1ª linha:`);
-      const s0 = rows[0];
-      console.log('  date:', s0.date || s0.Date, '| costInBillingCurrency:', s0.costInBillingCurrency, '| resourceGroupName:', s0.resourceGroupName);
-
-      const COLS = Object.keys(_mapRowCSV({}, ''));
-      const ph   = COLS.map((_, i) => `$${i + 1}`).join(', ');
-
-      // UPSERT com índice funcional — COALESCE resolve NULLs na chave de conflito
-      const updateCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
-      const sqlUpsert = `
-        INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})
-        ON CONFLICT (subscription_id, resource_id, cost_date,
-                     COALESCE(meter_id,''), COALESCE(charge_type,''), COALESCE(quantity,0))
-        DO UPDATE SET ${updateCols.map(c => `${c} = EXCLUDED.${c}`).join(', ')}
-      `;
-      // Fallback: se o índice único ainda não existir (ex: duplicatas impedem criação)
-      const sqlInsert = `
-        INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})
-        ON CONFLICT DO NOTHING
-      `;
-
-      // Verificar se o índice de deduplicação existe
-      let temConstraint = false;
-      try {
-        const ck = await pool.query(`
-          SELECT 1 FROM pg_indexes
-          WHERE tablename = 'azure_costs'
-            AND indexname  = 'idx_azure_costs_dedup'
-          LIMIT 1
-        `);
-        temConstraint = ck.rowCount > 0;
-      } catch (_) { temConstraint = false; }
-
-      const sql = temConstraint ? sqlUpsert : sqlInsert;
-
-      let inseridos = 0, atualizados = 0, erros = 0;
-      const errosMsgs = [];
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        let spCount = 0;
-        for (let i = 0; i < rows.length; i += 200) {
-          for (const rawRow of rows.slice(i, i + 200)) {
-            const sp = `sp_${spCount++}`;
-            try {
-              await client.query(`SAVEPOINT ${sp}`);
-              const m      = mapFn(rawRow, req.file.originalname);
-              const values = COLS.map(col => m[col] ?? null);
-              const r      = await client.query(sql, values);
-              await client.query(`RELEASE SAVEPOINT ${sp}`);
-              if (r.rowCount > 0) inseridos++;
-              else atualizados++;
-            } catch (e) {
-              await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-              await client.query(`RELEASE SAVEPOINT ${sp}`);
-              erros++;
-              if (errosMsgs.length < 5) errosMsgs.push(e.message);
-              if (erros <= 3) console.warn('[Azure Import] Linha ignorada:', e.message);
-            }
-          }
-        }
-        await client.query('COMMIT');
-      } catch (e) { await client.query('ROLLBACK'); throw e; }
-      finally { client.release(); }
-
-      console.log(`[Azure Import] Concluído: ${inseridos} inseridos, ${atualizados} atualizados, ${erros} erros / ${rows.length} linhas`);
-      if (errosMsgs.length) console.log('[Azure Import] Primeiros erros:', errosMsgs);
-      _refreshAzureCache().catch(e => console.warn('[Azure] Falha ao atualizar cache pós-import:', e.message));
-
-      res.json({
-        message:     `Importação concluída: ${inseridos} novos, ${atualizados} atualizados, ${erros} ignorados.`,
-        total:       rows.length,
-        inseridos,
-        atualizados,
-        erros,
-        erros_detalhe: errosMsgs,
-      });
-    } catch (err) {
-      console.error('Erro na importação Azure:', err);
-      res.status(500).json({ error: err.message });
-    } finally {
+    // Rejeitar se já há uma importação em andamento
+    if (_importJob && _importJob.status === 'running') {
       const fs = require('fs');
-      if (tmpPath)   try { fs.unlinkSync(tmpPath);   } catch (_) {}
-      if (csvGerado) try { fs.unlinkSync(csvGerado); } catch (_) {}
-      for (const f of tmpZipFiles) try { fs.unlinkSync(f); } catch (_) {}
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      return res.status(409).json({ error: 'Uma importação já está em andamento. Aguarde a conclusão.' });
     }
+
+    const jobId = Date.now().toString();
+    const idx   = parseInt(req.body?.idx   || '1', 10);
+    const total = parseInt(req.body?.total || '1', 10);
+
+    _importJob = {
+      id: jobId,
+      arquivo: req.file.originalname,
+      idx, total,
+      status: 'running',
+      linhas: 0, inseridos: 0, atualizados: 0, erros: 0,
+      subArquivo: null, erro: null,
+      iniciado: Date.now(), concluido: null,
+    };
+
+    // Processar em background — não aguarda a resposta HTTP
+    _processarImport(req.file.path, req.file.originalname, jobId).catch(() => {});
+
+    res.status(202).json({ jobId, arquivo: req.file.originalname });
   });
 }
+
+// ── GET /api/price-list/status ───────────────────────────────────────────────
+app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    // A price list é sempre armazenada em USD/global (sem filtro de região)
+    const currency = 'USD';
+    const region   = 'global';
+
+    // Garante tabela existe antes de consultar
+    await ensurePriceListTable();
+
+    const [meta, cnt] = await Promise.all([
+      pool.query(
+        `SELECT key, value, updated_at FROM azure_price_list_meta
+         WHERE key = $1 ORDER BY key`,
+        [`last_result_USD_global`]
+      ),
+      pool.query(`
+        SELECT COUNT(*)                  AS total,
+               COUNT(DISTINCT meter_id) AS meters,
+               MAX(updated_at)          AS last_updated
+        FROM azure_price_list
+        WHERE currency_code = $1
+      `, [currency])
+    ]);
+
+    // Lê último resultado gravado no meta
+    let last_result = null;
+    if (meta.rows[0]) {
+      try { last_result = JSON.parse(meta.rows[0].value); } catch (_) {}
+    }
+
+    res.json({
+      total:        parseInt(cnt.rows[0]?.total        || 0),
+      meters:       parseInt(cnt.rows[0]?.meters       || 0),
+      last_updated: cnt.rows[0]?.last_updated          || null,
+      syncing:      _syncingPriceList,
+      progress:     _syncingPriceList ? _syncProgress  : null,
+      last_result
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/price-list/sync ─────────────────────────────────────────────────
+// Dispara importação da Retail Prices API (fire-and-forget)
+// Sempre sincroniza em USD sem filtro de região — a API não filtra por armRegionName
+app.post('/api/price-list/sync', authMiddleware, dbMiddleware, async (req, res) => {
+  if (_syncingPriceList)
+    return res.status(409).json({ ok: false, msg: 'Sincronização já em andamento' });
+  res.json({ ok: true, msg: 'Sincronização iniciada', currency: 'USD', region: 'global' });
+  _syncPriceList()
+    .catch(e => console.error('[PriceList] Erro na sincronização:', e.message));
+});
 
 // ── GET /api/calculadora/subscriptions ───────────────────────────────────────
 app.get('/api/calculadora/subscriptions', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -2517,10 +2828,79 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
   }
 });
 
+// ── GET /api/calculadora/reconciliacao ───────────────────────────────────────
+// Retorna breakdown por charge_type e moeda SEM filtro de exclusão —
+// usado para reconciliar o total do sistema com o Azure Cost Management.
+app.get('/api/calculadora/reconciliacao', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
+    const params = []; const cond = [];
+    if (subscription_id) {
+      const ids = subscription_id.split(',').map(s => s.trim()).filter(Boolean);
+      if (ids.length === 1) { cond.push(`subscription_id = $${params.length+1}`); params.push(ids[0]); }
+      else if (ids.length > 1) { cond.push(`subscription_id = ANY($${params.length+1})`); params.push(ids); }
+    }
+    if (resource_group) {
+      const rgs = resource_group.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+      if (rgs.length === 1) { cond.push(`UPPER(resource_group_name) = $${params.length+1}`); params.push(rgs[0]); }
+      else if (rgs.length > 1) { cond.push(`UPPER(resource_group_name) = ANY($${params.length+1})`); params.push(rgs); }
+    }
+    if (data_inicio) { cond.push(`cost_date >= $${params.length+1}`); params.push(data_inicio); }
+    if (data_fim)    { cond.push(`cost_date <= $${params.length+1}`); params.push(data_fim); }
+    const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+
+    const [rTipo, rMoeda] = await Promise.all([
+      pool.query(`
+        SELECT
+          COALESCE(charge_type, '(sem tipo)') AS charge_type,
+          COUNT(*)                             AS linhas,
+          SUM(COALESCE(cost_in_billing_currency, 0)) AS total
+        FROM azure_costs ${where}
+        GROUP BY charge_type
+        ORDER BY SUM(COALESCE(cost_in_billing_currency, 0)) DESC
+      `, params),
+      pool.query(`
+        SELECT
+          COALESCE(billing_currency, 'USD') AS moeda,
+          SUM(COALESCE(cost_in_billing_currency, 0)) AS total
+        FROM azure_costs ${where}
+        GROUP BY billing_currency
+        ORDER BY total DESC
+      `, params),
+    ]);
+
+    const excluidos = ['Tax', 'Refund', 'RoundingAdjustment'];
+    const porTipo = rTipo.rows.map(r => ({
+      charge_type: r.charge_type,
+      linhas:      parseInt(r.linhas, 10),
+      total:       parseFloat(r.total) || 0,
+      excluido:    excluidos.includes(r.charge_type),
+    }));
+
+    const totalBruto    = porTipo.reduce((s, r) => s + r.total, 0);
+    const totalExcluido = porTipo.filter(r => r.excluido).reduce((s, r) => s + r.total, 0);
+    const totalSistema  = totalBruto - totalExcluido;
+
+    res.json({
+      por_tipo:        porTipo,
+      por_moeda:       rMoeda.rows.map(r => ({ moeda: r.moeda, total: parseFloat(r.total) || 0 })),
+      total_bruto:     totalBruto,
+      total_excluido:  totalExcluido,
+      total_sistema:   totalSistema,
+    });
+  } catch (err) {
+    console.error('[Reconciliacao]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/calculadora/recursos ────────────────────────────────────────────
 // Aceita subscription_id e resource_group como valores separados por vírgula
 app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, res) => {
   try {
+    // Garante que a tabela azure_price_list existe antes do LEFT JOIN
+    await ensurePriceListTable();
+
     const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
     const params = []; const cond = [];
 
@@ -2545,83 +2925,380 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
     }
     if (data_inicio) { cond.push(`cost_date >= $${params.length + 1}`); params.push(data_inicio); }
     if (data_fim)    { cond.push(`cost_date <= $${params.length + 1}`); params.push(data_fim); }
-    cond.push(`charge_type NOT IN ('Tax','Refund','RoundingAdjustment')`);
 
     const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
 
-    console.log('[Recursos] WHERE:', where);
-    console.log('[Recursos] params:', params);
     const _t0 = Date.now();
 
     const r = await pool.query(`
+      -- ── CTE base: agrega azure_costs por recurso ─────────────────────────────
+      WITH base AS (
+        SELECT
+          resource_id,
+          MAX(UPPER(resource_group_name))                                     AS resource_group_name,
+          MAX(COALESCE(
+            NULLIF(SPLIT_PART(resource_id, '/', 9), ''),
+            product_name, meter_name, resource_id
+          ))                                                                   AS nome_recurso,
+          COALESCE(MAX(meter_category), MAX(consumed_service), MAX(product_name), 'Outros') AS categoria,
+          COALESCE(MAX(meter_name), MAX(product_name), MAX(meter_sub_category), '')     AS meter_categories,
+          MAX(meter_sub_category)                                              AS subcategoria,
+          MAX(product_name)                                                    AS produto,
+          MAX(consumed_service)                                                AS consumed_service,
+          MAX(COALESCE(charge_type, 'Usage'))                                  AS charge_type,
+          MAX(COALESCE(pricing_model, 'OnDemand'))                             AS pricing_model,
+          MAX(publisher_type)                                                  AS publisher_type,
+          MAX(publisher_name)                                                  AS publisher_name,
+          MAX(resource_location)                                               AS regiao,
+          MAX(location)                                                        AS location,
+          MAX(billing_currency)                                                AS moeda,
+          MAX(exchange_rate_pricing_to_billing)                                AS taxa_cambio,
+          MIN(cost_date)                                                       AS data_inicio,
+          MAX(cost_date)                                                       AS data_fim,
+          (MAX(cost_date) - MIN(cost_date) + 1)                               AS dias_ativos,
+          SUM(COALESCE(cost_in_billing_currency, 0))                          AS total_billing,
+          SUM(COALESCE(cost_in_usd, 0))                                       AS total_usd,
+          SUM(COALESCE(quantity, 0))                                           AS total_qty,
+          SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity, 0)
+              * COALESCE(exchange_rate_pricing_to_billing, 1))                 AS total_upq_brl,
+          SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity, 0)) AS total_upq_usd,
+          COALESCE(MAX(unit_of_measure), '')                                    AS unidade,
+          COALESCE(MAX(unit_of_measure), '')                                    AS unit_of_measure,
+          -- ── HORAS REAIS DO PERÍODO (qty × fator UoM, só para UoM horária) ──
+          CASE
+            WHEN (MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%')
+                 AND SUM(COALESCE(quantity,0)) > 0
+            THEN ROUND(
+              SUM(COALESCE(quantity,0))::numeric
+              * GREATEST(COALESCE(
+                  NULLIF(REGEXP_REPLACE(MAX(unit_of_measure),'[^0-9]','','g'),'')::numeric,
+                  1.0
+                ), 1.0)
+            , 2)
+            ELSE NULL
+          END AS horas_reais,
+          -- ── TIPO DE CUSTO (RN-001 a RN-004) ──────────────────────────────────
+          CASE
+            WHEN MAX(COALESCE(charge_type,'')) IN ('Purchase','RoundTrustBill')
+                 AND MAX(COALESCE(pricing_model,'')) = 'Reservation'
+            THEN 'reserva'
+            WHEN MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%'
+            THEN 'hora'
+            WHEN MAX(unit_of_measure) ILIKE '%day%'
+            THEN 'dia'
+            ELSE 'periodo'
+          END AS tipo_custo,
+          -- ── TAXA HORÁRIA via effective_price ─────────────────────────────────
+          CASE
+            WHEN (MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%')
+                 AND SUM(COALESCE(quantity,0)) > 0
+            THEN ROUND(
+              SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0)
+                  * COALESCE(quantity,0)
+                  * COALESCE(exchange_rate_pricing_to_billing,1))::numeric
+              / NULLIF(
+                  SUM(COALESCE(quantity,0))
+                  * GREATEST(COALESCE(
+                      NULLIF(REGEXP_REPLACE(MAX(unit_of_measure),'[^0-9]','','g'),'')::numeric,
+                      1.0), 1.0)
+                , 0)
+            , 8)
+            ELSE NULL
+          END AS taxa_hora_rate,
+          -- ── CUSTO/HORA BILLING (4 RNs) ───────────────────────────────────────
+          COALESCE(
+            CASE
+              WHEN MAX(COALESCE(charge_type,'')) IN ('Purchase','RoundTrustBill')
+                   AND MAX(COALESCE(pricing_model,'')) = 'Reservation'
+              THEN ROUND(
+                SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                / NULLIF(CASE WHEN MAX(term) ILIKE '3%' THEN 26280.0 ELSE 8760.0 END, 0)
+              , 8)
+            END,
+            CASE
+              WHEN (MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%')
+                   AND SUM(COALESCE(quantity,0)) > 0
+              THEN ROUND(
+                SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                / NULLIF(
+                    SUM(COALESCE(quantity,0))
+                    * GREATEST(COALESCE(
+                        NULLIF(REGEXP_REPLACE(MAX(unit_of_measure),'[^0-9]','','g'),'')::numeric,
+                        1.0), 1.0)
+                  , 0)
+              , 8)
+            END,
+            CASE
+              WHEN MAX(unit_of_measure) ILIKE '%day%'
+                   AND SUM(COALESCE(quantity,0)) > 0
+              THEN ROUND(
+                SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                / NULLIF(SUM(COALESCE(quantity,0)) * 24.0, 0)
+              , 8)
+            END,
+            ROUND(
+              SUM(COALESCE(cost_in_billing_currency,0))::numeric
+              / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24.0, 0)
+            , 8)
+          ) AS custo_hora_billing,
+          -- ── CUSTO/HORA USD ────────────────────────────────────────────────────
+          COALESCE(
+            CASE
+              WHEN MAX(COALESCE(charge_type,'')) IN ('Purchase','RoundTrustBill')
+                   AND MAX(COALESCE(pricing_model,'')) = 'Reservation'
+              THEN ROUND(
+                SUM(COALESCE(cost_in_usd,0))::numeric
+                / NULLIF(CASE WHEN MAX(term) ILIKE '3%' THEN 26280.0 ELSE 8760.0 END, 0)
+              , 8)
+            END,
+            CASE
+              WHEN (MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%')
+                   AND SUM(COALESCE(quantity,0)) > 0
+              THEN ROUND(
+                SUM(COALESCE(cost_in_usd,0))::numeric
+                / NULLIF(
+                    SUM(COALESCE(quantity,0))
+                    * GREATEST(COALESCE(
+                        NULLIF(REGEXP_REPLACE(MAX(unit_of_measure),'[^0-9]','','g'),'')::numeric,
+                        1.0), 1.0)
+                  , 0)
+              , 8)
+            END,
+            CASE
+              WHEN MAX(unit_of_measure) ILIKE '%day%' AND SUM(COALESCE(quantity,0)) > 0
+              THEN ROUND(
+                SUM(COALESCE(cost_in_usd,0))::numeric
+                / NULLIF(SUM(COALESCE(quantity,0)) * 24.0, 0)
+              , 8)
+            END,
+            ROUND(
+              SUM(COALESCE(cost_in_usd,0))::numeric
+              / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24.0, 0)
+            , 8)
+          ) AS custo_hora_usd,
+          -- ── CUSTO MENSAL (Storage/Bandwidth) ─────────────────────────────────
+          ROUND(
+            SUM(COALESCE(cost_in_billing_currency,0))::numeric
+            / GREATEST(MAX(cost_date)-MIN(cost_date)+1, 1) * 30.0
+          , 4) AS custo_mes_billing,
+          NULL::numeric AS custo_dia_billing,
+          NULL::numeric AS custo_dia_usd,
+          NULL::numeric AS custo_uom_billing,
+          NULL::numeric AS custo_uom_usd,
+          -- Chaves para o JOIN com price list
+          MAX(meter_id)                          AS _meter_id,
+          MAX(COALESCE(billing_currency, 'BRL')) AS _currency
+        FROM azure_costs
+        ${where}
+        GROUP BY resource_id,
+                 COALESCE(meter_category,''),
+                 COALESCE(meter_name,''),
+                 COALESCE(unit_of_measure,'')
+      )
+      -- ── Outer: enriquece com preço retail e desconto ──────────────────────────
       SELECT
-        resource_id,
-        MAX(UPPER(resource_group_name))                                     AS resource_group_name,
-        MAX(COALESCE(
-          NULLIF(SPLIT_PART(resource_id, '/', 9), ''),
-          product_name, meter_name, resource_id
-        ))                                                                   AS nome_recurso,
-        MAX(meter_category)                                                  AS categoria,
-        MAX(meter_sub_category)                                              AS subcategoria,
-        MAX(product_name)                                                    AS produto,
-        MAX(consumed_service)                                                AS consumed_service,
-        MAX(charge_type)                                                     AS charge_type,
-        MAX(pricing_model)                                                   AS pricing_model,
-        MAX(publisher_type)                                                  AS publisher_type,
-        MAX(publisher_name)                                                  AS publisher_name,
-        MAX(resource_location)                                               AS regiao,
-        MAX(location)                                                        AS location,
-        MAX(billing_currency)                                                AS moeda,
-        MAX(exchange_rate_pricing_to_billing)                                AS taxa_cambio,
-        MIN(cost_date)                                                       AS data_inicio,
-        MAX(cost_date)                                                       AS data_fim,
-        (MAX(cost_date) - MIN(cost_date) + 1)                               AS dias_ativos,
-        SUM(COALESCE(cost_in_billing_currency, 0))                          AS total_billing,
-        SUM(COALESCE(cost_in_usd, 0))                                       AS total_usd,
-        SUM(COALESCE(quantity, 0))                                           AS total_qty,
-        -- effective_price tem prioridade sobre unit_price (cobre reservas e descontos)
-        SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity, 0)
-            * COALESCE(exchange_rate_pricing_to_billing, 1))                 AS total_upq_brl,
-        SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity, 0)) AS total_upq_usd,
-        MAX(unit_of_measure)                                                 AS unidade,
-        MAX(unit_of_measure)                                                 AS unit_of_measure,
-        -- Valor/hora universal: Hour → preço×qty/qty; não-Hour → billing/dias_ativos/24
+        base.resource_id,
+        base.resource_group_name,
+        base.nome_recurso,
+        base.categoria,
+        base.meter_categories,
+        base.subcategoria,
+        base.produto,
+        base.consumed_service,
+        base.charge_type,
+        base.pricing_model,
+        base.publisher_type,
+        base.publisher_name,
+        base.regiao,
+        base.location,
+        base.moeda,
+        base.taxa_cambio,
+        base.data_inicio,
+        base.data_fim,
+        base.dias_ativos,
+        base.total_billing,
+        base.total_usd,
+        base.total_qty,
+        base.total_upq_brl,
+        base.total_upq_usd,
+        base.unidade,
+        base.unit_of_measure,
+        base.horas_reais,
+        base.tipo_custo,
+        base.taxa_hora_rate,
+        base.custo_hora_billing,
+        base.custo_hora_usd,
+        base.custo_mes_billing,
+        base.custo_dia_billing,
+        base.custo_dia_usd,
+        base.custo_uom_billing,
+        base.custo_uom_usd,
+        -- ── Price List: preço retail on-demand normalizado e desconto ──────────
+        -- retail_price_unit: preço de catálogo na UoM original do azure_costs.
+        -- Quando a Price List está em USD e o billing é BRL, converte via taxa_cambio
+        -- (exchange_rate_pricing_to_billing). Fallback: taxa 1 (sem conversão).
+        COALESCE(
+          pl.retail_price * CASE
+            WHEN pl.currency_code = base.moeda THEN 1.0           -- mesma moeda
+            WHEN pl.currency_code = 'USD'                          -- USD → billing
+            THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+            ELSE 1.0
+          END,
+          0
+        )::numeric AS retail_price_unit,
+        -- desconto_pct: % de desconto vs on-demand (só para hora/dia)
         CASE
-          WHEN MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%'
-            THEN ROUND(
-              COALESCE(
-                NULLIF(SUM(COALESCE(NULLIF(effective_price,0),unit_price,0)*COALESCE(quantity,0)*COALESCE(exchange_rate_pricing_to_billing,1))
-                       / NULLIF(SUM(COALESCE(quantity,0)),0), 0),
-                SUM(COALESCE(cost_in_billing_currency,0)) / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24,0)
-              )::numeric, 8)
-          ELSE ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
-                     / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24, 0), 8)
-        END AS custo_hora_billing,
-        CASE
-          WHEN MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%'
-            THEN ROUND(
-              COALESCE(
-                NULLIF(SUM(COALESCE(NULLIF(effective_price,0),unit_price,0)*COALESCE(quantity,0))
-                       / NULLIF(SUM(COALESCE(quantity,0)),0), 0),
-                SUM(COALESCE(cost_in_usd,0)) / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24,0)
-              )::numeric, 8)
-          ELSE ROUND(SUM(COALESCE(cost_in_usd,0))::numeric
-                     / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24, 0), 8)
-        END AS custo_hora_usd,
-        NULL::numeric AS custo_dia_billing,
-        NULL::numeric AS custo_dia_usd,
-        NULL::numeric AS custo_uom_billing,
-        NULL::numeric AS custo_uom_usd
-      FROM azure_costs
-      ${where}
-      GROUP BY resource_id
-      ORDER BY MAX(UPPER(resource_group_name)), SUM(COALESCE(cost_in_billing_currency,0)) DESC
+          WHEN COALESCE(pl.retail_price, 0) > 0
+               AND COALESCE(base.custo_hora_billing, 0) > 0
+               AND base.tipo_custo IN ('hora', 'dia')
+          THEN ROUND(
+            (1 - base.custo_hora_billing::numeric
+                 / NULLIF(
+                     -- retail convertido para billing_currency / fator UoM
+                     pl.retail_price::numeric
+                     * CASE
+                         WHEN pl.currency_code = base.moeda THEN 1.0
+                         WHEN pl.currency_code = 'USD'
+                         THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+                         ELSE 1.0
+                       END
+                     / GREATEST(
+                         COALESCE(
+                           NULLIF(REGEXP_REPLACE(base.unidade,'[^0-9]','','g'),'')::numeric,
+                           1.0
+                         ), 1.0
+                       )
+                   , 0)
+            ) * 100, 1)
+          ELSE NULL
+        END AS desconto_pct
+      FROM base
+      LEFT JOIN azure_price_list pl
+             ON LOWER(pl.meter_id) = LOWER(base._meter_id)   -- case-insensitive: billing pode ter casing diferente
+            AND pl.type IN ('Consumption', 'DevTestConsumption')  -- inclui Dev/Test
+            AND pl.reservation_term = ''      -- NOT NULL DEFAULT '' — não usar IS NULL
+            -- Aceita tanto a moeda do billing quanto USD (com conversão acima)
+            AND pl.currency_code IN (base._currency, 'USD')
+      ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 
     console.log(`[Recursos] ${r.rows.length} recursos — ${Date.now()-_t0}ms`);
     res.json(r.rows);
   } catch (err) {
     console.error('Erro /api/calculadora/recursos:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/calculadora/debug-recurso ───────────────────────────────────────
+app.get('/api/calculadora/debug-recurso', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_id, resource_group } = req.query;
+    if (!subscription_id) return res.status(400).json({ error: 'subscription_id obrigatório' });
+    const cond = [`subscription_id = $1`];
+    const params = [subscription_id];
+    if (resource_group) { cond.push(`UPPER(resource_group_name) = $2`); params.push(resource_group.toUpperCase()); }
+    const r = await pool.query(`
+      SELECT
+        resource_id,
+        meter_category, meter_name, unit_of_measure,
+        consumed_service, charge_type, pricing_model,
+        cost_in_billing_currency, cost_in_usd,
+        exchange_rate_pricing_to_billing, billing_currency,
+        COUNT(*) AS linhas,
+        SUM(cost_in_billing_currency) AS soma_billing,
+        SUM(cost_in_usd) AS soma_usd
+      FROM azure_costs WHERE ${cond.join(' AND ')}
+      GROUP BY resource_id, meter_category, meter_name, unit_of_measure,
+               consumed_service, charge_type, pricing_model,
+               cost_in_billing_currency, cost_in_usd,
+               exchange_rate_pricing_to_billing, billing_currency
+      ORDER BY resource_id LIMIT 50`, params);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/calculadora/detalhe-diario ──────────────────────────────────────
+// Retorna custos por data × recurso × serviço/meter (para a visão "Por Data")
+app.get('/api/calculadora/detalhe-diario', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
+    const params = []; const cond = [];
+    if (subscription_id) {
+      const ids = subscription_id.split(',').map(s => s.trim()).filter(Boolean);
+      if (ids.length === 1) { cond.push(`subscription_id = $${params.length+1}`); params.push(ids[0]); }
+      else if (ids.length > 1) { cond.push(`subscription_id = ANY($${params.length+1})`); params.push(ids); }
+    }
+    if (resource_group) {
+      const rgs = resource_group.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+      if (rgs.length === 1) { cond.push(`UPPER(resource_group_name) = $${params.length+1}`); params.push(rgs[0]); }
+      else if (rgs.length > 1) { cond.push(`UPPER(resource_group_name) = ANY($${params.length+1})`); params.push(rgs); }
+    }
+    if (data_inicio) { cond.push(`cost_date >= $${params.length+1}`); params.push(data_inicio); }
+    if (data_fim)    { cond.push(`cost_date <= $${params.length+1}`); params.push(data_fim); }
+    const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+    const r = await pool.query(`
+      SELECT
+        cost_date::text                                                                  AS cost_date,
+        subscription_id,
+        MAX(subscription_name)                                                           AS subscription_name,
+        resource_id,
+        COALESCE(
+          NULLIF(SPLIT_PART(resource_id, '/', 9), ''),
+          MAX(product_name), MAX(meter_name), resource_id
+        )                                                                                AS nome_recurso,
+        MAX(COALESCE(meter_category, consumed_service))                                  AS resource_type,
+        MAX(COALESCE(resource_location, location))                                       AS location,
+        MAX(resource_group_name)                                                         AS resource_group_name,
+        COALESCE(MAX(consumed_service), '')                                              AS service_name,
+        COALESCE(MAX(meter_name), '')                                                    AS meter,
+        SUM(COALESCE(cost_in_billing_currency, 0))                                       AS cost
+      FROM azure_costs
+      ${where}
+      GROUP BY cost_date, subscription_id, resource_id, consumed_service, meter_name
+      ORDER BY cost_date DESC, SUM(COALESCE(cost_in_billing_currency,0)) DESC
+      LIMIT 15000
+    `, params);
+    res.json(r.rows);
+  } catch (err) {
+    console.error('Erro /api/calculadora/detalhe-diario:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/calculadora/por-servico ─────────────────────────────────────────
+// Retorna custos agrupados por serviço (consumed_service / meter_category)
+app.get('/api/calculadora/por-servico', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
+    const params = []; const cond = [];
+    if (subscription_id) {
+      const ids = subscription_id.split(',').map(s => s.trim()).filter(Boolean);
+      if (ids.length === 1) { cond.push(`subscription_id = $${params.length+1}`); params.push(ids[0]); }
+      else if (ids.length > 1) { cond.push(`subscription_id = ANY($${params.length+1})`); params.push(ids); }
+    }
+    if (resource_group) {
+      const rgs = resource_group.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+      if (rgs.length === 1) { cond.push(`UPPER(resource_group_name) = $${params.length+1}`); params.push(rgs[0]); }
+      else if (rgs.length > 1) { cond.push(`UPPER(resource_group_name) = ANY($${params.length+1})`); params.push(rgs); }
+    }
+    if (data_inicio) { cond.push(`cost_date >= $${params.length+1}`); params.push(data_inicio); }
+    if (data_fim)    { cond.push(`cost_date <= $${params.length+1}`); params.push(data_fim); }
+    const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+    const r = await pool.query(`
+      SELECT
+        COALESCE(NULLIF(consumed_service,''), meter_category, 'Desconhecido') AS service_name,
+        COUNT(DISTINCT resource_id)                                            AS qtd_recursos,
+        COUNT(DISTINCT resource_group_name)                                    AS qtd_rgs,
+        SUM(COALESCE(cost_in_billing_currency, 0))                             AS total_brl
+      FROM azure_costs
+      ${where}
+      GROUP BY COALESCE(NULLIF(consumed_service,''), meter_category, 'Desconhecido')
+      ORDER BY total_brl DESC
+    `, params);
+    res.json(r.rows);
+  } catch (err) {
+    console.error('Erro /api/calculadora/por-servico:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2687,16 +3364,21 @@ app.post('/api/calculadora/estimar', authMiddleware, dbMiddleware, async (req, r
     if (data_fim)        { cond.push(`cost_date <= $${params.length+1}`); params.push(data_fim); }
 
     const r = await pool.query(`
-      SELECT resource_id, COUNT(DISTINCT cost_date) AS dias_ativos,
-             SUM(cost_in_billing_currency) AS total_billing,
-             SUM(cost_in_usd) AS total_usd,
-             MAX(billing_currency) AS moeda,
-             MAX(exchange_rate_pricing_to_billing) AS taxa_cambio,
-             MAX(unit_of_measure) AS unidade,
-             SUM(quantity) AS total_qty,
-             SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity,0)) AS total_upq,
+      SELECT resource_id,
+             COUNT(DISTINCT cost_date)                                        AS dias_ativos,
+             SUM(cost_in_billing_currency)                                    AS total_billing,
+             SUM(cost_in_usd)                                                 AS total_usd,
+             MAX(billing_currency)                                            AS moeda,
+             MAX(exchange_rate_pricing_to_billing)                            AS taxa_cambio,
+             MAX(unit_of_measure)                                             AS unidade,
+             MAX(charge_type)                                                 AS charge_type,
+             MAX(pricing_model)                                               AS pricing_model,
+             MAX(term)                                                        AS term,
+             SUM(quantity)                                                    AS total_qty,
+             SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity,0))
+                                                                              AS total_upq,
              SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity,0)
-                 * COALESCE(exchange_rate_pricing_to_billing,1)) AS total_upq_brl
+                 * COALESCE(exchange_rate_pricing_to_billing,1))              AS total_upq_brl
       FROM azure_costs
       WHERE ${cond.join(' AND ')}
       GROUP BY resource_id
@@ -2717,57 +3399,118 @@ app.post('/api/calculadora/estimar', authMiddleware, dbMiddleware, async (req, r
     const resultados = recursos.map(item => {
       const dados = mapa[item.resource_id];
       if (!dados) return { resource_id: item.resource_id, erro: 'Sem dados no período', horas: item.horas };
-      const diasAtivos  = parseInt(dados.dias_ativos) || 1;
+      const diasAtivos   = parseInt(dados.dias_ativos) || 1;
       const totalBilling = parseFloat(dados.total_billing) || 0;
-      const totalUsd     = parseFloat(dados.total_usd) || 0;
-      const totalQty     = parseFloat(dados.total_qty) || 0;
+      const totalUsd     = parseFloat(dados.total_usd)     || 0;
+      const totalQty     = parseFloat(dados.total_qty)     || 0;
       const uom          = (dados.unidade || '').toLowerCase();
-      const isHora       = uom.includes('hour') || uom.includes('hora');
+      const chargeType   = (dados.charge_type   || '').trim();
+      const pricingModel = (dados.pricing_model || '').trim();
+      const term         = (dados.term          || '');
 
-      // Custo/hora via effective_price (ou unit_price) × quantity
+      // ── Classificação do tipo de custo (mesma lógica do SELECT /recursos) ──
+      const isReserva = ['Purchase','RoundTrustBill'].includes(chargeType) && pricingModel === 'Reservation';
+      const isHora    = !isReserva && (uom.includes('hour') || uom.includes('hora'));
+      const isDia     = !isReserva && !isHora && uom.includes('day');
+      const tipoCusto = isReserva ? 'reserva' : isHora ? 'hora' : isDia ? 'dia' : 'periodo';
+
+      // ── Fator UoM: "10 Hours" → 10, "1 Hour" → 1 ─────────────────────────
+      const fatorUom  = Math.max(parseInt((uom.match(/\d+/) || ['1'])[0]) || 1, 1);
+
+      // ── effective_price × qty (custo real com descontos aplicados) ──────────
       const totalUpq    = parseFloat(dados.total_upq)     || 0;
       const totalUpqBrl = parseFloat(dados.total_upq_brl) || 0;
 
-      const moeda = dados.moeda || 'USD';
-      const horas = parseFloat(item.horas) || 0;
+      const moeda          = dados.moeda || 'USD';
+      const horas          = parseFloat(item.horas) || 0;
       const dias_estimados = horas / 24;
+      const horasReais     = diasAtivos * 24 || 720;
 
-      let custo_hora_billing, custo_hora_usd, custo_hora_brl;
-      let estimativa_billing, estimativa_usd, estimativa_brl;
+      let custo_hora_billing, custo_hora_usd;
 
-      const horasReais = diasAtivos * 24 || 720;
-      if (isHora) {
-        // UoM = Hour: preço efetivo × qty / qty (média ponderada)
-        // fallback para billing/horas_reais quando effective_price e unit_price = 0
-        custo_hora_billing = totalQty > 0 && totalUpqBrl > 0
-          ? totalUpqBrl / totalQty
+      if (isReserva) {
+        // RN-002: amortiza pelo term (1y = 8760 h, 3y = 26280 h)
+        const horasTerm = /3\s*(year|ano)/i.test(term) ? 26280.0 : 8760.0;
+        custo_hora_billing = totalBilling / horasTerm;
+        custo_hora_usd     = totalUsd     / horasTerm;
+
+      } else if (isHora) {
+        // RN-001: UoM horária com fator (billing ÷ (qty × fator))
+        //
+        // PRIORIDADE 1: cost_in_billing_currency / (qty × fator)
+        //   → já está na moeda correta (BRL ou USD conforme o contrato)
+        //   → não depende de exchange_rate_pricing_to_billing (que pode ser NULL)
+        //
+        // PRIORIDADE 2: effective_price × exchange_rate / fator
+        //   → usa apenas quando billing = 0 (recurso gratuito / crédito)
+        //   → RISCO: se exchange_rate for NULL → COALESCE usa 1 → resultado em USD
+        //     mesmo em contrato BRL → sub-avalia por ~5,7×
+        //
+        if (totalQty > 0 && totalBilling > 0) {
+          custo_hora_billing = totalBilling / (totalQty * fatorUom);
+          // cost_in_usd: nem sempre presente no export (pode ser NULL/0)
+          custo_hora_usd = totalUsd > 0
+            ? totalUsd / (totalQty * fatorUom)
+            : custo_hora_billing; // proxy: billing como USD quando USD ausente
+        } else if (totalQty > 0 && totalUpqBrl > 0) {
+          // Fallback: effective_price × exchange_rate (cuidado com NULL exchange_rate)
+          custo_hora_billing = totalUpqBrl / (totalQty * fatorUom);
+          custo_hora_usd     = totalUpq    / (totalQty * fatorUom);
+        } else {
+          // Último recurso: divide pelo período real
+          custo_hora_billing = totalBilling / horasReais;
+          custo_hora_usd     = totalUsd     / horasReais;
+        }
+
+      } else if (isDia) {
+        // RN-003: UoM diária → billing ÷ (qty × 24)
+        custo_hora_billing = totalQty > 0
+          ? totalBilling / (totalQty * 24.0)
           : totalBilling / horasReais;
-        custo_hora_usd = totalQty > 0 && totalUpq > 0
-          ? totalUpq / totalQty
+        custo_hora_usd = totalQty > 0
+          ? totalUsd / (totalQty * 24.0)
           : totalUsd / horasReais;
+
       } else {
-        // UoM ≠ Hour: usa dias_ativos reais do arquivo, não 30 fixo
+        // RN-004: Storage, Bandwidth, Functions — custo médio do período
         custo_hora_billing = totalBilling / horasReais;
         custo_hora_usd     = totalUsd     / horasReais;
       }
-      custo_hora_brl     = moeda === 'BRL' ? custo_hora_billing : custo_hora_billing * parseFloat(taxa_brl);
-      estimativa_billing = custo_hora_billing * horas;
-      estimativa_usd     = custo_hora_usd     * horas;
-      estimativa_brl     = custo_hora_brl     * horas;
+
+      // RN-005 — Conversão para BRL
+      // Hierarquia da taxa de câmbio:
+      //  1) BRL billing  → custo_hora_billing já é BRL, sem conversão
+      //  2) taxa_cambio do export (exchange_rate_pricing_to_billing > 1)
+      //     → indica conversão real USD→BRL registrada pelo Azure
+      //  3) taxa_brl do usuário (parâmetro do body) → fallback configurável
+      const taxaCambioExport = parseFloat(dados.taxa_cambio || 0);
+      const taxaEfetiva = moeda !== 'BRL' && taxaCambioExport > 1
+        ? taxaCambioExport       // taxa real do Azure Export — mais precisa
+        : parseFloat(taxa_brl);  // taxa configurada pelo usuário (fallback)
+      const custo_hora_brl    = moeda === 'BRL'
+        ? custo_hora_billing
+        : custo_hora_billing * taxaEfetiva;
+      const custo_mes_billing = totalBilling / diasAtivos * 30;
+      const estimativa_billing = custo_hora_billing * horas;
+      const estimativa_usd     = custo_hora_usd     * horas;
+      const estimativa_brl     = custo_hora_brl     * horas;
 
       return {
         resource_id:        item.resource_id,
         horas_estimadas:    horas,
         dias_estimados:     parseFloat(dias_estimados.toFixed(2)),
-        isHora,
+        tipo_custo:         tipoCusto,
+        isHora:             isHora || isDia,
         custo_hora_billing: parseFloat((custo_hora_billing || 0).toFixed(8)),
         custo_hora_usd:     parseFloat((custo_hora_usd     || 0).toFixed(8)),
         custo_hora_brl:     parseFloat((custo_hora_brl     || 0).toFixed(4)),
+        custo_mes_billing:  parseFloat((custo_mes_billing  || 0).toFixed(4)),
         estimativa_billing: parseFloat((estimativa_billing || 0).toFixed(4)),
         estimativa_usd:     parseFloat((estimativa_usd     || 0).toFixed(4)),
         estimativa_brl:     parseFloat((estimativa_brl     || 0).toFixed(2)),
         moeda,
-        taxa_brl_usada:     parseFloat(taxa_brl),
+        taxa_brl_usada:     parseFloat(taxaEfetiva.toFixed(4)),
+        taxa_origem:        moeda !== 'BRL' ? (taxaCambioExport > 1 ? 'export' : 'usuario') : 'n/a',
         dias_ativos:        diasAtivos,
         total_billing:      parseFloat(totalBilling.toFixed(4)),
       };
@@ -2886,9 +3629,102 @@ app.delete('/api/reservas/:id', authMiddleware, dbMiddleware, async (req, res) =
 // COLETA AUTOMÁTICA — Azure Cost Management API (MCA)
 // ══════════════════════════════════════════════════════════════════════════════
 
-const _COLETA_API_VER = '2023-11-01';
 let _coletaEmExecucao = false;
-let _coletaScheduler  = null;
+let _coletaCancelada  = false;
+let _coletaProgresso  = { fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] };
+let _coletaIniciadaEm = null;
+
+// ── Circuit Breaker — Azure Cost Management API ────────────────────────────────
+const _CB_STATES       = Object.freeze({ CLOSED: 'CLOSED', OPEN: 'OPEN', HALF_OPEN: 'HALF_OPEN' });
+const _CB_MAX_FAILURES = 3;
+const _CB_OPEN_MS      = 5 * 60 * 1000; // 5 min
+let _cbAPI = { state: _CB_STATES.CLOSED, failures: 0, openUntil: null, lastOpened: null };
+
+function _cbCanAttempt() {
+  if (_cbAPI.state === _CB_STATES.CLOSED)    return true;
+  if (_cbAPI.state === _CB_STATES.HALF_OPEN) return true;
+  // OPEN — verificar se janela expirou
+  if (_cbAPI.openUntil && Date.now() >= _cbAPI.openUntil.getTime()) {
+    _cbAPI.state = _CB_STATES.HALF_OPEN;
+    _logColeta('[CB] Estado → HALF_OPEN (janela expirou, testando)');
+    return true;
+  }
+  return false;
+}
+
+function _cbRecordSuccess() {
+  if (_cbAPI.state === _CB_STATES.HALF_OPEN) {
+    _cbAPI.state    = _CB_STATES.CLOSED;
+    _cbAPI.failures = 0;
+    _cbAPI.openUntil = null;
+    _logColeta('[CB] Estado → CLOSED (HALF_OPEN bem-sucedido)');
+  } else if (_cbAPI.state === _CB_STATES.CLOSED) {
+    _cbAPI.failures = 0;
+  }
+}
+
+function _cbRecordFailure() {
+  if (_cbAPI.state === _CB_STATES.HALF_OPEN) {
+    // Falhou na sondagem — reabrir imediatamente
+    _cbAPI.state      = _CB_STATES.OPEN;
+    _cbAPI.openUntil  = new Date(Date.now() + _CB_OPEN_MS);
+    _cbAPI.lastOpened = new Date();
+    _logColeta(`[CB] Estado → OPEN (HALF_OPEN falhou, bloqueando até ${_cbAPI.openUntil.toISOString()})`);
+    return;
+  }
+  _cbAPI.failures++;
+  if (_cbAPI.failures >= _CB_MAX_FAILURES) {
+    _cbAPI.state      = _CB_STATES.OPEN;
+    _cbAPI.openUntil  = new Date(Date.now() + _CB_OPEN_MS);
+    _cbAPI.lastOpened = new Date();
+    _logColeta(`[CB] Estado → OPEN (${_cbAPI.failures} falhas consecutivas, bloqueando até ${_cbAPI.openUntil.toISOString()})`);
+  }
+}
+
+// _cbFetch — fetch com AbortController, retry 429 e integração ao Circuit Breaker
+// SAS URLs (blobs) devem usar countCbFailure:false para não abrir CB por problemas de download
+async function _cbFetch(url, options = {}, { timeoutMs = 30000, maxRetries = 3, countCbFailure = true } = {}) {
+  if (!_cbCanAttempt()) {
+    const until = _cbAPI.openUntil ? _cbAPI.openUntil.toISOString() : '?';
+    throw new Error(`Circuit Breaker OPEN — Azure API bloqueada até ${until}`);
+  }
+
+  let attempt = 0;
+  while (true) {
+    const ctrl    = new AbortController();
+    const timer   = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, { ...options, signal: ctrl.signal });
+      clearTimeout(timer);
+
+      if (resp.status === 429) {
+        if (attempt >= maxRetries) {
+          if (countCbFailure) _cbRecordFailure();
+          throw new Error(`HTTP 429 esgotado após ${maxRetries} tentativas`);
+        }
+        const retryAfter = parseInt(resp.headers.get('Retry-After') || '60', 10);
+        _logColeta(`[CB] HTTP 429 — aguardando ${retryAfter}s antes de retentar (tentativa ${attempt + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, retryAfter * 1000));
+        attempt++;
+        continue;
+      }
+
+      if (resp.status >= 500 && countCbFailure) _cbRecordFailure();
+      else if (resp.status < 400)               _cbRecordSuccess();
+      return resp;
+
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') {
+        if (countCbFailure) _cbRecordFailure();
+        throw new Error(`Timeout (${timeoutMs / 1000}s) na chamada Azure: ${url.split('?')[0]}`);
+      }
+      // Erro de rede
+      if (countCbFailure) _cbRecordFailure();
+      throw err;
+    }
+  }
+}
 
 async function ensureAzureColetaTable() {
   if (!pool) return;
@@ -2904,7 +3740,37 @@ async function ensureAzureColetaTable() {
       criado_em           TIMESTAMP DEFAULT NOW(),
       atualizado_em       TIMESTAMP DEFAULT NOW()
     );
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS granularidade_dias INTEGER DEFAULT 7;
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS granularidade_dias  INTEGER DEFAULT 7;
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS nome                VARCHAR(200) DEFAULT 'SP Principal';
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS expiracao_secret    DATE;
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_account     VARCHAR(200);
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_container   VARCHAR(200);
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_prefix      VARCHAR(500);
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_account_id  TEXT;
+    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_profile_id  TEXT;
+    ALTER TABLE azure_coleta_config ALTER COLUMN billing_account_id TYPE TEXT;
+    ALTER TABLE azure_coleta_config ALTER COLUMN billing_profile_id TYPE TEXT;
+    CREATE TABLE IF NOT EXISTS azure_storage_config (
+      id                SERIAL PRIMARY KEY,
+      nome              VARCHAR(200) NOT NULL DEFAULT 'Storage 1',
+      storage_account   VARCHAR(200) NOT NULL,
+      storage_container VARCHAR(200) NOT NULL,
+      storage_prefix    VARCHAR(500),
+      ativo             BOOLEAN DEFAULT true,
+      criado_em         TIMESTAMP DEFAULT NOW(),
+      atualizado_em     TIMESTAMP DEFAULT NOW()
+    );
+    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS auto_coleta_horas INTEGER;
+    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS proxima_coleta    TIMESTAMP;
+    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS hora_execucao     INTEGER;
+    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS dias_semana       TEXT;
+    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS hora_execucao     INTEGER;
+    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS dias_semana       TEXT;
+    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS auto_coleta       BOOLEAN DEFAULT false;
+    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS proxima_coleta    TIMESTAMP;
+    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS sp_id             INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL;
+    ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo             VARCHAR(20);
+    ALTER TABLE azure_coleta_config    ADD COLUMN IF NOT EXISTS is_padrao        BOOLEAN DEFAULT false;
     CREATE TABLE IF NOT EXISTS azure_coleta_historico (
       id                  BIGSERIAL PRIMARY KEY,
       iniciado_em         TIMESTAMP DEFAULT NOW(),
@@ -2940,119 +3806,835 @@ function _decryptSecret(enc) {
   return d.update(Buffer.from(dataH, 'hex'), undefined, 'utf8') + d.final('utf8');
 }
 
-async function _azureGetToken(tenantId, clientId, clientSecret) {
+// Handles both encrypted (iv:data:tag) and legacy plain-text values
+function _safeDecrypt(val) {
+  if (!val) return val;
+  if (!val.includes(':')) return val; // plain text (pre-encryption migration)
+  try { return _decryptSecret(val); } catch (_) { return val; }
+}
+
+function _logColeta(msg) {
+  _coletaProgresso.log.push({ ts: new Date().toISOString().slice(11, 19), msg });
+  if (_coletaProgresso.log.length > 200) _coletaProgresso.log.shift();
+  console.log('[Coleta] ' + msg);
+}
+
+// ── Agendador automático de coleta ────────────────────────────────────────────
+let _agendadorTimer = null;
+
+// Calcula o próximo timestamp de execução a partir de hora+dias da semana
+function _computeProximaColeta(horaExecucao, diasSemanaStr) {
+  if (horaExecucao == null || !diasSemanaStr) return null;
+  const dias = diasSemanaStr.split(',').map(Number).filter(d => d >= 0 && d <= 6);
+  if (!dias.length) return null;
+  const now = new Date();
+  for (let offset = 0; offset <= 7; offset++) {
+    const candidate = new Date(now);
+    candidate.setDate(now.getDate() + offset);
+    candidate.setHours(horaExecucao, 0, 0, 0);
+    if (dias.includes(candidate.getDay()) && candidate > now) return candidate;
+  }
+  return null;
+}
+
+function _iniciarAgendador() {
+  if (_agendadorTimer) return;
+  // Verifica a cada 5 minutos se alguma coleta está agendada para o momento atual
+  _agendadorTimer = setInterval(async () => {
+    // Safety valve: resetar coleta travada há mais de 30 min
+    if (_coletaEmExecucao && _coletaIniciadaEm) {
+      const elapsedMs = Date.now() - _coletaIniciadaEm.getTime();
+      if (elapsedMs > 30 * 60 * 1000) {
+        console.warn('[Agendador] SAFETY VALVE: coleta travada >30min — resetando');
+        _logColeta('[CB] Safety valve: coleta travada ' + Math.round(elapsedMs / 60000) + 'min — resetando flags');
+        _coletaEmExecucao = false;
+        _coletaIniciadaEm = null;
+        _cbAPI.state      = _CB_STATES.CLOSED;
+        _cbAPI.failures   = 0;
+        _cbAPI.openUntil  = null;
+      }
+    }
+    if (_coletaEmExecucao || !pool) return;
+    try {
+      // Storage: suporta agendamento por hora+dia ou por intervalo (legado)
+      const rStg = await pool.query(`
+        SELECT id, nome, hora_execucao, dias_semana, auto_coleta_horas
+        FROM azure_storage_config
+        WHERE ativo = true
+          AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
+          AND (
+            (hora_execucao IS NOT NULL AND dias_semana IS NOT NULL)
+            OR (auto_coleta_horas IS NOT NULL AND auto_coleta_horas > 0)
+          )
+        ORDER BY proxima_coleta ASC NULLS FIRST
+        LIMIT 1
+      `);
+      if (rStg.rows.length) {
+        const stg = rStg.rows[0];
+        console.log(`[Agendador] Disparando coleta Storage #${stg.id} (${stg.nome})`);
+        // Calcula próxima execução antes de disparar para evitar duplo disparo
+        let proxima;
+        if (stg.hora_execucao != null && stg.dias_semana) {
+          proxima = _computeProximaColeta(stg.hora_execucao, stg.dias_semana);
+        } else {
+          proxima = new Date(Date.now() + stg.auto_coleta_horas * 3600 * 1000);
+        }
+        await pool.query(
+          `UPDATE azure_storage_config SET proxima_coleta=$1 WHERE id=$2`,
+          [proxima, stg.id]
+        );
+        _executarColetaStorage('auto', stg.id).catch(e =>
+          console.error(`[Agendador] Erro coleta Storage #${stg.id}:`, e.message)
+        );
+        return; // só uma coleta por ciclo
+      }
+
+      // API: agendamento por hora+dia
+      const rApi = await pool.query(`
+        SELECT id, nome, billing_account_id, billing_profile_id, granularidade_dias, hora_execucao, dias_semana
+        FROM azure_coleta_config
+        WHERE ativo = true
+          AND auto_coleta = true
+          AND hora_execucao IS NOT NULL
+          AND dias_semana IS NOT NULL
+          AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
+        ORDER BY proxima_coleta ASC NULLS FIRST
+        LIMIT 1
+      `);
+      if (rApi.rows.length) {
+        const sp = rApi.rows[0];
+        if (!sp.billing_account_id || !sp.billing_profile_id) return;
+        console.log(`[Agendador] Disparando coleta API SP #${sp.id} (${sp.nome})`);
+        const proxima = _computeProximaColeta(sp.hora_execucao, sp.dias_semana);
+        await pool.query(
+          `UPDATE azure_coleta_config SET proxima_coleta=$1 WHERE id=$2`,
+          [proxima, sp.id]
+        );
+        const granDias = sp.granularidade_dias || 7;
+        const fim    = new Date(); fim.setDate(fim.getDate() - 1);
+        const inicio = new Date(fim); inicio.setDate(inicio.getDate() - (granDias - 1));
+        const fmt = d => d.toISOString().slice(0, 10);
+        _executarColetaAPI(
+          sp.id,
+          _decryptSecret(sp.billing_account_id),
+          _decryptSecret(sp.billing_profile_id),
+          fmt(inicio), fmt(fim)
+        ).catch(e => console.error(`[Agendador] Erro coleta API #${sp.id}:`, e.message));
+      }
+    } catch (e) {
+      console.warn('[Agendador] Erro ao verificar schedule:', e.message);
+    }
+  }, 5 * 60 * 1000); // 5 min
+}
+
+// ── Endpoints coleta ──────────────────────────────────────────────────────────
+
+app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
+  if (!_coletaEmExecucao) return res.status(409).json({ error: 'Nenhuma coleta em execução' });
+  _coletaCancelada = true;
+  _logColeta('Cancelamento solicitado pelo usuário via API');
+  res.json({ ok: true, message: 'Cancelamento solicitado' });
+});
+
+app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`SELECT id,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 1`);
+    res.json({
+      em_execucao:     _coletaEmExecucao,
+      cancelando:      _coletaCancelada,
+      progresso:       _coletaProgresso,
+      ultimo:          r.rows[0] || null,
+      circuit_breaker: {
+        state:      _cbAPI.state,
+        failures:   _cbAPI.failures,
+        open_until: _cbAPI.openUntil ? _cbAPI.openUntil.toISOString() : null,
+      },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const tipo = req.query.tipo;
+    const { rows } = tipo
+      ? await pool.query(`SELECT id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem,detalhes FROM azure_coleta_historico WHERE tipo=$1 ORDER BY iniciado_em DESC LIMIT 50`, [tipo])
+      : await pool.query(`SELECT id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem,detalhes FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 50`);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await pool.query(`TRUNCATE TABLE azure_coleta_historico RESTART IDENTITY`);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SERVICE PRINCIPALS — CRUD (credenciais de autenticação para Storage)
+// ══════════════════════════════════════════════════════════════════════════════
+
+app.get('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const r = await pool.query(`SELECT id,nome,tenant_id,client_id,ativo,is_padrao,expiracao_secret,billing_account_id,billing_profile_id,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM azure_coleta_config ORDER BY is_padrao DESC, id ASC`);
+    res.json(r.rows.map(row => ({
+      ...row,
+      tenant_id:          _safeDecrypt(row.tenant_id),
+      client_id:          _safeDecrypt(row.client_id),
+      billing_account_id: row.billing_account_id ? _safeDecrypt(row.billing_account_id) : '',
+      billing_profile_id: row.billing_profile_id ? _safeDecrypt(row.billing_profile_id) : '',
+    })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, dia_execucao, granularidade_dias } = req.body;
+    await ensureAzureColetaTable();
+    const tE   = tenant_id?.trim()         ? _encryptSecret(tenant_id.trim())         : '';
+    const cE   = client_id?.trim()          ? _encryptSecret(client_id.trim())          : '';
+    const sE   = client_secret?.trim()      ? _encryptSecret(client_secret.trim())      : '';
+    const baE  = billing_account_id?.trim() ? _encryptSecret(billing_account_id.trim()) : null;
+    const bpE  = billing_profile_id?.trim() ? _encryptSecret(billing_profile_id.trim()) : null;
+    const diaE = dia_execucao       != null ? Math.max(1, Math.min(28, parseInt(dia_execucao) || 5))  : 5;
+    const granE= granularidade_dias != null ? Math.max(1, parseInt(granularidade_dias) || 7)           : 7;
+    await pool.query(
+      `INSERT INTO azure_coleta_config(nome,tenant_id,client_id,client_secret,ativo,expiracao_secret,billing_account_id,billing_profile_id,dia_execucao,granularidade_dias) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [nome || 'Nova SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, diaE, granE]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, dia_execucao, granularidade_dias } = req.body;
+    const ex = await pool.query(`SELECT client_secret FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
+    if (!ex.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
+    let sE = ex.rows[0].client_secret || '';
+    if (client_secret?.trim()) sE = _encryptSecret(client_secret.trim());
+    const tE  = tenant_id?.trim()         ? _encryptSecret(tenant_id.trim())         : '';
+    const cE  = client_id?.trim()          ? _encryptSecret(client_id.trim())          : '';
+    const baE = billing_account_id?.trim() ? _encryptSecret(billing_account_id.trim()) : null;
+    const bpE = billing_profile_id?.trim() ? _encryptSecret(billing_profile_id.trim()) : null;
+    const diaE  = dia_execucao        != null ? Math.max(1, Math.min(28, parseInt(dia_execucao) || 5))   : 5;
+    const granE = granularidade_dias  != null ? Math.max(1, parseInt(granularidade_dias) || 7)            : 7;
+    await pool.query(
+      `UPDATE azure_coleta_config SET nome=$1,tenant_id=$2,client_id=$3,client_secret=$4,ativo=$5,expiracao_secret=$6,billing_account_id=$7,billing_profile_id=$8,dia_execucao=$9,granularidade_dias=$10,atualizado_em=NOW() WHERE id=$11`,
+      [nome || 'SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, diaE, granE, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/azure-coleta/sps/:id/coletar-api', authMiddleware, dbMiddleware, async (req, res) => {
+  if (_coletaEmExecucao) return res.status(409).json({ error: 'Coleta já em execução' });
+  const { billing_account_id, billing_profile_id, data_inicio, data_fim, modo, subscription_ids, resource_groups, metric } = req.body;
+  if (!data_inicio || !data_fim) return res.status(400).json({ error: 'data_inicio e data_fim são obrigatórios' });
+  const modoEfetivo   = modo || 'billing_profile';
+  const metricEfetivo = ['ActualCost','AmortizedCost'].includes(metric) ? metric : 'ActualCost';
+  if (modoEfetivo === 'billing_profile') {
+    if (!billing_account_id || !billing_profile_id) return res.status(400).json({ error: 'billing_account_id e billing_profile_id são obrigatórios para o modo Billing Profile' });
+  } else {
+    if (!subscription_ids || !subscription_ids.length) return res.status(400).json({ error: 'subscription_ids é obrigatório para o modo Subscription Direta' });
+  }
+  res.json({ ok: true, message: `Coleta via API iniciada (${metricEfetivo})` });
+  _executarColetaAPI(parseInt(req.params.id), billing_account_id || '', billing_profile_id || '', data_inicio, data_fim, modoEfetivo, subscription_ids || [], resource_groups || [], metricEfetivo)
+    .catch(e => console.error('[ColetaAPI] Erro:', e.message));
+});
+
+// Ativa/desativa SP sem tocar nos outros campos
+app.patch('/api/azure-coleta/sps/:id/ativo', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { ativo } = req.body;
+    await pool.query(`UPDATE azure_coleta_config SET ativo=$1,atualizado_em=NOW() WHERE id=$2`, [!!ativo, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Define esta SP como padrão (única por vez) — limpa is_padrao das outras
+app.patch('/api/azure-coleta/sps/:id/padrao', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`UPDATE azure_coleta_config SET is_padrao=false`);
+    await pool.query(`UPDATE azure_coleta_config SET is_padrao=true,atualizado_em=NOW() WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/azure-coleta/sps/:id/testar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
+    const cfg      = r.rows[0];
+    const tenantId = _safeDecrypt(cfg.tenant_id);
+    const clientId = _safeDecrypt(cfg.client_id);
+    const secret   = _safeDecrypt(cfg.client_secret);
+
+    const results = {};
+
+    // Testa escopo Management API (Cost Management / Billing)
+    try {
+      await _managementGetToken(tenantId, clientId, secret);
+      results.management = { ok: true, msg: 'Azure Management API ✅' };
+    } catch (e) {
+      results.management = { ok: false, msg: `Azure Management API ❌ — ${e.message}` };
+    }
+
+    // Testa escopo Storage (opcional — só necessário para coleta via Blob Storage)
+    try {
+      await _storageGetToken(tenantId, clientId, secret);
+      results.storage = { ok: true, msg: 'Azure Storage ✅' };
+    } catch (e) {
+      results.storage = { ok: false, msg: `Azure Storage ❌ — ${e.message}` };
+    }
+
+    const algumOk = results.management.ok || results.storage.ok;
+    const msgs    = [results.management.msg, results.storage.msg].join('\n');
+    if (algumOk) res.json({ ok: true, message: msgs, results });
+    else         res.status(400).json({ error: msgs, results });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Lista subscriptions de uma SP (para wizard de coleta)
+app.post('/api/azure-coleta/sps/:id/listar-subs', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
+    const cfg = r.rows[0];
+    const token = await _managementGetToken(
+      _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
+    );
+
+    // 1ª tentativa: ARM /subscriptions — lista TODAS as subs do tenant acessíveis pela SP
+    try {
+      const resp = await _cbFetch(
+        'https://management.azure.com/subscriptions?api-version=2022-12-01',
+        { headers: { Authorization: `Bearer ${token}` } },
+        { timeoutMs: 30_000 }
+      );
+      if (resp.ok) {
+        const data = await _safeRespJson(resp);
+        const subs = (data.value || [])
+          .filter(s => s.state === 'Enabled')
+          .map(s => ({ subscriptionId: s.subscriptionId, nome: s.displayName || s.subscriptionId }))
+          .sort((a, b) => a.nome.localeCompare(b.nome));
+        if (subs.length) return res.json({ subs, fonte: 'tenant' });
+      }
+    } catch (_) {}
+
+    // 2ª tentativa: Billing Profile (se configurado)
+    const baId = _safeDecrypt(cfg.billing_account_id || '');
+    const bpId = _safeDecrypt(cfg.billing_profile_id || '');
+    if (baId && bpId) {
+      try {
+        const subs = await _listarSubsBillingProfile(token, baId, bpId);
+        if (subs.length) return res.json({ subs, fonte: 'billing_profile' });
+      } catch (_) {}
+    }
+
+    // 3ª tentativa: cache local do banco
+    const cached = await pool.query(
+      `SELECT subscription_id, subscription_name FROM azure_subs_cache ORDER BY subscription_name`
+    );
+    const subs = cached.rows.map(row => ({
+      subscriptionId: row.subscription_id,
+      nome: row.subscription_name || row.subscription_id,
+    }));
+    res.json({ subs, fonte: 'cache' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Lista Resource Groups de subscriptions selecionadas (para wizard de coleta)
+app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_ids } = req.body;
+    if (!subscription_ids?.length) return res.status(400).json({ error: 'subscription_ids obrigatório' });
+
+    // Tenta ARM API primeiro (lista completa e atualizada)
+    try {
+      const r = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
+      const cfg = r.rows[0];
+      const token = await _managementGetToken(
+        _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
+      );
+      const rgs = [];
+      for (const subId of subscription_ids) {
+        try {
+          let url = `https://management.azure.com/subscriptions/${subId}/resourcegroups?api-version=2021-04-01&$top=1000`;
+          while (url) {
+            const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+            if (!resp.ok) break;
+            const data = await _safeRespJson(resp);
+            for (const rg of (data.value || [])) rgs.push({ subscriptionId: subId, name: rg.name });
+            url = data.nextLink || null;
+          }
+        } catch (_) {}
+      }
+      if (rgs.length > 0) return res.json({ rgs, fonte: 'arm' });
+    } catch (_) {}
+
+    // Fallback: cache local (normaliza para lowercase para evitar mismatch de case)
+    const lowerIds = subscription_ids.map(id => (id || '').toLowerCase().trim());
+    const ph = lowerIds.map((_, i) => `$${i + 1}`).join(',');
+    const cached = await pool.query(
+      `SELECT subscription_id, resource_group_name_upper AS name FROM azure_rg_cache WHERE LOWER(subscription_id) IN (${ph}) ORDER BY subscription_id, name`,
+      lowerIds
+    );
+    res.json({ rgs: cached.rows.map(r => ({ subscriptionId: r.subscription_id, name: r.name })), fonte: cached.rowCount > 0 ? 'cache' : 'empty' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COLETA VIA AZURE BLOB STORAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function _storageGetToken(tenantId, clientId, clientSecret) {
   const resp = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'client_credentials', client_id: clientId,
-      client_secret: clientSecret, scope: 'https://management.azure.com/.default'
+      client_secret: clientSecret, scope: 'https://storage.azure.com/.default'
     }).toString()
   });
-  if (!resp.ok) { const e = await resp.text(); throw new Error(`Autenticação Azure falhou (${resp.status}): ${e}`); }
-  return (await resp.json()).access_token;
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Storage falhou (${resp.status}): ${e}`); }
+  const tkStg = await _safeRespJson(resp);
+  if (!tkStg.access_token) throw new Error(`Token Storage: resposta sem access_token`);
+  return tkStg.access_token;
 }
 
-async function _azureListSubs(token) {
-  const subs = [];
-  let url = 'https://management.azure.com/subscriptions?api-version=2022-12-01';
-  while (url) {
-    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!resp.ok) throw new Error(`Erro ao listar subscriptions (${resp.status})`);
-    const data = await resp.json();
-    subs.push(...(data.value || []).filter(s => s.state === 'Enabled'));
-    url = data.nextLink || null;
+async function _managementGetToken(tenantId, clientId, clientSecret) {
+  const resp = await _cbFetch(
+    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials', client_id: clientId,
+        client_secret: clientSecret, scope: 'https://management.azure.com/.default'
+      }).toString(),
+    },
+    { timeoutMs: 30_000, countCbFailure: false } // 4xx de credencial não abre CB
+  );
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Management falhou (${resp.status}): ${e}`); }
+  const tkData = await _safeRespJson(resp);
+  if (!tkData.access_token) throw new Error(`Token Management: resposta sem access_token`);
+  return tkData.access_token;
+}
+
+// Lê JSON de uma Response sem quebrar em corpo vazio (Azure retorna 200/202 vazios)
+async function _safeRespJson(resp) {
+  const txt = await resp.text();
+  if (!txt || !txt.trim()) return {};
+  try { return JSON.parse(txt); } catch (_) { return {}; }
+}
+
+// ── Helpers de Coleta via API ─────────────────────────────────────────────────
+
+async function _listarSubsBillingProfile(token, billingAccountId, billingProfileId) {
+  const url  = `https://management.azure.com/providers/Microsoft.Billing/billingAccounts/${encodeURIComponent(billingAccountId)}/billingProfiles/${encodeURIComponent(billingProfileId)}/billingSubscriptions?api-version=2020-05-01`;
+  const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Listar subscriptions (${resp.status}): ${e}`); }
+  const data = await _safeRespJson(resp);
+  return (data.value || []).map(s => ({
+    subscriptionId: s.properties?.subscriptionId || s.subscriptionId || '',
+    nome: s.properties?.displayName || s.displayName || s.properties?.subscriptionId || '?',
+  })).filter(s => s.subscriptionId);
+}
+
+// Gera relatório, faz polling com limite de 60 tentativas (~6 min), baixa blobs e retorna caminhos locais
+// metric: 'ActualCost' (padrão) ou 'AmortizedCost' (reservas distribuídas mensalmente como no portal)
+async function _gerarRelatorioAPI(token, scopeUrl, startDate, endDate, label, metric = 'ActualCost') {
+  const fs     = require('fs');
+  const os     = require('os');
+  const path   = require('path');
+  const crypto = require('crypto');
+
+  const MAX_POLL_ATTEMPTS = 60; // 60 × 6s = 360s máximo por subscription
+
+  const genUrl  = `https://management.azure.com${scopeUrl}/providers/Microsoft.CostManagement/generateCostDetailsReport?api-version=2023-08-01`;
+  _logColeta(`→ Solicitando relatório: ${label}`);
+
+  const genResp = await _cbFetch(
+    genUrl,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ metric, timePeriod: { start: startDate, end: endDate } }),
+    },
+    { timeoutMs: 60_000 }
+  );
+
+  if (genResp.status === 404) { _logColeta(`  Sem dados: ${label}`); return []; }
+  if (genResp.status >= 500) {
+    _cbRecordFailure();
+    const e = await genResp.text();
+    throw new Error(`generateCostDetailsReport (${genResp.status}): ${e}`);
   }
-  return subs;
-}
+  if (!genResp.ok) { const e = await genResp.text(); throw new Error(`generateCostDetailsReport (${genResp.status}): ${e}`); }
 
-async function _azureGerarRelatorio(token, subId, startDate, endDate) {
-  const url = `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.CostManagement/generateCostDetailsReport?api-version=${_COLETA_API_VER}`;
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ metric: 'ActualCost', timePeriod: { start: startDate, end: endDate } })
-  });
-  if (resp.status === 202) return { location: resp.headers.get('Location') };
-  if (resp.status === 200) return { data: await resp.json() };
-  const e = await resp.text(); throw new Error(`Erro ao gerar relatório (${resp.status}): ${e}`);
-}
+  let manifest;
+  let pollUrl = genResp.headers.get('Location') || genResp.headers.get('location');
 
-async function _azurePollRelatorio(token, locationUrl) {
-  for (let i = 0; i < 120; i++) {
-    await new Promise(r => setTimeout(r, 10000));
-    const resp = await fetch(locationUrl, { headers: { Authorization: `Bearer ${token}` } });
-    if (resp.status === 200) return await resp.json();
-    if (resp.status === 202) continue;
-    const e = await resp.text(); throw new Error(`Erro ao aguardar relatório (${resp.status}): ${e}`);
+  if (!pollUrl && genResp.status === 200) {
+    const d = await _safeRespJson(genResp);
+    if (d.status === 'Completed' || d.manifest) manifest = d.manifest || d;
+    else if (d.status === 'NoDataFound') { _logColeta(`  Sem dados: ${label}`); return []; }
   }
-  throw new Error('Timeout aguardando relatório Azure (20 min)');
-}
+  if (genResp.status === 204) { _logColeta(`  Sem dados (204): ${label}`); return []; }
 
-function _splitPeriodo(startDate, endDate, diasChunk) {
-  const chunks = [];
-  let cur = new Date(startDate + 'T00:00:00Z');
-  const end = new Date(endDate + 'T00:00:00Z');
-  while (cur <= end) {
-    const chunkEnd = new Date(cur);
-    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + diasChunk - 1);
-    if (chunkEnd > end) chunkEnd.setTime(end.getTime());
-    chunks.push({ start: cur.toISOString().slice(0, 10), end: chunkEnd.toISOString().slice(0, 10) });
-    cur = new Date(chunkEnd);
-    cur.setUTCDate(cur.getUTCDate() + 1);
+  // Polling com limite máximo de tentativas
+  let tentativas = 0;
+  while (pollUrl && !manifest) {
+    if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+    if (tentativas >= MAX_POLL_ATTEMPTS) {
+      throw new Error(`Timeout de polling: Azure não entregou o relatório de '${label}' em ${MAX_POLL_ATTEMPTS * 6}s`);
+    }
+    await new Promise(r => setTimeout(r, 6000));
+    tentativas++;
+
+    const pr = await _cbFetch(pollUrl, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+    if (pr.status >= 500) {
+      _cbRecordFailure();
+      const e = await pr.text();
+      throw new Error(`Poll (${pr.status}): ${e}`);
+    }
+    if (!pr.ok) { const e = await pr.text(); throw new Error(`Poll (${pr.status}): ${e}`); }
+    if (pr.status === 204) { _logColeta(`  Sem dados (204): ${label}`); return []; }
+    const pd = await _safeRespJson(pr);
+
+    if (tentativas % 5 === 0) _logColeta(`  ${label}: aguardando Azure... ${tentativas * 6}s`);
+    _coletaProgresso.fase = `${label} — gerando relatório (${tentativas * 6}s)`;
+
+    if (pd.status === 'Completed')   { manifest = pd.manifest || pd; break; }
+    if (pd.status === 'Failed')      {
+      _cbRecordFailure();
+      throw new Error(`Relatório falhou no Azure: ${JSON.stringify(pd.error || {})}`);
+    }
+    if (pd.status === 'NoDataFound') { _logColeta(`  Sem dados: ${label}`); return []; }
   }
-  return chunks;
+  if (!manifest) throw new Error(`Sem manifest após polling: ${label}`);
+
+  // Download de blobs via SAS URL — sem CB (são URLs pré-assinadas, não passam pela API)
+  const tmpFiles = [];
+  for (const blob of (manifest.blobs || [])) {
+    const blobUrl = blob.blobLink || blob.blobSasUri || blob.downloadUrl || blob;
+    const dest    = path.join(os.tmpdir(), `az_api_${crypto.randomBytes(6).toString('hex')}.csv`);
+
+    const blobCtrl  = new AbortController();
+    const blobTimer = setTimeout(() => blobCtrl.abort(), 120_000);
+    try {
+      const dlResp = await fetch(typeof blobUrl === 'string' ? blobUrl : String(blobUrl), { signal: blobCtrl.signal });
+      clearTimeout(blobTimer);
+      if (!dlResp.ok) throw new Error(`Download blob (${dlResp.status})`);
+      fs.writeFileSync(dest, Buffer.from(await dlResp.arrayBuffer()));
+    } catch (err) {
+      clearTimeout(blobTimer);
+      if (err.name === 'AbortError') throw new Error(`Timeout (120s) ao baixar blob de '${label}'`);
+      throw err;
+    }
+    tmpFiles.push(dest);
+  }
+  _logColeta(`  ${label}: ${tmpFiles.length} blob(s) baixado(s)`);
+  return tmpFiles;
 }
 
-async function _azureDownloadCSV(downloadUrl) {
+async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null) {
+  const fs = require('fs');
+  let ins = 0, upd = 0, err = 0, linhas = 0;
+  for (const dest of tmpFiles) {
+    try {
+      const rows = await _lerCSV(dest);
+      linhas += rows.length;
+      _logColeta(`  ${label}: importando ${rows.length} linhas${rgFilter ? ` (filtro: ${rgFilter.size} RGs)` : ''}`);
+      const client = await pool.connect();
+      let spCount = 0;
+      try {
+        await client.query('BEGIN');
+        for (let i = 0; i < rows.length; i += 200) {
+          for (const raw of rows.slice(i, i + 200)) {
+            const m = _mapRowCSV(raw, `api-${label}`);
+            if (rgFilter && !rgFilter.has((m.resource_group_name || '').toUpperCase())) continue;
+            const sp = `sp_${spCount++}`;
+            try {
+              await client.query(`SAVEPOINT ${sp}`);
+              const r = await client.query(sql, COLS.map(c => m[c] ?? null));
+              await client.query(`RELEASE SAVEPOINT ${sp}`);
+              if (r.rowCount > 0) ins++; else upd++;
+            } catch (e) {
+              await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+              await client.query(`RELEASE SAVEPOINT ${sp}`);
+              err++;
+            }
+          }
+          _coletaProgresso.ins += ins; _coletaProgresso.upd += upd; _coletaProgresso.err += err;
+        }
+        await client.query('COMMIT');
+      } catch (e) { await client.query('ROLLBACK'); throw e; }
+      finally { client.release(); }
+    } finally {
+      try { fs.unlinkSync(dest); } catch (_) {}
+    }
+  }
+  return { ins, upd, err, linhas };
+}
+
+// ── Coleta via Azure Cost Management API ─────────────────────────────────────
+// modo: 'billing_profile' (padrão) ou 'subscription' (direto por subscription IDs)
+async function _executarColetaAPI(spId, billingAccountId, billingProfileId, startDate, endDate, modo = 'billing_profile', subscriptionIds = [], resourceGroups = [], metric = 'ActualCost') {
+  if (_coletaEmExecucao) throw new Error('Coleta já em execução');
+  if (!pool) throw new Error('Banco não conectado');
+  _coletaEmExecucao = true;
+  _coletaIniciadaEm = new Date();
+  _coletaCancelada  = false;
+  _coletaProgresso  = { tipo: 'api', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0,
+                        chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] };
+  const rgFilter = resourceGroups.length ? new Set(resourceGroups.map(r => r.toUpperCase())) : null;
+  _logColeta(`Coleta API [${modo}] — ${startDate} → ${endDate}${rgFilter ? ` | ${rgFilter.size} RG(s) filtrado(s)` : ''}`);
+  let histId, totalIns = 0, totalUpd = 0, totalErr = 0, totalLinhas = 0;
+  let subCount = 0;
+
+  try {
+    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo) VALUES ('executando','api') RETURNING id`);
+    histId = r.rows[0].id;
+
+    // 1) Credenciais e token
+    const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [spId]);
+    if (!spRow.rows.length) throw new Error('SP não encontrada');
+    const spCfg   = spRow.rows[0];
+    const token   = await _managementGetToken(
+      _safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret)
+    );
+
+    // 2) SQL de upsert
+    await ensureAzureCostsTable();
+    const COLS    = Object.keys(_mapRowCSV({}, ''));
+    const ph      = COLS.map((_, i) => `$${i + 1}`).join(', ');
+    const updCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
+    let temIdx = false;
+    try {
+      const ck = await pool.query(`SELECT 1 FROM pg_indexes WHERE tablename='azure_costs' AND indexname='idx_azure_costs_dedup' LIMIT 1`);
+      temIdx = ck.rowCount > 0;
+    } catch (_) {}
+    const sql = temIdx
+      ? `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT (COALESCE(subscription_id,''),COALESCE(resource_id,''),cost_date,COALESCE(meter_id,''),COALESCE(charge_type,''),COALESCE(quantity,0)) DO UPDATE SET ${updCols.map(c => `${c}=EXCLUDED.${c}`).join(',')}`
+      : `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT DO NOTHING`;
+
+    if (modo === 'subscription') {
+      // ── Modo: Subscription Direta ──────────────────────────────────────────
+      _coletaProgresso.fase      = 'Preparando coleta por subscriptions...';
+      _coletaProgresso.sub_total = subscriptionIds.length;
+      subCount = subscriptionIds.length;
+      for (let i = 0; i < subscriptionIds.length; i++) {
+        if (_coletaCancelada) { _logColeta('Cancelado'); break; }
+        const subId = subscriptionIds[i].trim();
+        if (!subId) continue;
+        _coletaProgresso.sub_idx   = i + 1;
+        _coletaProgresso.sub_atual = subId;
+        _coletaProgresso.fase      = `[${i + 1}/${subscriptionIds.length}] ${subId}`;
+        try {
+          const subScope = `/subscriptions/${subId}`;
+          const arquivos = await _gerarRelatorioAPI(token, subScope, startDate, endDate, subId, metric);
+          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
+          totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+        } catch (e) {
+          _logColeta(`Erro subscription ${subId}: ${e.message}`);
+          totalErr++;
+        }
+      }
+
+    } else {
+      // ── Modo: Billing Profile (MCA) ────────────────────────────────────────
+      _coletaProgresso.fase = 'Listando subscriptions do Billing Profile...';
+      let subs = [];
+      try {
+        subs = await _listarSubsBillingProfile(token, billingAccountId, billingProfileId);
+        _logColeta(`${subs.length} subscription(s) encontrada(s)`);
+      } catch (e) {
+        _logColeta(`Aviso: não foi possível listar subscriptions (${e.message})`);
+      }
+
+      // Filtrar subs selecionadas pelo wizard (se lista não vazia)
+      if (subscriptionIds.length > 0) {
+        const subFilterSet = new Set(subscriptionIds.map(s => s.toLowerCase()));
+        subs = subs.filter(s => subFilterSet.has(s.subscriptionId.toLowerCase()));
+        _logColeta(`Filtro wizard: ${subs.length} subscription(s) selecionada(s)`);
+      }
+
+      const bpScope = `/providers/Microsoft.Billing/billingAccounts/${encodeURIComponent(billingAccountId)}/billingProfiles/${encodeURIComponent(billingProfileId)}`;
+      subCount = subs.length;
+
+      if (subs.length > 0) {
+        _coletaProgresso.sub_total = subs.length + 1; // +1 para passagem de Tax
+        for (let i = 0; i < subs.length; i++) {
+          if (_coletaCancelada) { _logColeta('Cancelado'); break; }
+          const sub = subs[i];
+          _coletaProgresso.sub_idx   = i + 1;
+          _coletaProgresso.sub_atual = sub.nome;
+          _coletaProgresso.fase      = `[${i + 1}/${subs.length}] ${sub.nome}`;
+          try {
+            const subScope = `/subscriptions/${sub.subscriptionId}`;
+            const arquivos = await _gerarRelatorioAPI(token, subScope, startDate, endDate, sub.nome, metric);
+            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
+            totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+          } catch (e) {
+            _logColeta(`Erro subscription ${sub.nome}: ${e.message}`);
+            totalErr++;
+          }
+        }
+
+        // Passagem no Billing Profile para capturar Tax/Purchase/Refund
+        if (!_coletaCancelada) {
+          _coletaProgresso.sub_idx   = subs.length + 1;
+          _coletaProgresso.sub_atual = 'Billing Profile (Tax/Fiscal)';
+          _coletaProgresso.fase      = 'Coletando impostos fiscais (Tax) do Billing Profile...';
+          _logColeta('Passagem Billing Profile — Tax/Purchase/Refund...');
+          try {
+            const arquivos = await _gerarRelatorioAPI(token, bpScope, startDate, endDate, 'Billing Profile', metric);
+            const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
+            totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+          } catch (e) {
+            _logColeta(`Aviso: passagem Billing Profile falhou — ${e.message}`);
+          }
+        }
+      } else {
+        // Fallback: coleta direto no Billing Profile scope
+        _coletaProgresso.sub_total = 1;
+        _coletaProgresso.sub_idx   = 1;
+        _coletaProgresso.sub_atual = 'Billing Profile';
+        const arquivos = await _gerarRelatorioAPI(token, bpScope, startDate, endDate, 'Billing Profile', metric);
+        const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
+        totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+      }
+    }
+
+    // Resumo final
+    try {
+      const rCT = await pool.query(`SELECT COALESCE(charge_type,'(sem tipo)') AS ct, COUNT(*) AS n FROM azure_costs GROUP BY charge_type ORDER BY n DESC LIMIT 20`);
+      _logColeta('Charge types: ' + rCT.rows.map(r => `${r.ct}:${r.n}`).join(', '));
+    } catch (_) {}
+
+    _logColeta(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err / ${totalLinhas} linhas`);
+    _refreshAzureCache().catch(() => {});
+    const msgFinal = modo === 'subscription'
+      ? `API Subscription — ${subCount} sub(s) | ${startDate}→${endDate}`
+      : `API Billing Profile — ${subCount} sub(s) + Tax | ${startDate}→${endDate}`;
+    const detFinal = JSON.stringify({ tipo: 'api', modo, log: [..._coletaProgresso.log] });
+    await pool.query(
+      `UPDATE azure_coleta_historico SET status='concluido',concluido_em=NOW(),linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+      [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
+    );
+    _coletaProgresso.fase = 'Concluído';
+
+  } catch (err) {
+    _logColeta(`ERRO: ${err.message}`);
+    const detErr = JSON.stringify({ tipo: 'api', modo, log: [..._coletaProgresso.log] });
+    if (histId) await pool.query(
+      `UPDATE azure_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1,detalhes=$2 WHERE id=$3`,
+      [err.message, detErr, histId]
+    ).catch(() => {});
+  } finally {
+    _coletaEmExecucao = false;
+    _coletaIniciadaEm = null;
+  }
+}
+
+async function _storageListBlobs(token, storageAccount, container, prefix = '') {
+  const blobs = [];
+  let marker = '';
+  do {
+    const qs = new URLSearchParams({ restype: 'container', comp: 'list' });
+    if (prefix)  qs.set('prefix', prefix);
+    if (marker)  qs.set('marker', marker);
+    const url  = `https://${storageAccount}.blob.core.windows.net/${container}?${qs}`;
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}`, 'x-ms-version': '2020-04-08' } });
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Erro ao listar blobs (${resp.status}): ${e}`); }
+    const xml  = await resp.text();
+    const bRe  = /<Blob>([\s\S]*?)<\/Blob>/g;
+    let m;
+    while ((m = bRe.exec(xml)) !== null) {
+      const c    = m[1];
+      const name = c.match(/<Name>([\s\S]*?)<\/Name>/)?.[1]?.trim() || '';
+      const lm   = c.match(/<Last-Modified>([\s\S]*?)<\/Last-Modified>/)?.[1] || '';
+      const sz   = parseInt(c.match(/<Content-Length>(\d+)<\/Content-Length>/)?.[1] || '0');
+      if (name) blobs.push({ name, lastModified: new Date(lm), size: sz });
+    }
+    marker = xml.match(/<NextMarker>([\s\S]*?)<\/NextMarker>/)?.[1]?.trim() || '';
+  } while (marker);
+  return blobs;
+}
+
+async function _storageDownloadBlob(token, storageAccount, container, blobName) {
   const path   = require('path');
   const fs     = require('fs');
   const crypto = require('crypto');
   const os     = require('os');
-  const dest   = path.join(os.tmpdir(), `az_coleta_${crypto.randomBytes(6).toString('hex')}.csv`);
-  const resp   = await fetch(downloadUrl);
-  if (!resp.ok) throw new Error(`Erro ao baixar CSV (${resp.status})`);
+  const ext    = blobName.toLowerCase().endsWith('.parquet') ? '.parquet' : '.csv';
+  const dest   = path.join(os.tmpdir(), `az_stg_${crypto.randomBytes(6).toString('hex')}${ext}`);
+  const url    = `https://${storageAccount}.blob.core.windows.net/${container}/${blobName}`;
+  const resp   = await fetch(url, { headers: { Authorization: `Bearer ${token}`, 'x-ms-version': '2020-04-08' } });
+  if (!resp.ok) throw new Error(`Erro ao baixar blob ${blobName} (${resp.status})`);
   fs.writeFileSync(dest, Buffer.from(await resp.arrayBuffer()));
   return dest;
 }
 
-async function _executarColeta(modo = 'auto') {
+async function _executarColetaStorage(modo = 'manual', storageId = null) {
   if (_coletaEmExecucao) throw new Error('Coleta já em execução');
   if (!pool) throw new Error('Banco não conectado');
   _coletaEmExecucao = true;
+  _coletaCancelada  = false;
+  _coletaProgresso  = { tipo: 'storage', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] };
+  _logColeta(`Coleta Storage iniciada (${modo}${storageId ? ' STG#'+storageId : ''})`);
 
-  let histId, totalSubs = 0, subsOk = 0, subsErro = 0;
-  let totalIns = 0, totalUpd = 0, totalErr = 0;
-  const detalhes = [];
+  let histId, totalIns = 0, totalUpd = 0, totalErr = 0;
 
   try {
-    const r = await pool.query(`INSERT INTO azure_coleta_historico (status) VALUES ('executando') RETURNING id`);
+    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo) VALUES ('executando','storage') RETURNING id`);
     histId = r.rows[0].id;
 
-    const cfgRow = await pool.query(`SELECT * FROM azure_coleta_config LIMIT 1`);
-    if (!cfgRow.rows.length) throw new Error('Coleta automática não configurada');
-    const cfg = cfgRow.rows[0];
-    if (!cfg.ativo && modo === 'auto') throw new Error('Coleta automática está desativada');
+    // Storage config
+    const stgRow = storageId
+      ? await pool.query(`SELECT * FROM azure_storage_config WHERE id=$1`, [storageId])
+      : await pool.query(`SELECT * FROM azure_storage_config WHERE ativo=true ORDER BY id LIMIT 1`);
+    if (!stgRow.rows.length) throw new Error(storageId ? `Storage #${storageId} não encontrado` : 'Nenhum Storage ativo configurado');
+    const stg = stgRow.rows[0];
+    const storageAccount = stg.storage_account?.trim();
+    const container      = stg.storage_container?.trim();
+    const prefix         = stg.storage_prefix?.trim() || '';
+    if (!storageAccount || !container) throw new Error('Storage Account e Container não configurados');
 
-    const secret = _decryptSecret(cfg.client_secret);
-    console.log('[Coleta] Autenticando no Azure...');
-    const token = await _azureGetToken(cfg.tenant_id, cfg.client_id, secret);
+    // SP para autenticar — usa sp_id vinculado ao storage, ou cai para a primeira SP ativa
+    const spQuery = stg.sp_id
+      ? await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [stg.sp_id])
+      : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo=true ORDER BY is_padrao DESC, id ASC LIMIT 1`);
+    if (!spQuery.rows.length) throw new Error(stg.sp_id ? `SP #${stg.sp_id} não encontrada` : 'Nenhuma SP ativa configurada');
+    const sp = spQuery.rows[0];
+    const tenantId = _safeDecrypt(sp.tenant_id);
+    const clientId = _safeDecrypt(sp.client_id);
+    const secret   = _safeDecrypt(sp.client_secret);
 
-    console.log('[Coleta] Listando subscriptions do tenant...');
-    const subs = await _azureListSubs(token);
-    totalSubs = subs.length;
-    console.log(`[Coleta] ${totalSubs} subscription(s) ativa(s)`);
+    _coletaProgresso.fase = 'Autenticando no Azure Storage...';
+    _logColeta('Obtendo token de Storage...');
+    const token = await _storageGetToken(tenantId, clientId, secret);
 
-    // Período: mês anterior completo
-    const hoje   = new Date();
-    const inicio = new Date(Date.UTC(hoje.getFullYear(), hoje.getMonth() - 1, 1));
-    const fim    = new Date(Date.UTC(hoje.getFullYear(), hoje.getMonth(), 0));
-    const startDate = inicio.toISOString().slice(0, 10);
-    const endDate   = fim.toISOString().slice(0, 10);
-    const granularidade = cfg.granularidade_dias || 7;
-    const chunks = _splitPeriodo(startDate, endDate, granularidade);
-    console.log(`[Coleta] Período: ${startDate} → ${endDate} (${chunks.length} chunk(s) de ${granularidade} dias)`);
+    _coletaProgresso.fase = 'Listando arquivos no container...';
+    _logColeta(`Listando em ${storageAccount}/${container}/${prefix || '*'}`);
+    let blobs = await _storageListBlobs(token, storageAccount, container, prefix);
+    blobs = blobs.filter(b => /\.(csv|parquet)$/i.test(b.name));
+    _logColeta(`${blobs.length} arquivo(s) CSV/Parquet encontrado(s)`);
+    if (!blobs.length) throw new Error('Nenhum arquivo CSV/Parquet encontrado no caminho configurado');
+    _coletaProgresso.sub_total = blobs.length;
 
+    await ensureAzureCostsTable();
     const COLS    = Object.keys(_mapRowCSV({}, ''));
     const ph      = COLS.map((_, i) => `$${i + 1}`).join(', ');
     const updCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
@@ -3062,179 +4644,221 @@ async function _executarColeta(modo = 'auto') {
       temIdx = ck.rowCount > 0;
     } catch (_) {}
     const sqlU = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})
-      ON CONFLICT (subscription_id,resource_id,cost_date,COALESCE(meter_id,''),COALESCE(charge_type,''),COALESCE(quantity,0))
+      ON CONFLICT (COALESCE(subscription_id,''),COALESCE(resource_id,''),cost_date,COALESCE(meter_id,''),COALESCE(charge_type,''),COALESCE(quantity,0))
       DO UPDATE SET ${updCols.map(c => `${c}=EXCLUDED.${c}`).join(',')}`;
     const sqlI = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT DO NOTHING`;
     const sql  = temIdx ? sqlU : sqlI;
 
-    for (const sub of subs) {
-      const subId   = sub.subscriptionId;
-      const subName = sub.displayName;
-      const csvFiles = [];
-      let subIns = 0, subUpd = 0, subErr = 0, subBlobs = 0, subSemDados = 0;
-      let subFailed = false;
+    for (let bi = 0; bi < blobs.length; bi++) {
+      if (_coletaCancelada) { _logColeta('Cancelado'); break; }
+      const blob = blobs[bi];
+      _coletaProgresso.sub_idx   = bi + 1;
+      _coletaProgresso.sub_atual = blob.name.split('/').pop();
+      _coletaProgresso.fase      = `Importando: ${blob.name.split('/').pop()}`;
+      _logColeta(`→ ${blob.name} (${(blob.size / 1048576).toFixed(1)} MB)`);
+
+      let tmpFile;
       try {
-        console.log(`[Coleta] → ${subName} (${chunks.length} chunk(s))`);
-        for (const chunk of chunks) {
-          try {
-            const result  = await _azureGerarRelatorio(token, subId, chunk.start, chunk.end);
-            const repData = result.location ? await _azurePollRelatorio(token, result.location) : result.data;
-            const blobs   = repData?.manifest?.blobs ||
-                            (repData?.downloadUrl ? [{ blobLink: repData.downloadUrl }] : []);
+        tmpFile = await _storageDownloadBlob(token, storageAccount, container, blob.name);
+        const rows = await _lerCSV(tmpFile);
+        _logColeta(`  ${rows.length} linhas`);
 
-            if (!blobs.length) { subSemDados++; continue; }
-
-            for (const blob of blobs) {
-              const dlUrl = blob.blobLink || blob.downloadUrl;
-              if (!dlUrl) continue;
-              const csv = await _azureDownloadCSV(dlUrl);
-              csvFiles.push(csv);
-              const rows = await _lerCSV(csv);
-              console.log(`[Coleta]   ${chunk.start}→${chunk.end}: ${rows.length} linhas`);
-              subBlobs++;
-
-              const client = await pool.connect();
-              let ins = 0, upd = 0, err = 0;
+        const client = await pool.connect();
+        let ins = 0, upd = 0, err = 0;
+        try {
+          await client.query('BEGIN');
+          let sp = 0;
+          for (let i = 0; i < rows.length; i += 200) {
+            for (const raw of rows.slice(i, i + 200)) {
+              const spn = `sp_${sp++}`;
               try {
-                await client.query('BEGIN');
-                let sp = 0;
-                for (let i = 0; i < rows.length; i += 200) {
-                  for (const raw of rows.slice(i, i + 200)) {
-                    const spn = `sp_${sp++}`;
-                    try {
-                      await client.query(`SAVEPOINT ${spn}`);
-                      const m  = _mapRowCSV(raw, `${subName}_${chunk.start}`);
-                      const r2 = await client.query(sql, COLS.map(col => m[col] ?? null));
-                      await client.query(`RELEASE SAVEPOINT ${spn}`);
-                      if (r2.rowCount > 0) ins++; else upd++;
-                    } catch (e) {
-                      await client.query(`ROLLBACK TO SAVEPOINT ${spn}`);
-                      await client.query(`RELEASE SAVEPOINT ${spn}`);
-                      err++;
-                    }
-                  }
-                }
-                await client.query('COMMIT');
-              } catch (e) { await client.query('ROLLBACK'); throw e; }
-              finally { client.release(); }
-              subIns += ins; subUpd += upd; subErr += err;
+                await client.query(`SAVEPOINT ${spn}`);
+                const m = _mapRowCSV(raw, blob.name);
+                const r2 = await client.query(sql, COLS.map(col => m[col] ?? null));
+                await client.query(`RELEASE SAVEPOINT ${spn}`);
+                if (r2.rowCount > 0) ins++; else upd++;
+              } catch (e) {
+                await client.query(`ROLLBACK TO SAVEPOINT ${spn}`);
+                await client.query(`RELEASE SAVEPOINT ${spn}`);
+                err++;
+              }
             }
-          } catch (chunkErr) {
-            console.error(`[Coleta]   Erro no chunk ${chunk.start}→${chunk.end}:`, chunkErr.message);
-            subErr++;
-            subFailed = true;
-            detalhes.push({ sub: subName, subId, chunk: `${chunk.start}→${chunk.end}`, status: 'erro', erro: chunkErr.message });
           }
-        }
-        totalIns += subIns; totalUpd += subUpd; totalErr += subErr;
-        if (subFailed) {
-          subsErro++;
-        } else {
-          detalhes.push({ sub: subName, subId, status: subBlobs ? 'ok' : 'sem_dados', blobs: subBlobs, chunks: chunks.length });
-          subsOk++;
-        }
-      } catch (subErr) {
-        console.error(`[Coleta] Erro em ${subName}:`, subErr.message);
-        detalhes.push({ sub: subName, subId, status: 'erro', erro: subErr.message });
-        subsErro++;
+          await client.query('COMMIT');
+        } catch (e) { await client.query('ROLLBACK'); throw e; }
+        finally { client.release(); }
+        totalIns += ins; totalUpd += upd; totalErr += err;
+        _logColeta(`  ins:${ins} upd:${upd} err:${err}`);
+        _coletaProgresso.ins = totalIns;
+        _coletaProgresso.upd = totalUpd;
+        _coletaProgresso.err = totalErr;
+      } catch (blobErr) {
+        _logColeta(`ERRO ${blob.name.split('/').pop()}: ${blobErr.message.slice(0, 60)}`);
+        totalErr++;
+        _coletaProgresso.err = totalErr;
       } finally {
         const fs = require('fs');
-        for (const f of csvFiles) try { fs.unlinkSync(f); } catch (_) {}
+        if (tmpFile) try { fs.unlinkSync(tmpFile); } catch (_) {}
       }
     }
 
     _refreshAzureCache().catch(() => {});
-    const msg = `${subsOk}/${totalSubs} subs OK · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros`;
-    console.log(`[Coleta] Concluída: ${msg}`);
-    await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',subs_total=$1,subs_ok=$2,subs_erro=$3,linhas_inseridas=$4,linhas_atualizadas=$5,linhas_erro=$6,mensagem=$7,detalhes=$8 WHERE id=$9`,
-      [totalSubs, subsOk, subsErro, totalIns, totalUpd, totalErr, msg, JSON.stringify({ modo, subs: detalhes }), histId]);
-    return { ok: true, msg, detalhes };
-
+    const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros`;
+    _coletaProgresso.fase = 'Concluída';
+    _logColeta('Concluída: ' + msg);
+    await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+      [totalIns, totalUpd, totalErr, msg, JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] }), histId]);
+    return { ok: true, msg };
   } catch (err) {
-    console.error('[Coleta] Erro geral:', err.message);
-    if (histId) await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',subs_total=$1,subs_ok=$2,subs_erro=$3,linhas_inseridas=$4,linhas_atualizadas=$5,linhas_erro=$6,mensagem=$7,detalhes=$8 WHERE id=$9`,
-      [totalSubs, subsOk, subsErro, totalIns, totalUpd, totalErr, err.message, JSON.stringify(detalhes), histId]).catch(() => {});
+    _coletaProgresso.fase = 'Erro: ' + err.message.slice(0, 80);
+    _logColeta('Erro: ' + err.message.slice(0, 80));
+    const detStgErr = JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] });
+    if (histId) await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+      [totalIns, totalUpd, totalErr, err.message, detStgErr, histId]).catch(() => {});
     throw err;
   } finally {
     _coletaEmExecucao = false;
+    _coletaCancelada  = false;
   }
 }
 
-function _iniciarSchedulerColeta() {
-  if (_coletaScheduler) clearInterval(_coletaScheduler);
-  _coletaScheduler = setInterval(async () => {
-    if (!pool || _coletaEmExecucao) return;
-    try {
-      const cfg = await pool.query(`SELECT ativo, dia_execucao FROM azure_coleta_config LIMIT 1`).catch(() => ({ rows: [] }));
-      if (!cfg.rows.length || !cfg.rows[0].ativo) return;
-      if (new Date().getDate() !== (cfg.rows[0].dia_execucao || 5)) return;
-      const jaFez = await pool.query(`SELECT 1 FROM azure_coleta_historico WHERE DATE(iniciado_em)=CURRENT_DATE AND status IN ('concluido','executando') LIMIT 1`);
-      if (jaFez.rowCount > 0) return;
-      console.log('[Coleta] Iniciando coleta automática agendada...');
-      _executarColeta('auto').catch(e => console.error('[Coleta] Erro automático:', e.message));
-    } catch (e) { console.warn('[Coleta] Scheduler erro:', e.message); }
-  }, 60 * 60 * 1000); // verifica a cada hora
-}
+// ── Storage CRUD ──────────────────────────────────────────────────────────────
 
-// ── Endpoints Coleta Automática ───────────────────────────────────────────────
-
-app.get('/api/azure-coleta/config', authMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`SELECT id,tenant_id,client_id,ativo,dia_execucao,granularidade_dias,atualizado_em FROM azure_coleta_config LIMIT 1`);
-    res.json(r.rows[0] || null);
+    const r = await pool.query(`SELECT * FROM azure_storage_config ORDER BY id`);
+    res.json(r.rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/azure-coleta/config', authMiddleware, dbMiddleware, async (req, res) => {
+app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { tenant_id, client_id, client_secret, ativo, dia_execucao, granularidade_dias } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, ativo, sp_id } = req.body;
     await ensureAzureColetaTable();
-    const ex = await pool.query(`SELECT id, client_secret FROM azure_coleta_config LIMIT 1`);
-    let secretEnc = ex.rows[0]?.client_secret || '';
-    if (client_secret?.trim()) secretEnc = _encryptSecret(client_secret.trim());
-    const gran = Math.min(28, Math.max(1, parseInt(granularidade_dias) || 7));
-    if (ex.rows.length) {
-      await pool.query(`UPDATE azure_coleta_config SET tenant_id=$1,client_id=$2,client_secret=$3,ativo=$4,dia_execucao=$5,granularidade_dias=$6,atualizado_em=NOW() WHERE id=$7`,
-        [tenant_id, client_id, secretEnc, ativo ?? false, dia_execucao ?? 5, gran, ex.rows[0].id]);
-    } else {
-      await pool.query(`INSERT INTO azure_coleta_config(tenant_id,client_id,client_secret,ativo,dia_execucao,granularidade_dias) VALUES($1,$2,$3,$4,$5,$6)`,
-        [tenant_id, client_id, secretEnc, ativo ?? false, dia_execucao ?? 5, gran]);
-    }
+    if (!storage_account?.trim() || !storage_container?.trim()) return res.status(400).json({ error: 'Storage Account e Container são obrigatórios' });
+    const r = await pool.query(
+      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, ativo ?? true, sp_id || null]
+    );
+    res.json({ ok: true, id: r.rows[0].id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, storage_account, storage_container, storage_prefix, ativo, sp_id } = req.body;
+    await pool.query(
+      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,ativo=$5,sp_id=$6,atualizado_em=NOW() WHERE id=$7`,
+      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
+    );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/azure-coleta/testar', authMiddleware, dbMiddleware, async (_req, res) => {
+app.delete('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const r = await pool.query(`SELECT * FROM azure_coleta_config LIMIT 1`);
-    if (!r.rows.length) return res.status(400).json({ error: 'Coleta não configurada' });
-    const cfg    = r.rows[0];
-    const secret = _decryptSecret(cfg.client_secret);
-    const token  = await _azureGetToken(cfg.tenant_id, cfg.client_id, secret);
-    const subs   = await _azureListSubs(token);
-    res.json({ ok: true, subscriptions: subs.length, preview: subs.slice(0, 5).map(s => s.displayName) });
+    await pool.query(`DELETE FROM azure_storage_config WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/azure-coleta/executar', authMiddleware, dbMiddleware, (req, res) => {
+app.post('/api/azure-coleta/storages/:id/testar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const stgRow = await pool.query(`SELECT * FROM azure_storage_config WHERE id=$1`, [req.params.id]);
+    if (!stgRow.rows.length) return res.status(404).json({ error: 'Storage não encontrado' });
+    const stg = stgRow.rows[0];
+    const spQuery = stg.sp_id
+      ? await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [stg.sp_id])
+      : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo=true ORDER BY is_padrao DESC, id ASC LIMIT 1`);
+    if (!spQuery.rows.length) return res.status(400).json({ error: 'Nenhuma SP configurada para autenticar' });
+    const sp  = spQuery.rows[0];
+    const tok = await _storageGetToken(_safeDecrypt(sp.tenant_id), _safeDecrypt(sp.client_id), _safeDecrypt(sp.client_secret));
+    let blobs = await _storageListBlobs(tok, stg.storage_account, stg.storage_container, stg.storage_prefix || '');
+    blobs = blobs.filter(b => /\.(csv|parquet)$/i.test(b.name));
+    const totalSize = blobs.reduce((s, b) => s + b.size, 0);
+    res.json({ ok: true, total: blobs.length, totalSizeMB: (totalSize/1048576).toFixed(1),
+      preview: blobs.slice(0,10).map(b => ({ name: b.name, sizeMB: (b.size/1048576).toFixed(2), lastModified: b.lastModified })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/azure-coleta/storages/:id/executar', authMiddleware, dbMiddleware, (req, res) => {
   if (_coletaEmExecucao) return res.status(409).json({ error: 'Coleta já em execução' });
-  res.json({ ok: true, message: 'Coleta iniciada em background' });
-  _executarColeta('manual').catch(e => console.error('[Coleta] Erro manual:', e.message));
+  res.json({ ok: true, message: 'Coleta Storage iniciada' });
+  _executarColetaStorage('manual', parseInt(req.params.id)).catch(e => console.error('[ColetaStorage] Erro:', e.message));
 });
 
-app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
+app.put('/api/azure-coleta/storages/:id/agendamento', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const r = await pool.query(`SELECT id,iniciado_em,concluido_em,status,subs_total,subs_ok,subs_erro,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 1`);
-    res.json({ em_execucao: _coletaEmExecucao, ultimo: r.rows[0] || null });
+    const { hora_execucao, dias_semana } = req.body;
+    const hora   = hora_execucao != null ? Math.max(0, Math.min(23, parseInt(hora_execucao))) : null;
+    const dias   = dias_semana || null;
+    const proxima = _computeProximaColeta(hora, dias);
+    await pool.query(
+      `UPDATE azure_storage_config
+       SET hora_execucao=$1, dias_semana=$2, auto_coleta_horas=NULL,
+           proxima_coleta=$3, atualizado_em=NOW()
+       WHERE id=$4`,
+      [hora, dias, proxima, req.params.id]
+    );
+    const r = await pool.query(
+      `SELECT id, nome, hora_execucao, dias_semana, proxima_coleta FROM azure_storage_config WHERE id=$1`,
+      [req.params.id]
+    );
+    res.json({ ok: true, storage: r.rows[0] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_req, res) => {
+app.put('/api/azure-coleta/sps/:id/agendamento', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const r = await pool.query(`SELECT id,iniciado_em,concluido_em,status,subs_total,subs_ok,subs_erro,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem,detalhes FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 50`);
-    res.json(r.rows);
+    const { hora_execucao, dias_semana, auto_coleta } = req.body;
+    const hora    = hora_execucao != null ? Math.max(0, Math.min(23, parseInt(hora_execucao))) : null;
+    const dias    = dias_semana || null;
+    const ativo   = auto_coleta ? true : false;
+    const proxima = ativo ? _computeProximaColeta(hora, dias) : null;
+    await pool.query(
+      `UPDATE azure_coleta_config
+       SET hora_execucao=$1, dias_semana=$2, auto_coleta=$3, proxima_coleta=$4, atualizado_em=NOW()
+       WHERE id=$5`,
+      [hora, dias, ativo, proxima, req.params.id]
+    );
+    const r = await pool.query(
+      `SELECT id, nome, hora_execucao, dias_semana, auto_coleta, proxima_coleta FROM azure_coleta_config WHERE id=$1`,
+      [req.params.id]
+    );
+    res.json({ ok: true, sp: r.rows[0] });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/azure-coleta/agendamentos', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const [rStg, rApi] = await Promise.all([
+      pool.query(`
+        SELECT id, nome, hora_execucao, dias_semana, proxima_coleta, 'storage' AS tipo
+        FROM azure_storage_config
+        WHERE ativo = true AND hora_execucao IS NOT NULL AND dias_semana IS NOT NULL
+        ORDER BY proxima_coleta ASC NULLS LAST
+      `),
+      pool.query(`
+        SELECT id, nome, hora_execucao, dias_semana, proxima_coleta, granularidade_dias, 'api' AS tipo
+        FROM azure_coleta_config
+        WHERE ativo = true AND auto_coleta = true AND hora_execucao IS NOT NULL
+        ORDER BY proxima_coleta ASC NULLS LAST
+      `)
+    ]);
+    res.json([...rStg.rows, ...rApi.rows]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── HEALTH CHECK (sem autenticação — para load balancers, PM2, Railway, etc.) ─
+app.get('/health', (_req, res) => {
+  const dbOk = !!pool;
+  res.status(dbOk ? 200 : 503).json({
+    status:    dbOk ? 'ok' : 'degraded',
+    db:        dbOk ? 'connected' : 'unavailable',
+    uptime:    Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ─── START ───────────────────────────────────────────────────────────────────
@@ -3254,7 +4878,9 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_req
       await initDB();
       // Inicializar tabela Azure na startup — uma vez só, não em cada request
       try { await ensureAzureCostsTable(); } catch (e) { console.warn('[Azure] Tabela será criada na primeira importação:', e.message); }
-      try { await ensureAzureColetaTable(); _iniciarSchedulerColeta(); } catch (e) { console.warn('[Coleta] Scheduler não iniciado:', e.message); }
+      try { await ensureAzureColetaTable(); } catch (e) { console.warn('[Coleta] Tabela de histórico não iniciada:', e.message); }
+      try { await ensurePriceListTable(); } catch (e) { console.warn('[PriceList] Tabela será criada no primeiro sync:', e.message); }
+      _iniciarAgendador();
       _refreshAzureCache().catch(e => console.warn('[Azure] Cache de dropdowns não pôde ser construído:', e.message));
       console.log('  Banco conectado e inicializado.');
     } catch (err) {
@@ -3292,7 +4918,7 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_req
   async function gracefulShutdown(signal) {
     console.log(`\n  ${signal} recebido — encerrando servidor...`);
     clearInterval(_keepAliveTimer);
-    if (_coletaScheduler) clearInterval(_coletaScheduler);
+
     if (pool) {
       try { await pool.end(); console.log('  Pool PostgreSQL encerrado.'); }
       catch (e) { console.error('  Erro ao fechar pool:', e.message); }
@@ -3302,10 +4928,13 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_req
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
   process.on('uncaughtException', (err) => {
-    console.error('  Exceção não tratada:', err.message);
+    console.error('  Exceção não tratada (processo será encerrado):', err.message, err.stack);
+    // Encerra com código 1 para que PM2 / systemd / Docker reinicie o processo
+    process.exit(1);
   });
   process.on('unhandledRejection', (reason) => {
     console.error('  Promise rejeitada sem tratamento:', reason);
+    // Não encerra — rejeições assíncronas isoladas não necessariamente corrompem o estado
   });
 
 })();

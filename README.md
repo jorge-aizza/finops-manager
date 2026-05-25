@@ -1,198 +1,276 @@
-# FinOps Manager
+# FinOps Manager — v2.0
 
-Sistema web para gestão de ações FinOps com calculadora de custos Azure, dashboard executivo e exportação Excel.
+Sistema web para gestão de ações FinOps com calculadora de custos Azure, Price List integrado, dashboard executivo e exportação Excel.
 
-**Stack:** Node.js + Express · PostgreSQL · Vanilla JS SPA · Vivo Purple UI
+**Stack:** Node.js 18+ · Express · PostgreSQL 13+ · Vanilla JS SPA · Vivo Purple UI
 
 ---
 
 ## Índice
 
-1. [Pré-requisitos](#pré-requisitos)
-2. [Variáveis de Ambiente](#variáveis-de-ambiente)
-3. [Windows (local / on-premise)](#windows-local--on-premise)
-4. [Linux (Ubuntu / Debian)](#linux-ubuntu--debian)
-5. [Docker](#docker)
-6. [Azure (App Service + PostgreSQL Flexible)](#azure)
-7. [AWS (EC2 + RDS)](#aws)
-8. [GCP (Cloud Run + Cloud SQL)](#gcp)
-9. [SaaS / Railway · Render · Fly.io](#saas)
-10. [SSL / Proxy reverso (Nginx)](#ssl--proxy-reverso)
-11. [Segurança em produção](#segurança-em-produção)
-12. [API Endpoints](#api-endpoints)
+1. [O que há de novo na v2.0](#o-que-há-de-novo-na-v20)
+2. [Pré-requisitos](#pré-requisitos)
+3. [⚠️ Pré-produção — passo a passo obrigatório](#️-pré-produção--passo-a-passo-obrigatório)
+4. [Variáveis de Ambiente](#variáveis-de-ambiente)
+5. [Windows (local / on-premise)](#windows-local--on-premise)
+6. [Linux (Ubuntu / Debian)](#linux-ubuntu--debian)
+7. [Docker](#docker)
+8. [Azure (App Service + PostgreSQL Flexible)](#azure)
+9. [AWS (EC2 + RDS)](#aws)
+10. [GCP (Cloud Run + Cloud SQL)](#gcp)
+11. [SaaS — Railway · Render · Fly.io](#saas)
+12. [SSL / Proxy reverso (Nginx)](#ssl--proxy-reverso)
+13. [Segurança em produção](#segurança-em-produção)
+14. [API Endpoints](#api-endpoints)
+
+---
+
+## O que há de novo na v2.0
+
+### 💰 Azure Retail Price List integrado
+- Sincronização automática com a [Azure Retail Prices API](https://prices.azure.com/api/retail/prices) (pública, sem credenciais)
+- ~100 mil SKUs em USD sincronizados e convertidos para BRL via taxa de câmbio do próprio export
+- JOIN por `meter_id` (case-insensitive) entre custos reais e preço de tabela
+- Cobertura para todos os tipos: hora, dia, periodo (disco/storage), reserva
+
+### 📊 Calculadora aprimorada
+- Coluna **📋 PL/h** — preço on-demand do Price List por hora
+- Badge **▼ X%** — desconto real negociado vs on-demand
+- **Configurar Estimativa** usa Price List como base quando disponível (mais preciso que billing histórico)
+- Barra verde de economia para recursos hora/periodo; barra azul para reservas
+- Legenda interativa com explicação de todos os indicadores
+
+### 🔒 Reservas cloud
+- Controle de reservas (Azure, AWS, GCP, Oracle, Multicloud)
+- Alertas automáticos no login para reservas expirando em ≤ 90 dias
+- Badges por severidade: Expirada / Crítico / Atenção / Aviso
+
+### 🛡️ Segurança reforçada (v2.0)
+- `express.static` restrito a arquivos públicos — `server.js`, `.env.key` e `.finops_setup` não são mais acessíveis via HTTP
+- Content-Security-Policy configurado (helmet)
+- HSTS habilitado (1 ano)
+- Pool PostgreSQL com parâmetros explícitos e handler de erro
+- Endpoint `/health` para monitoramento e load balancers
+- `uncaughtException` encerra o processo para permitir restart automático via PM2/systemd
 
 ---
 
 ## Pré-requisitos
 
 | Componente | Versão mínima |
-|------------|---------------|
-| Node.js    | 18 LTS+       |
-| npm        | 9+            |
-| PostgreSQL | 13+           |
+|---|---|
+| Node.js | 18 LTS+ |
+| npm | 9+ |
+| PostgreSQL | 13+ |
 
 ---
 
-## Variáveis de Ambiente
+## ⚠️ Pré-produção — passo a passo obrigatório
 
-Crie um arquivo `.env` na raiz do projeto (ou use `.env.enc` criptografado — veja seção Segurança):
-
-```env
-# Banco de dados
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=finops_db
-DB_USER=postgres
-DB_PASSWORD=senha_segura_aqui
-
-# Segurança — OBRIGATÓRIO alterar em produção
-JWT_SECRET=troque-por-string-aleatoria-longa-em-producao
-JWT_EXPIRES=8h
-MASTER_KEY=chave-32-chars-para-criptografia-setup
-
-# Servidor
-PORT=3000
-ALLOWED_ORIGIN=https://seu-dominio.com   # null = permite todas as origens
-```
-
-> **Padrão sem .env:** `DB_HOST=localhost`, `PORT=3000`, JWT/MASTER com valores inseguros de desenvolvimento.
+Execute **todos** os passos desta seção antes de expor o sistema a usuários reais. Cada item é obrigatório.
 
 ---
 
-## Windows (local / on-premise)
+### Passo 1 — Gerar segredos criptograficamente seguros
 
-### 1. Instalar dependências
+Nunca use os valores padrão em produção. Gere valores únicos:
 
-- [Node.js 18 LTS](https://nodejs.org/en/download) — marque "Add to PATH" no instalador
-- [PostgreSQL 16](https://www.enterprisedb.com/downloads/postgres-postgresql-downloads) — anote a senha do `postgres`
-
-### 2. Clonar / copiar os arquivos
-
-```powershell
-# Copiar pasta do projeto para, ex.:
-C:\FinOps\
+```bash
+# Node.js (recomendado — já disponível no servidor)
+node -e "
+  const c = require('crypto');
+  console.log('JWT_SECRET=' + c.randomBytes(48).toString('hex'));
+  console.log('MASTER_KEY=' + c.randomBytes(48).toString('hex'));
+"
 ```
 
-### 3. Criar banco de dados
-
 ```powershell
-# Abrir SQL Shell (psql) ou pgAdmin e executar:
-CREATE DATABASE finops_db;
+# PowerShell (Windows)
+# Execute duas vezes — uma para JWT_SECRET, outra para MASTER_KEY
+[System.Convert]::ToBase64String(
+  [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48)
+)
 ```
 
-### 4. Configurar variáveis
-
-```powershell
-# Criar C:\FinOps\.env com o conteúdo acima
-# Ou definir no ambiente do sistema:
-[System.Environment]::SetEnvironmentVariable("DB_PASSWORD","sua_senha","Machine")
-```
-
-### 5. Instalar dependências e iniciar
-
-```powershell
-cd C:\FinOps
-npm install
-npm start          # produção
-# ou
-npm run dev        # desenvolvimento com hot-reload (nodemon)
-```
-
-Acesse: `http://localhost:3000`  
-Na primeira abertura o wizard de configuração é exibido automaticamente.
-
-### 6. Executar como serviço Windows (PM2)
-
-```powershell
-npm install -g pm2
-npm install -g pm2-windows-startup
-pm2 start server.js --name finops-manager
-pm2 save
-pm2-startup install
-```
-
-Para verificar:
-```powershell
-pm2 status
-pm2 logs finops-manager
-```
+**Regras:**
+- Mínimo 32 caracteres (os comandos acima geram 96)
+- `JWT_SECRET` — quem tiver esse valor pode forjar tokens de login. Nunca expor.
+- `MASTER_KEY` — se mudar após o setup, o arquivo `.finops_setup` torna-se ilegível. Guarde em cofre.
+- O servidor imprime **AVISO** no console se algum estiver com o valor padrão
 
 ---
 
-## Linux (Ubuntu / Debian)
-
-### 1. Instalar Node.js 18
+### Passo 2 — Criar e proteger o arquivo `.env`
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt-get install -y nodejs
-```
-
-### 2. Instalar PostgreSQL
-
-```bash
-sudo apt-get install -y postgresql postgresql-contrib
-sudo systemctl enable postgresql
-sudo systemctl start postgresql
-```
-
-### 3. Criar banco e usuário
-
-```bash
-sudo -u postgres psql <<EOF
-CREATE DATABASE finops_db;
-CREATE USER finops_user WITH ENCRYPTED PASSWORD 'senha_segura';
-GRANT ALL PRIVILEGES ON DATABASE finops_db TO finops_user;
-EOF
-```
-
-### 4. Configurar aplicação
-
-```bash
-# Clonar/copiar arquivos
-sudo mkdir -p /opt/finops
-sudo cp -r /caminho/dos/arquivos/* /opt/finops/
-sudo chown -R $USER:$USER /opt/finops
-
-cd /opt/finops
-npm install --omit=dev
-
-# Criar .env
+# Linux/macOS
 cat > .env <<EOF
-DB_HOST=localhost
+DB_HOST=seu-host-postgres
 DB_PORT=5432
 DB_NAME=finops_db
 DB_USER=finops_user
-DB_PASSWORD=senha_segura
-JWT_SECRET=$(openssl rand -hex 32)
-MASTER_KEY=$(openssl rand -hex 16)
+DB_PASSWORD=senha_forte_do_banco
+
+JWT_SECRET=<gerado_no_passo_1>
+JWT_EXPIRES=8h
+MASTER_KEY=<gerado_no_passo_1>
+
 PORT=3000
 ALLOWED_ORIGIN=https://seu-dominio.com
 EOF
-chmod 600 .env
+
+chmod 600 .env   # apenas o dono pode ler
 ```
 
-### 5. Iniciar com PM2
+```powershell
+# PowerShell (Windows)
+@"
+DB_HOST=seu-host-postgres
+DB_PORT=5432
+DB_NAME=finops_db
+DB_USER=finops_user
+DB_PASSWORD=senha_forte_do_banco
+JWT_SECRET=<gerado_no_passo_1>
+JWT_EXPIRES=8h
+MASTER_KEY=<gerado_no_passo_1>
+PORT=3000
+ALLOWED_ORIGIN=https://seu-dominio.com
+"@ | Set-Content .env -Encoding UTF8
+```
+
+---
+
+### Passo 3 — Criptografar o `.env` (recomendado)
 
 ```bash
-sudo npm install -g pm2
-cd /opt/finops
-pm2 start server.js --name finops-manager
+# Criptografa .env → .env.enc + .env.key (AES-256-GCM)
+node encrypt-env.js encrypt
+
+# Apaga o .env em texto plano
+rm .env          # Linux
+Remove-Item .env # PowerShell
+
+# Guarde .env.key em local seguro (Azure Key Vault, AWS Secrets Manager, cofre)
+# NUNCA envie .env.key para o repositório Git
+```
+
+Para iniciar o servidor com env criptografado:
+```bash
+node encrypt-env.js run
+```
+
+Ou altere o script `start` no `package.json`:
+```json
+"start": "node encrypt-env.js run"
+```
+
+---
+
+### Passo 4 — Configurar o PostgreSQL com acesso mínimo
+
+```sql
+-- Execute como superusuário (postgres)
+CREATE DATABASE finops_db;
+CREATE USER finops_user WITH ENCRYPTED PASSWORD 'senha_forte_aqui';
+GRANT ALL PRIVILEGES ON DATABASE finops_db TO finops_user;
+
+-- Após o primeiro start (tabelas criadas), restringir ao mínimo:
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT CREATE ON SCHEMA public TO finops_user;
+```
+
+**Regras de rede PostgreSQL:**
+- Nunca expor a porta 5432 publicamente (`0.0.0.0/0`)
+- Liberar apenas o IP/VPC da aplicação no `pg_hba.conf` ou firewall
+- Usar SSL: `?sslmode=require` na connection string
+
+---
+
+### Passo 5 — Verificar o arquivo `.gitignore`
+
+Confirme que os arquivos sensíveis estão no `.gitignore` antes de qualquer `git push`:
+
+```gitignore
+.env
+.env.key
+.env.enc
+.finops_setup
+node_modules/
+uploads_tmp/
+*.log
+*.png
+```
+
+Verificar arquivos acidentalmente commitados:
+```bash
+git ls-files .env .env.key .env.enc .finops_setup
+# Se retornar algo, remova do histórico com: git rm --cached <arquivo>
+```
+
+---
+
+### Passo 6 — HTTPS obrigatório
+
+O Node.js serve apenas HTTP. Coloque um terminador TLS na frente:
+
+**Opção A — Nginx + Certbot (Linux):**
+```bash
+sudo apt install -y nginx certbot python3-certbot-nginx
+
+sudo tee /etc/nginx/sites-available/finops > /dev/null <<'EOF'
+server {
+    listen 80;
+    server_name seu-dominio.com;
+
+    location / {
+        proxy_pass         http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection 'upgrade';
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        client_max_body_size 600M;   # uploads CSV/Parquet grandes
+    }
+}
+EOF
+
+sudo ln -s /etc/nginx/sites-available/finops /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+# Certificado gratuito (Let's Encrypt)
+sudo certbot --nginx -d seu-dominio.com
+```
+
+**Opção B — Plataformas gerenciadas:**
+- Azure App Service → HTTPS automático em `*.azurewebsites.net`
+- Railway / Render / Fly.io → HTTPS automático
+- AWS ALB → ACM certificate listener na porta 443
+
+---
+
+### Passo 7 — Configurar reinício automático
+
+**PM2 (recomendado para Linux e Windows):**
+```bash
+npm install -g pm2
+pm2 start server.js --name finops-manager --max-restarts 10 --restart-delay 5000
 pm2 save
-pm2 startup   # copia o comando gerado e executa com sudo
+pm2 startup   # siga o comando impresso para registrar no systemd/launchd/Windows
 ```
 
-### 6. Systemd (alternativa ao PM2)
-
+**systemd (Linux, alternativa robusta):**
 ```bash
-sudo tee /etc/systemd/system/finops.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/finops.service > /dev/null <<'EOF'
 [Unit]
-Description=FinOps Manager
+Description=FinOps Manager v2.0
 After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=www-data
+User=finops
 WorkingDirectory=/opt/finops
 ExecStart=/usr/bin/node server.js
 Restart=on-failure
@@ -211,11 +289,232 @@ sudo journalctl -u finops -f   # logs em tempo real
 
 ---
 
+### Passo 8 — Verificar saúde da aplicação
+
+Após o deploy, confirme que tudo está funcionando:
+
+```bash
+# Health check (sem autenticação)
+curl https://seu-dominio.com/health
+
+# Resposta esperada:
+# {"status":"ok","db":"connected","uptime":42,"timestamp":"2025-01-01T00:00:00.000Z"}
+```
+
+Se retornar `{"status":"degraded","db":"unavailable"}`, o servidor subiu mas não conseguiu conectar ao PostgreSQL — verifique as variáveis `DB_*`.
+
+---
+
+### Passo 9 — Configurar backup do banco
+
+```bash
+# Backup manual
+pg_dump -h localhost -U finops_user -d finops_db -F c -f finops_backup_$(date +%Y%m%d).dump
+
+# Cron diário às 2h (Linux)
+sudo crontab -e
+# Adicionar:
+0 2 * * * pg_dump -h localhost -U finops_user -d finops_db -F c -f /backups/finops_$(date +\%Y\%m\%d).dump
+
+# Testar restore
+pg_restore -h localhost -U finops_user -d finops_db_restore -F c finops_backup.dump
+```
+
+**Plataformas gerenciadas:** habilitar backups automáticos no painel do RDS / Azure Database / Cloud SQL (retenção mínima 7 dias).
+
+---
+
+### Passo 10 — Checklist final
+
+```
+Segredos
+[ ] JWT_SECRET definido com string aleatória ≥ 32 chars
+[ ] MASTER_KEY definido com string aleatória ≥ 32 chars
+[ ] DB_PASSWORD forte e único
+[ ] .env criptografado com encrypt-env.js ou injetado via plataforma
+[ ] .env.key guardado em cofre (não no servidor)
+
+Rede e acesso
+[ ] ALLOWED_ORIGIN = https://seu-dominio.com (não null)
+[ ] HTTPS ativo — Nginx/Caddy/terminador da plataforma
+[ ] Porta 3000 não exposta diretamente (só via proxy)
+[ ] PostgreSQL porta 5432 não exposta publicamente
+[ ] Firewall: apenas porta 80/443 aberta ao público
+
+Operação
+[ ] PM2 ou systemd configurado (auto-restart)
+[ ] /health retorna {"status":"ok"} após deploy
+[ ] Backup automático do banco configurado
+[ ] Monitoramento de logs ativo (pm2 logs / journalctl)
+[ ] Price List sincronizado (Configurações → Price List → Sincronizar)
+[ ] Usuário administrador criado via wizard de setup
+```
+
+---
+
+## Variáveis de Ambiente
+
+| Variável | Obrigatória | Padrão inseguro | Descrição |
+|---|---|---|---|
+| `JWT_SECRET` | ✅ Prod | `finops-secret-2024` | Chave de assinatura JWT — quem tiver pode forjar tokens |
+| `MASTER_KEY` | ✅ Prod | `finops-master-key-...` | Chave AES para criptografar `.finops_setup` |
+| `DB_PASSWORD` | ✅ | — | Senha do PostgreSQL |
+| `DB_HOST` | ✅ | `localhost` | Host do PostgreSQL |
+| `DB_PORT` | — | `5432` | Porta do PostgreSQL |
+| `DB_NAME` | — | `finops_db` | Nome do banco |
+| `DB_USER` | — | `postgres` | Usuário do banco |
+| `PORT` | — | `3000` | Porta HTTP do servidor Node |
+| `ALLOWED_ORIGIN` | ✅ Prod | `null` (permite tudo) | Origin CORS — ex: `https://finops.vivo.com.br` |
+| `JWT_EXPIRES` | — | `8h` | TTL do token JWT |
+| `DATABASE_URL` | — | — | Connection string completa (Railway/Render/Fly) — substitui DB_* |
+
+**Prioridade de configuração:** variáveis de ambiente do sistema → `.env.enc` + `.env.key` → `.env` → `.finops_setup` (wizard)
+
+---
+
+## Windows (local / on-premise)
+
+### 1. Instalar dependências
+
+- [Node.js 18 LTS](https://nodejs.org/en/download) — marque "Add to PATH" no instalador
+- [PostgreSQL 16](https://www.enterprisedb.com/downloads/postgres-postgresql-downloads) — anote a senha do `postgres`
+
+### 2. Configurar banco e aplicação
+
+```powershell
+# Criar banco (psql ou pgAdmin)
+CREATE DATABASE finops_db;
+CREATE USER finops_user WITH ENCRYPTED PASSWORD 'senha_segura';
+GRANT ALL PRIVILEGES ON DATABASE finops_db TO finops_user;
+
+# Na pasta do projeto
+cd C:\FinOps
+npm install
+```
+
+### 3. Criar `.env` e iniciar
+
+```powershell
+# Gerar segredos
+$jwt  = [System.Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+$mkey = [System.Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+
+@"
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=finops_db
+DB_USER=finops_user
+DB_PASSWORD=senha_segura
+JWT_SECRET=$jwt
+MASTER_KEY=$mkey
+PORT=3000
+ALLOWED_ORIGIN=http://localhost:3000
+"@ | Set-Content .env -Encoding UTF8
+
+npm start
+```
+
+Acesse `http://localhost:3000` — o wizard de configuração abre automaticamente na primeira execução.
+
+### 4. Executar como serviço Windows (PM2)
+
+```powershell
+npm install -g pm2 pm2-windows-startup
+pm2 start server.js --name finops-manager
+pm2 save
+pm2-startup install
+```
+
+---
+
+## Linux (Ubuntu / Debian)
+
+### 1. Instalar Node.js 18 e PostgreSQL
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs postgresql postgresql-contrib
+
+sudo systemctl enable --now postgresql
+```
+
+### 2. Criar banco e usuário
+
+```bash
+sudo -u postgres psql <<EOF
+CREATE DATABASE finops_db;
+CREATE USER finops_user WITH ENCRYPTED PASSWORD 'senha_segura';
+GRANT ALL PRIVILEGES ON DATABASE finops_db TO finops_user;
+EOF
+```
+
+### 3. Instalar e configurar aplicação
+
+```bash
+sudo mkdir -p /opt/finops
+sudo cp -r /caminho/dos/arquivos/* /opt/finops/
+sudo chown -R $USER:$USER /opt/finops
+cd /opt/finops
+npm install --omit=dev
+
+# Gerar segredos e criar .env
+JWT=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
+MKEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
+
+cat > .env <<EOF
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=finops_db
+DB_USER=finops_user
+DB_PASSWORD=senha_segura
+JWT_SECRET=$JWT
+MASTER_KEY=$MKEY
+PORT=3000
+ALLOWED_ORIGIN=https://seu-dominio.com
+EOF
+
+chmod 600 .env
+```
+
+### 4. PM2 ou systemd
+
+**PM2:**
+```bash
+sudo npm install -g pm2
+pm2 start server.js --name finops-manager
+pm2 save && pm2 startup
+```
+
+**systemd:**
+```bash
+sudo tee /etc/systemd/system/finops.service > /dev/null <<'EOF'
+[Unit]
+Description=FinOps Manager v2.0
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=finops
+WorkingDirectory=/opt/finops
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=/opt/finops/.env
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now finops
+sudo journalctl -u finops -f
+```
+
+---
+
 ## Docker
 
 ### Dockerfile
-
-Crie `Dockerfile` na raiz do projeto:
 
 ```dockerfile
 FROM node:18-alpine
@@ -227,19 +526,6 @@ RUN mkdir -p uploads_tmp
 EXPOSE 3000
 CMD ["node", "server.js"]
 ```
-
-Crie também `.dockerignore` (já incluso no projeto):
-
-```
-node_modules/
-uploads_tmp/
-.env
-.env.key
-.git/
-*.log
-```
-
-> **Armazenamento efêmero:** em containers, a pasta `uploads_tmp/` é perdida ao reiniciar. Os arquivos CSV são deletados automaticamente após o import, portanto isso não afeta os dados — que ficam no PostgreSQL.
 
 ### docker-compose.yml
 
@@ -255,21 +541,27 @@ services:
       DB_PORT: 5432
       DB_NAME: finops_db
       DB_USER: finops_user
-      DB_PASSWORD: senha_segura
-      JWT_SECRET: troque-em-producao
-      MASTER_KEY: troque-em-producao-32c
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      MASTER_KEY: ${MASTER_KEY}
       PORT: 3000
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN}
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: finops_db
       POSTGRES_USER: finops_user
-      POSTGRES_PASSWORD: senha_segura
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -284,104 +576,59 @@ volumes:
 ```
 
 ```bash
-docker-compose up -d
-docker-compose logs -f app
+# Criar .env com segredos reais antes de executar
+docker compose up -d
+docker compose logs -f app
 ```
+
+> **Upload de arquivos grandes:** o multer grava temporariamente em `uploads_tmp/` e apaga após o import. Em containers, monte um volume se precisar de persistência entre restarts.
 
 ---
 
 ## Azure
 
-### Opção A — App Service + Azure Database for PostgreSQL Flexible
-
-#### 1. Criar recursos
+### App Service + Azure Database for PostgreSQL Flexible
 
 ```bash
-# Login e grupo de recursos
 az login
 az group create --name rg-finops --location brazilsouth
 
 # PostgreSQL Flexible Server
 az postgres flexible-server create \
-  --resource-group rg-finops \
-  --name finops-pg \
-  --location brazilsouth \
-  --admin-user finops_user \
-  --admin-password "SenhaSegura123!" \
-  --sku-name Standard_B1ms \
-  --tier Burstable \
-  --version 16 \
-  --public-access 0.0.0.0   # apenas para teste; em produção use VNet integration
+  --resource-group rg-finops --name finops-pg \
+  --location brazilsouth --version 16 \
+  --admin-user finops_user --admin-password "SenhaSegura123!" \
+  --sku-name Standard_B1ms --tier Burstable
 
 az postgres flexible-server db create \
-  --resource-group rg-finops \
-  --server-name finops-pg \
-  --database-name finops_db
+  --resource-group rg-finops --server-name finops-pg --database-name finops_db
 
-# App Service Plan (Linux B1 ~$13/mês)
-az appservice plan create \
-  --name plan-finops \
-  --resource-group rg-finops \
-  --sku B1 \
-  --is-linux
+# App Service
+az appservice plan create --name plan-finops --resource-group rg-finops \
+  --sku B1 --is-linux
 
-# Web App
-az webapp create \
-  --resource-group rg-finops \
-  --plan plan-finops \
-  --name finops-manager \
-  --runtime "NODE:18-lts"
-```
+az webapp create --resource-group rg-finops --plan plan-finops \
+  --name finops-manager --runtime "NODE:18-lts"
 
-#### 2. Configurar variáveis de ambiente
-
-```bash
-az webapp config appsettings set \
-  --resource-group rg-finops \
-  --name finops-manager \
+# Variáveis de ambiente
+az webapp config appsettings set --resource-group rg-finops --name finops-manager \
   --settings \
     DB_HOST="finops-pg.postgres.database.azure.com" \
-    DB_PORT="5432" \
-    DB_NAME="finops_db" \
-    DB_USER="finops_user" \
+    DB_PORT="5432" DB_NAME="finops_db" DB_USER="finops_user" \
     DB_PASSWORD="SenhaSegura123!" \
-    JWT_SECRET="$(openssl rand -hex 32)" \
-    MASTER_KEY="$(openssl rand -hex 16)" \
+    JWT_SECRET="$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")" \
+    MASTER_KEY="$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")" \
     PORT="8080" \
-    ALLOWED_ORIGIN="https://finops-manager.azurewebsites.net" \
-    WEBSITE_NODE_DEFAULT_VERSION="~18"
-```
+    ALLOWED_ORIGIN="https://finops-manager.azurewebsites.net"
 
-#### 3. Deploy
-
-```bash
-# Via ZIP deploy
-zip -r deploy.zip . --exclude="node_modules/*" --exclude=".git/*" --exclude="uploads_tmp/*"
+# Deploy via ZIP
+zip -r deploy.zip . --exclude="node_modules/*" --exclude=".git/*" \
+  --exclude="uploads_tmp/*" --exclude=".env*"
 az webapp deployment source config-zip \
-  --resource-group rg-finops \
-  --name finops-manager \
-  --src deploy.zip
+  --resource-group rg-finops --name finops-manager --src deploy.zip
 ```
 
-#### 4. SSL — gerado automaticamente pelo App Service
-
-Acesse: `https://finops-manager.azurewebsites.net`
-
----
-
-### Opção B — Azure Container Instances (Docker)
-
-```bash
-az acr create --resource-group rg-finops --name finopsacr --sku Basic
-az acr build --registry finopsacr --image finops-manager:latest .
-az container create \
-  --resource-group rg-finops \
-  --name finops-aci \
-  --image finopsacr.azurecr.io/finops-manager:latest \
-  --cpu 1 --memory 1.5 \
-  --ports 3000 \
-  --environment-variables DB_HOST=finops-pg.postgres.database.azure.com ...
-```
+HTTPS automático em `https://finops-manager.azurewebsites.net`. Para domínio próprio: **Custom Domains → App Service Managed Certificate**.
 
 ---
 
@@ -389,60 +636,33 @@ az container create \
 
 ### EC2 + RDS PostgreSQL
 
-#### 1. RDS PostgreSQL
-
 ```bash
+# RDS
 aws rds create-db-instance \
   --db-instance-identifier finops-pg \
-  --db-instance-class db.t3.micro \
-  --engine postgres \
-  --engine-version 16 \
-  --master-username finops_user \
-  --master-user-password "SenhaSegura123!" \
-  --allocated-storage 20 \
-  --db-name finops_db \
-  --no-publicly-accessible
+  --db-instance-class db.t3.micro --engine postgres --engine-version 16 \
+  --master-username finops_user --master-user-password "SenhaSegura123!" \
+  --allocated-storage 20 --db-name finops_db --no-publicly-accessible
 
-# Anote o endpoint gerado (finops-pg.xxxx.us-east-1.rds.amazonaws.com)
-```
-
-#### 2. EC2 (Amazon Linux 2023)
-
-```bash
-# No servidor EC2:
+# EC2 (Amazon Linux 2023)
 sudo dnf install -y nodejs20 npm
 sudo npm install -g pm2
-
-mkdir /home/ec2-user/finops
-# Copiar arquivos via scp ou CodeDeploy
-cd /home/ec2-user/finops
+mkdir /home/ec2-user/finops && cd /home/ec2-user/finops
 npm install --omit=dev
 
+JWT=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
+MKEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
 cat > .env <<EOF
 DB_HOST=finops-pg.xxxx.us-east-1.rds.amazonaws.com
-DB_PORT=5432
-DB_NAME=finops_db
-DB_USER=finops_user
-DB_PASSWORD=SenhaSegura123!
-JWT_SECRET=$(openssl rand -hex 32)
-MASTER_KEY=$(openssl rand -hex 16)
-PORT=3000
+DB_PORT=5432 DB_NAME=finops_db DB_USER=finops_user DB_PASSWORD=SenhaSegura123!
+JWT_SECRET=$JWT MASTER_KEY=$MKEY PORT=3000
+ALLOWED_ORIGIN=https://seu-dominio.com
 EOF
 
-pm2 start server.js --name finops-manager
-pm2 startup && pm2 save
+pm2 start server.js --name finops-manager && pm2 startup && pm2 save
 ```
 
-#### 3. Usar AWS Secrets Manager (recomendado)
-
-```bash
-aws secretsmanager create-secret \
-  --name finops/env \
-  --secret-string '{"DB_PASSWORD":"...","JWT_SECRET":"...","MASTER_KEY":"..."}'
-```
-
-Opção A: exportar os secrets como variáveis de ambiente antes de iniciar via script de bootstrap na instância EC2.  
-Opção B: usar o parâmetro `--environment-file` do ECS / App Runner para injetar os valores automaticamente.
+**Recomendado:** usar AWS Secrets Manager para `JWT_SECRET`, `MASTER_KEY` e `DB_PASSWORD` em vez de `.env` no servidor.
 
 ---
 
@@ -450,46 +670,29 @@ Opção B: usar o parâmetro `--environment-file` do ECS / App Runner para injet
 
 ### Cloud Run + Cloud SQL
 
-#### 1. Cloud SQL PostgreSQL
-
 ```bash
 gcloud sql instances create finops-pg \
-  --database-version=POSTGRES_16 \
-  --tier=db-f1-micro \
-  --region=southamerica-east1
-
+  --database-version=POSTGRES_16 --tier=db-f1-micro --region=southamerica-east1
 gcloud sql databases create finops_db --instance=finops-pg
-gcloud sql users create finops_user \
-  --instance=finops-pg \
-  --password=SenhaSegura123!
-```
+gcloud sql users create finops_user --instance=finops-pg --password=SenhaSegura123!
 
-#### 2. Build e push da imagem
+# Secrets
+echo -n "<jwt>" | gcloud secrets create JWT_SECRET --data-file=-
+echo -n "<mkey>" | gcloud secrets create MASTER_KEY --data-file=-
 
-```bash
 gcloud builds submit --tag gcr.io/SEU_PROJETO/finops-manager
-```
 
-#### 3. Deploy no Cloud Run
-
-```bash
 gcloud run deploy finops-manager \
   --image gcr.io/SEU_PROJETO/finops-manager \
-  --platform managed \
-  --region southamerica-east1 \
-  --allow-unauthenticated \
+  --region southamerica-east1 --allow-unauthenticated \
   --add-cloudsql-instances SEU_PROJETO:southamerica-east1:finops-pg \
-  --set-env-vars \
-    DB_HOST="/cloudsql/SEU_PROJETO:southamerica-east1:finops-pg",\
-    DB_NAME=finops_db,\
-    DB_USER=finops_user,\
-    DB_PASSWORD=SenhaSegura123!,\
-    JWT_SECRET=troque,\
-    MASTER_KEY=troque,\
-    PORT=8080
+  --set-env-vars DB_HOST="/cloudsql/SEU_PROJETO:southamerica-east1:finops-pg",\
+    DB_NAME=finops_db,DB_USER=finops_user,PORT=8080,\
+    ALLOWED_ORIGIN=https://finops-manager-xxx.run.app \
+  --set-secrets DB_PASSWORD=DB_PASSWORD:latest,JWT_SECRET=JWT_SECRET:latest,\
+    MASTER_KEY=MASTER_KEY:latest \
+  --memory 512Mi --min-instances 0 --max-instances 5
 ```
-
-> Cloud Run escala automaticamente para zero — ideal para ambientes sem tráfego constante.
 
 ---
 
@@ -498,35 +701,31 @@ gcloud run deploy finops-manager \
 ### Railway
 
 ```bash
-# railway.app — mais simples para começar
 npm install -g @railway/cli
-railway login
-railway init
-railway add --plugin postgresql   # provisiona PostgreSQL automaticamente
+railway login && railway init
+railway add --plugin postgresql   # DATABASE_URL injetado automaticamente
 railway up
-# Variáveis de ambiente: Railway Dashboard → Variables
-# DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD preenchidos automaticamente pelo plugin
+# Painel Variables: JWT_SECRET, MASTER_KEY, ALLOWED_ORIGIN
+# DATABASE_URL é parseado automaticamente pelo server.js
 ```
 
 ### Render
 
-1. Criar conta em [render.com](https://render.com)
-2. **New → Web Service** → conectar repositório Git
-3. Build command: `npm install`
-4. Start command: `node server.js`
-5. **New → PostgreSQL** → criar instância gratuita
-6. Em **Environment**, adicionar `JWT_SECRET` e `MASTER_KEY` — `DATABASE_URL` é preenchido automaticamente pelo Render
-7. `DATABASE_URL` é suportado nativamente pelo server.js: se presente e `DB_HOST` não estiver definido, as variáveis individuais são extraídas automaticamente
+1. **New → Web Service** → conectar repositório Git
+2. Build: `npm install` | Start: `node server.js`
+3. **New → PostgreSQL** → `DATABASE_URL` injetado automaticamente
+4. Environment Variables: `JWT_SECRET`, `MASTER_KEY`, `ALLOWED_ORIGIN`
 
 ### Fly.io
 
 ```bash
-npm install -g flyctl
-fly auth login
-fly launch --name finops-manager --region gru   # São Paulo
+fly launch --name finops-manager --region gru
 fly postgres create --name finops-pg --region gru
 fly postgres attach finops-pg
-fly secrets set JWT_SECRET=$(openssl rand -hex 32) MASTER_KEY=$(openssl rand -hex 16)
+fly secrets set \
+  JWT_SECRET=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))") \
+  MASTER_KEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))") \
+  ALLOWED_ORIGIN=https://finops-manager.fly.dev
 fly deploy
 ```
 
@@ -539,29 +738,28 @@ fly deploy
 ```bash
 sudo apt install -y nginx certbot python3-certbot-nginx
 
-# /etc/nginx/sites-available/finops
-sudo tee /etc/nginx/sites-available/finops > /dev/null <<EOF
+sudo tee /etc/nginx/sites-available/finops > /dev/null <<'EOF'
 server {
     listen 80;
     server_name seu-dominio.com;
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass         http://localhost:3000;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_cache_bypass \$http_upgrade;
-        client_max_body_size 600M;   # uploads de CSV grandes
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection 'upgrade';
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        client_max_body_size 600M;
     }
 }
 EOF
 
 sudo ln -s /etc/nginx/sites-available/finops /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
-
-# Certificado SSL gratuito
 sudo certbot --nginx -d seu-dominio.com
 ```
 
@@ -569,101 +767,113 @@ sudo certbot --nginx -d seu-dominio.com
 
 ## Segurança em produção
 
-### Criptografar .env
+### Criptografar `.env`
 
 ```bash
-# 1. Configure o .env com as variáveis reais
-# 2. Criptografe
-node encrypt-env.js encrypt
-# → gera .env.enc (criptografado) e .env.key (chave)
-
-# 3. Apague o .env original
-rm .env
-
-# 4. Guarde .env.key em local seguro (cofre, Secrets Manager, Key Vault)
-# NUNCA envie .env.key para o repositório Git
-
-# 5. Iniciar o servidor com env criptografado
-node encrypt-env.js run
-# ou via npm:
-# "start": "node encrypt-env.js run"
+node encrypt-env.js encrypt   # .env → .env.enc + .env.key
+rm .env                       # apaga texto plano
+# Guarda .env.key fora do servidor (Key Vault, Secrets Manager, cofre)
+node encrypt-env.js run       # inicia com env criptografado
 ```
 
-### .gitignore recomendado
+### Vulnerabilidades conhecidas (npm audit)
 
-```gitignore
-.env
-.env.key
-.env.enc
-.finops_setup
-node_modules/
-uploads_tmp/
-*.log
-```
+| Pacote | Severidade | Status | Mitigação |
+|---|---|---|---|
+| `thrift` (via `@dsnp/parquetjs`) | 🔴 High | Sem fix disponível | Import Parquet requer autenticação; arquivo deletado após uso |
+| `uuid` (via `exceljs ≥3.5`) | 🟡 Moderate | Fix = downgrade exceljs (breaking) | Risco baixo — uso interno para gerar IDs em exports |
 
-### Checklist de produção
+Execute `npm audit` periodicamente e aplique `npm audit fix` quando disponível.
 
-- [ ] `JWT_SECRET` — string aleatória de 32+ caracteres (`openssl rand -hex 32`)
-- [ ] `MASTER_KEY` — string aleatória de 32+ caracteres
-- [ ] `DB_PASSWORD` — senha forte, usuário PostgreSQL com acesso mínimo
-- [ ] `ALLOWED_ORIGIN` — domínio exato da aplicação (não `null`)
-- [ ] SSL/TLS ativo — Nginx + Certbot ou certificado do provedor cloud
-- [ ] PostgreSQL — não exposto publicamente (acesso via VPC/rede privada)
-- [ ] Porta 3000 — não exposta diretamente; servir via Nginx na 443
-- [ ] `uploads_tmp/` — fora do repositório, com espaço suficiente (CSVs podem ter 500 MB+)
-- [ ] Backups do banco — automáticos via RDS/Cloud SQL ou `pg_dump` agendado
+### Headers de segurança (configurados automaticamente)
+
+- `Content-Security-Policy` — restringe scripts, estilos e conexões
+- `Strict-Transport-Security` — HSTS 1 ano com includeSubDomains
+- `X-Frame-Options` — DENY (sem iframes)
+- `X-Content-Type-Options` — nosniff
+- `Referrer-Policy` — strict-origin-when-cross-origin
+
+### Arquivos que NÃO são acessíveis via HTTP (v2.0)
+
+`server.js` · `package.json` · `.env` · `.env.key` · `.env.enc` · `.finops_setup` · `schema.sql` · `*.sql`
+
+Apenas `index.html`, `app.js`, `calculadora.js`, `styles.css` e `favicon.svg` são servidos estaticamente.
 
 ---
 
 ## API Endpoints
 
-Todos os endpoints (exceto `/api/auth/*` e `/api/health`) exigem header:
+Todos os endpoints (exceto `/health`, `/api/auth/*` e `/api/setup/*`) exigem:
 ```
 Authorization: Bearer <jwt_token>
 ```
 
+### Sistema
+
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| GET | `/health` | ❌ | Status do servidor e banco — para monitoramento |
+| GET | `/api/usuarios` | ✅ admin | Listar usuários |
+| POST | `/api/usuarios` | ✅ admin | Criar usuário |
+
 ### Autenticação
-| Método | Rota                | Descrição                         |
-|--------|---------------------|-----------------------------------|
-| POST   | /api/auth/login     | Login local (email + senha)       |
-| POST   | /api/auth/ad        | Login Active Directory (LDAP)     |
-| GET    | /api/auth/entra/redirect | Inicia OAuth Microsoft Entra  |
-| GET    | /api/auth/entra/callback | Callback OAuth                |
 
-### Projetos
-| Método | Rota              | Descrição         |
-|--------|-------------------|-------------------|
-| GET    | /api/projetos     | Listar projetos   |
-| POST   | /api/projetos     | Criar projeto     |
-| PUT    | /api/projetos/:id | Atualizar         |
-| DELETE | /api/projetos/:id | Excluir           |
+| Método | Rota | Descrição |
+|---|---|---|
+| POST | `/api/auth/login` | Login local (email + senha) — rate limit 20/15min |
+| POST | `/api/auth/ad` | Login Active Directory (LDAP) — rate limit 20/15min |
+| GET | `/api/auth/entra/redirect` | Inicia OAuth Microsoft Entra ID |
+| GET | `/api/auth/entra/callback` | Callback OAuth Entra ID |
 
-### Ações FinOps
-| Método | Rota           | Descrição                         |
-|--------|----------------|-----------------------------------|
-| GET    | /api/acoes     | Listar (suporta filtros via query) |
-| POST   | /api/acoes     | Criar ação                        |
-| PUT    | /api/acoes/:id | Atualizar                         |
-| DELETE | /api/acoes/:id | Excluir                           |
+### Projetos e Ações FinOps
 
-### Dashboard / Export
-| Método | Rota              | Descrição                          |
-|--------|-------------------|------------------------------------|
-| GET    | /api/dashboard    | Estatísticas agregadas             |
-| GET    | /api/export/excel | Download .xlsx (3 abas)            |
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/projetos` | Listar projetos |
+| POST | `/api/projetos` | Criar projeto |
+| PUT | `/api/projetos/:id` | Atualizar projeto |
+| DELETE | `/api/projetos/:id` | Excluir projeto |
+| GET | `/api/acoes` | Listar ações (filtros: `projeto_id`, `status`, `cloud`) |
+| POST | `/api/acoes` | Criar ação |
+| PUT | `/api/acoes/:id` | Atualizar ação |
+| DELETE | `/api/acoes/:id` | Excluir ação |
+
+### Dashboard e Export
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/dashboard` | Estatísticas agregadas por status e cloud |
+| GET | `/api/export/excel` | Download `.xlsx` — Sumário / Ações / Retorno Mensal |
 
 ### Calculadora Azure
-| Método | Rota                             | Descrição                           |
-|--------|----------------------------------|-------------------------------------|
-| GET    | /api/calculadora/subscriptions   | Lista assinaturas (do cache)        |
-| GET    | /api/calculadora/resource-groups | Lista RGs por assinatura (do cache) |
-| GET    | /api/calculadora/recursos        | Recursos com custo/hora calculado   |
-| POST   | /api/calculadora/estimar         | Estimativa de custo por horas       |
-| POST   | /api/azure-costs/import          | Upload CSV ou Parquet               |
 
-### Sistema
-| Método | Rota          | Descrição                      |
-|--------|---------------|--------------------------------|
-| GET    | /api/health   | Status da conexão com o banco  |
-| GET    | /api/usuarios | Listar usuários (admin)        |
-| POST   | /api/usuarios | Criar usuário (admin)          |
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/calculadora/subscriptions` | Subscriptions (cache — < 5 ms) |
+| GET | `/api/calculadora/resource-groups` | Resource Groups por subscription (cache) |
+| GET | `/api/calculadora/recursos` | Recursos com custo/h, Price List e desconto |
+| POST | `/api/calculadora/estimar` | Estimativa consolidada por período |
+| GET | `/api/calculadora/reconciliacao` | Reconciliação por subscription/RG/período |
+
+### Custos Azure (Import)
+
+| Método | Rota | Descrição |
+|---|---|---|
+| POST | `/api/azure-costs/import` | Upload CSV, Parquet ou ZIP — aceita até 2 GB |
+| GET | `/api/azure-costs/import-status` | Status do import em andamento |
+
+### Azure Retail Price List *(novo v2.0)*
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/price-list/status` | Total de registros, data da última sync e status |
+| POST | `/api/price-list/sync` | Inicia sincronização com `prices.azure.com` (fire-and-forget) |
+
+### Reservas Cloud *(novo v2.0)*
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/reservas` | Listar reservas (filtros: `cloud`, `status`) |
+| POST | `/api/reservas` | Criar reserva |
+| PUT | `/api/reservas/:id` | Atualizar reserva |
+| DELETE | `/api/reservas/:id` | Excluir reserva |

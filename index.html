@@ -334,6 +334,11 @@
       0%,100% { transform: translateY(0px); }
       50%      { transform: translateY(-8px); }
     }
+    @keyframes monPulse {
+      0%   { box-shadow: 0 0 0 0 rgba(255,140,66,.5); }
+      70%  { box-shadow: 0 0 0 8px rgba(255,140,66,0); }
+      100% { box-shadow: 0 0 0 0 rgba(255,140,66,0); }
+    }
     .login-screen {
       position: fixed; inset: 0; z-index: 9999;
       background: #0c0014;
@@ -579,36 +584,67 @@
     /* ── Settings Modal ── */
     .settings-tabs {
       display: flex;
-      gap: 4px;
+      gap: 2px;
       border-bottom: 1px solid var(--border, #313244);
-      margin-bottom: 20px;
+      margin-bottom: 24px;
+      padding-bottom: 0;
     }
     .settings-tab {
-      padding: 8px 16px;
+      padding: 10px 18px;
       font-size: 13px;
       font-weight: 500;
       color: var(--text-muted, #6c7086);
       cursor: pointer;
       border-bottom: 2px solid transparent;
       margin-bottom: -1px;
-      transition: color .15s, border-color .15s;
+      border-radius: 6px 6px 0 0;
+      transition: color .15s, border-color .15s, background .15s;
       white-space: nowrap;
     }
+    .settings-tab:hover { color: var(--text); background: rgba(147,51,234,.06); }
     .settings-tab.active {
-      color: var(--accent, #89b4fa);
-      border-bottom-color: var(--accent, #89b4fa);
+      color: var(--accent, #9333ea);
+      border-bottom-color: var(--accent, #9333ea);
+      background: rgba(147,51,234,.08);
     }
     .settings-panel { display: none; }
     .settings-panel.active { display: block; }
     .settings-section-title {
       font-size: 11px;
-      font-weight: 600;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: .06em;
-      color: var(--text-muted, #6c7086);
-      margin: 18px 0 10px;
+      letter-spacing: .07em;
+      color: var(--accent);
+      opacity: .75;
+      margin: 22px 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
     .settings-section-title:first-child { margin-top: 0; }
+    /* Coleta Azure — grid de cards de status */
+    .coleta-status-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .coleta-status-card {
+      padding: 12px 14px;
+      background: rgba(22,4,38,.60);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .coleta-status-card .csc-label {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 6px;
+    }
+    @media (max-width: 700px) { .coleta-status-grid { grid-template-columns: 1fr 1fr; } }
     .role-badge {
       display: inline-flex; align-items: center; gap: 4px;
       padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500;
@@ -1216,7 +1252,7 @@
             <path d="M13 3.5A7 7 0 0 1 17 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             <path d="M17 7.5v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          <span class="nav-label">Coleta Automática</span>
+          <span class="nav-label">Coleta Azure</span>
         </a>
       </nav>
 
@@ -1664,122 +1700,359 @@
           </div>
         </div>
 
-        <!-- ══ VIEW: COLETA AUTOMÁTICA ══ -->
+        <!-- ══ VIEW: COLETA DE CUSTOS ══ -->
         <div id="view-coleta" class="view">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;align-items:start">
 
-            <!-- Card: Configuração -->
-            <div class="stat-card" style="padding:20px">
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
-                <svg viewBox="0 0 20 20" fill="none" width="20" height="20" style="color:var(--accent);flex-shrink:0">
-                  <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
-                  <path d="M10 6v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span style="font-size:14px;font-weight:700;color:var(--text)">Configuração</span>
-              </div>
-              <div style="display:flex;flex-direction:column;gap:12px">
-                <div>
-                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Tenant ID</label>
-                  <input id="coleta-tenant-id" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-                </div>
-                <div>
-                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Client ID (App Registration)</label>
-                  <input id="coleta-client-id" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-                </div>
-                <div>
-                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Client Secret <span style="color:var(--text-dim);font-size:10px">(deixe em branco para manter o atual)</span></label>
-                  <input id="coleta-client-secret" type="password" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="••••••••••••••••">
-                </div>
-                <div style="display:flex;gap:12px;align-items:center">
-                  <div style="flex:1">
-                    <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Dia de Execução (mensal)</label>
-                    <input id="coleta-dia" type="number" class="filter-input" style="width:100%;box-sizing:border-box" min="1" max="28" value="5">
-                  </div>
-                  <div style="flex:1">
-                    <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Granularidade (dias/chunk)</label>
-                    <select id="coleta-granularidade" class="filter-select" style="width:100%;box-sizing:border-box">
-                      <option value="7">Semanal — 7 dias (recomendado)</option>
-                      <option value="14">Quinzenal — 14 dias</option>
-                      <option value="28">Mensal — 28 dias (1 request)</option>
-                    </select>
-                  </div>
-                  <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:14px">
-                    <label class="toggle-label" style="font-size:11px;color:var(--text-muted)">Ativo</label>
-                    <label class="toggle-switch" style="margin:0">
-                      <input type="checkbox" id="coleta-ativo">
-                      <span class="toggle-slider"></span>
-                    </label>
-                  </div>
-                </div>
-                <div style="display:flex;gap:8px;margin-top:4px">
-                  <button class="btn-primary" style="flex:1;font-size:12px;padding:8px" onclick="saveColetaConfig()">Salvar Configuração</button>
-                  <button class="btn-ghost" style="flex:1;font-size:12px;padding:8px" onclick="testColetaConexao()">Testar Conexão</button>
-                </div>
-                <div id="coleta-test-result" style="display:none;font-size:11px;padding:8px 10px;border-radius:6px;margin-top:2px"></div>
+          <div style="margin-bottom:18px">
+            <div class="page-title">Coleta de Custos Azure</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Três métodos: API Oficial (inclui impostos), Storage Account ou Import Manual</div>
+          </div>
+
+          <!-- ══ Tabs ══ -->
+          <div style="display:flex;border-bottom:2px solid var(--border);margin-bottom:20px">
+            <button id="ctab-btn-api" onclick="switchColetaTab('api')" style="background:transparent;border:none;border-bottom:3px solid var(--accent);margin-bottom:-2px;padding:10px 22px;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer">API Oficial</button>
+            <button id="ctab-btn-storage" onclick="switchColetaTab('storage')" style="background:transparent;border:none;border-bottom:3px solid transparent;margin-bottom:-2px;padding:10px 22px;color:var(--text-muted);font-size:13px;font-weight:600;cursor:pointer">Via Storage</button>
+            <button id="ctab-btn-manual" onclick="switchColetaTab('manual')" style="background:transparent;border:none;border-bottom:3px solid transparent;margin-bottom:-2px;padding:10px 22px;color:var(--text-muted);font-size:13px;font-weight:600;cursor:pointer">Import Manual</button>
+          </div>
+
+          <!-- ── PAINEL: API Oficial ── -->
+          <div id="ctab-panel-api">
+
+            <div style="padding:12px 16px;background:rgba(147,51,234,.08);border:1px solid rgba(147,51,234,.3);border-radius:10px;margin-bottom:16px">
+              <div style="font-size:13px;font-weight:600;color:var(--accent);margin-bottom:6px">Azure Cost Management API</div>
+              <div style="font-size:12px;color:var(--text-muted);line-height:1.65">
+                Coleta diretamente via API REST — sem Storage Account. Processa uma assinatura por vez e inclui
+                linhas de <strong style="color:var(--text)">imposto (ISS/PIS/COFINS)</strong> via escopo do Billing Profile.
+                A SP precisa ter a role <strong style="color:var(--text)">Billing Reader</strong> no Billing Account.
               </div>
             </div>
 
-            <!-- Card: Status -->
+            <!-- Service Principals -->
+            <div class="stat-card" style="padding:20px;margin-bottom:16px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <svg viewBox="0 0 20 20" fill="none" width="18" height="18" style="color:var(--accent)"><circle cx="10" cy="7" r="3.5" stroke="currentColor" stroke-width="1.5"/><path d="M3 17c0-3.314 3.134-6 7-6s7 2.686 7 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  <span style="font-size:14px;font-weight:700;color:var(--text)">Service Principals</span>
+                  <span style="font-size:10px;color:var(--text-muted)">credenciais de autenticação</span>
+                </div>
+                <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="openSPModal(null)">+ Nova SP</button>
+              </div>
+              <div class="table-wrapper">
+                <table class="data-table">
+                  <thead><tr>
+                    <th>Nome</th><th>Tenant ID</th><th>Client ID</th>
+                    <th>Expira em</th><th style="text-align:center">Ativo</th><th></th>
+                  </tr></thead>
+                  <tbody id="sp-list-tbody"><tr><td colspan="6" class="empty-state">Carregando...</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Botões rápidos de wizard por SP -->
+            <div id="api-wizard-sp-wrap" style="margin-bottom:16px"></div>
+
+            <div class="stat-card" style="padding:20px;margin-bottom:16px">
+              <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:14px">Configurar e Executar</div>
+
+              <!-- SP selector -->
+              <div style="margin-bottom:12px">
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Service Principal</label>
+                <select id="tab-api-sp-select" class="filter-select" style="width:100%;box-sizing:border-box" onchange="_updateTabApiSpInfoEvt(this)">
+                  <option value="">Carregando...</option>
+                </select>
+              </div>
+              <div id="tab-api-bp-fields" style="margin-bottom:12px">
+                <div id="tab-api-sp-info" style="font-size:11px;padding:8px 10px;background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;color:var(--text-muted);min-height:36px;line-height:1.5">Selecione uma SP</div>
+              </div>
+
+              <!-- Período: presets + datas -->
+              <div style="margin-bottom:10px">
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:6px">Período de coleta</label>
+                <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">
+                  <button class="btn-ghost" id="tab-preset-mc"  style="font-size:11px;padding:3px 10px" onclick="_setTabApiPeriodo('mes_atual')">Mês atual</button>
+                  <button class="btn-ghost" id="tab-preset-ma"  style="font-size:11px;padding:3px 10px" onclick="_setTabApiPeriodo('mes_anterior')">Mês anterior</button>
+                  <button class="btn-ghost" id="tab-preset-ont" style="font-size:11px;padding:3px 10px" onclick="_setTabApiPeriodo('ontem')">Ontem</button>
+                  <button class="btn-ghost" id="tab-preset-7d"  style="font-size:11px;padding:3px 10px" onclick="_setTabApiPeriodo('7dias')">Últimos 7 dias</button>
+                  <button class="btn-ghost" id="tab-preset-30d" style="font-size:11px;padding:3px 10px" onclick="_setTabApiPeriodo('30dias')">Últimos 30 dias</button>
+                  <button class="btn-ghost" id="tab-preset-cust" style="font-size:11px;padding:3px 10px" onclick="_setTabApiPeriodo('custom')">Personalizado</button>
+                </div>
+                <div id="tab-api-datas-wrap" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                  <div>
+                    <label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:4px">Data Início</label>
+                    <input id="tab-api-inicio" type="date" class="filter-input" style="width:100%;box-sizing:border-box">
+                  </div>
+                  <div>
+                    <label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:4px">Data Fim</label>
+                    <input id="tab-api-fim" type="date" class="filter-input" style="width:100%;box-sizing:border-box">
+                  </div>
+                </div>
+              </div>
+
+              <div id="tab-api-aviso" style="display:none;padding:8px 12px;background:rgba(255,140,66,.1);border:1px solid rgba(255,140,66,.3);border-radius:8px;font-size:11px;color:var(--orange);margin-bottom:12px">
+                ⚠ Período maior que 31 dias — a coleta pode demorar bastante. Considere dividir em períodos menores.
+              </div>
+
+              <!-- Agendamento API (apenas modo Billing Profile) -->
+              <div id="tab-api-agendamento-wrap">
+              <div style="border:1px solid var(--border);border-radius:10px;padding:14px 16px;background:rgba(0,0,0,.15);margin-bottom:12px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                  <span style="font-size:12px;font-weight:600;color:var(--text)">Coleta automática agendada</span>
+                  <label class="toggle-switch" style="margin:0"><input type="checkbox" id="api-auto-ativo" onchange="_onApiAutoToggle(this)"><span class="toggle-slider"></span></label>
+                </div>
+                <div id="api-sched-body" style="display:none">
+                  <div style="margin-bottom:10px">
+                    <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:6px">Dias da semana</label>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap">
+                      <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="api-dia" value="0"><span style="font-size:10px;color:var(--text-muted)">Dom</span></label>
+                      <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="api-dia" value="1" checked><span style="font-size:10px;color:var(--text-muted)">Seg</span></label>
+                      <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="api-dia" value="2" checked><span style="font-size:10px;color:var(--text-muted)">Ter</span></label>
+                      <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="api-dia" value="3" checked><span style="font-size:10px;color:var(--text-muted)">Qua</span></label>
+                      <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="api-dia" value="4" checked><span style="font-size:10px;color:var(--text-muted)">Qui</span></label>
+                      <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="api-dia" value="5" checked><span style="font-size:10px;color:var(--text-muted)">Sex</span></label>
+                      <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="api-dia" value="6"><span style="font-size:10px;color:var(--text-muted)">Sáb</span></label>
+                    </div>
+                  </div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:end">
+                    <div>
+                      <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Horário</label>
+                      <select id="api-hora-exec" class="filter-input" style="width:100%;box-sizing:border-box" onchange="_updateApiProxima()">
+                        <option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option>
+                        <option value="3" selected>03:00</option><option value="4">04:00</option><option value="5">05:00</option>
+                        <option value="6">06:00</option><option value="7">07:00</option><option value="8">08:00</option>
+                        <option value="9">09:00</option><option value="10">10:00</option><option value="11">11:00</option>
+                        <option value="12">12:00</option><option value="13">13:00</option><option value="14">14:00</option>
+                        <option value="15">15:00</option><option value="16">16:00</option><option value="17">17:00</option>
+                        <option value="18">18:00</option><option value="19">19:00</option><option value="20">20:00</option>
+                        <option value="21">21:00</option><option value="22">22:00</option><option value="23">23:00</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Janela (dias)</label>
+                      <select id="api-granularidade" class="filter-input" style="width:100%;box-sizing:border-box">
+                        <option value="1">1 dia</option><option value="3">3 dias</option>
+                        <option value="7" selected>7 dias</option><option value="15">15 dias</option><option value="30">30 dias</option>
+                      </select>
+                    </div>
+                    <div id="api-proxima-wrap" style="font-size:11px;color:var(--text-muted);line-height:1.5;padding-bottom:4px"></div>
+                  </div>
+                  <button class="btn-primary" style="width:100%;font-size:13px;padding:9px;margin-top:10px" onclick="salvarAgendamentoAPI()">
+                    Salvar agendamento
+                  </button>
+                </div>
+              </div>
+              </div><!-- fecha tab-api-agendamento-wrap -->
+
+              <button id="tab-api-btn" class="btn-primary" style="width:100%;font-size:14px;padding:11px" onclick="executarColetaAPITab()">
+                <svg viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:inline;margin-right:6px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg>
+                Coletar agora via API
+              </button>
+            </div>
+            <!-- âncora: monitor será movido aqui quando coleta API estiver em andamento -->
+            <div id="mon-anchor-api"></div>
+
+          </div>
+
+          <!-- ── PAINEL: Via Storage ── -->
+          <div id="ctab-panel-storage" style="display:none">
+
+            <div class="stat-card" style="padding:20px;margin-bottom:16px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <svg viewBox="0 0 20 20" fill="none" width="18" height="18" style="color:var(--accent)"><rect x="2" y="4" width="16" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M2 8h16" stroke="currentColor" stroke-width="1.5"/></svg>
+                  <span style="font-size:14px;font-weight:700;color:var(--text)">Storage Accounts</span>
+                  <span style="font-size:10px;padding:2px 7px;border-radius:10px;background:rgba(34,197,94,.15);color:var(--green);font-weight:600">Recomendado</span>
+                </div>
+                <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="openStorageModal(null)">+ Novo Storage</button>
+              </div>
+              <div class="table-wrapper">
+                <table class="data-table">
+                  <thead><tr>
+                    <th>Nome</th><th>Storage Account</th><th>Container</th>
+                    <th>Prefixo</th><th style="text-align:center">Ativo</th><th></th>
+                  </tr></thead>
+                  <tbody id="storage-list-tbody"><tr><td colspan="6" class="empty-state">Carregando...</td></tr></tbody>
+                </table>
+              </div>
+              <div style="margin-top:12px;padding:8px 12px;background:rgba(147,51,234,.05);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text-muted)">
+                O SP precisa do papel <code style="background:rgba(147,51,234,.12);color:var(--accent);padding:1px 5px;border-radius:3px">Storage Blob Data Reader</code> no container do Cost Management Export.
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;align-items:start">
+              <div class="stat-card" style="padding:20px">
+                <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:14px">Status da Coleta</div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:12px;color:var(--text-muted)">Estado atual</span>
+                    <span id="coleta-status-badge" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:rgba(147,51,234,.15);color:var(--accent)">Carregando...</span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:12px;color:var(--text-muted)">Última execução</span>
+                    <span id="coleta-ultima-exec" style="font-size:12px;color:var(--text)">—</span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:12px;color:var(--text-muted)">Registros</span>
+                    <span id="coleta-ultima-linhas" style="font-size:12px;color:var(--text)">—</span>
+                  </div>
+                  <div style="padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:11px;color:var(--text-dim);word-break:break-word" id="coleta-ultima-msg">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="stat-card" style="padding:20px">
+                <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:14px">Ações</div>
+                <div style="display:flex;flex-direction:column;gap:10px">
+                  <div style="display:flex;gap:8px">
+                    <button id="coleta-exec-btn" class="btn-primary" style="flex:1;font-size:13px;padding:10px" onclick="executarStorageAtivo()">
+                      <svg viewBox="0 0 20 20" fill="none" width="13" height="13" style="display:inline;margin-right:5px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg>Executar Storage
+                    </button>
+                    <button id="coleta-cancel-btn" class="btn-ghost" style="display:none;flex:1;font-size:13px;padding:10px;border-color:var(--danger);color:var(--danger)" onclick="cancelarColeta()">
+                      <svg viewBox="0 0 20 20" fill="none" width="13" height="13" style="display:inline;margin-right:5px;vertical-align:-2px"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Cancelar
+                    </button>
+                  </div>
+                  <div style="font-size:11px;color:var(--text-muted);text-align:center">ou use o botão ▶ em cada Storage acima</div>
+                </div>
+              </div>
+            </div>
+            <!-- âncora: monitor será movido aqui quando coleta Storage estiver em andamento -->
+            <div id="mon-anchor-storage"></div>
+
+          </div>
+
+          <!-- ── PAINEL: Import Manual ── -->
+          <div id="ctab-panel-manual" style="display:none">
+
+            <div class="stat-card" style="padding:32px;margin-bottom:16px;text-align:center">
+              <svg viewBox="0 0 48 48" fill="none" width="52" height="52" style="margin:0 auto 18px;display:block;color:var(--accent)"><rect x="6" y="6" width="36" height="36" rx="6" stroke="currentColor" stroke-width="1.8"/><path d="M24 14v16M17 25l7 7 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 34h20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:8px">Importar Arquivos de Custo</div>
+              <div style="font-size:12px;color:var(--text-muted);max-width:480px;margin:0 auto 22px;line-height:1.7">
+                Aceita arquivos <strong style="color:var(--text)">.csv</strong>, <strong style="color:var(--text)">.parquet</strong> ou <strong style="color:var(--text)">.zip</strong> exportados do Azure Cost Management. Múltiplos arquivos podem ser selecionados de uma vez.
+              </div>
+              <button class="btn-primary" style="font-size:14px;padding:12px 34px" onclick="_ensureCalcIniciado();document.getElementById('cfile').click()">
+                <svg viewBox="0 0 16 16" fill="none" width="15" height="15" style="display:inline;margin-right:7px;vertical-align:-2px"><path d="M8 2v8M5 7l3 3 3-3M2 12v2h12v-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Selecionar Arquivos
+              </button>
+            </div>
+
+            <!-- Monitor de upload manual -->
+            <div id="mon-upload-manual" style="display:none;margin-bottom:16px" class="stat-card">
+              <div style="padding:16px 20px">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+                  <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--accent);animation:monPulse 1.4s infinite"></span>
+                  <span style="font-size:13px;font-weight:700;color:var(--text)">Importando arquivo...</span>
+                  <span id="mon-upload-nome" style="font-size:12px;color:var(--text-muted)"></span>
+                </div>
+                <div style="margin-bottom:10px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                    <span style="font-size:11px;color:var(--text-muted)">Progresso</span>
+                    <span id="mon-upload-pct" style="font-size:12px;font-weight:600;color:var(--accent)">0%</span>
+                  </div>
+                  <div style="height:5px;background:var(--border);border-radius:3px;overflow:hidden">
+                    <div id="mon-upload-bar" style="height:100%;background:linear-gradient(90deg,var(--accent),#c084fc);border-radius:3px;width:0%;transition:width .3s ease"></div>
+                  </div>
+                </div>
+                <div id="mon-upload-status" style="font-size:11px;color:var(--text-dim)">Enviando...</div>
+              </div>
+            </div>
+
             <div class="stat-card" style="padding:20px">
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
-                <svg viewBox="0 0 20 20" fill="none" width="20" height="20" style="color:var(--accent);flex-shrink:0">
-                  <path d="M3 10a7 7 0 1014 0A7 7 0 003 10z" stroke="currentColor" stroke-width="1.5"/>
-                  <path d="M10 7v3.5l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span style="font-size:14px;font-weight:700;color:var(--text)">Status da Coleta</span>
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <svg viewBox="0 0 20 20" fill="none" width="18" height="18" style="color:var(--accent)"><path d="M10 2a8 8 0 100 16A8 8 0 0010 2z" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v4l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  <span style="font-size:14px;font-weight:700;color:var(--text)">Dados Importados</span>
+                  <span style="font-size:10px;color:var(--text-muted)">custos no banco de dados</span>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn-ghost" style="font-size:12px;padding:6px 14px" onclick="abrirDiagnosticoAzure()">
+                    <svg viewBox="0 0 16 16" fill="none" width="13" height="13" style="display:inline;margin-right:5px;vertical-align:-1px"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4"/><path d="M8 7v4M8 5.5v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>Diagnóstico
+                  </button>
+                  <button class="btn-ghost" style="font-size:12px;padding:6px 14px;border-color:var(--danger);color:var(--danger)" onclick="abrirPurgeAzure()">
+                    <svg viewBox="0 0 16 16" fill="none" width="13" height="13" style="display:inline;margin-right:5px;vertical-align:-1px"><path d="M2 4h12M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 7v5M10 7v5M3 4l1 9a1 1 0 001 1h6a1 1 0 001-1l1-9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Limpar Dados
+                  </button>
+                </div>
               </div>
-              <div style="display:flex;flex-direction:column;gap:10px">
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
-                  <span style="font-size:12px;color:var(--text-muted)">Estado atual</span>
-                  <span id="coleta-status-badge" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:rgba(147,51,234,.15);color:var(--accent)">Carregando...</span>
-                </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
-                  <span style="font-size:12px;color:var(--text-muted)">Última execução</span>
-                  <span id="coleta-ultima-exec" style="font-size:12px;color:var(--text)">—</span>
-                </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
-                  <span style="font-size:12px;color:var(--text-muted)">Última mensagem</span>
-                  <span id="coleta-ultima-msg" style="font-size:11px;color:var(--text-dim);text-align:right;max-width:200px;word-break:break-word">—</span>
-                </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
-                  <span style="font-size:12px;color:var(--text-muted)">Registros (último mês)</span>
-                  <span id="coleta-ultima-linhas" style="font-size:12px;color:var(--text)">—</span>
-                </div>
-                <button id="coleta-exec-btn" class="btn-primary" style="margin-top:8px;font-size:13px;padding:10px" onclick="executarColetaAgora()">
-                  <svg viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:inline;margin-right:5px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg>
-                  Executar Agora
-                </button>
+            </div>
+
+          </div>
+
+          <!-- Monitor de progresso (movido dinamicamente para dentro da aba ativa via JS) -->
+          <div id="coleta-monitor" class="stat-card" style="padding:20px;margin-top:16px;margin-bottom:0;display:none">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span id="mon-pulse" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--orange);box-shadow:0 0 0 0 rgba(255,140,66,.5);animation:monPulse 1.4s infinite"></span>
+                <span style="font-size:14px;font-weight:700;color:var(--text)">Monitor de Coleta</span>
+                <span id="mon-tipo-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(147,51,234,.15);color:var(--accent);font-weight:600">—</span>
               </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span id="mon-fase" style="font-size:11px;color:var(--text-dim);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Iniciando...</span>
+                <button id="mon-cancel-btn" onclick="cancelarColeta()" style="font-size:11px;padding:3px 10px;border-radius:6px;background:rgba(255,77,106,.12);color:var(--danger);border:1px solid rgba(255,77,106,.3);cursor:pointer;white-space:nowrap">✕ Cancelar</button>
+                <button id="mon-close-btn" onclick="fecharMonitor()" style="display:none;font-size:11px;padding:3px 10px;border-radius:6px;background:rgba(147,51,234,.12);color:var(--accent);border:1px solid rgba(147,51,234,.3);cursor:pointer;white-space:nowrap">✕ Fechar</button>
+              </div>
+            </div>
+            <div id="mon-cb-row" style="display:none;padding:7px 12px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:7px;margin-bottom:12px;display:flex;align-items:center;gap:10px;font-size:11px;flex-wrap:wrap">
+              <span style="color:var(--text-muted)">Circuit Breaker:</span>
+              <span id="mon-cb-badge" style="font-weight:700;padding:1px 8px;border-radius:8px;background:rgba(34,197,94,.15);color:var(--green)">CLOSED</span>
+              <span id="mon-cb-failures" style="color:var(--text-muted)"></span>
+              <span id="mon-cb-until" style="color:var(--orange)"></span>
+            </div>
+            <div style="margin-bottom:16px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                <span style="font-size:11px;color:var(--text-muted)">Progresso</span>
+                <span id="mon-progress-txt" style="font-size:12px;font-weight:600;color:var(--accent)">0 / 0</span>
+              </div>
+              <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+                <div id="mon-progress-bar" style="height:100%;background:linear-gradient(90deg,var(--accent),#c084fc);border-radius:3px;width:0%;transition:width .5s ease"></div>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+              <div style="padding:10px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Arquivo atual</div>
+                <div id="mon-sub" style="font-size:12px;color:var(--text);word-break:break-all">—</div>
+                <div id="mon-chunk" style="font-size:10px;color:var(--text-dim);margin-top:3px">—</div>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+                <div style="text-align:center;padding:8px 4px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px">
+                  <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase">Inseridos</div>
+                  <div id="mon-ins" style="font-size:16px;font-weight:700;color:var(--green)">0</div>
+                </div>
+                <div style="text-align:center;padding:8px 4px;background:rgba(147,51,234,.08);border:1px solid var(--border);border-radius:8px">
+                  <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase">Atualizados</div>
+                  <div id="mon-upd" style="font-size:16px;font-weight:700;color:var(--accent)">0</div>
+                </div>
+                <div style="text-align:center;padding:8px 4px;background:rgba(255,77,106,.08);border:1px solid rgba(255,77,106,.2);border-radius:8px">
+                  <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase">Erros</div>
+                  <div id="mon-err" style="font-size:16px;font-weight:700;color:var(--danger)">0</div>
+                </div>
+              </div>
+            </div>
+            <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Log de Atividade</div>
+            <div id="mon-log" style="background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:8px;padding:10px 12px;max-height:130px;overflow-y:auto;font-family:monospace;font-size:11px;color:var(--text-dim);line-height:1.7">
+              <span style="color:var(--text-muted)">Aguardando...</span>
             </div>
           </div>
 
-          <!-- Histórico -->
+          <!-- Histórico de Execuções (compartilhado) -->
           <div class="stat-card" style="padding:20px">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
               <span style="font-size:14px;font-weight:700;color:var(--text)">Histórico de Execuções</span>
-              <button class="btn-ghost" style="font-size:11px;padding:4px 12px" onclick="loadColetaHistorico()">Atualizar</button>
+              <div style="display:flex;gap:8px">
+                <button class="btn-ghost" style="font-size:11px;padding:4px 12px" onclick="loadColetaHistorico(_coletaTabAtual)">Atualizar</button>
+                <button class="btn-ghost" style="font-size:11px;padding:4px 12px;border-color:var(--danger);color:var(--danger)" onclick="limparHistoricoColeta()">Limpar</button>
+              </div>
             </div>
             <div class="table-wrapper" style="max-height:360px;overflow-y:auto">
               <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Início</th>
-                    <th>Tipo</th>
-                    <th>Status</th>
-                    <th style="text-align:right">Subs</th>
-                    <th style="text-align:right">Inseridos</th>
-                    <th style="text-align:right">Atualizados</th>
-                    <th style="text-align:right">Erros</th>
-                    <th>Duração</th>
-                    <th>Mensagem</th>
-                  </tr>
-                </thead>
-                <tbody id="coleta-hist-tbody">
-                  <tr><td colspan="9" class="empty-state">Carregando...</td></tr>
-                </tbody>
+                <thead id="coleta-hist-thead"><tr>
+                  <th>Início</th><th>Status</th>
+                  <th style="text-align:right">Inseridos</th>
+                  <th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th>
+                  <th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th>
+                </tr></thead>
+                <tbody id="coleta-hist-tbody"><tr><td colspan="8" class="empty-state">Carregando...</td></tr></tbody>
               </table>
             </div>
           </div>
+
         </div>
         <!-- ═══════════════════════════════════ -->
 
@@ -1787,7 +2060,389 @@
     </main>
   </div>
 
-  <!-- MODAL ALERTAS DE RESERVAS (popup pós-login) -->
+  <!-- Modal: SP -->
+  <div id="modal-sp" class="modal-overlay" onclick="if(event.target===this)closeSPModal()">
+    <div class="modal modal-wide" style="max-width:560px">
+      <div class="modal-header">
+        <h3 id="modal-sp-titulo" class="modal-title">Nova Service Principal</h3>
+        <button class="modal-close" onclick="closeSPModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:20px 24px;display:flex;flex-direction:column;gap:12px">
+        <input type="hidden" id="sp-edit-id">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Nome da SP</label>
+            <input id="sp-nome" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="SP Produção">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Data Expiração do Secret</label>
+            <input id="sp-expiracao" type="date" class="filter-input" style="width:100%;box-sizing:border-box">
+          </div>
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Tenant ID</label>
+          <input id="sp-tenant-id" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Client ID (App Registration)</label>
+          <input id="sp-client-id" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Client Secret <span style="color:var(--text-dim);font-size:10px">(deixe em branco para manter o atual)</span></label>
+          <input id="sp-client-secret" type="password" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="••••••••••••••••">
+        </div>
+        <div id="sp-billing-section" style="border-top:1px solid var(--border);padding-top:12px;margin-top:2px;border-radius:8px;padding:12px;transition:background .2s,border-color .2s">
+          <div id="sp-billing-section-lbl" style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);margin-bottom:10px;">Coleta via API — MCA Billing Profile</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div>
+              <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Billing Account ID</label>
+              <input id="sp-billing-account" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx:xxxxxxxx_xxxx-xx-xx">
+            </div>
+            <div>
+              <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Billing Profile ID</label>
+              <input id="sp-billing-profile" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="XXXX-XXXX-XXX-XXX">
+            </div>
+          </div>
+          <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">A SP precisa ter a role <strong style="color:var(--text)">Billing Reader</strong> no Billing Account para usar a coleta via API.</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:end">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Dia de Execução</label>
+            <input id="sp-dia" type="number" class="filter-input" style="width:100%;box-sizing:border-box" min="1" max="28" value="5">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Granularidade</label>
+            <select id="sp-granularidade" class="filter-select" style="width:100%;box-sizing:border-box">
+              <option value="7">7 dias (rec.)</option>
+              <option value="14">14 dias</option>
+              <option value="28">28 dias</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+            <label style="font-size:11px;color:var(--text-muted)">Ativo</label>
+            <label class="toggle-switch" style="margin:0"><input type="checkbox" id="sp-ativo" checked><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:4px">
+          <button class="btn-primary" style="flex:1;font-size:13px;padding:10px" onclick="saveSP()">Salvar</button>
+          <button class="btn-ghost" style="font-size:13px;padding:10px 18px" onclick="closeSPModal()">Cancelar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Wizard de Coleta via API (4 passos) -->
+  <div id="modal-wizard-coleta" class="modal-overlay" onclick="if(event.target===this)fecharWizardColeta()">
+    <div class="modal modal-wide" style="max-width:620px">
+      <div class="modal-header" style="flex-direction:column;align-items:stretch;gap:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <h3 class="modal-title">Nova Coleta via API</h3>
+          <button class="modal-close" onclick="fecharWizardColeta()">✕</button>
+        </div>
+        <!-- Step indicator -->
+        <div style="display:flex;align-items:center;gap:0;padding:0 4px">
+          <div id="wizard-dot-1" style="width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">1</div>
+          <div id="wizard-line-1" style="flex:1;height:2px;background:var(--border)"></div>
+          <div id="wizard-dot-2" style="width:28px;height:28px;border-radius:50%;background:var(--border);color:var(--text-muted);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">2</div>
+          <div id="wizard-line-2" style="flex:1;height:2px;background:var(--border)"></div>
+          <div id="wizard-dot-3" style="width:28px;height:28px;border-radius:50%;background:var(--border);color:var(--text-muted);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">3</div>
+          <div id="wizard-line-3" style="flex:1;height:2px;background:var(--border)"></div>
+          <div id="wizard-dot-4" style="width:28px;height:28px;border-radius:50%;background:var(--border);color:var(--text-muted);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">4</div>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:0 4px">
+          <span id="wizard-lbl-1" style="font-size:10px;color:var(--accent);font-weight:600">Assinaturas</span>
+          <span id="wizard-lbl-2" style="font-size:10px;color:var(--text-muted)">Resource Groups</span>
+          <span id="wizard-lbl-3" style="font-size:10px;color:var(--text-muted)">Período</span>
+          <span id="wizard-lbl-4" style="font-size:10px;color:var(--text-muted)">Confirmar</span>
+        </div>
+      </div>
+      <div class="modal-body" style="padding:16px 20px;min-height:260px;display:flex;flex-direction:column">
+
+        <!-- Passo 1: Assinaturas -->
+        <div id="wizard-step-1" style="flex:1;display:flex;flex-direction:column;gap:12px">
+          <!-- Seletor de escopo (visível só para SPs com Billing Profile) -->
+          <div id="wizard-scope-selector" style="display:none;background:rgba(147,51,234,.06);border:1px solid rgba(147,51,234,.2);border-radius:10px;padding:12px;flex-shrink:0">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px">Escopo da coleta</div>
+            <div style="display:flex;gap:8px">
+              <button id="wizard-scope-bp" onclick="_wizardSetScope('billing_profile')"
+                style="flex:1;padding:9px 10px;border-radius:8px;border:2px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:700;transition:all .2s;text-align:center">
+                <div>Billing Profile</div>
+                <div style="font-size:10px;font-weight:400;opacity:.85;margin-top:2px">Todas as subscriptions</div>
+              </button>
+              <button id="wizard-scope-subs" onclick="_wizardSetScope('subscriptions')"
+                style="flex:1;padding:9px 10px;border-radius:8px;border:2px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;font-size:12px;font-weight:600;transition:all .2s;text-align:center">
+                <div>Subscriptions</div>
+                <div style="font-size:10px;font-weight:400;margin-top:2px">Selecionar específicas</div>
+              </button>
+            </div>
+          </div>
+          <div id="wizard-subs-wrap" style="flex:1;display:flex;flex-direction:column;gap:8px;min-height:0">
+            <p id="wizard-subs-label" style="color:var(--text-muted);font-size:13px;margin:0;flex-shrink:0">Selecione as assinaturas que deseja coletar:</p>
+            <div id="wizard-subs-list" style="flex:1;overflow-y:auto;max-height:260px"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--border);flex-shrink:0">
+            <button class="btn-ghost" onclick="fecharWizardColeta()">Cancelar</button>
+            <button id="wizard-btn-next-1" class="btn-primary" onclick="wizardNext1()" disabled>Próximo →</button>
+          </div>
+        </div>
+
+        <!-- Passo 2: Resource Groups -->
+        <div id="wizard-step-2" style="flex:1;display:none;flex-direction:column;gap:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
+            <p style="color:var(--text-muted);font-size:13px;margin:0">Selecione os Resource Groups (todos = sem filtro):</p>
+            <div style="display:flex;gap:10px;font-size:11px">
+              <span id="wizard-sel-subs-label" style="color:var(--text-muted)">0 assinatura(s)</span>
+              <span style="color:var(--border)">|</span>
+              <span id="wizard-sel-rgs-label" style="color:var(--accent);font-weight:600">0 RG(s)</span>
+            </div>
+          </div>
+          <div id="wizard-rgs-controls" style="flex-shrink:0"></div>
+          <div id="wizard-rgs-list" style="flex:1;overflow-y:auto;min-height:80px;max-height:240px"></div>
+          <div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--border)">
+            <button class="btn-ghost" onclick="wizardBack(1)">← Voltar</button>
+            <button id="wizard-btn-next-2" class="btn-primary" onclick="wizardNext2()" disabled>Próximo →</button>
+          </div>
+        </div>
+
+        <!-- Passo 3: Período -->
+        <div id="wizard-step-3" style="flex:1;display:none;flex-direction:column;gap:16px">
+          <p style="color:var(--text-muted);font-size:13px;margin:0">Defina o período de coleta:</p>
+          <div style="display:flex;gap:16px">
+            <div style="flex:1">
+              <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase">Data início</label>
+              <input type="date" id="wizard-inicio" class="form-control">
+            </div>
+            <div style="flex:1">
+              <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase">Data fim</label>
+              <input type="date" id="wizard-fim" class="form-control">
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick="_wizardSetPeriodo('mes_atual')">Mês atual</button>
+            <button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick="_wizardSetPeriodo('mes_anterior')">Mês anterior</button>
+            <button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick="_wizardSetPeriodo('trimestre')">Último trimestre</button>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--border)">
+            <button class="btn-ghost" onclick="wizardBack(2)">← Voltar</button>
+            <button class="btn-primary" onclick="wizardNext3()">Próximo →</button>
+          </div>
+        </div>
+
+        <!-- Passo 4: Confirmar -->
+        <div id="wizard-step-4" style="flex:1;display:none;flex-direction:column;gap:16px">
+          <p style="color:var(--text-muted);font-size:13px;margin:0">Confirme os detalhes antes de iniciar a coleta:</p>
+          <div id="wizard-summary" style="background:rgba(147,51,234,.08);border:1px solid var(--border-light);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px"></div>
+          <!-- Tipo de métrica -->
+          <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);">Tipo de Custo</div>
+            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+              <input type="radio" name="wizard-metric" value="ActualCost" checked style="margin-top:2px;accent-color:var(--accent);">
+              <div>
+                <div style="font-size:13px;color:var(--text);font-weight:600;">ActualCost <span style="font-size:10px;font-weight:400;color:var(--text-muted);">(padrão)</span></div>
+                <div style="font-size:11px;color:var(--text-muted);">Custo real faturado. Reservas aparecem como valor total no mês da compra.</div>
+              </div>
+            </label>
+            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+              <input type="radio" name="wizard-metric" value="AmortizedCost" style="margin-top:2px;accent-color:var(--accent);">
+              <div>
+                <div style="font-size:13px;color:var(--text);font-weight:600;">AmortizedCost <span style="font-size:10px;font-weight:400;color:var(--green);">recomendado para comparar com portal</span></div>
+                <div style="font-size:11px;color:var(--text-muted);">Reservas e savings plans distribuídos no período de uso — igual ao padrão do Azure Cost Analysis.</div>
+              </div>
+            </label>
+          </div>
+          <!-- Agendamento recorrente -->
+          <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);">Agendamento Recorrente</div>
+              <label class="toggle-switch" style="margin:0"><input type="checkbox" id="wizard-sched-ativo" onchange="_wizardSchedToggle(this)"><span class="toggle-slider"></span></label>
+            </div>
+            <div id="wizard-sched-body" style="display:none;flex-direction:column;gap:8px">
+              <div>
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:5px">Dias da semana</label>
+                <div style="display:flex;gap:5px;flex-wrap:wrap">
+                  <label style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" class="wiz-dia" value="0"><span style="font-size:10px;color:var(--text-muted)">Dom</span></label>
+                  <label style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" class="wiz-dia" value="1" checked><span style="font-size:10px;color:var(--text-muted)">Seg</span></label>
+                  <label style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" class="wiz-dia" value="2" checked><span style="font-size:10px;color:var(--text-muted)">Ter</span></label>
+                  <label style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" class="wiz-dia" value="3" checked><span style="font-size:10px;color:var(--text-muted)">Qua</span></label>
+                  <label style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" class="wiz-dia" value="4" checked><span style="font-size:10px;color:var(--text-muted)">Qui</span></label>
+                  <label style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" class="wiz-dia" value="5" checked><span style="font-size:10px;color:var(--text-muted)">Sex</span></label>
+                  <label style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer"><input type="checkbox" class="wiz-dia" value="6"><span style="font-size:10px;color:var(--text-muted)">Sáb</span></label>
+                </div>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Horário</label>
+                  <select id="wizard-sched-hora" class="filter-input" style="width:100%;box-sizing:border-box">
+                    <option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option>
+                    <option value="3" selected>03:00</option><option value="4">04:00</option><option value="5">05:00</option>
+                    <option value="6">06:00</option><option value="7">07:00</option><option value="8">08:00</option>
+                    <option value="9">09:00</option><option value="10">10:00</option><option value="11">11:00</option>
+                    <option value="12">12:00</option><option value="13">13:00</option><option value="14">14:00</option>
+                    <option value="15">15:00</option><option value="16">16:00</option><option value="17">17:00</option>
+                    <option value="18">18:00</option><option value="19">19:00</option><option value="20">20:00</option>
+                    <option value="21">21:00</option><option value="22">22:00</option><option value="23">23:00</option>
+                  </select>
+                </div>
+                <div>
+                  <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Janela (dias atrás)</label>
+                  <select id="wizard-sched-janela" class="filter-input" style="width:100%;box-sizing:border-box">
+                    <option value="1">1 dia</option><option value="3">3 dias</option>
+                    <option value="7" selected>7 dias</option><option value="15">15 dias</option><option value="30">30 dias</option>
+                  </select>
+                </div>
+              </div>
+              <div id="wizard-sched-proxima" style="font-size:11px;color:var(--text-muted);text-align:right;min-height:14px"></div>
+            </div>
+          </div>
+
+          <div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid var(--border)">
+            <button class="btn-ghost" onclick="wizardBack(3)">← Voltar</button>
+            <button id="wizard-btn-start" class="btn-primary" onclick="wizardIniciarColeta()">▶ Iniciar Coleta</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Detalhes de execução (log passo a passo) -->
+  <div id="modal-coleta-det" class="modal-overlay" onclick="if(event.target===this)fecharDetalhesColeta()">
+    <div class="modal modal-wide" style="max-width:680px">
+      <div class="modal-header">
+        <h3 class="modal-title">Log de Execução</h3>
+        <button class="modal-close" onclick="fecharDetalhesColeta()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:16px 20px;display:flex;flex-direction:column;gap:0">
+        <div id="coleta-det-meta"></div>
+        <div id="coleta-det-log"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Coletar via API -->
+  <div id="modal-coleta-api" class="modal-overlay" onclick="if(event.target===this)fecharColetaAPI()">
+    <div class="modal modal-wide" style="max-width:500px">
+      <div class="modal-header">
+        <h3 class="modal-title">Coletar via Cost Management API</h3>
+        <button class="modal-close" onclick="fecharColetaAPI()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
+        <input type="hidden" id="coleta-api-sp-id">
+        <div style="padding:10px 14px;border-radius:8px;background:rgba(147,51,234,.08);border:1px solid rgba(147,51,234,.2);font-size:11px;color:var(--text-muted);line-height:1.6;">
+          Busca <strong style="color:var(--text)">todos os charge types</strong> (Usage, Tax, Purchase, UnusedReservation…) diretamente da API do Azure no escopo do <strong style="color:var(--text)">Billing Profile</strong>. Inclui impostos fiscais (ISS/PIS/COFINS).
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">SP / Billing Profile</label>
+          <div id="coleta-api-sp-info" style="font-size:12px;font-weight:600;color:var(--text);padding:8px 12px;border-radius:6px;background:rgba(255,255,255,.04);border:1px solid var(--border)"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Data início</label>
+            <input id="coleta-api-inicio" type="date" class="filter-input" style="width:100%;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Data fim</label>
+            <input id="coleta-api-fim" type="date" class="filter-input" style="width:100%;box-sizing:border-box">
+          </div>
+        </div>
+        <div id="coleta-api-aviso" style="display:none;font-size:10px;color:var(--orange);padding:6px 10px;border-radius:6px;background:rgba(255,140,66,.08);border:1px solid rgba(255,140,66,.2);">
+          ⚠ Períodos longos podem demorar vários minutos. O Azure gera o relatório de forma assíncrona.
+        </div>
+        <div style="display:flex;gap:8px;margin-top:4px">
+          <button id="coleta-api-btn" class="btn-primary" style="flex:1;font-size:13px;padding:10px" onclick="executarColetaAPI()">⬇ Coletar agora</button>
+          <button class="btn-ghost" style="font-size:13px;padding:10px 18px" onclick="fecharColetaAPI()">Cancelar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Storage -->
+  <div id="modal-storage" class="modal-overlay" onclick="if(event.target===this)closeStorageModal()">
+    <div class="modal modal-wide" style="max-width:520px">
+      <div class="modal-header">
+        <h3 id="modal-storage-titulo" class="modal-title">Novo Storage Account</h3>
+        <button class="modal-close" onclick="closeStorageModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:20px 24px;display:flex;flex-direction:column;gap:12px">
+        <input type="hidden" id="storage-edit-id">
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Nome</label>
+          <input id="storage-nome" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="Export Produção">
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Storage Account</label>
+            <input id="storage-account" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="meuStorage">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Container</label>
+            <input id="storage-container" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="cost-exports">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Prefixo / Caminho <span style="color:var(--text-dim)">(opcional)</span></label>
+            <input id="storage-prefix" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="exports/monthly/">
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+            <label style="font-size:11px;color:var(--text-muted)">Ativo</label>
+            <label class="toggle-switch" style="margin:0"><input type="checkbox" id="storage-ativo" checked><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Service Principal <span style="color:var(--text-dim)">(para autenticação)</span></label>
+          <select id="storage-sp-id" class="filter-input" style="width:100%;box-sizing:border-box">
+            <option value="">— Usar primeira SP ativa (padrão) —</option>
+          </select>
+        </div>
+        <!-- Agendamento automático -->
+        <div style="border:1px solid var(--border);border-radius:10px;padding:14px 16px;background:rgba(0,0,0,.15)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <span style="font-size:12px;font-weight:600;color:var(--text)">Coleta automática</span>
+            <label class="toggle-switch" style="margin:0"><input type="checkbox" id="storage-auto-ativo" onchange="_onStorageAutoToggle(this)"><span class="toggle-slider"></span></label>
+          </div>
+          <div id="storage-sched-body" style="display:none">
+            <div style="margin-bottom:10px">
+              <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:6px">Dias da semana</label>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="storage-dia" value="0" checked><span style="font-size:10px;color:var(--text-muted)">Dom</span></label>
+                <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="storage-dia" value="1" checked><span style="font-size:10px;color:var(--text-muted)">Seg</span></label>
+                <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="storage-dia" value="2" checked><span style="font-size:10px;color:var(--text-muted)">Ter</span></label>
+                <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="storage-dia" value="3" checked><span style="font-size:10px;color:var(--text-muted)">Qua</span></label>
+                <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="storage-dia" value="4" checked><span style="font-size:10px;color:var(--text-muted)">Qui</span></label>
+                <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="storage-dia" value="5" checked><span style="font-size:10px;color:var(--text-muted)">Sex</span></label>
+                <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="storage-dia" value="6" checked><span style="font-size:10px;color:var(--text-muted)">Sáb</span></label>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end">
+              <div>
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Horário</label>
+                <select id="storage-hora-exec" class="filter-input" style="width:100%;box-sizing:border-box" onchange="_updateStorageProxima()">
+                  <option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option>
+                  <option value="3" selected>03:00</option><option value="4">04:00</option><option value="5">05:00</option>
+                  <option value="6">06:00</option><option value="7">07:00</option><option value="8">08:00</option>
+                  <option value="9">09:00</option><option value="10">10:00</option><option value="11">11:00</option>
+                  <option value="12">12:00</option><option value="13">13:00</option><option value="14">14:00</option>
+                  <option value="15">15:00</option><option value="16">16:00</option><option value="17">17:00</option>
+                  <option value="18">18:00</option><option value="19">19:00</option><option value="20">20:00</option>
+                  <option value="21">21:00</option><option value="22">22:00</option><option value="23">23:00</option>
+                </select>
+              </div>
+              <div id="storage-proxima-wrap" style="font-size:11px;color:var(--text-muted);line-height:1.5"></div>
+            </div>
+          </div>
+        </div>
+        <div id="storage-test-result" style="display:none;font-size:11px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(0,0,0,.2)"></div>
+        <div style="display:flex;gap:8px;margin-top:4px">
+          <button class="btn-primary" style="flex:1;font-size:13px;padding:10px" onclick="saveStorage()">Salvar</button>
+          <button class="btn-ghost" style="font-size:13px;padding:10px 18px" onclick="testarStorageModal()">Testar</button>
+          <button class="btn-ghost" style="font-size:13px;padding:10px 18px" onclick="closeStorageModal()">Cancelar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Detalhes de execução de coleta -->  <!-- MODAL ALERTAS DE RESERVAS (popup pós-login) -->
   <div class="modal-overlay" id="modal-rsv-alerts" onclick="closeModalOnOverlay(event,'modal-rsv-alerts')">
     <div class="modal" style="max-width:700px;width:95%">
       <div class="modal-header" style="gap:10px">
@@ -2186,7 +2841,7 @@
   </div>
 
   <!-- MODAL CONFIGURAÇÕES -->
-  <div class="modal-overlay" id="modal-settings" onclick="closeModalOnOverlay(event, 'modal-settings')">
+  <div class="modal-overlay" id="modal-settings" onclick="if(event.target===this)closeSettingsModal()">
     <div class="modal modal-wide">
       <div class="modal-header">
         <span>
@@ -2196,7 +2851,7 @@
           </svg>
           Configurações
         </span>
-        <button class="modal-close" onclick="document.getElementById('modal-settings').classList.remove('open')">✕</button>
+        <button class="modal-close" onclick="closeSettingsModal()">✕</button>
       </div>
       <div class="modal-body">
 
@@ -2206,6 +2861,7 @@
           <div class="settings-tab" onclick="switchSettingsTab('privilegios')">🔐 Privilégios</div>
           <div class="settings-tab" onclick="switchSettingsTab('integracao')">🔗 Integração AD / Entra ID</div>
           <div class="settings-tab" onclick="switchSettingsTab('banco')">🗄️ Banco de Dados</div>
+          <div class="settings-tab" onclick="switchSettingsTab('pricelist')">💰 Price List</div>
         </div>
 
         <!-- Tab: Usuários -->
@@ -2503,6 +3159,80 @@
           <div id="db-test-result" style="display:none;margin-top:12px"></div>
 
         </div>
+
+        <!-- Tab: Price List ──────────────────────────────────────────────── -->
+        <div class="settings-panel" id="stab-pricelist">
+
+          <div class="settings-section-title">Azure Retail Price List</div>
+          <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px;">
+            Importa o catálogo público de preços da Microsoft
+            (<a href="https://prices.azure.com/api/retail/prices" target="_blank" style="color:var(--accent)">prices.azure.com</a>)
+            e cruza com os dados de export para calcular o desconto real de cada recurso.
+            Não requer credenciais Azure — a API é pública.
+          </p>
+
+          <!-- Status atual -->
+          <div class="integration-card" id="pl-status-card">
+            <div class="integration-header" style="justify-content:space-between;align-items:flex-start">
+              <div>
+                <div class="integration-title">📊 Status do cache local</div>
+                <div class="integration-sub" id="pl-status-sub">Carregando...</div>
+              </div>
+              <span id="pl-status-badge" style="font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(147,51,234,.15);color:var(--accent);">—</span>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:24px;flex-wrap:wrap" id="pl-stats-row">
+              <div style="text-align:center;">
+                <div style="font-size:20px;font-weight:700;color:var(--accent);font-family:'IBM Plex Mono',monospace" id="pl-total">—</div>
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em">Registros</div>
+              </div>
+              <div style="text-align:center;">
+                <div style="font-size:20px;font-weight:700;color:var(--text);font-family:'IBM Plex Mono',monospace" id="pl-meters">—</div>
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em">Meters únicos</div>
+              </div>
+              <div style="text-align:center;">
+                <div style="font-size:14px;font-weight:600;color:var(--text-dim);font-family:'IBM Plex Mono',monospace" id="pl-updated">—</div>
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em">Última sync</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Configuração -->
+          <div class="settings-section-title" style="margin-top:20px">Configuração da Importação</div>
+
+          <div class="sw-hint" style="margin-bottom:14px">
+            💡 A Azure Retail Prices API é pública e não aceita filtro por região — os preços são sincronizados
+            globalmente em <strong>USD</strong> (cobertura completa de meters). A Calculadora converte
+            automaticamente para BRL usando a taxa de câmbio do seu export de custos. A sync abrange todos os
+            serviços Azure (~100 k+ registros) e leva de 5 a 10 minutos. Execute semanalmente ou quando notar
+            preços desatualizados.
+          </div>
+
+          <!-- Botão + progresso -->
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button type="button" class="btn-primary" id="pl-sync-btn" onclick="syncPriceList()">
+              <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
+                <path d="M13.5 8A5.5 5.5 0 112.5 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M13.5 4v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Sincronizar Price List
+            </button>
+            <button type="button" class="btn-rep secondary" onclick="_loadPriceListStatus()">
+              🔄 Atualizar status
+            </button>
+          </div>
+
+          <div id="pl-progress" style="display:none;margin-top:14px">
+            <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(147,51,234,.08);border:1px solid var(--border-light);border-radius:8px;">
+              <div style="width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0"></div>
+              <span id="pl-progress-msg" style="font-size:13px;color:var(--text-dim);">Importando...</span>
+            </div>
+          </div>
+
+          <div id="pl-msg" style="display:none;margin-top:12px"></div>
+
+        </div>
+        <!-- /Tab Price List -->
+
       </div>
     </div>
   </div>
@@ -2687,5 +3417,8 @@ document.addEventListener('keydown', function(e) {
     </div>
   </div>
 
+
+  <!-- Azure import file input — usado pela view-coleta -->
+  <input type="file" id="cfile" accept=".csv,.parquet,.zip" multiple style="display:none">
 </body>
 </html>
