@@ -1130,6 +1130,12 @@
                   if(svg)svg.style.opacity='1';
                 }
               };
+              offImg.onerror = function() {
+                // mascote.png não encontrado — exibe só o texto "vivo"
+                var svg = document.getElementById('vivo-logo-svg');
+                if (svg) svg.style.opacity = '1';
+                cvs.style.display = 'none';
+              };
               offImg.src = 'mascote.png?' + Date.now();
             })();
           </script>

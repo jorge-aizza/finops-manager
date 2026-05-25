@@ -132,23 +132,9 @@ const app = express();
 // ─── SECURITY HEADERS ────────────────────────────────────────────────────────
 try {
   const helmet = require('helmet');
-  app.use(helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc:     ["'self'"],
-        scriptSrc:      ["'self'", "'unsafe-inline'", 'https://cdnjs.cloudflare.com'],  // CDN p/ xlsx.js
-        styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-        fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
-        imgSrc:         ["'self'", 'data:'],
-        connectSrc:     ["'self'", 'https://prices.azure.com'],
-        frameSrc:       ["'none'"],
-        objectSrc:      ["'none'"],
-        // NÃO incluir upgradeInsecureRequests — força HTTPS e bloqueia login em HTTP
-      }
-    },
-    hsts: false,          // HSTS só com HTTPS real; configurar no reverse-proxy (nginx/Caddy)
-    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  }));
+  // CSP desabilitado: o SPA usa inline scripts/styles e CDNs externos (fonts, xlsx).
+  // Segurança de arquivos sensíveis é feita pelo middleware de bloqueio abaixo.
+  app.use(helmet({ contentSecurityPolicy: false }));
 } catch { console.warn('  helmet nao instalado — execute: npm install helmet'); }
 
 // ─── RATE LIMITING ───────────────────────────────────────────────────────────
