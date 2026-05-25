@@ -143,10 +143,10 @@ try {
         connectSrc:     ["'self'", 'https://prices.azure.com'],  // Price List API
         frameSrc:       ["'none'"],
         objectSrc:      ["'none'"],
-        upgradeInsecureRequests: [],
+        // upgradeInsecureRequests removido — força HTTPS e bloqueia login em HTTP
       }
     },
-    hsts: { maxAge: 31536000, includeSubDomains: true },  // 1 ano
+    hsts: false,  // HSTS só faz sentido com HTTPS; configurar no reverse-proxy (nginx)
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   }));
 } catch { console.warn('  helmet nao instalado — execute: npm install helmet'); }
