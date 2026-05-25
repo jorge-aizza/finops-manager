@@ -136,17 +136,17 @@ try {
     contentSecurityPolicy: {
       directives: {
         defaultSrc:     ["'self'"],
-        scriptSrc:      ["'self'", "'unsafe-inline'"],   // unsafe-inline necessário para onclick= no SPA
+        scriptSrc:      ["'self'", "'unsafe-inline'", 'https://cdnjs.cloudflare.com'],  // CDN p/ xlsx.js
         styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
         fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
         imgSrc:         ["'self'", 'data:'],
-        connectSrc:     ["'self'", 'https://prices.azure.com'],  // Price List API
+        connectSrc:     ["'self'", 'https://prices.azure.com'],
         frameSrc:       ["'none'"],
         objectSrc:      ["'none'"],
-        // upgradeInsecureRequests removido — força HTTPS e bloqueia login em HTTP
+        // NÃO incluir upgradeInsecureRequests — força HTTPS e bloqueia login em HTTP
       }
     },
-    hsts: false,  // HSTS só faz sentido com HTTPS; configurar no reverse-proxy (nginx)
+    hsts: false,          // HSTS só com HTTPS real; configurar no reverse-proxy (nginx/Caddy)
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   }));
 } catch { console.warn('  helmet nao instalado — execute: npm install helmet'); }
@@ -169,22 +169,16 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));           // 50 MB era excessivo para JSON; uploads usam multer
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// ─── STATIC FILES — apenas arquivos públicos explícitos ──────────────────────
-// IMPORTANTE: NÃO usar express.static(__dirname) — exporia server.js, .env.key, etc.
-const _PUBLIC_FILES = {
-  '/app.js':          { file: 'app.js',          mime: 'application/javascript' },
-  '/calculadora.js':  { file: 'calculadora.js',  mime: 'application/javascript' },
-  '/styles.css':      { file: 'styles.css',       mime: 'text/css' },
-  '/favicon.svg':     { file: 'favicon.svg',      mime: 'image/svg+xml' },
-};
-app.get(Object.keys(_PUBLIC_FILES), (req, res) => {
-  const entry = _PUBLIC_FILES[req.path];
-  if (!entry) return res.status(404).end();
-  res.setHeader('Content-Type', entry.mime);
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.sendFile(path.join(__dirname, entry.file));
+// ─── STATIC FILES ────────────────────────────────────────────────────────────
+// Bloqueia acesso direto a arquivos sensíveis antes de servir estáticos
+const _SENSITIVE = /^\/?(server\.js|encrypt-env\.js|package(-lock)?\.json|\.env(\.\w+)?|\.finops_setup|CLAUDE\.md|README\.md|.*\.sql$|.*\.key$|.*\.enc$)/i;
+app.use((req, res, next) => {
+  if (_SENSITIVE.test(req.path) || req.path.includes('node_modules')) {
+    return res.status(403).end();
+  }
+  next();
 });
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.use(express.static(path.join(__dirname), { index: 'index.html' }));
 
 // ─── DB ──────────────────────────────────────────────────────────────────────
 let pool = null; // Created lazily after setup
