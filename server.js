@@ -355,7 +355,7 @@ async function initDB() {
         numero          VARCHAR(50),
         titulo          VARCHAR(200),
         responsavel     VARCHAR(200),
-        validade_dias   INTEGER DEFAULT 30,
+        validade_dias   INTEGER DEFAULT 5,
         data_estimativa DATE,
         horas           INTEGER,
         pct_imposto     NUMERIC(5,2) DEFAULT 0,
@@ -417,6 +417,12 @@ async function initDB() {
       -- reservas_cloud: query de alertas de vencimento
       CREATE INDEX IF NOT EXISTS idx_reservas_status_venc ON reservas_cloud (status, data_vencimento);
     `);
+
+    // Limpeza de sessões antigas (> 90 dias) — evita crescimento ilimitado da tabela
+    try {
+      const del = await c.query(`DELETE FROM sessoes WHERE criado_em < NOW() - INTERVAL '90 days'`);
+      if (del.rowCount > 0) console.log(`[DB] ${del.rowCount} sessão(ões) antigas removidas.`);
+    } catch (_) {}
 
     console.log('Banco de dados inicializado com sucesso.');
   } finally {
@@ -2671,8 +2677,8 @@ if (_multer) {
     filename: (_, file, cb) => cb(null, Date.now() + '_' + file.originalname),
   });
 
-  // Limite de 2 GB — arquivos do Azure Cost Management podem ser grandes
-  const FILE_SIZE_LIMIT = 2 * 1024 * 1024 * 1024; // 2 GB
+  // Limite de 500 MB — suficiente para exports Azure; 2 GB era excessivo e podia travar o servidor
+  const FILE_SIZE_LIMIT = 500 * 1024 * 1024; // 500 MB
 
   const _upload = _multer({
     storage: _storage,
