@@ -22,13 +22,14 @@ node encrypt-env.js run       # load .env.enc and start server
 ## File Map
 
 ```
-server.js          (~2 700 lines)  All API routes, auth, DB init, middleware, Excel export
-app.js             (~1 980 lines)  Setup wizard, login, projects/actions CRUD, reservas, session mgmt
-calculadora.js     (~2 030 lines)  Azure cost calculator — self-contained IIFE
-index.html         (~2 260 lines)  SPA shell — all views toggled by showView()
-styles.css         (~1 180 lines)  Dark-mode CSS, Vivo purple theme
+server.js          (~4 520 lines)  All API routes, auth, DB init, middleware, Excel export
+app.js             (~4 060 lines)  Setup wizard, login, projects/actions CRUD, reservas, session mgmt
+calculadora.js     (~3 300 lines)  Azure cost calculator — self-contained IIFE
+index.html         (~3 260 lines)  SPA shell — all views toggled by showView()
+styles.css         (~1 430 lines)  Dark-mode CSS, Vivo purple theme
 encrypt-env.js     (139 lines)     AES-256-GCM .env encryption utility
 favicon.svg                        App icon (SVG)
+mascote.png                        Vivo mascot used in login screen (not tracked by git — keep locally)
 .finops_setup                      AES-256-CBC encrypted setup config — do not delete
 uploads_tmp/                       Multer temp dir — CSVs deleted automatically after import
 ```
@@ -57,8 +58,11 @@ Single-process Node.js + Express backend serving a vanilla-JS SPA. No build step
 4. `isConfigured()` — checks for `.finops_setup`; if absent, serves only the setup wizard
 5. `initDB()` — creates all core tables with `IF NOT EXISTS`
 6. `ensureAzureCostsTable()` — creates `azure_costs` + 11 indexes (incl. functional)
-7. `_refreshAzureCache()` — rebuilds `azure_subs_cache` + `azure_rg_cache` in background
-8. SIGTERM/SIGINT handlers registered — close pool + clear keep-alive timer before exit
+7. `ensurePriceListTable()` — creates `azure_price_list` + indexes (incl. functional on `LOWER(meter_id)`)
+8. `ensureAzureColetaTable()` — creates `azure_coleta_historico` + `azure_coleta_sps`
+9. `_refreshAzureCache()` — rebuilds `azure_subs_cache` + `azure_rg_cache` in background
+10. `_iniciarAgendador()` — starts automated Azure cost collection scheduler
+11. SIGTERM/SIGINT handlers registered — close pool + clear keep-alive timer before exit
 
 ### Authentication
 Three methods — all issue the same JWT payload `{id, nome, email, perfil}`:
@@ -70,6 +74,18 @@ Token stored in `sessionStorage` + `localStorage` (fallback).
 `authMiddleware` — verifies `Authorization: Bearer <token>`. Returns 401 on failure.
 `dbMiddleware` — returns 503 if pool is null (pre-setup state).
 Rate limiting: 20 req / 15 min on `/api/auth/login` and `/api/auth/ad`.
+
+### Static file security
+`express.static(__dirname)` com middleware de bloqueio antes:
+```javascript
+const _SENSITIVE = /^\/?(server\.js|encrypt-env\.js|package(-lock)?\.json|\.env(\.\w+)?|\.finops_setup|CLAUDE\.md|README\.md|.*\.sql$|.*\.key$|.*\.enc$)/i;
+app.use((req, res, next) => {
+  if (_SENSITIVE.test(req.path) || req.path.includes('node_modules')) return res.status(403).end();
+  next();
+});
+app.use(express.static(path.join(__dirname), { index: 'index.html' }));
+```
+Blocks HTTP access to source code and secrets while serving `index.html`, `app.js`, `styles.css`, `calculadora.js`, `favicon.svg`, `mascote.png` normally.
 
 ### Database — PostgreSQL only
 Tables created by `initDB()` at startup with `IF NOT EXISTS`. No migration framework.
@@ -87,6 +103,18 @@ Schema changes go directly in `initDB()` — must be idempotent.
   - NULL in any conflict column breaks deduplication (PostgreSQL NULL ≠ NULL)
 - `azure_subs_cache` — pre-aggregated subscription list (subscription_id PK)
 - `azure_rg_cache` — pre-aggregated RG list (subscription_id + resource_group_name_upper PK)
+
+**Price List table:** `azure_price_list` — created by `ensurePriceListTable()`
+- Source: Azure Retail Prices API (`prices.azure.com/api/retail/prices`)
+- Sync: global USD only (`currencyCode eq 'USD'`); `arm_region_name = 'global'` sentinel
+- UPSERT conflict key: `(meter_id, type, reservation_term, currency_code, arm_region_name)`
+- `reservation_term` is `NOT NULL DEFAULT ''` — JOIN must use `= ''` not `IS NULL`
+- Key indexes: `LOWER(meter_id)` functional index for case-insensitive JOIN
+- JOIN with `azure_costs`: `LOWER(pl.meter_id) = LOWER(base._meter_id) AND pl.type IN ('Consumption','DevTestConsumption') AND pl.reservation_term = ''`
+
+**Azure Coleta tables:**
+- `azure_coleta_historico` — log of each automated collection run
+- `azure_coleta_sps` — Service Principals (tenantId, clientId, clientSecret encrypted)
 
 **Performance indexes on azure_costs:**
 ```
@@ -115,8 +143,48 @@ Reduces dropdown load from ~12 s (full GROUP BY) to < 5 ms (tiny cache table sca
 - Parquet: read via `@dsnp/parquetjs` via `_mapRow`
 - Both normalize values with `_toDate()`, `_toNum()`, `_toStr()`
 - Azure exports mix casing: `Date`, `SubscriptionId` (Pascal), `invoiceId` (camel) — mappers handle both
+- Import runs in background job (`_processarImport`); progress via `GET /api/azure-costs/import-status`
 - Temp file deleted after processing; `uploads_tmp/` directory is kept
 - `req.setTimeout(0)` / `res.setTimeout(0)` intentionally disabled for large file uploads (up to 2 GB)
+
+### Azure Coleta Automática
+Automated cost collection via Azure Management + Storage APIs (no manual CSV needed).
+
+**Service Principals (`azure_coleta_sps`):** each SP stores `tenant_id`, `client_id`, `client_secret` (encrypted with MASTER_KEY). Required Azure RBAC: `Reader` + `Storage Blob Data Reader`.
+
+**Scheduler (`_iniciarAgendador`):** runs at configured time/days. Uses `_computeProximaColeta()` to calculate next run. Stores results in `azure_coleta_historico`.
+
+**Circuit breaker (`_cbCanAttempt` / `_cbRecordSuccess` / `_cbRecordFailure`):** prevents hammering Azure API on repeated failures. Opens after 3 consecutive failures; resets after 5 minutes.
+
+**Fetch helper (`_cbFetch`):** wraps `fetch` with timeout (30s), retry (3x) and circuit breaker integration.
+
+**Endpoints:**
+```
+GET  /api/azure-coleta/status          — current scheduler state + next run time
+GET  /api/azure-coleta/historico       — collection history log
+DELETE /api/azure-coleta/historico     — clear history
+POST /api/azure-coleta/cancelar        — cancel running collection
+GET  /api/azure-coleta/sps             — list Service Principals
+POST /api/azure-coleta/sps             — add Service Principal
+PUT  /api/azure-coleta/sps/:id         — update SP
+DELETE /api/azure-coleta/sps/:id       — remove SP
+POST /api/azure-coleta/sps/:id/testar  — test SP credentials
+POST /api/azure-coleta/sps/:id/coletar-api  — trigger manual collection
+POST /api/azure-coleta/sps/:id/listar-subs  — list subscriptions for SP
+POST /api/azure-coleta/sps/:id/listar-rgs   — list resource groups for SP
+PATCH /api/azure-coleta/sps/:id/ativo  — toggle SP active
+PATCH /api/azure-coleta/sps/:id/padrao — set SP as default
+```
+
+### Price List module
+`_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
+- No `armRegionName` filter — global sync (filter caused API to return 0 items)
+- Pagination via `NextPageLink` until exhausted
+- Stores `arm_region_name = 'global'` as sentinel
+- `resultKey` declared before `try` block to be accessible in `catch`
+
+`GET /api/price-list/status` — returns last sync metadata (timestamp, record count, errors).
+`POST /api/price-list/sync` — triggers sync (background, responds immediately with jobId).
 
 ### Calculadora module
 `calculadora.js` — IIFE `const Calculadora = (() => { ... })()`.
@@ -131,6 +199,16 @@ subscription dropdown → confirm OK → RG dropdown → confirm OK → date ran
 - UoM contains `hour`/`hora` → `custo_hora = SUM(unit_price × qty) / total_qty`
 - All other UoMs → `custo_hora = total_billing / 30 / 24`
 - Both types use the hours slider. Non-hour resources show `/h*` label.
+
+**Price List integration (v2.0):**
+- `isHora = tipo === 'hora' || tipo === 'dia'` — guard for hourly PL
+- `hora`/`dia`: `retailHora = retail_price / uomFactor × convR` — discount badge `▼ X% vs tabela`
+- `periodo` (discos/storage): `retailMes = retail_price / uomFactor × convR` — monthly reference
+- `reserva`: `retailHoraRsv` = on-demand reference; badge azul `▼ X% reserva vs on-demand`
+- `fonte_estimado`: `'price_list'` (verde 📋) or `'billing'` (cinza, custo histórico)
+- `temPL = (isHora && retailHora > 0) || (!isHora && retailMes > 0)` — drives UI indicators
+
+**Legenda colapsável** (`#cov-legenda`): botão 📖 na tela Configurar Estimativa abre grid 2 colunas explicando todos os indicadores (fonte, descontos, H.reais, Uso parcial, *, cores do Estimado).
 
 **End-date calendar:** enabled — user can freely select the end date. `_sincDataFim()` only auto-fills fim if field is currently empty.
 
@@ -209,8 +287,9 @@ linear-gradient(160deg, #1a0030 → #0c0014 → #04000c)
 - `filter: drop-shadow(0 0 8px rgba(147,51,234,.5))`
 
 **Button classes:**
-- `.btn-primary` — filled accent purple, white text
-- `.btn-ghost` / `.btn-secondary` — transparent with border, muted text (both defined in styles.css)
+- `.btn-primary` — filled accent purple, white text (defined in `styles.css`)
+- `.btn-ghost` / `.btn-secondary` — transparent with border, muted text (defined in `styles.css`)
+- `.btn-sso` — SSO login buttons (defined inline in `index.html`)
 - `.btn-export` — defined in `index.html` inline `<style>` (overrides external CSS)
 
 **Key element rules:**
@@ -234,7 +313,10 @@ Hidden on mobile via `@media (max-width: 768px) { .topbar-vivo-brand { display: 
 ### Login screen
 - Background: dark `#0c0014` + `::before` radial glow + `::after` conic-gradient rays (animated)
 - `.login-rays` + `.login-glow` — extra animated ray layers for depth
-- Logo: "vivo" text in `#660099` (38px Arial Black) with subtle `drop-shadow` glow animation
+- Logo: SVG "vivo" text (`#9333ea`, 46px Arial Black) com canvas do `mascote.png` ao lado
+  - Canvas starts at `opacity:0`; `onload` revela ambos juntos para evitar flash
+  - **`onerror` handler:** se `mascote.png` falhar, SVG "vivo" aparece sozinho (canvas hidden)
+  - `mascote.png` não está no git (`.gitignore: *.png`) — manter cópia local no servidor
 - Card: `rgba(18,2,32,.78)` + `backdrop-filter: blur(24px)` + purple border + float animation
 - **Dark theme is the default** — `doLogin()` removes `data-theme` attribute and clears `localStorage 'finops-theme'` on every login
 
@@ -342,16 +424,13 @@ CMD ["node", "server.js"]
 ```bash
 docker run -d --name finops -p 3000:3000 \
   -e JWT_SECRET=... -e MASTER_KEY=... -e DATABASE_URL=... -e ALLOWED_ORIGIN=... \
-  -v finops-data:/app \          # persists .finops_setup + uploads_tmp
+  -v finops-data:/app \          # persists .finops_setup + uploads_tmp + mascote.png
   finops-manager
 ```
 
 ### Azure PaaS — App Service + PostgreSQL Flexible Server
 ```bash
-# 1. Resource Group
 az group create --name rg-finops --location brazilsouth
-
-# 2. PostgreSQL Flexible Server (create via portal or CLI)
 az postgres flexible-server create \
   --resource-group rg-finops --name finops-pg \
   --location brazilsouth --version 16 \
@@ -359,109 +438,19 @@ az postgres flexible-server create \
   --sku-name Standard_B1ms --tier Burstable
 az postgres flexible-server db create --resource-group rg-finops \
   --server-name finops-pg --database-name finops_db
-
-# 3. Web App (Node.js 18, Linux)
 az webapp create --resource-group rg-finops --plan finops-plan \
   --name finops-manager --runtime "NODE:18-lts"
-
-# 4. Startup command
 az webapp config set --resource-group rg-finops \
   --name finops-manager --startup-file "node server.js"
-
-# 5. Environment variables
 az webapp config appsettings set --resource-group rg-finops \
   --name finops-manager --settings \
   DATABASE_URL="postgresql://pgadmin:<senha>@finops-pg.postgres.database.azure.com:5432/finops_db?sslmode=require" \
   JWT_SECRET=<gerado> MASTER_KEY=<gerado> \
-  ALLOWED_ORIGIN=https://finops-manager.azurewebsites.net \
-  WEBSITE_RUN_FROM_PACKAGE=1
-
-# 6. Deploy ZIP
+  ALLOWED_ORIGIN=https://finops-manager.azurewebsites.net
 zip -r finops.zip . -x "node_modules/*" -x ".env" -x "uploads_tmp/*"
 az webapp deploy --resource-group rg-finops \
   --name finops-manager --src-path finops.zip --type zip
 ```
-- HTTPS automático em `*.azurewebsites.net`; domínio próprio via **Custom Domains > App Service Managed Certificate**
-- SSL obrigatório no PostgreSQL: incluir `?sslmode=require` na connection string
-
-### GCP PaaS — Cloud Run + Cloud SQL
-```bash
-# 1. Ativar APIs
-gcloud services enable run.googleapis.com sqladmin.googleapis.com \
-  artifactregistry.googleapis.com secretmanager.googleapis.com
-
-# 2. Cloud SQL PostgreSQL
-gcloud sql instances create finops-db \
-  --database-version=POSTGRES_16 --tier=db-f1-micro \
-  --region=southamerica-east1
-gcloud sql databases create finops_db --instance=finops-db
-gcloud sql users set-password postgres --instance=finops-db --password=<senha>
-
-# 3. Secrets (boas práticas GCP)
-echo -n "<jwt-secret>"   | gcloud secrets create JWT_SECRET  --data-file=-
-echo -n "<master-key>"   | gcloud secrets create MASTER_KEY  --data-file=-
-echo -n "<db-password>"  | gcloud secrets create DB_PASSWORD --data-file=-
-
-# 4. Artifact Registry + build
-gcloud artifacts repositories create finops-repo \
-  --repository-format=docker --location=southamerica-east1
-gcloud builds submit \
-  --tag southamerica-east1-docker.pkg.dev/PROJECT_ID/finops-repo/finops-manager:latest
-
-# 5. Deploy Cloud Run (conecta ao Cloud SQL via socket Unix)
-gcloud run deploy finops-manager \
-  --image southamerica-east1-docker.pkg.dev/PROJECT_ID/finops-repo/finops-manager:latest \
-  --region southamerica-east1 --allow-unauthenticated \
-  --add-cloudsql-instances PROJECT_ID:southamerica-east1:finops-db \
-  --set-env-vars DB_HOST=/cloudsql/PROJECT_ID:southamerica-east1:finops-db,DB_NAME=finops_db,DB_USER=postgres \
-  --set-secrets DB_PASSWORD=DB_PASSWORD:latest,JWT_SECRET=JWT_SECRET:latest,MASTER_KEY=MASTER_KEY:latest \
-  --set-env-vars ALLOWED_ORIGIN=https://finops-manager-xxx.run.app \
-  --memory 512Mi --min-instances 0 --max-instances 5
-```
-- Cloud Run é stateless — `.finops_setup` deve persistir em Cloud Storage (gcsfuse) entre deploys
-- Dockerfile necessário: porta deve ser `8080` (padrão Cloud Run) — defina `ENV PORT=8080`
-
-### AWS PaaS — Elastic Beanstalk + RDS PostgreSQL
-```bash
-# 1. Instalar EB CLI
-pip install awsebcli
-aws configure  # Access Key, Secret Key, region: sa-east-1
-
-# 2. Criar banco RDS (via console ou CLI)
-# Console: RDS > Create database > PostgreSQL 16
-# Após criar: psql -h endpoint.rds.amazonaws.com -U postgres -c "CREATE DATABASE finops_db;"
-
-# 3. Procfile (obrigatório para EB)
-echo "web: node server.js" > Procfile
-zip -r finops-deploy.zip . -x "node_modules/*" -x ".env" -x "uploads_tmp/*" -x "*.zip"
-
-# 4. Criar aplicação e ambiente
-eb init finops-manager \
-  --platform "Node.js 18 running on 64bit Amazon Linux 2023" --region sa-east-1
-eb create finops-prod --instance-type t3.small
-
-# 5. Variáveis de ambiente
-eb setenv \
-  JWT_SECRET=<gerado> MASTER_KEY=<gerado> \
-  DB_HOST=endpoint.rds.amazonaws.com DB_PORT=5432 \
-  DB_NAME=finops_db DB_USER=postgres DB_PASSWORD=<senha> \
-  ALLOWED_ORIGIN=https://finops-prod.sa-east-1.elasticbeanstalk.com PORT=8080
-
-# 6. Deploy
-eb deploy
-eb logs --all   # monitorar
-eb open         # abrir no browser
-```
-- HTTPS: ACM > Request certificate → EB > Configuration > Load balancer > Add HTTPS listener 443
-- Security Groups: RDS deve aceitar porta 5432 apenas do SG do Elastic Beanstalk (nunca `0.0.0.0/0`)
-
-| Critério | Azure App Service | GCP Cloud Run | AWS Elastic Beanstalk |
-|----------|------------------|---------------|----------------------|
-| Banco PaaS | PostgreSQL Flexible Server | Cloud SQL | Amazon RDS |
-| Região Brasil | Brazil South | southamerica-east1 | sa-east-1 |
-| Deploy sem Docker | ✔ ZIP deploy | ✖ Docker obrigatório | ✔ ZIP / eb deploy |
-| Escala para zero | ✖ | ✔ serverless | ✖ |
-| Recomendação Vivo | **Preferencial** (já usa Azure) | Alternativa | Alternativa |
 
 ---
 
@@ -472,11 +461,11 @@ eb open         # abrir no browser
 npm install -g pm2
 pm2 start server.js --name finops-manager
 pm2 save
-pm2 startup          # follow the printed command to register with systemd/launchd/Windows
+pm2 startup
 ```
 Key commands: `pm2 status` · `pm2 logs finops-manager` · `pm2 restart finops-manager`
 
-### systemd — Linux (Ubuntu/Debian/CentOS)
+### systemd — Linux
 Create `/etc/systemd/system/finops-manager.service`:
 ```ini
 [Unit]
@@ -497,14 +486,13 @@ WantedBy=multi-user.target
 ```
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable finops-manager   # start on boot
+sudo systemctl enable finops-manager
 sudo systemctl start finops-manager
-sudo journalctl -u finops-manager -f   # live logs
+sudo journalctl -u finops-manager -f
 ```
 
 ### Windows Service — NSSM
 ```powershell
-# Download nssm.cc/download, extract to C:\nssm\
 nssm install FinOpsManager
 nssm set FinOpsManager Application  "C:\Program Files\nodejs\node.exe"
 nssm set FinOpsManager AppDirectory "C:\finops-manager"
@@ -513,23 +501,18 @@ nssm set FinOpsManager Start SERVICE_AUTO_START
 nssm start FinOpsManager
 ```
 
-| Platform | Method | Auto-restart | Logs |
-|----------|--------|-------------|------|
-| Linux (prod) | systemd | ✔ | journalctl |
-| Linux (simple) | PM2 | ✔ | pm2 logs |
-| Windows Server | NSSM | ✔ | Event Viewer |
-| Cloud managed | Native | ✔ | Platform panel |
-| Docker/K8s | `--restart always` | ✔ | docker logs |
-
 ---
 
 ## Production checklist
 
-- [ ] `JWT_SECRET` set to a long random string (≥ 32 chars) — see section above
-- [ ] `MASTER_KEY` set to a long random string (≥ 32 chars) — see section above
+- [ ] `JWT_SECRET` set to a long random string (≥ 32 chars)
+- [ ] `MASTER_KEY` set to a long random string (≥ 32 chars)
 - [ ] `ALLOWED_ORIGIN` set to the exact frontend domain
 - [ ] `DB_PASSWORD` set and not default
 - [ ] `.env.enc` used instead of plain `.env` (run `node encrypt-env.js encrypt`)
 - [ ] HTTPS termination at reverse proxy (nginx / Caddy) — Node runs HTTP only
 - [ ] `uploads_tmp/` writable by the Node process
 - [ ] PostgreSQL accessible from Node host on configured port
+- [ ] `mascote.png` present in the app directory (not tracked by git — copy manually)
+- [ ] Windows Firewall: port 3000 open for inbound connections (if accessed from network)
+- [ ] PM2 or systemd configured for auto-restart on crash/reboot
