@@ -2318,7 +2318,10 @@ const Calculadora = (() => {
     return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <title>${_esc(p.titulo)}</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:300 700;font-display:swap;src:url('${_origin}/fonts/ibm-plex-sans-latin-ext-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:300 700;font-display:swap;src:url('${_origin}/fonts/ibm-plex-sans-latin-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('${_origin}/fonts/ibm-plex-mono-latin-ext-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('${_origin}/fonts/ibm-plex-mono-latin-400.woff2') format('woff2')}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'IBM Plex Sans','Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;color:#1a202c;background:#0d0f14;padding:24px}
 .page{background:#fff;max-width:960px;margin:0 auto;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.55)}
