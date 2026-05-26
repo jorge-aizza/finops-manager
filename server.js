@@ -1891,6 +1891,22 @@ function _fetchJson(url) {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
+        // 429 — Rate limit da Azure (resposta em texto puro, não JSON)
+        if (res.statusCode === 429) {
+          const retryAfter = parseInt(res.headers['retry-after'] || '60', 10) || 60;
+          const err = new Error(
+            `Rate limit atingido (HTTP 429) pela Azure Retail Prices API. Aguarde ${retryAfter}s e tente novamente.`
+          );
+          err.code = 429;
+          err.retryAfter = retryAfter;
+          return reject(err);
+        }
+        // Qualquer outro status não-2xx
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(
+            `Azure Retail Prices API retornou HTTP ${res.statusCode}: ${data.slice(0, 200)}`
+          ));
+        }
         try { resolve(JSON.parse(data)); }
         catch (e) { reject(new Error('JSON inválido na Retail Prices API: ' + e.message)); }
       });
@@ -1917,11 +1933,23 @@ async function _gravaMeta(key, value) {
   }
 }
 
-// Busca uma página da Retail Prices API e retorna { items, nextLink, currency_used }
-// Fallback automático: se a moeda solicitada retorna 0 itens, tenta USD
-async function _fetchPriceListPage(urlOrFilter) {
-  const data = await _fetchJson(urlOrFilter);
-  return { items: data.Items || [], nextLink: data.NextPageLink || null };
+// Busca uma página da Retail Prices API com retry automático em caso de 429
+async function _fetchPriceListPage(urlOrFilter, maxRetries = 4) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const data = await _fetchJson(urlOrFilter);
+      return { items: data.Items || [], nextLink: data.NextPageLink || null };
+    } catch (err) {
+      if (err.code === 429 && attempt < maxRetries) {
+        // Respeita Retry-After do header; fallback: 30s × tentativa
+        const wait = (err.retryAfter > 0 ? err.retryAfter : attempt * 30) * 1000;
+        console.warn(`[PriceList] Rate limit 429 — aguardando ${wait / 1000}s (tentativa ${attempt}/${maxRetries})...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw err; // outro erro ou esgotou tentativas
+    }
+  }
 }
 
 function _buildPriceListUrl(currency) {
