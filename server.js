@@ -397,6 +397,27 @@ async function initDB() {
       );
     `);
 
+    // ── PERFORMANCE INDEXES v2.0 — tabelas core ──────────────────────────────
+    // Reversão: ver rollback_performance_indexes.sql
+    await c.query(`
+      -- acoes_finops: filtros de lista, dashboard e notificações
+      CREATE INDEX IF NOT EXISTS idx_acoes_status        ON acoes_finops (status);
+      CREATE INDEX IF NOT EXISTS idx_acoes_projeto        ON acoes_finops (projeto_id);
+      CREATE INDEX IF NOT EXISTS idx_acoes_conclusao      ON acoes_finops (data_conclusao);
+      CREATE INDEX IF NOT EXISTS idx_acoes_cloud          ON acoes_finops (cloud);
+
+      -- sessoes: lookup por usuário (FK sem index automático no PG)
+      CREATE INDEX IF NOT EXISTS idx_sessoes_usuario      ON sessoes (usuario_id);
+      CREATE INDEX IF NOT EXISTS idx_sessoes_criado        ON sessoes (criado_em);
+
+      -- estimativas: listagem ordenada e filtro por projeto
+      CREATE INDEX IF NOT EXISTS idx_estimativas_projeto  ON estimativas (projeto_id);
+      CREATE INDEX IF NOT EXISTS idx_estimativas_criado   ON estimativas (criado_em DESC);
+
+      -- reservas_cloud: query de alertas de vencimento
+      CREATE INDEX IF NOT EXISTS idx_reservas_status_venc ON reservas_cloud (status, data_vencimento);
+    `);
+
     console.log('Banco de dados inicializado com sucesso.');
   } finally {
     c.release();
@@ -1655,7 +1676,34 @@ async function ensureAzureCostsTable() {
       CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_date     ON azure_costs(subscription_id, cost_date);
       CREATE INDEX IF NOT EXISTS idx_azure_costs_rg_upper     ON azure_costs(UPPER(resource_group_name));
       CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_upper ON azure_costs(subscription_id, UPPER(resource_group_name));
+
+      -- ── PERFORMANCE INDEXES v2.0 — azure_costs ─────────────────────────────
+      -- Reversão: ver rollback_performance_indexes.sql
+
+      -- Composto triplo: cobre o filtro principal da Calculadora (sub + rg + date)
+      CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_date
+        ON azure_costs (subscription_id, UPPER(resource_group_name), cost_date);
+
+      -- charge_type e pricing_model: usados em CASE e WHERE da classificação de recursos
+      CREATE INDEX IF NOT EXISTS idx_azure_costs_charge_type   ON azure_costs (charge_type);
+      CREATE INDEX IF NOT EXISTS idx_azure_costs_pricing_model ON azure_costs (pricing_model);
+
+      -- pg_trgm: permite ILIKE '%hour%' / '%hora%' usar index (antes era seq scan)
+      -- Nota: requer extensão pg_trgm — criada logo abaixo com IF NOT EXISTS
     `);
+
+    // pg_trgm GIN index — isolado pois requer superuser em alguns ambientes
+    // Reversão: DROP INDEX IF EXISTS idx_azure_costs_uom_trgm;
+    try {
+      await c.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
+      await c.query(`
+        CREATE INDEX IF NOT EXISTS idx_azure_costs_uom_trgm
+          ON azure_costs USING GIN (unit_of_measure gin_trgm_ops)
+      `);
+      console.log('[DB] Index GIN pg_trgm em unit_of_measure criado ✅');
+    } catch (e) {
+      console.warn('[DB] pg_trgm não disponível — ILIKE continuará usando seq scan:', e.message);
+    }
 
     // 5) Índice único funcional para deduplicação — COALESCE em TODAS as colunas nullable
     //    Inclui subscription_id e resource_id (antes sem COALESCE — linhas NULL se duplicavam)
@@ -1810,9 +1858,15 @@ async function ensurePriceListTable() {
       );
     `);
     // Migração: garante índices funcionais em instâncias já existentes
+    // Reversão: ver rollback_performance_indexes.sql
     await c.query(`
       CREATE INDEX IF NOT EXISTS idx_pricelist_meter_lower ON azure_price_list (LOWER(meter_id));
       CREATE INDEX IF NOT EXISTS idx_pricelist_type        ON azure_price_list (type);
+
+      -- Partial index: cobre exatamente o JOIN da Calculadora (subconjunto mais usado)
+      CREATE INDEX IF NOT EXISTS idx_pricelist_join
+        ON azure_price_list (LOWER(meter_id))
+        WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = '';
     `).catch(() => {}); // silencia se já existir ou se a tabela ainda não tiver dados
     _priceListReady = true;
     console.log('[PriceList] Tabela pronta ✅');
