@@ -2820,6 +2820,34 @@ app.post('/api/price-list/sync', authMiddleware, dbMiddleware, async (req, res) 
     .catch(e => console.error('[PriceList] Erro na sincronização:', e.message));
 });
 
+// ── GET /api/price-list/schedule ─────────────────────────────────────────────
+app.get('/api/price-list/schedule', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT value FROM azure_price_list_meta WHERE key = 'pl_schedule'`
+    );
+    if (!r.rows.length) return res.json({ ativo: false, dia_mes: 28, hora: 2 });
+    res.json(JSON.parse(r.rows[0].value));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/price-list/schedule ────────────────────────────────────────────
+app.post('/api/price-list/schedule', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const ativo   = req.body.ativo   === true || req.body.ativo === 'true';
+    const dia_mes = Math.min(28, Math.max(1, parseInt(req.body.dia_mes) || 28)); // 1-28 (seguro p/ fev)
+    const hora    = Math.min(23, Math.max(0, parseInt(req.body.hora)    || 2));
+    const cfg     = { ativo, dia_mes, hora };
+    await pool.query(`
+      INSERT INTO azure_price_list_meta (key, value, updated_at)
+      VALUES ('pl_schedule', $1, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [JSON.stringify(cfg)]);
+    console.log(`[PriceList] Agendamento ${ativo ? 'ativado' : 'desativado'}: dia ${dia_mes} às ${hora}h`);
+    res.json({ ok: true, ...cfg });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/calculadora/subscriptions ───────────────────────────────────────
 app.get('/api/calculadora/subscriptions', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
@@ -3989,6 +4017,50 @@ function _iniciarAgendador() {
           fmt(inicio), fmt(fim)
         ).catch(e => console.error(`[Agendador] Erro coleta API #${sp.id}:`, e.message));
       }
+
+      // ── Price List: agendamento mensal ───────────────────────────────────────
+      if (!_syncingPriceList) {
+        try {
+          const rPl = await pool.query(
+            `SELECT value FROM azure_price_list_meta WHERE key = 'pl_schedule'`
+          );
+          if (rPl.rows.length) {
+            const cfg = JSON.parse(rPl.rows[0].value);
+            if (cfg.ativo) {
+              const now      = new Date();
+              const diaMes   = parseInt(cfg.dia_mes) || 28;
+              const hora     = parseInt(cfg.hora)    || 2;
+              const diaAtual = now.getDate();
+              const horaAtual = now.getHours();
+              // Último dia do mês: se dia configurado > dias no mês atual, usa último dia
+              const ultimoDia = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+              const diaExec  = Math.min(diaMes, ultimoDia);
+              if (diaAtual === diaExec && horaAtual === hora) {
+                // Verifica se já rodou hoje para não disparar múltiplas vezes no mesmo dia/hora
+                const rUlt = await pool.query(
+                  `SELECT value FROM azure_price_list_meta WHERE key = 'pl_schedule_last_run'`
+                );
+                const hoje = now.toISOString().slice(0, 10);
+                const lastRun = rUlt.rows.length ? rUlt.rows[0].value.replace(/"/g, '') : '';
+                if (lastRun !== hoje) {
+                  console.log(`[Agendador] Disparando sync mensal do Price List (dia ${diaExec} às ${hora}h)`);
+                  await pool.query(`
+                    INSERT INTO azure_price_list_meta (key, value, updated_at)
+                    VALUES ('pl_schedule_last_run', $1, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                  `, [JSON.stringify(hoje)]);
+                  _syncPriceList().catch(e =>
+                    console.error('[Agendador] Erro sync mensal Price List:', e.message)
+                  );
+                }
+              }
+            }
+          }
+        } catch (ePlSched) {
+          console.warn('[Agendador] Erro ao verificar schedule Price List:', ePlSched.message);
+        }
+      }
+
     } catch (e) {
       console.warn('[Agendador] Erro ao verificar schedule:', e.message);
     }

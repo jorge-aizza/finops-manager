@@ -1735,7 +1735,7 @@ function switchSettingsTab(tab) {
   const panelEl = document.getElementById('stab-' + tab);
   if (panelEl) panelEl.classList.add('active');
   if (tab === 'coleta') loadColeta();
-  if (tab === 'pricelist') _loadPriceListStatus();
+  if (tab === 'pricelist') { _loadPriceListStatus(); loadPlSchedule(); }
 }
 
 // ── Price List ─────────────────────────────────────────────────────────────────
@@ -1895,6 +1895,78 @@ async function syncPriceList() {
         + '❌ Erro: ' + e.message + '</div>';
     }
   }
+}
+
+// ── Price List — Agendamento Automático ────────────────────────────────────────
+
+async function loadPlSchedule() {
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res = await fetch('/api/price-list/schedule', { headers: { Authorization: 'Bearer ' + token } });
+    const d = await res.json();
+    const chk  = document.getElementById('pl-sched-ativo');
+    const dia  = document.getElementById('pl-sched-dia');
+    const hora = document.getElementById('pl-sched-hora');
+    if (chk)  chk.checked = !!d.ativo;
+    if (dia)  dia.value   = String(d.dia_mes || 28);
+    if (hora) hora.value  = String(d.hora != null ? d.hora : 2);
+    _updatePlSchedProx(d);
+  } catch (e) {
+    console.warn('[PL Schedule] loadPlSchedule:', e.message);
+  }
+}
+
+async function savePlSchedule() {
+  const ativo   = document.getElementById('pl-sched-ativo')?.checked || false;
+  const dia_mes = parseInt(document.getElementById('pl-sched-dia')?.value)  || 28;
+  const hora    = parseInt(document.getElementById('pl-sched-hora')?.value) || 2;
+  const msgEl   = document.getElementById('pl-sched-msg');
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res = await fetch('/api/price-list/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify({ ativo, dia_mes, hora })
+    });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'Erro ao salvar agendamento');
+    _updatePlSchedProx(d);
+    if (msgEl) {
+      msgEl.style.display = 'block';
+      msgEl.style.color   = 'var(--green,#22c55e)';
+      msgEl.textContent   = ativo
+        ? `✅ Agendado para o dia ${dia_mes} às ${String(hora).padStart(2, '0')}:00`
+        : '⏸ Agendamento desativado';
+      setTimeout(() => { if (msgEl) msgEl.style.display = 'none'; }, 3500);
+    }
+  } catch (e) {
+    if (msgEl) {
+      msgEl.style.display = 'block';
+      msgEl.style.color   = 'var(--danger,#ff4d6a)';
+      msgEl.textContent   = '❌ ' + e.message;
+    }
+  }
+}
+
+function _updatePlSchedProx(cfg) {
+  const el = document.getElementById('pl-sched-prox');
+  if (!el) return;
+  if (!cfg || !cfg.ativo) { el.textContent = ''; return; }
+  const now  = new Date();
+  const dia  = parseInt(cfg.dia_mes) || 28;
+  const hora = parseInt(cfg.hora != null ? cfg.hora : 2);
+  // Último dia do mês atual — garante que dia 28 funciona em fevereiro
+  const ultimoDiaMesAtual = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const diaExecAtual = Math.min(dia, ultimoDiaMesAtual);
+  let prox = new Date(now.getFullYear(), now.getMonth(), diaExecAtual, hora, 0, 0);
+  // Se a data já passou neste mês, calcula para o próximo
+  if (prox <= now) {
+    const ultimoDiaMesProx = new Date(now.getFullYear(), now.getMonth() + 2, 0).getDate();
+    const diaExecProx = Math.min(dia, ultimoDiaMesProx);
+    prox = new Date(now.getFullYear(), now.getMonth() + 1, diaExecProx, hora, 0, 0);
+  }
+  el.textContent = '📅 Próxima execução: ' + prox.toLocaleDateString('pt-BR')
+    + ' às ' + String(hora).padStart(2, '0') + ':00';
 }
 
 function closeSettingsModal() {

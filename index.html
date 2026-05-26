@@ -3234,6 +3234,53 @@
 
           <div id="pl-msg" style="display:none;margin-top:12px"></div>
 
+          <!-- Agendamento automático -->
+          <div class="settings-section-title" style="margin-top:24px">⏰ Agendamento Automático</div>
+          <div class="integration-card" id="pl-schedule-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+              <div>
+                <div class="integration-title">Sincronização mensal automática</div>
+                <div class="integration-sub">O Price List será sincronizado automaticamente no dia e hora configurados.</div>
+              </div>
+              <label class="sw-toggle" title="Ativar agendamento automático">
+                <input type="checkbox" id="pl-sched-ativo" onchange="savePlSchedule()">
+                <span class="sw-slider"></span>
+              </label>
+            </div>
+            <div id="pl-sched-fields" style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
+              <div>
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Dia do mês</div>
+                <select id="pl-sched-dia" onchange="savePlSchedule()" style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;min-width:130px">
+                  <option value="1">1º dia</option>
+                  <option value="5">5º dia</option>
+                  <option value="10">10º dia</option>
+                  <option value="15">15º dia</option>
+                  <option value="20">20º dia</option>
+                  <option value="25">25º dia</option>
+                  <option value="28" selected>28º dia (padrão)</option>
+                </select>
+              </div>
+              <div>
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Horário</div>
+                <select id="pl-sched-hora" onchange="savePlSchedule()" style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;min-width:120px">
+                  <option value="0">00:00 (meia-noite)</option>
+                  <option value="1">01:00</option>
+                  <option value="2" selected>02:00 (padrão)</option>
+                  <option value="3">03:00</option>
+                  <option value="4">04:00</option>
+                  <option value="6">06:00</option>
+                  <option value="8">08:00</option>
+                  <option value="12">12:00</option>
+                  <option value="18">18:00</option>
+                  <option value="20">20:00</option>
+                  <option value="22">22:00</option>
+                </select>
+              </div>
+              <div id="pl-sched-prox" style="font-size:12px;color:var(--text-muted);padding-bottom:8px"></div>
+            </div>
+            <div id="pl-sched-msg" style="margin-top:10px;font-size:12px;display:none"></div>
+          </div>
+
         </div>
         <!-- /Tab Price List -->
 
