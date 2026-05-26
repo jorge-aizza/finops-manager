@@ -21,7 +21,8 @@ Sistema web para gestão de ações FinOps com calculadora de custos Azure, Pric
 11. [SaaS — Railway · Render · Fly.io](#saas)
 12. [SSL / Proxy reverso (Nginx)](#ssl--proxy-reverso)
 13. [Segurança em produção](#segurança-em-produção)
-14. [API Endpoints](#api-endpoints)
+14. [APIs Externas — Liberação de Firewall](#apis-externas--liberação-de-firewall)
+15. [API Endpoints](#api-endpoints)
 
 ---
 
@@ -324,7 +325,70 @@ pg_restore -h localhost -U finops_user -d finops_db_restore -F c finops_backup.d
 
 ---
 
-### Passo 10 — Checklist final
+### Passo 10 — Copiar o mascote.png
+
+O arquivo `mascote.png` (mascote Vivo exibido na tela de login) **não é versionado no Git** (listado em `.gitignore`). Você deve copiá-lo manualmente para a pasta raiz da aplicação em cada servidor/ambiente.
+
+```powershell
+# Windows — copiar para a pasta da aplicação
+Copy-Item "C:\caminho\original\mascote.png" "C:\FinOps\mascote.png"
+```
+
+```bash
+# Linux
+cp /caminho/original/mascote.png /opt/finops/mascote.png
+```
+
+```bash
+# Docker — inclua no build ou monte como volume
+# Opção 1 — copiar antes do build (sem git):
+cp mascote.png ./mascote.png
+docker build -t finops-manager .
+
+# Opção 2 — volume (persiste entre atualizações):
+docker run -d ... -v /caminho/mascote.png:/app/mascote.png finops-manager
+```
+
+> **Por que não está no Git?** O `.gitignore` exclui `*.png` para evitar que assets binários grandes aumentem o histórico do repositório. Se preferir versioná-lo, remova a entrada `*.png` do `.gitignore` e execute `git add mascote.png`.
+
+**Comportamento sem o arquivo:** A tela de login exibe apenas o logo SVG "vivo" em roxo, sem o mascote ao lado. O sistema funciona normalmente — o arquivo é apenas visual.
+
+---
+
+### Passo 11 — Configurar monitoramento de disponibilidade
+
+Configure um monitor externo para ser alertado se o sistema cair.
+
+**UptimeRobot (gratuito, recomendado):**
+
+1. Acesse [uptimerobot.com](https://uptimerobot.com) e crie uma conta gratuita
+2. **New Monitor → HTTP(s)**
+3. Preencha:
+   - **URL:** `https://seu-dominio.com/health`
+   - **Monitoring Interval:** 5 minutos
+   - **Alert Contacts:** seu e-mail ou canal Slack/Teams
+4. Resposta esperada: HTTP `200` com corpo `{"status":"ok"}`
+5. Se retornar `503` ou `{"status":"degraded"}`, o banco não está acessível — verifique as variáveis `DB_*`
+
+**Alternativas:**
+
+| Serviço | Plano gratuito | Intervalo mínimo |
+|---|---|---|
+| [UptimeRobot](https://uptimerobot.com) | 50 monitores | 5 min |
+| [Better Uptime](https://betteruptime.com) | 10 monitores | 3 min |
+| [Freshping](https://freshping.io) | 50 monitores | 1 min |
+| Azure Monitor / AWS CloudWatch | Pago | 1 min |
+
+**PM2 — monitoramento local:**
+```bash
+pm2 monit                   # dashboard em tempo real
+pm2 logs finops-manager     # logs do processo
+pm2 status                  # resumo de todos os processos
+```
+
+---
+
+### Passo 12 — Checklist final
 
 ```
 Segredos
@@ -340,14 +404,19 @@ Rede e acesso
 [ ] Porta 3000 não exposta diretamente (só via proxy)
 [ ] PostgreSQL porta 5432 não exposta publicamente
 [ ] Firewall: apenas porta 80/443 aberta ao público
+[ ] Liberações de firewall outbound para APIs externas (ver seção "APIs Externas")
 
 Operação
 [ ] PM2 ou systemd configurado (auto-restart)
 [ ] /health retorna {"status":"ok"} após deploy
 [ ] Backup automático do banco configurado
 [ ] Monitoramento de logs ativo (pm2 logs / journalctl)
+[ ] Monitor externo configurado (UptimeRobot ou similar) apontando para /health
 [ ] Price List sincronizado (Configurações → Price List → Sincronizar)
 [ ] Usuário administrador criado via wizard de setup
+
+Assets
+[ ] mascote.png copiado manualmente para a pasta raiz da aplicação
 ```
 
 ---
@@ -787,17 +856,79 @@ Execute `npm audit` periodicamente e aplique `npm audit fix` quando disponível.
 
 ### Headers de segurança (configurados automaticamente)
 
-- `Content-Security-Policy` — restringe scripts, estilos e conexões
-- `Strict-Transport-Security` — HSTS 1 ano com includeSubDomains
+O servidor usa `helmet` com CSP desabilitado (para compatibilidade com o SPA inline):
+
 - `X-Frame-Options` — DENY (sem iframes)
 - `X-Content-Type-Options` — nosniff
 - `Referrer-Policy` — strict-origin-when-cross-origin
+- `X-DNS-Prefetch-Control` — off
+- `X-Download-Options` — noopen
+
+> **HSTS (Strict-Transport-Security):** não é configurado pelo Node — deve ser adicionado no proxy reverso (Nginx/Caddy). Exemplo para Nginx: `add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`
 
 ### Arquivos que NÃO são acessíveis via HTTP (v2.0)
 
 `server.js` · `package.json` · `.env` · `.env.key` · `.env.enc` · `.finops_setup` · `schema.sql` · `*.sql`
 
 Apenas `index.html`, `app.js`, `calculadora.js`, `styles.css` e `favicon.svg` são servidos estaticamente.
+
+---
+
+## APIs Externas — Liberação de Firewall
+
+O sistema realiza chamadas externas tanto a partir do **servidor Node.js** quanto a partir do **navegador do usuário**. Ambas as direções precisam ser liberadas na infraestrutura de rede.
+
+### Servidor → Internet (Outbound do servidor)
+
+| Serviço | URL / Destino | Porta | Protocolo | Quando é usado |
+|---|---|---|---|---|
+| **Azure Retail Prices** | `https://prices.azure.com` | 443 | HTTPS | Sincronização do Price List (Configurações → Price List → Sincronizar) |
+| **Azure Management API** | `https://management.azure.com` | 443 | HTTPS | Coleta Automática de custos (lista subscriptions, RGs e aciona export) |
+| **Microsoft Entra ID (login)** | `https://login.microsoftonline.com` | 443 | HTTPS | Autenticação SSO OAuth 2.0 (se Entra ID estiver configurado) |
+| **Azure Storage (Blobs)** | `https://*.blob.core.windows.net` | 443 | HTTPS | Download dos arquivos de export gerados pela Coleta Automática |
+| **Active Directory / LDAP** | Servidor AD corporativo | 389 (LDAP) / 636 (LDAPS) | TCP | Autenticação via Active Directory (se AD estiver configurado) |
+
+> **LDAPS (porta 636) é fortemente recomendado em produção.** Usar LDAP simples (389) transmite credenciais sem criptografia.
+
+### Navegador → Internet (Outbound do browser do usuário)
+
+| Serviço | URL | Porta | Quando é usado |
+|---|---|---|---|
+| **Google Fonts** | `https://fonts.googleapis.com` | 443 | Carregamento da fonte Inter (UI) |
+| **Google Fonts CDN** | `https://fonts.gstatic.com` | 443 | Arquivos de fonte `.woff2` |
+| **cdnjs (Cloudflare)** | `https://cdnjs.cloudflare.com` | 443 | Biblioteca XLSX.js usada no export Excel do frontend |
+
+> Se os usuários estiverem em uma rede corporativa com proxy ou firewall de saída, as URLs acima precisam estar na lista de permissões do proxy/firewall para que a interface funcione corretamente.
+
+### Resumo de portas e direções
+
+```
+SERVIDOR (outbound)
+  443/TCP  → prices.azure.com
+  443/TCP  → management.azure.com
+  443/TCP  → login.microsoftonline.com
+  443/TCP  → *.blob.core.windows.net
+  389/TCP  → [AD server]    ← LDAP simples (evitar em prod)
+  636/TCP  → [AD server]    ← LDAPS (recomendado)
+
+NAVEGADOR (outbound)
+  443/TCP  → fonts.googleapis.com
+  443/TCP  → fonts.gstatic.com
+  443/TCP  → cdnjs.cloudflare.com
+
+INBOUND (para o servidor Node.js)
+  3000/TCP ← apenas do proxy reverso (Nginx/Caddy) — nunca expor ao público
+  80/TCP   ← público (redireciona para HTTPS via Nginx)
+  443/TCP  ← público (terminado no Nginx, encaminhado para :3000)
+  5432/TCP ← apenas da aplicação Node.js (PostgreSQL — nunca expor ao público)
+```
+
+### Observações para ambientes com saída restrita
+
+- **Price List:** se `prices.azure.com` estiver bloqueado, a sincronização falha silenciosamente e a calculadora usa apenas o custo histórico de billing (sem coluna PL/h e sem badges de desconto).
+- **Coleta Automática:** requer acesso a `management.azure.com` e ao `*.blob.core.windows.net` da subscription configurada. Sem acesso, a coleta falha e registra erro no histórico.
+- **SSO Entra ID:** sem acesso a `login.microsoftonline.com`, o botão "Entrar com Microsoft" não funciona. O login local (e-mail + senha) e o AD continuam funcionando.
+- **Google Fonts / cdnjs:** sem acesso, a UI ainda funciona mas usa fontes fallback do sistema e o export Excel via browser pode falhar (XLSX.js não carrega). Considere hospedar os assets localmente se necessário.
 
 ---
 
@@ -859,7 +990,7 @@ Authorization: Bearer <jwt_token>
 
 | Método | Rota | Descrição |
 |---|---|---|
-| POST | `/api/azure-costs/import` | Upload CSV, Parquet ou ZIP — aceita até 2 GB |
+| POST | `/api/azure-costs/import` | Upload CSV, Parquet ou ZIP — aceita até 500 MB |
 | GET | `/api/azure-costs/import-status` | Status do import em andamento |
 
 ### Azure Retail Price List *(novo v2.0)*
