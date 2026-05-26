@@ -874,7 +874,7 @@ O servidor usa `helmet` com CSP desabilitado (para compatibilidade com o SPA inl
 
 `server.js` · `package.json` · `.env` · `.env.key` · `.env.enc` · `.finops_setup` · `schema.sql` · `*.sql`
 
-**Arquivos servidos estaticamente:** `index.html` · `app.js` · `calculadora.js` · `styles.css` · `favicon.svg` · `mascote.png` · `fonts/*.woff2`
+**Arquivos servidos estaticamente:** `index.html` · `app.js` · `calculadora.js` · `styles.css` · `favicon.svg` · `mascote.png` · `fonts/*.woff2` · `libs/xlsx.full.min.js`
 
 ### Atualizar as fontes tipográficas
 
@@ -925,6 +925,30 @@ git commit -m "chore: atualizar IBM Plex fonts para versao X.X"
 
 > Os `@font-face` em `styles.css` não precisam ser alterados — os nomes dos arquivos são estáveis entre versões do fontsource.
 
+### Atualizar o XLSX.js
+
+O arquivo `libs/xlsx.full.min.js` é a versão `0.18.5` da biblioteca SheetJS Community Edition (última versão open-source gratuita). Para atualizar:
+
+```bash
+# Linux / macOS
+curl -sL "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" \
+  -o libs/xlsx.full.min.js
+
+git add libs/xlsx.full.min.js
+git commit -m "chore: atualizar xlsx.js para versao X.X.X"
+```
+
+```powershell
+# Windows (PowerShell)
+Invoke-WebRequest "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" `
+  -OutFile "libs\xlsx.full.min.js"
+
+git add libs/xlsx.full.min.js
+git commit -m "chore: atualizar xlsx.js para versao X.X.X"
+```
+
+> **Atenção:** versões acima de `0.18.5` são comerciais (SheetJS Pro). Verifique a licença antes de atualizar. A versão `0.18.5` é suficiente para leitura de `.xlsx`/`.xls` e não tem planos de descontinuação.
+
 ---
 
 ## APIs Externas — Liberação de Firewall
@@ -945,13 +969,14 @@ O sistema realiza chamadas externas tanto a partir do **servidor Node.js** quant
 
 ### Navegador → Internet (Outbound do browser do usuário)
 
-| Serviço | URL | Porta | Quando é usado |
-|---|---|---|---|
-| **cdnjs (Cloudflare)** | `https://cdnjs.cloudflare.com` | 443 | Biblioteca XLSX.js usada no export Excel do frontend |
+**Nenhuma chamada externa necessária.** Todas as bibliotecas e fontes são self-hosted:
 
-> **Fontes tipográficas (IBM Plex Sans / Mono):** self-hosted na pasta `fonts/` — **não há chamada externa para Google Fonts**. Nenhuma liberação de firewall necessária para fontes.
+| Asset | Local | Observação |
+|---|---|---|
+| IBM Plex Sans / Mono | `fonts/*.woff2` | Self-hosted — sem Google Fonts |
+| XLSX.js 0.18.5 | `libs/xlsx.full.min.js` | Self-hosted — sem cdnjs/Cloudflare |
 
-> Se os usuários estiverem em uma rede corporativa com proxy ou firewall de saída, apenas a URL do cdnjs acima precisa estar na lista de permissões.
+> O browser do usuário **não faz nenhuma request para domínios externos**. Zero regras de firewall outbound necessárias para o frontend.
 
 ### Resumo de portas e direções
 
@@ -965,8 +990,7 @@ SERVIDOR (outbound)
   636/TCP  → [AD server]    ← LDAPS (recomendado)
 
 NAVEGADOR (outbound)
-  443/TCP  → cdnjs.cloudflare.com
-  (fontes: self-hosted — sem saída para Google Fonts)
+  (sem saída externa — fontes e xlsx.js são self-hosted)
 
 INBOUND (para o servidor Node.js)
   3000/TCP ← apenas do proxy reverso (Nginx/Caddy) — nunca expor ao público
@@ -980,8 +1004,7 @@ INBOUND (para o servidor Node.js)
 - **Price List:** se `prices.azure.com` estiver bloqueado, a sincronização falha silenciosamente e a calculadora usa apenas o custo histórico de billing (sem coluna PL/h e sem badges de desconto).
 - **Coleta Automática:** requer acesso a `management.azure.com` e ao `*.blob.core.windows.net` da subscription configurada. Sem acesso, a coleta falha e registra erro no histórico.
 - **SSO Entra ID:** sem acesso a `login.microsoftonline.com`, o botão "Entrar com Microsoft" não funciona. O login local (e-mail + senha) e o AD continuam funcionando.
-- **Fontes (IBM Plex):** self-hosted em `fonts/` — sem dependência externa. Nenhuma regra de firewall necessária.
-- **cdnjs:** sem acesso, o export Excel via browser pode falhar (XLSX.js não carrega). O restante da UI funciona normalmente.
+- **Fontes e XLSX.js:** 100% self-hosted (`fonts/` e `libs/`) — sem dependência externa no browser. Nenhuma regra de firewall necessária para o frontend.
 
 ---
 
