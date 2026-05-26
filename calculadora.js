@@ -529,6 +529,10 @@ const Calculadora = (() => {
           <label class="cl">Validade (dias)</label>
           <input type="number" id="cinv-validade" class="ci" value="30" min="1" readonly
                  style="opacity:.55;cursor:not-allowed;background:var(--bg);" title="Validade padrão: 30 dias">
+          <div style="margin-top:5px;font-size:11px;color:var(--text-muted);display:flex;align-items:flex-start;gap:5px;line-height:1.4;">
+            <span style="color:var(--orange);font-size:13px;flex-shrink:0;">⚠</span>
+            <span>Após 30 dias esta estimativa expira. Caso o ambiente ainda esteja necessário, uma nova solicitação deverá ser aberta.</span>
+          </div>
         </div>
       </div>
       <div style="margin-bottom:16px;">
