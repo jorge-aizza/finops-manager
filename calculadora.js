@@ -527,11 +527,11 @@ const Calculadora = (() => {
         </div>
         <div>
           <label class="cl">Validade (dias)</label>
-          <input type="number" id="cinv-validade" class="ci" value="30" min="1" readonly
-                 style="opacity:.55;cursor:not-allowed;background:var(--bg);" title="Validade padrão: 30 dias">
+          <input type="number" id="cinv-validade" class="ci" value="5" min="1" readonly
+                 style="opacity:.55;cursor:not-allowed;background:var(--bg);" title="Validade padrão: 5 dias">
           <div style="margin-top:5px;font-size:11px;color:var(--text-muted);display:flex;align-items:flex-start;gap:5px;line-height:1.4;">
             <span style="color:var(--orange);font-size:13px;flex-shrink:0;">⚠</span>
-            <span>Após 30 dias esta estimativa expira. Caso o ambiente ainda esteja necessário, uma nova solicitação deverá ser aberta.</span>
+            <span>Após 5 dias esta estimativa expira. Caso o ambiente ainda esteja necessário, uma nova solicitação deverá ser aberta.</span>
           </div>
         </div>
       </div>
@@ -2565,7 +2565,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const titulo  = document.getElementById('cinv-titulo')?.value?.trim()   || 'Estimativa de Custos Azure';
     const dataVal = document.getElementById('cinv-data')?.value             || new Date().toISOString().slice(0,10);
     const resp    = document.getElementById('cinv-resp')?.value?.trim()     || '';
-    const valDias = 30; // Validade fixa em 30 dias
+    const valDias = 5; // Validade fixa em 5 dias
     const obs     = document.getElementById('cinv-obs')?.value?.trim()      || '';
 
     if (!sel?.value) { _toast('Selecione um projeto.', 'error'); return; }
@@ -2622,7 +2622,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
   function gerarPDFSalvo(e) {
     const dataVal   = e.data_estimativa ? String(e.data_estimativa).slice(0,10) : new Date().toISOString().slice(0,10);
     const dataFmt   = new Date(dataVal + 'T12:00:00').toLocaleDateString('pt-BR');
-    const valDias   = parseInt(e.validade_dias) || 30;
+    const valDias   = parseInt(e.validade_dias) || 5;
     const dataValid = new Date(new Date(dataVal + 'T12:00:00').getTime() + valDias * 86400000).toLocaleDateString('pt-BR');
     const html = _buildPDFHtml({
       invoiceNum:  e.numero || 'EST-000000',
