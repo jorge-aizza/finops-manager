@@ -1884,13 +1884,14 @@ async function ensurePriceListTable() {
 }
 
 // Busca uma URL e retorna JSON — usado para paginar a Retail Prices API
-function _fetchJson(url) {
+function _fetchJson(url, timeoutMs = 90000) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? require('https') : require('http');
     const req = mod.get(url, { headers: { Accept: 'application/json' } }, res => {
-      let data = '';
-      res.on('data', chunk => { data += chunk; });
+      const chunks = [];
+      res.on('data', chunk => { chunks.push(chunk); });
       res.on('end', () => {
+        const data = Buffer.concat(chunks).toString('utf8');
         // 429 — Rate limit da Azure (resposta em texto puro, não JSON)
         if (res.statusCode === 429) {
           const retryAfter = parseInt(res.headers['retry-after'] || '60', 10) || 60;
@@ -1908,11 +1909,16 @@ function _fetchJson(url) {
           ));
         }
         try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error('JSON inválido na Retail Prices API: ' + e.message)); }
+        catch (e) { reject(new Error('JSON inválido na Retail Prices API: ' + e.message + ' — primeiros 200 chars: ' + data.slice(0, 200))); }
       });
     });
-    req.on('error', reject);
-    req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout na Retail Prices API')); });
+    req.on('error', err => { err.code = err.code || 'NETWORK_ERROR'; reject(err); });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy();
+      const err = new Error(`Timeout na Retail Prices API (${timeoutMs / 1000}s)`);
+      err.code = 'TIMEOUT';
+      reject(err);
+    });
   });
 }
 
@@ -1933,21 +1939,31 @@ async function _gravaMeta(key, value) {
   }
 }
 
-// Busca uma página da Retail Prices API com retry automático em caso de 429
-async function _fetchPriceListPage(urlOrFilter, maxRetries = 4) {
+// Busca uma página da Retail Prices API com retry automático (429 e timeout)
+async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const data = await _fetchJson(urlOrFilter);
+      // Timeout cresce com as tentativas: 90s → 120s → 150s → 180s → 210s
+      const timeoutMs = 90000 + (attempt - 1) * 30000;
+      const data = await _fetchJson(urlOrFilter, timeoutMs);
       return { items: data.Items || [], nextLink: data.NextPageLink || null };
     } catch (err) {
-      if (err.code === 429 && attempt < maxRetries) {
-        // Respeita Retry-After do header; fallback: 30s × tentativa
-        const wait = (err.retryAfter > 0 ? err.retryAfter : attempt * 30) * 1000;
-        console.warn(`[PriceList] Rate limit 429 — aguardando ${wait / 1000}s (tentativa ${attempt}/${maxRetries})...`);
+      const isRetryable = err.code === 429 || err.code === 'TIMEOUT' || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'NETWORK_ERROR';
+      if (isRetryable && attempt < maxRetries) {
+        let wait;
+        if (err.code === 429) {
+          // Respeita Retry-After do header; fallback: 60s × tentativa
+          wait = (err.retryAfter > 0 ? err.retryAfter : attempt * 60) * 1000;
+          console.warn(`[PriceList] Rate limit 429 — aguardando ${wait / 1000}s (tentativa ${attempt}/${maxRetries})...`);
+        } else {
+          // Timeout ou erro de rede — backoff 15s, 30s, 45s...
+          wait = attempt * 15000;
+          console.warn(`[PriceList] ${err.code} — aguardando ${wait / 1000}s antes de nova tentativa (${attempt}/${maxRetries})...`);
+        }
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
-      throw err; // outro erro ou esgotou tentativas
+      throw err; // erro não-retryable ou esgotou tentativas
     }
   }
 }
