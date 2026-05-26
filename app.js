@@ -1771,6 +1771,19 @@ async function _loadPriceListStatus() {
       updated.textContent = 'Nunca';
     }
 
+    // ── Circuit Breaker — exibe alerta se API estiver bloqueada ────────────────
+    const cbBtn = document.getElementById('pl-sync-btn');
+    const cb    = d.circuit_breaker;
+    if (cb && cb.state === 'OPEN') {
+      sub.textContent        = `⚡ Circuit Breaker aberto — API bloqueada por falhas consecutivas. Liberação automática em ${cb.remaining_min ?? '?'} min.`;
+      badge.textContent      = '⚡ CB Aberto';
+      badge.style.background = 'rgba(255,77,106,.15)';
+      badge.style.color      = 'var(--danger,#ff4d6a)';
+      if (cbBtn) cbBtn.disabled = true;
+      return { syncing: false, total: tot, last_result: d.last_result, cb_open: true };
+    }
+    if (cbBtn && !_plPolling) cbBtn.disabled = false; // reabilita se CB fechou
+
     if (d.syncing) {
       // Mostra progresso em tempo real quando disponível
       const prog = d.progress;
@@ -1786,7 +1799,8 @@ async function _loadPriceListStatus() {
       // Sucesso: há dados no banco
       const lr = d.last_result;
       const infoExtra = lr ? ` (${(lr.total||0).toLocaleString('pt-BR')} reg · ${lr.pages||0} págs)` : '';
-      sub.textContent        = 'Cache atualizado — preços disponíveis na Calculadora.' + infoExtra;
+      const cbExtra   = cb && cb.state === 'HALF_OPEN' ? ' · ⚡ CB testando' : cb && cb.failures > 0 ? ` · ⚡ CB: ${cb.failures} falha(s)` : '';
+      sub.textContent        = 'Cache atualizado — preços disponíveis na Calculadora.' + infoExtra + cbExtra;
       badge.textContent      = '✅ Disponível';
       badge.style.background = 'rgba(34,197,94,.12)';
       badge.style.color      = 'var(--green,#22c55e)';
@@ -1796,7 +1810,8 @@ async function _loadPriceListStatus() {
       const lr = d.last_result;
       if (lr && lr.ok === false) {
         // Sync rodou mas falhou
-        sub.textContent        = '❌ Última sync falhou: ' + (lr.error || 'erro desconhecido');
+        const cbExtra = cb && cb.failures > 0 ? ` (CB: ${cb.failures}/${3} falhas)` : '';
+        sub.textContent        = '❌ Última sync falhou: ' + (lr.error || 'erro desconhecido') + cbExtra;
         badge.textContent      = '❌ Falha';
         badge.style.background = 'rgba(255,77,106,.12)';
         badge.style.color      = 'var(--danger,#ff4d6a)';
@@ -1810,7 +1825,7 @@ async function _loadPriceListStatus() {
     }
 
     // Retorna o estado para quem chama (usado pelo polling)
-    return { syncing: d.syncing, total: tot, last_result: d.last_result };
+    return { syncing: d.syncing, total: tot, last_result: d.last_result, cb_open: false };
 
   } catch (e) {
     if (sub) sub.textContent = 'Erro ao consultar status: ' + e.message;

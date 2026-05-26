@@ -1883,6 +1883,49 @@ async function ensurePriceListTable() {
   }
 }
 
+// ── Circuit Breaker — Azure Retail Prices API ──────────────────────────────────
+// Separado do CB da Coleta para não contaminar estados independentes.
+// Abre após 3 falhas consecutivas; fica bloqueado 10 min; então tenta HALF_OPEN.
+const _PL_CB_MAX_FAILURES = 3;
+const _PL_CB_OPEN_MS      = 10 * 60 * 1000; // 10 min
+let _plCB = { state: 'CLOSED', failures: 0, openUntil: null };
+
+function _plCbCanAttempt() {
+  if (_plCB.state === 'CLOSED' || _plCB.state === 'HALF_OPEN') return true;
+  // OPEN — verifica se a janela de bloqueio expirou
+  if (_plCB.openUntil && Date.now() >= _plCB.openUntil) {
+    _plCB.state = 'HALF_OPEN';
+    console.log('[PriceList CB] Estado → HALF_OPEN (janela expirou, testando)');
+    return true;
+  }
+  return false;
+}
+
+function _plCbSuccess() {
+  if (_plCB.state !== 'CLOSED') {
+    console.log('[PriceList CB] Estado → CLOSED (recuperado)');
+  }
+  _plCB.state    = 'CLOSED';
+  _plCB.failures = 0;
+  _plCB.openUntil = null;
+}
+
+function _plCbFailure() {
+  if (_plCB.state === 'HALF_OPEN') {
+    // Falhou na sondagem — reabrir imediatamente
+    _plCB.openUntil = Date.now() + _PL_CB_OPEN_MS;
+    _plCB.state     = 'OPEN';
+    console.warn(`[PriceList CB] Estado → OPEN (HALF_OPEN falhou, bloqueando por ${_PL_CB_OPEN_MS / 60000} min)`);
+    return;
+  }
+  _plCB.failures++;
+  if (_plCB.failures >= _PL_CB_MAX_FAILURES) {
+    _plCB.openUntil = Date.now() + _PL_CB_OPEN_MS;
+    _plCB.state     = 'OPEN';
+    console.warn(`[PriceList CB] Estado → OPEN (${_plCB.failures} falhas consecutivas, bloqueando por ${_PL_CB_OPEN_MS / 60000} min)`);
+  }
+}
+
 // Busca uma URL e retorna JSON — usado para paginar a Retail Prices API
 function _fetchJson(url, timeoutMs = 90000) {
   return new Promise((resolve, reject) => {
@@ -1939,31 +1982,45 @@ async function _gravaMeta(key, value) {
   }
 }
 
-// Busca uma página da Retail Prices API com retry automático (429 e timeout)
+// Busca uma página da Retail Prices API com retry automático + circuit breaker
 async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
+  // Verifica CB antes de qualquer tentativa
+  if (!_plCbCanAttempt()) {
+    const bloqueadoAte = _plCB.openUntil
+      ? new Date(_plCB.openUntil).toLocaleTimeString('pt-BR')
+      : '?';
+    throw new Error(`Circuit Breaker OPEN — Retail Prices API bloqueada até ${bloqueadoAte}. Tente novamente em ${Math.ceil((_plCB.openUntil - Date.now()) / 60000)} min.`);
+  }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       // Timeout cresce com as tentativas: 90s → 120s → 150s → 180s → 210s
       const timeoutMs = 90000 + (attempt - 1) * 30000;
       const data = await _fetchJson(urlOrFilter, timeoutMs);
+      // Sucesso — notifica CB (reseta contador ou fecha HALF_OPEN)
+      _plCbSuccess();
       return { items: data.Items || [], nextLink: data.NextPageLink || null };
     } catch (err) {
-      const isRetryable = err.code === 429 || err.code === 'TIMEOUT' || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'NETWORK_ERROR';
+      const isRetryable = err.code === 429 || err.code === 'TIMEOUT'
+        || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'NETWORK_ERROR';
+
       if (isRetryable && attempt < maxRetries) {
         let wait;
         if (err.code === 429) {
-          // Respeita Retry-After do header; fallback: 60s × tentativa
           wait = (err.retryAfter > 0 ? err.retryAfter : attempt * 60) * 1000;
           console.warn(`[PriceList] Rate limit 429 — aguardando ${wait / 1000}s (tentativa ${attempt}/${maxRetries})...`);
         } else {
-          // Timeout ou erro de rede — backoff 15s, 30s, 45s...
-          wait = attempt * 15000;
+          wait = attempt * 15000; // backoff 15s, 30s, 45s...
           console.warn(`[PriceList] ${err.code} — aguardando ${wait / 1000}s antes de nova tentativa (${attempt}/${maxRetries})...`);
         }
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
-      throw err; // erro não-retryable ou esgotou tentativas
+
+      // Esgotou tentativas ou erro não-retryable — registra falha no CB
+      // 429 não conta como falha de infraestrutura (é throttling esperado)
+      if (err.code !== 429) _plCbFailure();
+      throw err;
     }
   }
 }
@@ -2814,13 +2871,19 @@ app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res)
       try { last_result = JSON.parse(meta.rows[0].value); } catch (_) {}
     }
 
+    // Estado do Circuit Breaker para exibição na UI
+    const cbInfo = _plCB.state === 'OPEN'
+      ? { state: _plCB.state, blocked_until: new Date(_plCB.openUntil).toISOString(), remaining_min: Math.ceil((_plCB.openUntil - Date.now()) / 60000) }
+      : { state: _plCB.state, failures: _plCB.failures };
+
     res.json({
-      total:        parseInt(cnt.rows[0]?.total        || 0),
-      meters:       parseInt(cnt.rows[0]?.meters       || 0),
-      last_updated: cnt.rows[0]?.last_updated          || null,
-      syncing:      _syncingPriceList,
-      progress:     _syncingPriceList ? _syncProgress  : null,
-      last_result
+      total:          parseInt(cnt.rows[0]?.total        || 0),
+      meters:         parseInt(cnt.rows[0]?.meters       || 0),
+      last_updated:   cnt.rows[0]?.last_updated          || null,
+      syncing:        _syncingPriceList,
+      progress:       _syncingPriceList ? _syncProgress  : null,
+      last_result,
+      circuit_breaker: cbInfo
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
