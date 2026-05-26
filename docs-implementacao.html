@@ -977,6 +977,21 @@ eb status</pre>
   </div>
   <div class="note"><div class="note-lbl">Security Groups AWS</div><p>Configure o Security Group do RDS para aceitar conexões na porta 5432 apenas do Security Group do Elastic Beanstalk. Nunca abra o RDS para <code>0.0.0.0/0</code>.</p></div>
 
+  <div class="subsec">Compatibilidade Linux On-Premise</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Distribuição</th><th>Versão</th><th>Gerenciador</th><th>Node.js</th><th>PostgreSQL</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>Oracle Enterprise Linux (OEL)</td><td>9.x</td><td>dnf</td><td>NodeSource RPM</td><td>PGDG EL9</td><td>✔ Compatível</td></tr>
+        <tr><td>Red Hat Enterprise Linux (RHEL)</td><td>9.x</td><td>dnf</td><td>NodeSource RPM</td><td>PGDG EL9</td><td>✔ Compatível</td></tr>
+        <tr><td>AlmaLinux / Rocky Linux</td><td>9.x</td><td>dnf</td><td>NodeSource RPM</td><td>PGDG EL9</td><td>✔ Compatível</td></tr>
+        <tr><td>Ubuntu / Debian</td><td>22.04 / 12</td><td>apt</td><td>NodeSource DEB</td><td>PGDG DEB</td><td>✔ Compatível</td></tr>
+        <tr><td>Amazon Linux</td><td>2023</td><td>dnf</td><td>dnf module</td><td>PGDG EL9</td><td>✔ Compatível</td></tr>
+        <tr><td>Windows Server</td><td>2019/2022</td><td>NSSM/PM2</td><td>Instalador .msi</td><td>Instalador .exe</td><td>✔ Compatível</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <div class="subsec">Comparativo PaaS por Provedor</div>
   <div class="tbl-wrap">
     <table class="doc">
@@ -993,6 +1008,201 @@ eb status</pre>
       </tbody>
     </table>
   </div>
+
+  <div class="subsec">Linux On-Premise — OEL9 / RHEL 9 / AlmaLinux 9 / Rocky Linux 9</div>
+  <p>Oracle Enterprise Linux 9 é um clone do RHEL 9. O sistema é totalmente compatível — a única diferença em relação ao Ubuntu/Debian é o gerenciador de pacotes (<code>dnf</code> em vez de <code>apt</code>).</p>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body">
+      <div class="step-title">Instalar o Node.js 18 via NodeSource</div>
+      <div class="step-desc">O repositório NodeSource suporta OEL9/RHEL9 nativamente:</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Adicionar repositório NodeSource para RHEL/OEL</span>
+curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+sudo dnf install -y nodejs
+
+<span class="c"># Verificar</span>
+node --version   <span class="c"># deve retornar v18.x.x</span>
+npm --version    <span class="c"># deve retornar 9.x ou superior</span></pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">2</div><div class="step-body">
+      <div class="step-title">Instalar o PostgreSQL 16 via PGDG</div>
+      <div class="step-desc">O módulo PostgreSQL nativo do OEL9 precisa ser desativado antes de instalar a versão do PGDG:</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Adicionar repositório oficial do PostgreSQL para RHEL 9</span>
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+
+<span class="c"># Desativar o módulo nativo (evita conflito de versão)</span>
+sudo dnf -qy module disable postgresql
+
+<span class="c"># Instalar o PostgreSQL 16</span>
+sudo dnf install -y postgresql16-server postgresql16
+
+<span class="c"># Inicializar o banco e habilitar o serviço</span>
+sudo /usr/pgsql-16/bin/postgresql-16-setup initdb
+sudo systemctl enable --now postgresql-16
+
+<span class="c"># Verificar</span>
+sudo systemctl status postgresql-16</pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">3</div><div class="step-body">
+      <div class="step-title">Criar banco e usuário</div>
+    </div></div>
+  </div>
+  <pre>sudo -u postgres psql &lt;&lt;EOF
+CREATE DATABASE finops_db;
+CREATE USER finops_user WITH ENCRYPTED PASSWORD '<span class="v">senha-segura</span>';
+GRANT ALL PRIVILEGES ON DATABASE finops_db TO finops_user;
+EOF</pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">4</div><div class="step-body">
+      <div class="step-title">Instalar a aplicação</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Criar diretório e copiar os arquivos</span>
+sudo mkdir -p /opt/finops-manager
+sudo cp -r /caminho/dos/arquivos/* /opt/finops-manager/
+sudo chown -R $USER:$USER /opt/finops-manager
+cd /opt/finops-manager
+
+<span class="c"># Instalar dependências Node.js</span>
+npm install --omit=dev
+
+<span class="c"># Copiar o mascote (não versionado no Git)</span>
+cp /caminho/mascote.png /opt/finops-manager/mascote.png</pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">5</div><div class="step-body">
+      <div class="step-title">Criar o arquivo .env e gerar segredos</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Gerar JWT_SECRET e MASTER_KEY</span>
+JWT=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
+MKEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
+
+cat &gt; .env &lt;&lt;EOF
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=finops_db
+DB_USER=finops_user
+DB_PASSWORD=<span class="v">senha-segura</span>
+JWT_SECRET=$JWT
+MASTER_KEY=$MKEY
+JWT_EXPIRES=8h
+PORT=3000
+ALLOWED_ORIGIN=https://<span class="v">seu-dominio.com</span>
+EOF
+
+chmod 600 .env   <span class="c"># apenas o dono pode ler</span>
+
+<span class="c"># (Recomendado) Criptografar o .env</span>
+node encrypt-env.js encrypt
+rm .env</pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">6</div><div class="step-body">
+      <div class="step-title">Configurar como serviço systemd</div>
+      <div class="step-desc">Crie o arquivo de serviço (o systemd do OEL9 é idêntico ao do RHEL/Ubuntu):</div>
+    </div></div>
+  </div>
+  <pre>sudo tee /etc/systemd/system/finops-manager.service &gt; /dev/null &lt;&lt;'EOF'
+[Unit]
+Description=FinOps Manager v2.1 - Vivo
+After=network.target postgresql-16.service
+
+[Service]
+Type=simple
+User=<span class="v">finops</span>
+WorkingDirectory=/opt/finops-manager
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=/opt/finops-manager/.env
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now finops-manager
+sudo journalctl -u finops-manager -f   <span class="c"># logs em tempo real</span></pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">7</div><div class="step-body">
+      <div class="step-title">Instalar e configurar o Nginx como proxy reverso</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Instalar nginx</span>
+sudo dnf install -y nginx
+sudo systemctl enable --now nginx
+
+<span class="c"># Abrir portas no firewall do OEL9 (firewalld)</span>
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --reload
+
+<span class="c"># Criar configuração do site</span>
+sudo tee /etc/nginx/conf.d/finops.conf &gt; /dev/null &lt;&lt;'EOF'
+server {
+    listen 80;
+    server_name <span class="v">seu-dominio.com</span>;
+
+    location / {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 600s;
+        client_max_body_size 600M;
+    }
+}
+EOF
+
+sudo nginx -t && sudo systemctl reload nginx</pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">8</div><div class="step-body">
+      <div class="step-title">Certificado SSL com Certbot (Let's Encrypt)</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Instalar Certbot para RHEL/OEL via EPEL</span>
+sudo dnf install -y epel-release
+sudo dnf install -y certbot python3-certbot-nginx
+
+<span class="c"># Emitir e instalar o certificado (HTTPS automático)</span>
+sudo certbot --nginx -d <span class="v">seu-dominio.com</span>
+
+<span class="c"># Renovação automática (já configurada pelo Certbot)</span>
+sudo systemctl status certbot-renew.timer</pre>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">9</div><div class="step-body">
+      <div class="step-title">Verificar a instalação</div>
+    </div></div>
+  </div>
+  <pre><span class="c"># Health check</span>
+curl https://<span class="v">seu-dominio.com</span>/health
+<span class="c"># Esperado: {"status":"ok","db":"connected",...}</span>
+
+<span class="c"># Status dos serviços</span>
+sudo systemctl status finops-manager postgresql-16 nginx</pre>
+
+  <div class="note">
+    <div class="note-lbl">SELinux no OEL9</div>
+    <p>O OEL9 vem com SELinux em modo <strong>Enforcing</strong> por padrão. Se o Nginx não conseguir se conectar ao Node.js na porta 3000, execute:</p>
+  </div>
+  <pre><span class="c"># Permitir que o Nginx faça proxy para processos locais</span>
+sudo setsebool -P httpd_can_network_connect 1
+
+<span class="c"># Verificar se há negativas do SELinux</span>
+sudo ausearch -c 'nginx' --raw | audit2allow -M nginx-finops
+sudo semodule -X 300 -i nginx-finops.pp</pre>
 
   <div class="subsec">Docker (qualquer plataforma)</div>
   <pre><span class="c"># Dockerfile mínimo</span>
