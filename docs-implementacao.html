@@ -198,7 +198,7 @@ window.onload=function(){
   </div>
   <div class="cover-bottom">
     <div class="cover-meta">
-      Versão <strong>1.0</strong> &nbsp;·&nbsp; Maio 2026 &nbsp;·&nbsp; Uso Interno
+      Versão <strong>2.1</strong> &nbsp;·&nbsp; Maio 2026 &nbsp;·&nbsp; Uso Interno
     </div>
     <div class="cover-badge">Confidencial</div>
   </div>
@@ -210,17 +210,19 @@ window.onload=function(){
   <div class="toc-title">Índice</div>
   <div class="toc-grid">
     <div class="toc-item"><span class="toc-num">01</span><span class="toc-label">Visão Geral do Sistema</span></div>
-    <div class="toc-item"><span class="toc-num">07</span><span class="toc-label">Funcionalidades</span></div>
+    <div class="toc-item"><span class="toc-num">07</span><span class="toc-label">Funcionalidades v2.1</span></div>
     <div class="toc-item"><span class="toc-num">02</span><span class="toc-label">Pré-requisitos</span></div>
     <div class="toc-item"><span class="toc-num">08</span><span class="toc-label">Importação de Custos Azure</span></div>
     <div class="toc-item"><span class="toc-num">03</span><span class="toc-label">Instalação</span></div>
     <div class="toc-item"><span class="toc-num">09</span><span class="toc-label">Segurança em Produção</span></div>
     <div class="toc-item"><span class="toc-num">04</span><span class="toc-label">Variáveis de Ambiente</span></div>
-    <div class="toc-item"><span class="toc-num">10</span><span class="toc-label">Deploy em Plataformas Cloud</span></div>
+    <div class="toc-item"><span class="toc-num">10</span><span class="toc-label">APIs Externas — Firewall</span></div>
     <div class="toc-item"><span class="toc-num">05</span><span class="toc-label">Setup Inicial e Banco de Dados</span></div>
-    <div class="toc-item"><span class="toc-num">11</span><span class="toc-label">Configurar como Serviço do Sistema</span></div>
+    <div class="toc-item"><span class="toc-num">11</span><span class="toc-label">Deploy em Plataformas Cloud</span></div>
     <div class="toc-item"><span class="toc-num">06</span><span class="toc-label">Perfis de Acesso</span></div>
-    <div class="toc-item"><span class="toc-num">12</span><span class="toc-label">Checklist de Deploy</span></div>
+    <div class="toc-item"><span class="toc-num">12</span><span class="toc-label">Configurar como Serviço</span></div>
+    <div class="toc-item"><span class="toc-num">  </span><span class="toc-label"></span></div>
+    <div class="toc-item"><span class="toc-num">13</span><span class="toc-label">Checklist de Deploy</span></div>
   </div>
 </div>
 
@@ -273,7 +275,7 @@ window.onload=function(){
         <tr><td>Node.js</td><td>18.x LTS+</td><td>Verificar com: <code>node --version</code></td></tr>
         <tr><td>npm</td><td>9.x+</td><td>Incluído com Node.js</td></tr>
         <tr><td>PostgreSQL</td><td>14+</td><td>Local, Docker ou serviço gerenciado (Railway, Render, Supabase)</td></tr>
-        <tr><td>Acesso à internet</td><td>—</td><td>Necessário apenas para fontes Google (PDF) e CDN Excel.js</td></tr>
+        <tr><td>Acesso à internet</td><td>—</td><td>Necessário apenas no servidor para Azure APIs (Price List, Coleta Automática, SSO). Fontes e xlsx.js são self-hosted.</td></tr>
         <tr><td>Porta disponível</td><td>3000 (padrão)</td><td>Configurável via variável <code>PORT</code></td></tr>
       </tbody>
     </table>
@@ -293,41 +295,65 @@ window.onload=function(){
       <div class="step-num">1</div>
       <div class="step-body">
         <div class="step-title">Transferir os arquivos para o servidor</div>
-        <div class="step-desc">Copie todos os arquivos do projeto para o diretório de destino (ex: <code>/opt/finops-manager</code>). Certifique-se de incluir <code>.finops_setup</code> caso já exista configuração prévia.</div>
+        <div class="step-desc">Copie todos os arquivos do projeto para o diretório de destino (ex: <code>/opt/finops-manager</code>). Certifique-se de incluir <code>.finops_setup</code> caso já exista configuração prévia. As pastas <code>fonts/</code> e <code>libs/</code> fazem parte do repositório — não precisam ser baixadas separadamente.</div>
       </div>
     </div>
     <div class="step">
       <div class="step-num">2</div>
       <div class="step-body">
-        <div class="step-title">Instalar dependências</div>
+        <div class="step-title">Instalar dependências Node.js</div>
         <div class="step-desc">Execute no diretório do projeto:</div>
       </div>
     </div>
   </div>
   <pre>npm install</pre>
+  <div class="note">
+    <div class="note-lbl">Fontes e biblioteca XLSX — self-hosted</div>
+    <p>A partir da v2.1, as fontes IBM Plex Sans/Mono (<code>fonts/</code>) e a biblioteca XLSX.js (<code>libs/xlsx.full.min.js</code>) já estão incluídas no repositório. <strong>Não é necessário nenhum passo extra</strong> — o <code>npm install</code> cuida apenas das dependências Node.js do servidor.</p>
+  </div>
   <div class="steps">
     <div class="step">
       <div class="step-num">3</div>
       <div class="step-body">
-        <div class="step-title">Criar o arquivo de variáveis de ambiente</div>
-        <div class="step-desc">Crie o arquivo <code>.env</code> na raiz do projeto com as configurações do ambiente. Consulte a seção 04 para a lista completa de variáveis.</div>
-      </div>
-    </div>
-    <div class="step">
-      <div class="step-num">4</div>
-      <div class="step-body">
-        <div class="step-title">(Recomendado) Criptografar o .env</div>
-        <div class="step-desc">Para ambientes de produção, gere o arquivo criptografado:</div>
+        <div class="step-title">Copiar o mascote.png</div>
+        <div class="step-desc">O arquivo <code>mascote.png</code> (imagem do mascote Vivo na tela de login) <strong>não é versionado no Git</strong>. Copie-o manualmente para a pasta raiz da aplicação:</div>
       </div>
     </div>
   </div>
-  <pre>node encrypt-env.js encrypt   <span class="c"># gera .env.enc + .env.key</span></pre>
+  <pre><span class="c"># Linux</span>
+cp /caminho/original/mascote.png /opt/finops-manager/mascote.png
+
+<span class="c"># Windows (PowerShell)</span>
+Copy-Item "C:\origem\mascote.png" "C:\finops-manager\mascote.png"</pre>
+  <div class="note">
+    <div class="note-lbl">mascote.png ausente</div>
+    <p>Se o arquivo não for copiado, a tela de login exibe apenas o logo SVG "vivo" em roxo. O sistema funciona normalmente — o arquivo é apenas visual.</p>
+  </div>
   <div class="steps">
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <div class="step-title">Criar o arquivo de variáveis de ambiente</div>
+        <div class="step-desc">Crie o arquivo <code>.env</code> na raiz do projeto. Consulte a seção 04 para a lista completa de variáveis e como gerar os valores seguros.</div>
+      </div>
+    </div>
     <div class="step">
       <div class="step-num">5</div>
       <div class="step-body">
+        <div class="step-title">(Recomendado) Criptografar o .env</div>
+        <div class="step-desc">Para ambientes de produção, gere o arquivo criptografado e remova o texto puro:</div>
+      </div>
+    </div>
+  </div>
+  <pre>node encrypt-env.js encrypt   <span class="c"># gera .env.enc + .env.key</span>
+rm .env                       <span class="c"># Linux — apaga o texto puro</span>
+Remove-Item .env              <span class="c"># Windows PowerShell</span></pre>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">6</div>
+      <div class="step-body">
         <div class="step-title">Iniciar o servidor</div>
-        <div class="step-desc">Para produção, use um gerenciador de processos como PM2:</div>
+        <div class="step-desc">Para produção, use um gerenciador de processos como PM2 (ver seção 12):</div>
       </div>
     </div>
   </div>
@@ -344,6 +370,21 @@ pm2 save && pm2 startup
 
 <span class="c"># Desenvolvimento (hot reload)</span>
 npm run dev</pre>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">7</div>
+      <div class="step-body">
+        <div class="step-title">Verificar a saúde da aplicação</div>
+        <div class="step-desc">Após o servidor iniciar, valide o endpoint de health check:</div>
+      </div>
+    </div>
+  </div>
+  <pre><span class="c"># Resposta esperada: {"status":"ok","db":"connected",...}</span>
+curl http://localhost:3000/health</pre>
+  <div class="warn">
+    <div class="warn-lbl">Se retornar "db: unavailable"</div>
+    <p>O servidor subiu mas não conectou ao PostgreSQL. Verifique as variáveis <code>DB_HOST</code>, <code>DB_PORT</code>, <code>DB_USER</code>, <code>DB_PASSWORD</code> e <code>DB_NAME</code>. Confirme que o PostgreSQL está acessível a partir do servidor.</p>
+  </div>
 </div>
 
 <!-- 04 VARIÁVEIS DE AMBIENTE -->
@@ -492,7 +533,7 @@ ALLOWED_ORIGIN=<span class="v">https://finops.vivo.com.br</span></pre>
 
 <!-- 07 FUNCIONALIDADES -->
 <div class="sec">
-  <div class="sec-hdr"><div class="sec-num">07</div><div class="sec-ttl">Funcionalidades</div></div>
+  <div class="sec-hdr"><div class="sec-num">07</div><div class="sec-ttl">Funcionalidades v2.1</div></div>
   <div class="feat-grid">
     <div class="feat">
       <div class="feat-icon">📊</div>
@@ -507,17 +548,27 @@ ALLOWED_ORIGIN=<span class="v">https://finops.vivo.com.br</span></pre>
     <div class="feat">
       <div class="feat-icon">☁️</div>
       <div class="feat-name">Custos Azure</div>
-      <div class="feat-desc">Visualização de gastos por subscription, resource group e período. Filtros avançados. Importação via CSV ou Parquet (Azure Cost Management). Suporte a arquivos de até 2 GB.</div>
+      <div class="feat-desc">Visualização de gastos por subscription, resource group e período. Filtros avançados. Importação via CSV ou Parquet (Azure Cost Management). Suporte a arquivos de até 500 MB.</div>
     </div>
     <div class="feat">
       <div class="feat-icon">🧮</div>
       <div class="feat-name">Calculadora de Estimativas</div>
-      <div class="feat-desc">Seleção de recursos Azure por subscription/RG/período. Simulação de horas de uso com slider. Geração de estimativa em PDF com logo Vivo e mascote. Salvamento no banco para histórico.</div>
+      <div class="feat-desc">Seleção de recursos Azure por subscription/RG/período. Simulação de horas de uso com slider. Geração de estimativa em PDF. Validade fixa de 5 dias e motivo da solicitação obrigatório.</div>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">💰</div>
+      <div class="feat-name">Azure Price List (novo v2.0)</div>
+      <div class="feat-desc">Sincronização com Azure Retail Prices API (~100 mil SKUs). Coluna PL/h e badge de desconto real vs. on-demand na calculadora. Cobertura para hora, dia, periodo e reservas.</div>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">🤖</div>
+      <div class="feat-name">Coleta Automática (novo v2.0)</div>
+      <div class="feat-desc">Coleta automática de custos Azure via Service Principals (sem upload manual). Agendamento configurável, circuit breaker e histórico de execuções.</div>
     </div>
     <div class="feat">
       <div class="feat-icon">🔖</div>
       <div class="feat-name">Reservas Cloud</div>
-      <div class="feat-desc">Cadastro de reservas para Azure, AWS, GCP e Oracle. Campos adaptativos por cloud. Alerta automático de vencimento (popup no login) para reservas dentro de 90 dias.</div>
+      <div class="feat-desc">Cadastro de reservas para Azure, AWS, GCP, Oracle e Multicloud. Campos adaptativos por cloud. Alerta automático no login para reservas vencendo em ≤ 90 dias com badges de severidade.</div>
     </div>
     <div class="feat">
       <div class="feat-icon">🔔</div>
@@ -534,8 +585,8 @@ ALLOWED_ORIGIN=<span class="v">https://finops.vivo.com.br</span></pre>
   <div class="steps">
     <div class="step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Acesse o Azure Portal</div><div class="step-desc">Navegue até <strong>Cost Management + Billing &gt; Cost Management &gt; Cost analysis</strong> ou use a URL <code>portal.azure.com</code>.</div></div></div>
     <div class="step"><div class="step-num">2</div><div class="step-body"><div class="step-title">Configure o escopo e período</div><div class="step-desc">Selecione a subscription desejada. Defina o período (recomendado: máximo 3 meses por arquivo para melhor performance).</div></div></div>
-    <div class="step"><div class="step-num">3</div><div class="step-body"><div class="step-title">Exporte os dados</div><div class="step-desc">Clique em <strong>Download</strong> e escolha o formato <strong>CSV</strong> ou <strong>Parquet</strong>. O Parquet é mais compacto e recomendado para grandes volumes.</div></div></div>
-    <div class="step"><div class="step-num">4</div><div class="step-body"><div class="step-title">Importe no FinOps Manager</div><div class="step-desc">Acesse <strong>Custos Azure &gt; Importar</strong>, arraste o arquivo e aguarde o processamento. O sistema exibirá o progresso em tempo real.</div></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><div class="step-title">Exporte os dados</div><div class="step-desc">Clique em <strong>Download</strong> e escolha o formato <strong>CSV</strong> ou <strong>Parquet</strong>. O Parquet é mais compacto e recomendado para grandes volumes. Limite máximo por arquivo: <strong>500 MB</strong>.</div></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><div class="step-title">Importe no FinOps Manager</div><div class="step-desc">Acesse <strong>Custos Azure &gt; Importar</strong>, arraste o arquivo e aguarde o processamento. O sistema exibirá o progresso em tempo real. O arquivo temporário é apagado automaticamente após o processamento.</div></div></div>
   </div>
   <div class="note">
     <div class="note-lbl">Deduplicação Automática</div>
@@ -584,9 +635,67 @@ ALLOWED_ORIGIN=<span class="v">https://finops.vivo.com.br</span></pre>
   <p>O sistema já possui rate limiting nativo nos endpoints de autenticação: máximo de <strong>20 requisições a cada 15 minutos</strong> por IP nos endpoints <code>/api/auth/login</code> e <code>/api/auth/ad</code>. Configure limites adicionais no nginx se necessário.</p>
 </div>
 
-<!-- 10 DEPLOY CLOUD -->
+<!-- 10 APIs EXTERNAS / FIREWALL -->
 <div class="sec">
-  <div class="sec-hdr"><div class="sec-num">10</div><div class="sec-ttl">Deploy em Plataformas Cloud</div></div>
+  <div class="sec-hdr"><div class="sec-num">10</div><div class="sec-ttl">APIs Externas — Liberação de Firewall</div></div>
+  <p>O sistema realiza chamadas externas a partir do <strong>servidor Node.js</strong>. O browser do usuário <strong>não faz nenhuma chamada externa</strong> — fontes e biblioteca XLSX.js são self-hosted.</p>
+
+  <div class="subsec">Servidor → Internet (Outbound)</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Serviço</th><th>URL / Destino</th><th>Porta</th><th>Quando é usado</th></tr></thead>
+      <tbody>
+        <tr><td>Azure Retail Prices</td><td><code>https://prices.azure.com</code></td><td>443</td><td>Sincronização do Price List (Configurações → Price List → Sincronizar)</td></tr>
+        <tr><td>Azure Management API</td><td><code>https://management.azure.com</code></td><td>443</td><td>Coleta Automática de custos (lista subscriptions, RGs, aciona export)</td></tr>
+        <tr><td>Microsoft Entra ID</td><td><code>https://login.microsoftonline.com</code></td><td>443</td><td>Autenticação SSO OAuth 2.0 (se Entra ID estiver configurado)</td></tr>
+        <tr><td>Azure Storage (Blobs)</td><td><code>https://*.blob.core.windows.net</code></td><td>443</td><td>Download dos exports gerados pela Coleta Automática</td></tr>
+        <tr><td>Active Directory / LDAP</td><td>Servidor AD corporativo</td><td>389 / 636</td><td>Autenticação via AD (se configurado). Usar 636 (LDAPS) em produção.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="subsec">Browser → Internet (Outbound)</div>
+  <div class="note">
+    <div class="note-lbl">Zero dependências externas no browser</div>
+    <p>Fontes IBM Plex Sans/Mono hospedadas em <code>fonts/</code> · Biblioteca XLSX.js hospedada em <code>libs/</code> · Nenhuma regra de firewall outbound necessária para o frontend.</p>
+  </div>
+
+  <div class="subsec">Resumo de Portas</div>
+  <pre><span class="c">SERVIDOR (outbound)</span>
+  443/TCP  → prices.azure.com
+  443/TCP  → management.azure.com
+  443/TCP  → login.microsoftonline.com
+  443/TCP  → *.blob.core.windows.net
+  389/TCP  → [AD corporativo]   <span class="c">← LDAP simples (evitar em prod)</span>
+  636/TCP  → [AD corporativo]   <span class="c">← LDAPS recomendado</span>
+
+<span class="c">BROWSER (outbound)</span>
+  <span class="c">(sem saída externa — fontes e xlsx.js são self-hosted)</span>
+
+<span class="c">INBOUND (para o servidor Node.js)</span>
+  3000/TCP ← apenas do proxy reverso (Nginx) — nunca expor ao público
+   80/TCP  ← público (redireciona para HTTPS)
+  443/TCP  ← público (terminado no Nginx, encaminhado para :3000)
+  5432/TCP ← apenas da aplicação Node.js (PostgreSQL)</pre>
+
+  <div class="subsec">Impacto de Bloqueios</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>API bloqueada</th><th>Impacto</th><th>O que continua funcionando</th></tr></thead>
+      <tbody>
+        <tr><td>prices.azure.com</td><td>Price List não sincroniza. Calculadora sem coluna PL/h e sem badge de desconto.</td><td>Todo o restante do sistema</td></tr>
+        <tr><td>management.azure.com</td><td>Coleta Automática falha. Import manual via CSV continua funcionando.</td><td>Todo o restante do sistema</td></tr>
+        <tr><td>login.microsoftonline.com</td><td>Botão "Entrar com Microsoft" não funciona.</td><td>Login local e Active Directory</td></tr>
+        <tr><td>*.blob.core.windows.net</td><td>Download do export da Coleta Automática falha.</td><td>Todo o restante do sistema</td></tr>
+        <tr><td>AD corporativo (389/636)</td><td>Login via Active Directory não funciona.</td><td>Login local e SSO Entra ID</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 11 DEPLOY CLOUD -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">11</div><div class="sec-ttl">Deploy em Plataformas Cloud</div></div>
   <p>O FinOps Manager pode ser implantado em qualquer plataforma que suporte Node.js e PostgreSQL. Abaixo estão as instruções para as plataformas mais utilizadas.</p>
 
   <div class="subsec">Railway (recomendado para início rápido)</div>
@@ -907,9 +1016,9 @@ docker run -d --name finops \
   <div class="warn"><div class="warn-lbl">Persistência de dados no Docker</div><p>Monte o diretório da aplicação como volume (<code>-v finops-data:/app</code>) para preservar o arquivo <code>.finops_setup</code> e o diretório <code>uploads_tmp/</code> entre reinicializações do container.</p></div>
 </div>
 
-<!-- 11 SERVIÇO DO SISTEMA -->
+<!-- 12 SERVIÇO DO SISTEMA -->
 <div class="sec">
-  <div class="sec-hdr"><div class="sec-num">11</div><div class="sec-ttl">Configurar como Serviço do Sistema</div></div>
+  <div class="sec-hdr"><div class="sec-num">12</div><div class="sec-ttl">Configurar como Serviço do Sistema</div></div>
   <p>Para garantir que o FinOps Manager inicie automaticamente com o servidor e seja reiniciado em caso de falha, configure-o como um serviço do sistema operacional.</p>
 
   <div class="subsec">PM2 — Linux e Windows (recomendado)</div>
@@ -1007,9 +1116,9 @@ nssm status FinOpsManager</pre>
   </div>
 </div>
 
-<!-- 12 CHECKLIST -->
+<!-- 13 CHECKLIST -->
 <div class="sec">
-  <div class="sec-hdr"><div class="sec-num">12</div><div class="sec-ttl">Checklist de Deploy</div></div>
+  <div class="sec-hdr"><div class="sec-num">13</div><div class="sec-ttl">Checklist de Deploy</div></div>
   <p>Use esta lista como referência final antes de liberar o sistema para os usuários:</p>
   <div class="subsec">Infraestrutura</div>
   <div class="checklist">
@@ -1017,8 +1126,10 @@ nssm status FinOpsManager</pre>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">PostgreSQL 14+ acessível pelo servidor de aplicação</div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Banco de dados criado (<code>CREATE DATABASE finops_db</code>)</div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Usuário do banco com permissões de leitura e escrita</div></div>
-    <div class="chk"><div class="chk-box"></div><div class="chk-text">Porta 3000 (ou configurada) acessível internamente</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Porta 3000 acessível internamente (apenas pelo proxy reverso)</div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Diretório <code>uploads_tmp/</code> com permissão de escrita</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>mascote.png</code> copiado manualmente para a pasta raiz da aplicação</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Pastas <code>fonts/</code> e <code>libs/</code> presentes (já incluídas no repositório)</div></div>
   </div>
   <div class="subsec">Configuração</div>
   <div class="checklist">
@@ -1028,17 +1139,22 @@ nssm status FinOpsManager</pre>
     <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>DB_PASSWORD</code> definido e diferente do padrão</div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Arquivo <code>.env</code> criptografado com <code>encrypt-env.js</code></div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>.env</code> em texto puro removido do servidor após criptografar</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Firewall outbound liberado para APIs Azure (ver seção 10)</div></div>
   </div>
   <div class="subsec">Aplicação</div>
   <div class="checklist">
     <div class="chk"><div class="chk-box"></div><div class="chk-text"><code>npm install</code> executado com sucesso (sem erros)</div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Servidor inicia sem erros: <code>node --check server.js</code></div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Wizard de configuração concluído e <code>.finops_setup</code> gerado</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Health check retorna <code>{"status":"ok"}</code>: <code>curl /health</code></div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Login com usuário administrador testado com sucesso</div></div>
-    <div class="chk"><div class="chk-box"></div><div class="chk-text">Gerenciador de processos configurado (PM2 ou systemd)</div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Reverse proxy (nginx/Caddy) com HTTPS configurado</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Gerenciador de processos configurado (PM2 ou systemd)</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Monitor externo configurado (UptimeRobot ou similar) apontando para <code>/health</code></div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Backup automático do banco configurado (cron ou plataforma gerenciada)</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Price List sincronizado: Configurações → Price List → Sincronizar</div></div>
     <div class="chk"><div class="chk-box"></div><div class="chk-text">Importação de arquivo CSV Azure testada</div></div>
-    <div class="chk"><div class="chk-box"></div><div class="chk-text">Geração de PDF de estimativa testada</div></div>
+    <div class="chk"><div class="chk-box"></div><div class="chk-text">Geração de estimativa em PDF testada</div></div>
   </div>
   <div style="height:16px"></div>
 </div>
@@ -1053,7 +1169,7 @@ nssm status FinOpsManager</pre>
     <span class="foot-dot"></span>
     <span>FinOps Manager</span>
     <span class="foot-dot"></span>
-    <span>Guia de Implementação v1.0</span>
+    <span>Guia de Implementação v2.1</span>
     <span class="foot-dot"></span>
     <span>Uso Interno Vivo</span>
   </div>
