@@ -48,11 +48,15 @@ Sistema web para gestão de ações FinOps com calculadora de custos Azure, Pric
 
 ### 🛡️ Segurança reforçada (v2.0)
 - `express.static` restrito a arquivos públicos — `server.js`, `.env.key` e `.finops_setup` não são mais acessíveis via HTTP
-- Content-Security-Policy configurado (helmet)
-- HSTS habilitado (1 ano)
 - Pool PostgreSQL com parâmetros explícitos e handler de erro
 - Endpoint `/health` para monitoramento e load balancers
 - `uncaughtException` encerra o processo para permitir restart automático via PM2/systemd
+
+### 🔤 Fontes self-hosted (v2.0)
+- IBM Plex Sans e IBM Plex Mono incluídas no repositório (`fonts/` — 16 arquivos WOFF2, ~308 KB)
+- Zero dependência de Google Fonts — sem chamada externa para `fonts.googleapis.com` ou `fonts.gstatic.com`
+- Funciona em redes corporativas isoladas e ambientes sem acesso à internet
+- Elimina transferência de IP do usuário para o Google a cada acesso (LGPD)
 
 ---
 
@@ -870,7 +874,56 @@ O servidor usa `helmet` com CSP desabilitado (para compatibilidade com o SPA inl
 
 `server.js` · `package.json` · `.env` · `.env.key` · `.env.enc` · `.finops_setup` · `schema.sql` · `*.sql`
 
-Apenas `index.html`, `app.js`, `calculadora.js`, `styles.css` e `favicon.svg` são servidos estaticamente.
+**Arquivos servidos estaticamente:** `index.html` · `app.js` · `calculadora.js` · `styles.css` · `favicon.svg` · `mascote.png` · `fonts/*.woff2`
+
+### Atualizar as fontes tipográficas
+
+As fontes IBM Plex são open-source (SIL OFL 1.1) e distribuídas via [`@fontsource`](https://fontsource.org). Para atualizar para uma versão mais nova:
+
+```bash
+# 1. Instalar pacotes fontsource temporariamente
+npm install --save-dev @fontsource/ibm-plex-sans @fontsource/ibm-plex-mono
+
+# 2. Copiar apenas os subsets latin e latin-ext que o sistema usa
+# Linux / macOS
+BASE_SANS="node_modules/@fontsource/ibm-plex-sans/files"
+BASE_MONO="node_modules/@fontsource/ibm-plex-mono/files"
+
+for w in 300 400 500 600 700; do
+  cp "$BASE_SANS/ibm-plex-sans-latin-${w}-normal.woff2"     "fonts/ibm-plex-sans-latin-${w}.woff2"
+  cp "$BASE_SANS/ibm-plex-sans-latin-ext-${w}-normal.woff2" "fonts/ibm-plex-sans-latin-ext-${w}.woff2"
+done
+for w in 400 500 600; do
+  cp "$BASE_MONO/ibm-plex-mono-latin-${w}-normal.woff2"     "fonts/ibm-plex-mono-latin-${w}.woff2"
+  cp "$BASE_MONO/ibm-plex-mono-latin-ext-${w}-normal.woff2" "fonts/ibm-plex-mono-latin-ext-${w}.woff2"
+done
+```
+
+```powershell
+# Windows (PowerShell)
+$baseSans = "node_modules\@fontsource\ibm-plex-sans\files"
+$baseMono = "node_modules\@fontsource\ibm-plex-mono\files"
+
+foreach ($w in @(300,400,500,600,700)) {
+  Copy-Item "$baseSans\ibm-plex-sans-latin-$w-normal.woff2"     "fonts\ibm-plex-sans-latin-$w.woff2"
+  Copy-Item "$baseSans\ibm-plex-sans-latin-ext-$w-normal.woff2" "fonts\ibm-plex-sans-latin-ext-$w.woff2"
+}
+foreach ($w in @(400,500,600)) {
+  Copy-Item "$baseMono\ibm-plex-mono-latin-$w-normal.woff2"     "fonts\ibm-plex-mono-latin-$w.woff2"
+  Copy-Item "$baseMono\ibm-plex-mono-latin-ext-$w-normal.woff2" "fonts\ibm-plex-mono-latin-ext-$w.woff2"
+}
+```
+
+```bash
+# 3. Remover pacotes temporários
+npm uninstall @fontsource/ibm-plex-sans @fontsource/ibm-plex-mono
+
+# 4. Commitar os novos arquivos
+git add fonts/
+git commit -m "chore: atualizar IBM Plex fonts para versao X.X"
+```
+
+> Os `@font-face` em `styles.css` não precisam ser alterados — os nomes dos arquivos são estáveis entre versões do fontsource.
 
 ---
 
@@ -894,11 +947,11 @@ O sistema realiza chamadas externas tanto a partir do **servidor Node.js** quant
 
 | Serviço | URL | Porta | Quando é usado |
 |---|---|---|---|
-| **Google Fonts** | `https://fonts.googleapis.com` | 443 | Carregamento da fonte Inter (UI) |
-| **Google Fonts CDN** | `https://fonts.gstatic.com` | 443 | Arquivos de fonte `.woff2` |
 | **cdnjs (Cloudflare)** | `https://cdnjs.cloudflare.com` | 443 | Biblioteca XLSX.js usada no export Excel do frontend |
 
-> Se os usuários estiverem em uma rede corporativa com proxy ou firewall de saída, as URLs acima precisam estar na lista de permissões do proxy/firewall para que a interface funcione corretamente.
+> **Fontes tipográficas (IBM Plex Sans / Mono):** self-hosted na pasta `fonts/` — **não há chamada externa para Google Fonts**. Nenhuma liberação de firewall necessária para fontes.
+
+> Se os usuários estiverem em uma rede corporativa com proxy ou firewall de saída, apenas a URL do cdnjs acima precisa estar na lista de permissões.
 
 ### Resumo de portas e direções
 
@@ -912,9 +965,8 @@ SERVIDOR (outbound)
   636/TCP  → [AD server]    ← LDAPS (recomendado)
 
 NAVEGADOR (outbound)
-  443/TCP  → fonts.googleapis.com
-  443/TCP  → fonts.gstatic.com
   443/TCP  → cdnjs.cloudflare.com
+  (fontes: self-hosted — sem saída para Google Fonts)
 
 INBOUND (para o servidor Node.js)
   3000/TCP ← apenas do proxy reverso (Nginx/Caddy) — nunca expor ao público
@@ -928,7 +980,8 @@ INBOUND (para o servidor Node.js)
 - **Price List:** se `prices.azure.com` estiver bloqueado, a sincronização falha silenciosamente e a calculadora usa apenas o custo histórico de billing (sem coluna PL/h e sem badges de desconto).
 - **Coleta Automática:** requer acesso a `management.azure.com` e ao `*.blob.core.windows.net` da subscription configurada. Sem acesso, a coleta falha e registra erro no histórico.
 - **SSO Entra ID:** sem acesso a `login.microsoftonline.com`, o botão "Entrar com Microsoft" não funciona. O login local (e-mail + senha) e o AD continuam funcionando.
-- **Google Fonts / cdnjs:** sem acesso, a UI ainda funciona mas usa fontes fallback do sistema e o export Excel via browser pode falhar (XLSX.js não carrega). Considere hospedar os assets localmente se necessário.
+- **Fontes (IBM Plex):** self-hosted em `fonts/` — sem dependência externa. Nenhuma regra de firewall necessária.
+- **cdnjs:** sem acesso, o export Excel via browser pode falhar (XLSX.js não carrega). O restante da UI funciona normalmente.
 
 ---
 
