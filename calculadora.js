@@ -527,12 +527,14 @@ const Calculadora = (() => {
         </div>
         <div>
           <label class="cl">Validade (dias)</label>
-          <input type="number" id="cinv-validade" class="ci" value="30" min="1">
+          <input type="number" id="cinv-validade" class="ci" value="30" min="1" readonly
+                 style="opacity:.55;cursor:not-allowed;background:var(--bg);" title="Validade padrão: 30 dias">
         </div>
       </div>
       <div style="margin-bottom:16px;">
-        <label class="cl">Observações</label>
-        <textarea id="cinv-obs" class="ci" rows="2" style="height:60px;padding:8px 10px;resize:none;" placeholder="Observações opcionais..."></textarea>
+        <label class="cl">Motivo da Solicitação <span style="color:var(--danger);font-size:13px">*</span></label>
+        <textarea id="cinv-obs" class="ci" rows="2" style="height:60px;padding:8px 10px;resize:none;"
+                  placeholder="Informe o motivo da solicitação do ambiente ligado..."></textarea>
       </div>
 
       <!-- Preview resumo -->
@@ -2559,10 +2561,15 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const titulo  = document.getElementById('cinv-titulo')?.value?.trim()   || 'Estimativa de Custos Azure';
     const dataVal = document.getElementById('cinv-data')?.value             || new Date().toISOString().slice(0,10);
     const resp    = document.getElementById('cinv-resp')?.value?.trim()     || '';
-    const valDias = parseInt(document.getElementById('cinv-validade')?.value) || 30;
+    const valDias = 30; // Validade fixa em 30 dias
     const obs     = document.getElementById('cinv-obs')?.value?.trim()      || '';
 
     if (!sel?.value) { _toast('Selecione um projeto.', 'error'); return; }
+    if (!obs) {
+      _toast('Informe o motivo da solicitação do ambiente ligado.', 'error');
+      document.getElementById('cinv-obs')?.focus();
+      return;
+    }
 
     const projetoId   = sel.value;
     const nomeProjeto = sel.selectedOptions[0]?.text || '';
