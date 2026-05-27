@@ -2007,7 +2007,9 @@ async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
       if (isRetryable && attempt < maxRetries) {
         let wait;
         if (err.code === 429) {
-          wait = (err.retryAfter > 0 ? err.retryAfter : attempt * 60) * 1000;
+          // Respeita Retry-After; se não houver, cresce: 60s → 90s → 120s → 150s
+          const base = err.retryAfter > 0 ? err.retryAfter : 60;
+          wait = (base + (attempt - 1) * 30) * 1000;
           console.warn(`[PriceList] Rate limit 429 — aguardando ${wait / 1000}s (tentativa ${attempt}/${maxRetries})...`);
         } else {
           wait = attempt * 15000; // backoff 15s, 30s, 45s...
@@ -2026,12 +2028,11 @@ async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
 }
 
 function _buildPriceListUrl(currency) {
-  // Nota: armRegionName NÃO é filtrado aqui — a Azure Retail Prices API retorna
-  // 0 itens para 'brazilsouth' quando esse filtro é aplicado.
-  // Os preços são globais (em USD); o meter_id é único mundialmente, portanto
-  // o JOIN com azure_costs funciona sem filtrar por região na price list.
+  // Nota: armRegionName NÃO é filtrado — a API retorna 0 itens para qualquer região específica.
+  // $top=1000 reduz o nº de chamadas de ~1000 para ~100 (default da API é 100 itens/pág),
+  // diminuindo drasticamente a exposição ao rate limit (429).
   const f = encodeURIComponent(`currencyCode eq '${currency}'`);
-  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}`;
+  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}&$top=1000`;
 }
 
 async function _syncPriceList(requestedCurrency = 'USD') {
@@ -2108,10 +2109,15 @@ async function _syncPriceList(requestedCurrency = 'USD') {
 
         _syncProgress.pages = pages;
         _syncProgress.total = total;
-        if (pages % 50 === 0)
+        if (pages % 10 === 0)
           console.log(`[PriceList] Página ${pages} — ${total} registros...`);
 
         if (!nextLink) break;
+
+        // Delay entre páginas: evita 429 por burst de requisições.
+        // Com $top=1000 são ~100 páginas no total; 300ms → ~30s overhead tolerável.
+        await new Promise(r => setTimeout(r, 300));
+
         const next = await _fetchPriceListPage(nextLink);
         currentItems = next.items;
         nextLink     = next.nextLink;
