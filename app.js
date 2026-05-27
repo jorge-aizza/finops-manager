@@ -1772,17 +1772,21 @@ async function _loadPriceListStatus() {
     }
 
     // ── Circuit Breaker — exibe alerta se API estiver bloqueada ────────────────
-    const cbBtn = document.getElementById('pl-sync-btn');
-    const cb    = d.circuit_breaker;
+    const syncBtn  = document.getElementById('pl-sync-btn');
+    const cbRstBtn = document.getElementById('pl-cb-reset-btn');
+    const cb       = d.circuit_breaker;
     if (cb && cb.state === 'OPEN') {
       sub.textContent        = `⚡ Circuit Breaker aberto — API bloqueada por falhas consecutivas. Liberação automática em ${cb.remaining_min ?? '?'} min.`;
       badge.textContent      = '⚡ CB Aberto';
       badge.style.background = 'rgba(255,77,106,.15)';
       badge.style.color      = 'var(--danger,#ff4d6a)';
-      if (cbBtn) cbBtn.disabled = true;
+      if (syncBtn)  syncBtn.disabled       = true;
+      if (cbRstBtn) cbRstBtn.style.display = 'inline-flex';
       return { syncing: false, total: tot, last_result: d.last_result, cb_open: true };
     }
-    if (cbBtn && !_plPolling) cbBtn.disabled = false; // reabilita se CB fechou
+    // CB fechado — reabilita botão e esconde reset
+    if (syncBtn  && !_plPolling) syncBtn.disabled       = false;
+    if (cbRstBtn)                cbRstBtn.style.display = 'none';
 
     if (d.syncing) {
       // Mostra progresso em tempo real quando disponível
@@ -1909,6 +1913,25 @@ async function syncPriceList() {
       msgEl.innerHTML = '<div style="padding:10px 14px;background:rgba(255,77,106,.10);border:1px solid rgba(255,77,106,.2);border-radius:8px;font-size:13px;color:var(--danger,#ff4d6a);">'
         + '❌ Erro: ' + e.message + '</div>';
     }
+  }
+}
+
+async function resetPlCb() {
+  const btn = document.getElementById('pl-cb-reset-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res = await fetch('/api/price-list/reset-cb', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'Erro ao resetar CB');
+    showToast('Circuit Breaker liberado — pode tentar sincronizar novamente.', 'success');
+    await _loadPriceListStatus();
+  } catch (e) {
+    showToast('Erro ao resetar CB: ' + e.message, 'error');
+    if (btn) btn.disabled = false;
   }
 }
 

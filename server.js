@@ -2029,10 +2029,10 @@ async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
 
 function _buildPriceListUrl(currency) {
   // Nota: armRegionName NÃO é filtrado — a API retorna 0 itens para qualquer região específica.
-  // $top=1000 reduz o nº de chamadas de ~1000 para ~100 (default da API é 100 itens/pág),
-  // diminuindo drasticamente a exposição ao rate limit (429).
+  // A API retorna 100 itens/pág e não aceita $top > 100 (retorna HTTP 400).
+  // O throttling é controlado pelo delay entre páginas em _syncPriceList.
   const f = encodeURIComponent(`currencyCode eq '${currency}'`);
-  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}&$top=1000`;
+  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}`;
 }
 
 async function _syncPriceList(requestedCurrency = 'USD') {
@@ -2931,6 +2931,16 @@ app.post('/api/price-list/schedule', authMiddleware, dbMiddleware, async (req, r
     console.log(`[PriceList] Agendamento ${ativo ? 'ativado' : 'desativado'}: dia ${dia_mes} às ${hora}h`);
     res.json({ ok: true, ...cfg });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/price-list/reset-cb ────────────────────────────────────────────
+// Reseta o Circuit Breaker do Price List sem precisar reiniciar o servidor.
+// Útil após corrigir configuração que causou erros consecutivos (ex: $top inválido).
+app.post('/api/price-list/reset-cb', authMiddleware, dbMiddleware, (_req, res) => {
+  const anterior = { ..._plCB };
+  _plCB = { state: 'CLOSED', failures: 0, openUntil: null };
+  console.log(`[PriceList CB] Reset manual — estado anterior: ${anterior.state} (${anterior.failures} falhas)`);
+  res.json({ ok: true, anterior, atual: { ..._plCB } });
 });
 
 // ── GET /api/calculadora/subscriptions ───────────────────────────────────────

@@ -3223,6 +3223,9 @@
             <button type="button" class="btn-rep secondary" onclick="_loadPriceListStatus()">
               🔄 Atualizar status
             </button>
+            <button type="button" id="pl-cb-reset-btn" onclick="resetPlCb()" style="display:none;background:rgba(255,77,106,.12);border:1px solid rgba(255,77,106,.35);color:var(--danger,#ff4d6a);border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;">
+              ⚡ Liberar Circuit Breaker
+            </button>
           </div>
 
           <div id="pl-progress" style="display:none;margin-top:14px">
