@@ -2500,8 +2500,8 @@ function _mapRow(row, nomeArquivo) {
     meter_region:                    _toStr(row.meterRegion        || row.MeterRegion),
     product_id:                      _toStr(row.productId          || row.ProductId),
     product_name:                    _toStr(row.productName        || row.ProductName),
-    subscription_id:                 _toStr(row.subscriptionId     || row.SubscriptionId),
-    subscription_name:               _toStr(row.subscriptionName   || row.SubscriptionName),
+    subscription_id:                 _toStr(row.subscriptionId     || row.SubscriptionId     || row.SubscriptionGuid || row.subscriptionGuid || row['Subscription Id'] || row['Subscription ID'] || row['subscription id'] || row['SubscriptionId']),
+    subscription_name:               _toStr(row.subscriptionName   || row.SubscriptionName   || row['Subscription Name'] || row['Subscription']),
     publisher_type:                  _toStr(row.publisherType      || row.PublisherType),
     publisher_id:                    _toStr(row.publisherId        || row.PublisherId),
     publisher_name:                  _toStr(row.publisherName      || row.PublisherName),
@@ -2748,11 +2748,16 @@ async function _lerArquivoRows(filePath, filename) {
 // ── Mapear linha CSV (camelCase Azure) → objeto DB ───────────────────────────
 function _mapRowCSV(row, nomeArquivo) {
   // Suporta camelCase, PascalCase, "Title case" (MCA) e EA legacy
-  // Lookup helper: percorre até 6 nomes, retorna o primeiro não-nulo/vazio
+  // Lookup helper: percorre nomes exatos, retorna o primeiro não-nulo/vazio
   const _p = (...keys) => { for (const k of keys) { const v = row[k]; if (v != null && v !== '') return v; } return null; };
   const p = (a, b, c) => _p(a, b, c);
   const n = (a, b, c) => _toNum(row[a] ?? row[b] ?? (c ? row[c] : undefined));
   const d = (a, b, c) => _toDate(row[a] || row[b] || (c ? row[c] : null));
+
+  // Lookup case-insensitive para lidar com qualquer variação de capitalização do Azure
+  const _rowKeysLower = Object.keys(row).reduce((m, k) => { m[k.toLowerCase().replace(/[\s_-]/g, '')] = k; return m; }, {});
+  const _ci = (...slugs) => { for (const s of slugs) { const k = _rowKeysLower[s]; if (k != null) { const v = row[k]; if (v != null && v !== '') return v; } } return null; };
+
   return {
     invoice_id:                      p('invoiceId',                    'InvoiceId',                    'Invoice ID'),
     previous_invoice_id:             p('previousInvoiceId',            'PreviousInvoiceId',            'Previous Invoice ID'),
@@ -2769,7 +2774,7 @@ function _mapRowCSV(row, nomeArquivo) {
     billing_period_start_date:       d('billingPeriodStartDate',       'BillingPeriodStartDate',       'Billing Period Start Date'),
     service_period_end_date:         d('servicePeriodEndDate',         'ServicePeriodEndDate',         'Service Period End Date'),
     service_period_start_date:       d('servicePeriodStartDate',       'ServicePeriodStartDate',       'Service Period Start Date'),
-    cost_date:                       _toDate(_p('date','Date','usageDate','UsageDate','Usage Date','serviceDate','ServiceDate','Service Date')),
+    cost_date:                       _toDate(_p('date','Date','usageDate','UsageDate','Usage Date','serviceDate','ServiceDate','Service Date','UsageDateTimeKey','usageDateTimeKey')) || _toDate(_ci('date','usagedate','servicedate','usagedatetimekey')),
     service_family:                  p('serviceFamily',                'ServiceFamily',                'Service Family'),
     product_order_id:                p('productOrderId',               'ProductOrderId',               'Product Order ID'),
     product_order_name:              p('productOrderName',             'ProductOrderName',             'Product Order Name'),
@@ -2781,8 +2786,8 @@ function _mapRowCSV(row, nomeArquivo) {
     meter_region:                    p('meterRegion',                  'MeterRegion',                  'Meter Region'),
     product_id:                      p('productId',                    'ProductId',                    'Product ID'),
     product_name:                    p('productName',                  'ProductName',                  'Product Name'),
-    subscription_id:                 p('subscriptionId',               'SubscriptionId',               'Subscription ID'),
-    subscription_name:               p('subscriptionName',             'SubscriptionName',             'Subscription Name'),
+    subscription_id:                 _p('subscriptionId','SubscriptionId','Subscription ID','Subscription Id','SubscriptionGuid','subscriptionGuid') || _ci('subscriptionid','subscriptionguid','subscriptionid'),
+    subscription_name:               _p('subscriptionName','SubscriptionName','Subscription Name','Subscription') || _ci('subscriptionname','subscription'),
     publisher_type:                  p('publisherType',                'PublisherType',                'Publisher Type'),
     publisher_id:                    p('publisherId',                  'PublisherId',                  'Publisher ID'),
     publisher_name:                  p('publisherName',                'PublisherName',                'Publisher Name'),
