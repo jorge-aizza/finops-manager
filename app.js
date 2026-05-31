@@ -1935,6 +1935,141 @@ async function resetPlCb() {
   }
 }
 
+// ── Price List — Import por arquivo CSV / ZIP (múltiplos) ────────────────────
+
+let _plImportQueue   = [];  // FileList → Array de File pendentes
+let _plImportResults = [];  // acumulado de resultados
+let _plImportPollTimer = null;
+
+function _onPlFileChange(input) {
+  const label = document.getElementById('pl-import-label');
+  const btn   = document.getElementById('pl-import-btn');
+  const count = input.files ? input.files.length : 0;
+  if (count > 0) {
+    if (label) label.textContent = count === 1
+      ? input.files[0].name
+      : `${count} arquivos selecionados`;
+    if (btn) btn.disabled = false;
+  } else {
+    if (label) label.textContent = 'Clique para selecionar .csv, .parquet ou .zip (múltiplos)';
+    if (btn)   btn.disabled = true;
+  }
+  document.getElementById('pl-import-msg').style.display = 'none';
+}
+
+async function importPriceListFile() {
+  const fileInput = document.getElementById('pl-import-file');
+  if (!fileInput || !fileInput.files.length) return;
+
+  _plImportQueue   = Array.from(fileInput.files);
+  _plImportResults = [];
+
+  document.getElementById('pl-import-btn').disabled = true;
+  document.getElementById('pl-import-msg').style.display = 'none';
+
+  await _processPlQueue();
+}
+
+async function _processPlQueue() {
+  const prog    = document.getElementById('pl-import-progress');
+  const progMsg = document.getElementById('pl-import-progress-msg');
+
+  if (!_plImportQueue.length) {
+    // Fila concluída — mostrar resumo agregado
+    if (prog) prog.style.display = 'none';
+    document.getElementById('pl-import-btn').disabled = false;
+    document.getElementById('pl-import-file').value  = '';
+    document.getElementById('pl-import-label').textContent = 'Clique para selecionar .csv, .parquet ou .zip (múltiplos)';
+
+    const total    = _plImportResults.length;
+    const erros    = _plImportResults.filter(r => r.error).length;
+    const ins      = _plImportResults.reduce((s, r) => s + (r.inserted || 0), 0);
+    const skip     = _plImportResults.reduce((s, r) => s + (r.skipped  || 0), 0);
+    const errRows  = _plImportResults.reduce((s, r) => s + (r.errors   || 0), 0);
+
+    const _esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    if (erros === total) {
+      _showPlImportMsg('error', `❌ Todos os ${total} arquivos falharam. Verifique o formato.`);
+    } else {
+      const detalhes = _plImportResults.map(r =>
+        `<div style="margin-top:4px">${r.error
+          ? `<span style="color:var(--danger)">❌ ${_esc(r.filename)}: ${_esc(r.error)}</span>`
+          : `✅ ${_esc(r.filename)}: ${(r.inserted||0).toLocaleString('pt-BR')} ins · ${(r.skipped||0).toLocaleString('pt-BR')} ignorados · ${(r.errors||0)} err`
+        }</div>`
+      ).join('');
+      _showPlImportMsg('success',
+        `✅ ${total} arquivo(s) · ${ins.toLocaleString('pt-BR')} inseridos · ${skip.toLocaleString('pt-BR')} ignorados · ${errRows} erros${detalhes}`
+      );
+      _loadPriceListStatus();
+    }
+    return;
+  }
+
+  const file    = _plImportQueue.shift();
+  const idx     = _plImportResults.length + 1;
+  const total   = idx + _plImportQueue.length;
+
+  if (prog) prog.style.display = 'block';
+  if (progMsg) progMsg.textContent = `Enviando (${idx}/${total}): ${file.name}`;
+
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const form  = new FormData();
+    form.append('file', file);
+    const res  = await fetch('/api/price-list/import', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: form });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Erro ao iniciar importação');
+
+    if (progMsg) progMsg.textContent = `Importando (${idx}/${total}): ${file.name}`;
+    _plImportPollTimer = setTimeout(() => _pollPlImport(file.name, idx, total), 1500);
+  } catch (e) {
+    _plImportResults.push({ filename: file.name, error: e.message });
+    await _processPlQueue();
+  }
+}
+
+async function _pollPlImport(filename, idx, total) {
+  const progMsg = document.getElementById('pl-import-progress-msg');
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res   = await fetch('/api/price-list/import-status', { headers: { Authorization: 'Bearer ' + token } });
+    const d     = await res.json();
+
+    if (d.importing) {
+      const pct = d.total > 0 ? ` (${((d.inserted||0)+(d.skipped||0)+(d.errors||0)).toLocaleString('pt-BR')}/${d.total.toLocaleString('pt-BR')})` : '';
+      if (progMsg) progMsg.textContent = `Importando${pct} (${idx}/${total}): ${filename}`;
+      _plImportPollTimer = setTimeout(() => _pollPlImport(filename, idx, total), 1500);
+      return;
+    }
+
+    // Arquivo concluído — salvar resultado e processar próximo
+    _plImportResults.push({
+      filename,
+      inserted: d.inserted || 0,
+      skipped:  d.skipped  || 0,
+      errors:   d.errors   || 0,
+      total:    d.total    || 0,
+      error:    d.error    || null,
+    });
+    await _processPlQueue();
+  } catch (e) {
+    _plImportResults.push({ filename, error: e.message });
+    await _processPlQueue();
+  }
+}
+
+function _showPlImportMsg(type, html) {
+  const el = document.getElementById('pl-import-msg');
+  if (!el) return;
+  el.style.display      = 'block';
+  el.style.padding      = '8px 12px';
+  el.style.borderRadius = '8px';
+  el.style.border       = `1px solid ${type === 'error' ? 'rgba(255,77,106,.35)' : 'rgba(34,197,94,.35)'}`;
+  el.style.background   = type === 'error' ? 'rgba(255,77,106,.08)' : 'rgba(34,197,94,.08)';
+  el.style.color        = type === 'error' ? 'var(--danger)' : 'var(--green)';
+  el.innerHTML = html;
+}
+
 // ── Price List — Agendamento Automático ────────────────────────────────────────
 
 async function loadPlSchedule() {
@@ -2998,7 +3133,11 @@ async function checkPendingImportStatus() {
               title.textContent      = '✅ Importação concluída';
               title.style.color      = 'var(--green)';
               fillEl.style.background= 'var(--green)';
-              resumo.innerHTML = `${job.arquivo} · <strong style="color:var(--green)">${(job.inseridos||0).toLocaleString('pt-BR')}</strong> novos · ${(job.erros||0).toLocaleString('pt-BR')} ignorados`;
+              const erros = job.erros || 0;
+              const errBtn = erros > 0 && job.erros_det?.length
+                ? ` <button onclick="_abrirImportErros()" style="margin-left:8px;font-size:11px;padding:2px 10px;background:rgba(255,77,106,.12);border:1px solid rgba(255,77,106,.4);color:var(--danger);border-radius:6px;cursor:pointer">Ver ${erros} erro(s)</button>`
+                : '';
+              resumo.innerHTML = `${job.arquivo} · <strong style="color:var(--green)">${(job.inseridos||0).toLocaleString('pt-BR')}</strong> novos · <span style="color:${erros>0?'var(--danger)':'var(--text-muted)'}">${erros.toLocaleString('pt-BR')} com erro</span>${errBtn}`;
             } else {
               title.textContent      = '⚠️ Erro na importação';
               title.style.color      = 'var(--danger)';
@@ -3076,6 +3215,66 @@ function _ensureCalcIniciado() {
 function abrirDiagnosticoAzure() {
   _ensureCalcIniciado();
   Calculadora.abrirDiagnostico();
+}
+
+// ── Modal de erros de importação ──────────────────────────────────────────────
+async function _abrirImportErros() {
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res   = await fetch('/api/azure-costs/import-status', { headers: { Authorization: 'Bearer ' + token } });
+    const data  = await res.json();
+    const det   = data?.job?.erros_det || [];
+
+    let modal = document.getElementById('modal-import-erros');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'modal-import-erros';
+      modal.className = 'modal-overlay';
+      modal.onclick = e => { if (e.target === modal) modal.classList.remove('open'); };
+      modal.innerHTML = `
+        <div class="modal" style="max-width:820px;width:96%">
+          <div class="modal-header">
+            <h3 class="modal-title" style="color:var(--danger)">⚠️ Linhas com erro na importação</h3>
+            <button class="modal-close" onclick="document.getElementById('modal-import-erros').classList.remove('open')">✕</button>
+          </div>
+          <div class="modal-body" style="padding:16px 20px">
+            <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+              Primeiras <strong>50 amostras</strong> de linhas que falharam. Causas comuns: campo obrigatório nulo,
+              data inválida, duplicata com chave inválida. Verifique o arquivo-fonte e corrija antes de reimportar.
+            </p>
+            <div id="import-erros-body" style="overflow-x:auto;max-height:420px;overflow-y:auto"></div>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+    }
+
+    const body = document.getElementById('import-erros-body');
+    if (!det.length) {
+      body.innerHTML = '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:20px">Nenhum detalhe de erro disponível.</p>';
+    } else {
+      body.innerHTML = `<table class="data-table" style="font-size:11px;width:100%">
+        <thead><tr>
+          <th style="white-space:nowrap">Linha aprox.</th>
+          <th>Mensagem de erro</th>
+          <th>cost_date</th>
+          <th>subscription_id</th>
+          <th>resource_id</th>
+        </tr></thead>
+        <tbody>
+          ${det.map(d => `<tr>
+            <td style="text-align:center;color:var(--text-muted)">${d.linha ?? '—'}</td>
+            <td style="color:var(--danger);word-break:break-word;max-width:260px">${d.msg || '—'}</td>
+            <td style="white-space:nowrap;color:var(--text-dim)">${d.cost_date || '—'}</td>
+            <td style="font-family:monospace;font-size:10px;color:var(--text-muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.subscription_id||''}">${d.subscription_id || '—'}</td>
+            <td style="font-family:monospace;font-size:10px;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.resource_id||''}">${d.resource_id || '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+    }
+    modal.classList.add('open');
+  } catch (e) {
+    showToast('Erro ao carregar detalhes: ' + e.message, 'error');
+  }
 }
 
 function abrirPurgeAzure() {
@@ -4238,6 +4437,7 @@ function openStorageModal(id) {
   document.getElementById('storage-account').value   = '';
   document.getElementById('storage-container').value = '';
   document.getElementById('storage-prefix').value    = '';
+  document.getElementById('storage-pl-prefix').value = '';
   document.getElementById('storage-ativo').checked   = true;
   document.getElementById('storage-auto-ativo').checked = false;
   document.getElementById('storage-sched-body').style.display = 'none';
@@ -4264,6 +4464,7 @@ function openStorageModal(id) {
         document.getElementById('storage-account').value   = s.storage_account || '';
         document.getElementById('storage-container').value = s.storage_container || '';
         document.getElementById('storage-prefix').value    = s.storage_prefix || '';
+        document.getElementById('storage-pl-prefix').value = s.price_list_prefix || '';
         document.getElementById('storage-ativo').checked   = s.ativo;
         sel.value = s.sp_id || '';
         const temSched = s.hora_execucao != null && s.dias_semana;
@@ -4290,8 +4491,9 @@ async function saveStorage() {
     nome:              document.getElementById('storage-nome').value.trim(),
     storage_account:   document.getElementById('storage-account').value.trim(),
     storage_container: document.getElementById('storage-container').value.trim(),
-    storage_prefix:    document.getElementById('storage-prefix').value.trim(),
-    ativo:             document.getElementById('storage-ativo').checked,
+    storage_prefix:      document.getElementById('storage-prefix').value.trim(),
+    price_list_prefix:   document.getElementById('storage-pl-prefix').value.trim() || null,
+    ativo:               document.getElementById('storage-ativo').checked,
     sp_id:             spVal ? parseInt(spVal) : null,
   };
   if (!body.storage_account || !body.storage_container) { showToast('Preencha Storage Account e Container', 'error'); return; }
@@ -4415,6 +4617,11 @@ async function loadColetaHistorico(tipo) {
   const tab   = tipo || _coletaTabAtual || 'api';
   const tbody = document.getElementById('coleta-hist-tbody');
   const thead = document.getElementById('coleta-hist-thead');
+
+  // Limpar só faz sentido para API/Storage (azure_coleta_historico)
+  // Na aba manual os dados vêm de azure_costs — não há histórico separado para apagar
+  const btnLimpar = document.getElementById('btn-limpar-historico');
+  if (btnLimpar) btnLimpar.style.display = tab === 'manual' ? 'none' : '';
 
   if (tab === 'manual') {
     // Histórico de imports manuais (fonte: azure_costs por arquivo)

@@ -2041,7 +2041,7 @@
               <span style="font-size:14px;font-weight:700;color:var(--text)">Histórico de Execuções</span>
               <div style="display:flex;gap:8px">
                 <button class="btn-ghost" style="font-size:11px;padding:4px 12px" onclick="loadColetaHistorico(_coletaTabAtual)">Atualizar</button>
-                <button class="btn-ghost" style="font-size:11px;padding:4px 12px;border-color:var(--danger);color:var(--danger)" onclick="limparHistoricoColeta()">Limpar</button>
+                <button id="btn-limpar-historico" class="btn-ghost" style="font-size:11px;padding:4px 12px;border-color:var(--danger);color:var(--danger)" onclick="limparHistoricoColeta()">Limpar</button>
               </div>
             </div>
             <div class="table-wrapper" style="max-height:360px;overflow-y:auto">
@@ -2392,6 +2392,10 @@
             <label style="font-size:11px;color:var(--text-muted)">Ativo</label>
             <label class="toggle-switch" style="margin:0"><input type="checkbox" id="storage-ativo" checked><span class="toggle-slider"></span></label>
           </div>
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Prefixo Price List <span style="color:var(--text-dim)">(opcional — caminho dos CSVs/ZIPs de tabela de preços)</span></label>
+          <input id="storage-pl-prefix" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="pricelist/">
         </div>
         <div>
           <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Service Principal <span style="color:var(--text-dim)">(para autenticação)</span></label>
@@ -3209,6 +3213,29 @@
             automaticamente para BRL usando a taxa de câmbio do seu export de custos. A sync abrange todos os
             serviços Azure (~100 k+ registros) e leva de 5 a 10 minutos. Execute semanalmente ou quando notar
             preços desatualizados.
+          </div>
+
+          <!-- Importar por arquivo CSV / ZIP -->
+          <div style="margin-bottom:18px;padding:14px 16px;border:1px solid var(--border);border-radius:10px;background:rgba(0,0,0,.12)">
+            <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px">📂 Importar por arquivo (CSV ou ZIP)</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <label style="flex:1;min-width:180px;cursor:pointer">
+                <input type="file" id="pl-import-file" accept=".csv,.parquet,.zip" multiple style="display:none" onchange="_onPlFileChange(this)">
+                <div id="pl-import-label" style="padding:8px 12px;background:var(--bg);border:1px dashed var(--border-light);border-radius:8px;font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                  Clique para selecionar .csv, .parquet ou .zip (múltiplos)
+                </div>
+              </label>
+              <button type="button" class="btn-primary" id="pl-import-btn" onclick="importPriceListFile()" disabled style="white-space:nowrap;font-size:13px;padding:8px 16px">
+                Importar
+              </button>
+            </div>
+            <div id="pl-import-progress" style="display:none;margin-top:10px;display:none">
+              <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(147,51,234,.08);border:1px solid var(--border-light);border-radius:8px;">
+                <div style="width:12px;height:12px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0"></div>
+                <span id="pl-import-progress-msg" style="font-size:12px;color:var(--text-dim)">Importando...</span>
+              </div>
+            </div>
+            <div id="pl-import-msg" style="display:none;margin-top:8px;font-size:12px"></div>
           </div>
 
           <!-- Botão + progresso -->

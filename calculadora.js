@@ -956,6 +956,7 @@ const Calculadora = (() => {
       ));
 
       let totalInseridos = 0, totalErros = 0, concluidos = 0, falhas = 0;
+      const errosArquivos = [];
 
       for (let i = 0; i < validos.length; i++) {
         const file  = validos[i];
@@ -1013,12 +1014,15 @@ const Calculadora = (() => {
             concluidos++;
           } else {
             falhas++;
-            atualEl.textContent    = `⚠ ${file.name}: ${resultado.erro || 'erro no servidor'}`;
+            const erroMsg = resultado.erro || 'erro no servidor';
+            errosArquivos.push({ arquivo: file.name, erro: erroMsg });
+            atualEl.textContent    = `⚠ ${file.name}: ${erroMsg}`;
             fillEl.style.background= 'var(--danger)';
           }
 
         } catch (err) {
           falhas++;
+          errosArquivos.push({ arquivo: file.name, erro: err.message });
           atualEl.textContent    = `⚠ ${file.name}: ${err.message}`;
           fillEl.style.background= 'var(--danger)';
         }
@@ -1039,7 +1043,12 @@ const Calculadora = (() => {
       resumo.style.display = 'block';
       resumo.innerHTML = tudoOk
         ? `${concluidos} arquivo${concluidos !== 1 ? 's' : ''} · <strong style="color:var(--green)">${totalInseridos.toLocaleString('pt-BR')}</strong> novos · ${totalErros.toLocaleString('pt-BR')} ignorados`
-        : `${concluidos} ok${falhas ? ` · <span style="color:var(--danger)">${falhas} com erro</span>` : ''} · <strong>${totalInseridos.toLocaleString('pt-BR')}</strong> novos`;
+        : `${concluidos} ok${falhas ? ` · <span style="color:var(--danger)">${falhas} com erro</span>` : ''} · <strong>${totalInseridos.toLocaleString('pt-BR')}</strong> novos`
+          + (errosArquivos.length
+            ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted);line-height:1.6">`
+              + errosArquivos.map(e => `<div>⚠ <strong style="color:var(--danger)">${e.arquivo}</strong>: ${e.erro}</div>`).join('')
+              + `</div>`
+            : '');
 
       localStorage.setItem('finops_import_status', JSON.stringify({
         status: tudoOk ? 'done' : 'partial',
@@ -1160,7 +1169,11 @@ const Calculadora = (() => {
     opts.innerHTML='<div style="padding:8px 12px;font-size:12px;color:var(--text-muted);">Carregando...</div>';
     try {
       const data = await _api('GET', '/calculadora/subscriptions');
-      if (!Array.isArray(data)||!data.length) { opts.innerHTML='<div style="padding:8px 12px;font-size:12px;color:var(--text-muted);">Nenhuma assinatura. Importe um CSV/Parquet.</div>'; return; }
+      if (!Array.isArray(data)||!data.length) {
+        opts.innerHTML='<div style="padding:8px 12px;font-size:12px;color:var(--text-muted);">Nenhuma assinatura. Importe um CSV/Parquet.</div>';
+        _diagCache();
+        return;
+      }
       _dds.csub.data = data.map(s => { const ini=(s.periodo_inicio||'').slice(0,10),fim=(s.periodo_fim||'').slice(0,10); return { value:s.subscription_id, label:`${s.subscription_name||s.subscription_id}${ini?' ('+ini+' → '+fim+')':''}`, labelShort:s.subscription_name||s.subscription_id, sub:ini?`${ini} → ${fim}`:'', periodo_fim:fim }; });
       _renderOpcoes('csub');
     } catch(err) { opts.innerHTML=`<div style="padding:8px 12px;font-size:12px;color:#ff4d6a;">Erro: ${_esc(err.message)}</div>`; }
@@ -1168,6 +1181,49 @@ const Calculadora = (() => {
 
   function onSubChange() {}
   function onRgChange()  {}
+
+  async function _diagCache() {
+    const opts = document.getElementById('csub-options');
+    try {
+      const d = await _api('GET', '/azure-costs/diag');
+      const total   = parseInt(d.azure_costs?.total   || 0);
+      const comSub  = parseInt(d.azure_costs?.com_sub || 0);
+      const comData = parseInt(d.azure_costs?.com_data|| 0);
+      const subs    = parseInt(d.subs_cache?.total    || 0);
+      const ok = total > 0 && comSub > 0;
+
+      let html = `<div style="padding:10px 12px;font-size:11px;line-height:1.7">`;
+      if (total === 0) {
+        html += `<div style="color:var(--danger);font-weight:600">❌ azure_costs está vazia — importe um CSV/Parquet</div>`;
+      } else if (comSub === 0) {
+        html += `<div style="color:var(--orange);font-weight:600">⚠ ${total.toLocaleString('pt-BR')} linhas importadas mas subscription_id é nulo em todos</div>`;
+        if (d.colunas_amostra?.length) html += `<div style="color:var(--text-muted);margin-top:4px">Colunas encontradas: <span style="font-family:monospace">${d.colunas_amostra.join(', ')}</span></div>`;
+        if (d.amostra_valores) html += `<div style="color:var(--text-muted)">Amostra: ${JSON.stringify(d.amostra_valores)}</div>`;
+      } else {
+        html += `<div style="color:var(--green)">✅ ${total.toLocaleString('pt-BR')} linhas · ${comSub.toLocaleString('pt-BR')} com subscription · ${comData.toLocaleString('pt-BR')} com data</div>`;
+        html += `<div style="color:var(--text-muted)">Cache: ${subs} assinatura(s)</div>`;
+      }
+      html += `<button onclick="Calculadora._forcarRefreshCache()" style="margin-top:8px;font-size:11px;padding:3px 12px;background:rgba(147,51,234,.15);border:1px solid rgba(147,51,234,.4);color:var(--accent);border-radius:6px;cursor:pointer">🔄 Forçar rebuild de cache</button>`;
+      html += `</div>`;
+      if (opts) opts.innerHTML = html;
+    } catch (_) {}
+  }
+
+  async function _forcarRefreshCache() {
+    const opts = document.getElementById('csub-options');
+    if (opts) opts.innerHTML = '<div style="padding:8px 12px;font-size:12px;color:var(--text-muted);">Reconstruindo cache...</div>';
+    try {
+      const r = await _api('POST', '/azure-costs/refresh-cache');
+      if (r.subs > 0) {
+        _carregarSubscriptions();
+      } else {
+        if (opts) opts.innerHTML = `<div style="padding:8px 12px;font-size:12px;color:var(--danger);">Cache reconstruído mas ainda 0 assinaturas. Verifique o import.</div>`;
+        _diagCache();
+      }
+    } catch (e) {
+      if (opts) opts.innerHTML = `<div style="padding:8px 12px;font-size:12px;color:var(--danger);">Erro: ${_esc(e.message)}</div>`;
+    }
+  }
 
   async function buscarRecursos() {
     if (!_subsSel.length) { _toast('Selecione assinaturas e clique OK ✓.', 'error'); return; }
@@ -3643,6 +3699,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
            abrirPurge, fecharPurge, executarPurge,
            abrirReconciliacao, fecharReconciliacao, _onAzureRefInput,
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
+           _diagCache, _forcarRefreshCache,
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,

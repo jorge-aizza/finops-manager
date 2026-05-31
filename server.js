@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 // ─── AUTO-LOAD .env or .env.enc ──────────────────────────────────────────────
 (function loadEnv() {
@@ -1790,6 +1790,25 @@ async function _refreshAzureCache() {
       );
     `);
     await c.query('BEGIN');
+    // Diagnóstico: conta registros antes de reconstruir o cache
+    const diag = await c.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(subscription_id) AS com_sub,
+             COUNT(cost_date) AS com_data
+      FROM azure_costs
+    `).catch(() => null);
+    if (diag) {
+      const { total, com_sub, com_data } = diag.rows[0];
+      console.log(`[Azure Cache] azure_costs: ${total} linhas, ${com_sub} com subscription_id, ${com_data} com cost_date`);
+      if (parseInt(total) > 0 && parseInt(com_sub) === 0) {
+        // subscription_id nulo em todos — mostra os nomes das colunas para diagnóstico
+        const amostra = await c.query(`SELECT * FROM azure_costs LIMIT 1`).catch(() => null);
+        if (amostra?.rows?.length) {
+          console.warn('[Azure Cache] ⚠ subscription_id nulo em todos os registros. Colunas disponíveis:', Object.keys(amostra.rows[0]).join(', '));
+        }
+      }
+    }
+
     await c.query('DELETE FROM azure_subs_cache');
     await c.query(`
       INSERT INTO azure_subs_cache
@@ -2147,6 +2166,147 @@ async function _syncPriceList(requestedCurrency = 'USD') {
   }
 }
 
+// ── Price List import via CSV/ZIP ─────────────────────────────────────────────
+let _plImporting = false;
+let _plImportProgress = { total: 0, inserted: 0, skipped: 0, errors: 0, started: null, finished: null, error: null, filename: null };
+
+// Normaliza cabeçalho CSV → chave canônica da tabela azure_price_list
+function _mapPlCol(h) {
+  const s = h.replace(/[_\s-]/g, '').toLowerCase();
+  if (s === 'meterid')            return 'meter_id';
+  if (s === 'currencycode')       return 'currency_code';
+  if (s === 'armregionname')      return 'arm_region_name';
+  if (s === 'retailprice')        return 'retail_price';
+  if (s === 'unitprice')          return 'unit_price';
+  if (s === 'unitofmeasure')      return 'unit_of_measure';
+  if (s === 'productname')        return 'product_name';
+  if (s === 'skuname')            return 'sku_name';
+  if (s === 'servicename')        return 'service_name';
+  if (s === 'servicefamily')      return 'service_family';
+  if (s === 'type')               return 'type';
+  if (s === 'reservationterm')    return 'reservation_term';
+  if (s === 'effectivestartdate') return 'effective_start';
+  return null;
+}
+
+async function _importPriceListFromCSV(csvPath, filename) {
+  await ensurePriceListTable();
+
+  const ARM_REGION_FALLBACK = 'global';
+  const nome = (filename || csvPath).toLowerCase();
+
+  // ZIP/Parquet: carrega na memória (caso menos comum para Price List)
+  let nonCsvRows = null;
+  if (!nome.endsWith('.csv')) {
+    nonCsvRows = await _lerArquivoRows(csvPath, filename || csvPath);
+    if (!nonCsvRows.length) return { total: 0, inserted: 0, skipped: 0, errors: 0 };
+  }
+
+  let colMap = null;
+  let inserted = 0, skipped = 0, errors = 0, total = 0, sp = 0;
+
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+
+    const processarRow = async (row) => {
+      const spn = `spl_${sp++}`;
+      try {
+        const meterId       = (row[colMap['meter_id']] || '').trim();
+        if (!meterId) { skipped++; return; }
+        const currency      = (row[colMap['currency_code']]    || 'USD').trim() || 'USD';
+        const armRegion     = (row[colMap['arm_region_name']]  || ARM_REGION_FALLBACK).trim() || ARM_REGION_FALLBACK;
+        const retailPrice   = parseFloat(row[colMap['retail_price']]  || 0) || 0;
+        const unitPrice     = parseFloat(row[colMap['unit_price']]    || 0) || 0;
+        const unitOfMeasure = (row[colMap['unit_of_measure']]  || null)?.trim() || null;
+        const productName   = (row[colMap['product_name']]     || null)?.trim() || null;
+        const skuName       = (row[colMap['sku_name']]         || null)?.trim() || null;
+        const serviceName   = (row[colMap['service_name']]     || null)?.trim() || null;
+        const serviceFamily = (row[colMap['service_family']]   || null)?.trim() || null;
+        const type          = (row[colMap['type']]             || 'Consumption').trim() || 'Consumption';
+        const rsvTerm       = (row[colMap['reservation_term']] || '').trim();
+        const effStart      = (row[colMap['effective_start']]  || '').trim().slice(0, 10) || null;
+
+        await c.query(`SAVEPOINT ${spn}`);
+        const r = await c.query(`
+          INSERT INTO azure_price_list
+            (meter_id, currency_code, arm_region_name, retail_price, unit_price,
+             unit_of_measure, product_name, sku_name, service_name, service_family,
+             type, reservation_term, effective_start, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
+          ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
+          DO UPDATE SET
+            retail_price    = EXCLUDED.retail_price,
+            unit_price      = EXCLUDED.unit_price,
+            product_name    = EXCLUDED.product_name,
+            sku_name        = EXCLUDED.sku_name,
+            effective_start = EXCLUDED.effective_start,
+            updated_at      = NOW()
+        `, [meterId, currency, armRegion, retailPrice, unitPrice,
+            unitOfMeasure, productName, skuName, serviceName, serviceFamily,
+            type, rsvTerm, effStart]);
+        await c.query(`RELEASE SAVEPOINT ${spn}`);
+        if (r.rowCount > 0) inserted++; else skipped++;
+      } catch (e) {
+        await c.query(`ROLLBACK TO SAVEPOINT ${spn}`);
+        await c.query(`RELEASE SAVEPOINT ${spn}`);
+        errors++;
+      }
+    };
+
+    if (nonCsvRows) {
+      // ZIP/Parquet — já carregado na memória
+      colMap = {};
+      for (const k of Object.keys(nonCsvRows[0])) {
+        const mapped = _mapPlCol(k);
+        if (mapped) colMap[mapped] = k;
+      }
+      if (!colMap['meter_id']) throw new Error('Coluna meterId / meter_id não encontrada no CSV');
+      total = nonCsvRows.length;
+      if (_plImportProgress) _plImportProgress.total = total;
+      for (let _i = 0; _i < nonCsvRows.length; _i++) {
+        await processarRow(nonCsvRows[_i]);
+        if ((_i + 1) % 200 === 0 && _plImportProgress)
+          Object.assign(_plImportProgress, { inserted, skipped, errors });
+      }
+      if (_plImportProgress) Object.assign(_plImportProgress, { inserted, skipped, errors });
+    } else {
+      // CSV — streaming por batches de 500 linhas (sem carregar na memória)
+      await _lerCSVBatched(csvPath, 500, async (batch) => {
+        if (!colMap) {
+          colMap = {};
+          for (const k of Object.keys(batch[0])) {
+            const mapped = _mapPlCol(k);
+            if (mapped) colMap[mapped] = k;
+          }
+          if (!colMap['meter_id']) throw new Error('Coluna meterId / meter_id não encontrada no CSV');
+        }
+        total += batch.length;
+        if (_plImportProgress) _plImportProgress.total = total;
+        for (const row of batch) await processarRow(row);
+        if (_plImportProgress) Object.assign(_plImportProgress, { inserted, skipped, errors });
+      });
+
+      if (!colMap) {
+        // CSV vazio — finaliza sem gravar
+        await c.query('COMMIT');
+        return { total: 0, inserted: 0, skipped: 0, errors: 0 };
+      }
+    }
+
+    await c.query('COMMIT');
+  } catch (e) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    c.release();
+  }
+
+  const ts = new Date().toISOString();
+  await _gravaMeta('last_result_USD_global', { ok: true, total, pages: 1, currency: 'USD', region: ARM_REGION_FALLBACK, ts, source: 'csv', filename });
+  return { total, inserted, skipped, errors };
+}
+
 // ── Helpers de importação ────────────────────────────────────────────────────
 const _uploadDir = require('path').join(__dirname, 'uploads_tmp');
 if (!require('fs').existsSync(_uploadDir)) require('fs').mkdirSync(_uploadDir, { recursive: true });
@@ -2400,8 +2560,9 @@ function _lerCSV(filePath) {
     const fd        = fs.openSync(filePath, 'r');
     const bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
     fs.closeSync(fd);
-    const preview = buf.slice(0, bytesRead).toString('utf8').replace(/^\uFEFF/, '');
-    const delim   = preview.includes(';') ? ';' : ',';
+    const preview    = buf.slice(0, bytesRead).toString('utf8').replace(/^\uFEFF/, '');
+    const headerLine = preview.split(/\r?\n/)[0] || preview;
+    const delim      = headerLine.includes(';') ? ';' : ',';
 
     // Parser CSV respeitando aspas
     function parseLine(line) {
@@ -2451,6 +2612,137 @@ function _lerCSV(filePath) {
     rl.on('error', reject);
     stream.on('error', reject);
   });
+}
+
+// Lê CSV em streaming e chama onBatch(rows) a cada batchSize linhas.
+// Evita carregar o arquivo inteiro na memória — necessário para arquivos > 500 MB.
+async function _lerCSVBatched(filePath, batchSize, onBatch) {
+  const fs       = require('fs');
+  const readline = require('readline');
+
+  const buf       = Buffer.allocUnsafe(4096);
+  const fd        = fs.openSync(filePath, 'r');
+  const bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
+  fs.closeSync(fd);
+  const preview    = buf.slice(0, bytesRead).toString('utf8').replace(/^﻿/, '');
+  const headerLine = preview.split(/\r?\n/)[0] || preview;
+  const delim      = headerLine.includes(';') ? ';' : ',';
+
+  function parseLine(line) {
+    const fields = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (ch === delim && !inQ) {
+        fields.push(cur); cur = '';
+      } else cur += ch;
+    }
+    fields.push(cur);
+    return fields;
+  }
+
+  const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+  const rl     = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+  try {
+    let headers = null, firstLine = true, batch = [];
+
+    for await (const rawLine of rl) {
+      const line = firstLine ? rawLine.replace(/^﻿/, '') : rawLine;
+      firstLine = false;
+      if (!line.trim()) continue;
+      if (!headers) { headers = parseLine(line).map(h => h.trim()); continue; }
+      const vals = parseLine(line);
+      if (!vals.some(v => v.trim())) continue;
+      const obj = {};
+      headers.forEach((h, i) => { obj[h] = (vals[i] || '').trim(); });
+      batch.push(obj);
+      if (batch.length >= batchSize) { await onBatch(batch); batch = []; }
+    }
+    if (batch.length) await onBatch(batch);
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
+// ── Leitor universal: CSV / Parquet / ZIP (contendo CSV ou Parquet) ───────────
+// Retorna array de objetos {coluna: valor} prontos para _mapRowCSV ou _mapPlCol.
+async function _lerArquivoRows(filePath, filename) {
+  const fs     = require('fs');
+  const path   = require('path');
+  const os     = require('os');
+  const crypto = require('crypto');
+  const nome   = (filename || path.basename(filePath)).toLowerCase();
+
+  if (nome.endsWith('.csv')) {
+    return _lerCSV(filePath);
+  }
+
+  if (nome.endsWith('.parquet')) {
+    // Tenta pyarrow (Python) primeiro; fallback para @dsnp/parquetjs
+    let tmpCsv = null;
+    try {
+      tmpCsv = await _parquetParaCSV(filePath);
+      if (tmpCsv && fs.existsSync(tmpCsv)) {
+        const rows = await _lerCSV(tmpCsv);
+        try { fs.unlinkSync(tmpCsv); } catch (_) {}
+        return rows;
+      }
+    } catch (pyErr) {
+      if (tmpCsv) try { fs.unlinkSync(tmpCsv); } catch (_) {}
+      console.warn('[lerArquivo] pyarrow falhou, tentando parquetjs:', pyErr.message);
+    }
+
+    let parquet;
+    try { parquet = require('@dsnp/parquetjs'); } catch (_) {}
+    if (!parquet) { try { parquet = require('parquetjs-lite'); } catch (_) {} }
+    if (!parquet) throw new Error('Não foi possível ler Parquet — instale @dsnp/parquetjs');
+
+    const rows   = [];
+    const reader = await parquet.ParquetReader.openFile(filePath);
+    const cursor = reader.getCursor();
+    let rec;
+    while ((rec = await cursor.next()) !== null) {
+      rows.push(Object.fromEntries(
+        Object.entries(rec).map(([k, v]) => [k, v == null ? '' : String(v)])
+      ));
+    }
+    await reader.close();
+    return rows;
+  }
+
+  if (nome.endsWith('.zip')) {
+    const AdmZip  = require('adm-zip');
+    let zip;
+    try { zip = new AdmZip(filePath); }
+    catch (e) { throw new Error(`ZIP inválido: ${e.message}`); }
+
+    const entries = zip.getEntries().filter(e => {
+      const n = e.entryName.toLowerCase();
+      return !n.includes('..') && (n.endsWith('.csv') || n.endsWith('.parquet'));
+    });
+    if (!entries.length) throw new Error('ZIP não contém arquivos .csv ou .parquet válidos');
+
+    const allRows = [];
+    for (const entry of entries) {
+      const tmpName = `zip_ex_${crypto.randomBytes(6).toString('hex')}_${path.basename(entry.entryName)}`;
+      const tmpPath = path.join(os.tmpdir(), tmpName);
+      try {
+        zip.extractEntryTo(entry, os.tmpdir(), false, true, false, tmpName);
+        const rows = await _lerArquivoRows(tmpPath, entry.entryName);
+        allRows.push(...rows);
+      } finally {
+        try { fs.unlinkSync(tmpPath); } catch (_) {}
+      }
+    }
+    return allRows;
+  }
+
+  throw new Error(`Formato não suportado: ${path.extname(nome) || nome}`);
 }
 
 // ── Mapear linha CSV (camelCase Azure) → objeto DB ───────────────────────────
@@ -2570,7 +2862,7 @@ except Exception as e:
 // ── Background import job state ──────────────────────────────────────────────
 let _importJob = null;
 // { id, arquivo, idx, total, status:'running'|'done'|'error',
-//   linhas, inseridos, atualizados, erros, subArquivo, erro, iniciado, concluido }
+//   linhas, inseridos, atualizados, erros, erros_det, subArquivo, erro, iniciado, concluido }
 
 async function _processarImport(tmpPath, originalname, jobId) {
   const fs   = require('fs');
@@ -2578,6 +2870,7 @@ async function _processarImport(tmpPath, originalname, jobId) {
   let csvGerado    = null;
   const tmpZipFiles = [];
   let totalLinhas = 0, totalIns = 0, totalUpd = 0, totalErr = 0;
+  const errosDet = []; // amostras de erro (máx 50)
 
   function upd(fields) {
     if (_importJob && _importJob.id === jobId) Object.assign(_importJob, fields);
@@ -2603,6 +2896,21 @@ async function _processarImport(tmpPath, originalname, jobId) {
             await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
             await client.query(`RELEASE SAVEPOINT ${sp}`);
             totalErr++;
+            if (errosDet.length < 50) {
+              // Captura dados-chave da linha que falhou para diagnóstico
+              let preview = {};
+              try {
+                const m = mapFn(rawRow, nomeArq);
+                preview = {
+                  cost_date:       m.cost_date       || null,
+                  subscription_id: m.subscription_id ? m.subscription_id.slice(0, 36) : null,
+                  resource_id:     m.resource_id     ? m.resource_id.slice(0, 80)     : null,
+                  meter_id:        m.meter_id        ? m.meter_id.slice(0, 40)        : null,
+                };
+              } catch (_) {}
+              errosDet.push({ linha: totalLinhas - rows.length + spCount, msg: e.message.slice(0, 200), ...preview });
+              upd({ erros_det: errosDet });
+            }
           }
         }
         upd({ inseridos: totalIns, atualizados: totalUpd, erros: totalErr });
@@ -2675,14 +2983,23 @@ async function _processarImport(tmpPath, originalname, jobId) {
           else { console.warn(`[Azure Import] Arquivo extraído não encontrado: ${nomeArq}`); continue; }
         }
 
-        let rows = [], mapFn = _mapRowCSV;
         if (nomeArq.endsWith('.csv')) {
-          rows = await _lerCSV(arquivoExtraido);
+          const linhasAntes = totalLinhas;
+          await _lerCSVBatched(arquivoExtraido, 1000, async (batch) => {
+            totalLinhas += batch.length;
+            upd({ linhas: totalLinhas });
+            await _inserirLinhas(batch, _mapRowCSV, nomeArq, sql, COLS);
+          });
+          if (totalLinhas === linhasAntes) {
+            console.warn(`[Azure Import] ${nomeArq} sem dados válidos, ignorado.`);
+            continue;
+          }
         } else {
+          let rows = [], mapFn = _mapRow;
           let tmpCsv = null;
           try {
             tmpCsv = await _parquetParaCSV(arquivoExtraido);
-            if (tmpCsv && fs.existsSync(tmpCsv)) rows = await _lerCSV(tmpCsv);
+            if (tmpCsv && fs.existsSync(tmpCsv)) { rows = await _lerCSV(tmpCsv); mapFn = _mapRowCSV; }
           } catch (_) { tmpCsv = null; }
           if (!rows.length) {
             let parquet;
@@ -2694,25 +3011,33 @@ async function _processarImport(tmpPath, originalname, jobId) {
               let record;
               while ((record = await cursor.next()) !== null) rows.push(record);
               await reader.close();
-              mapFn = _mapRow;
             }
           }
           if (tmpCsv) try { fs.unlinkSync(tmpCsv); } catch (_) {}
+          if (!rows.length) { console.warn(`[Azure Import] ${nomeArq} sem dados válidos, ignorado.`); continue; }
+          totalLinhas += rows.length;
+          upd({ linhas: totalLinhas });
+          await _inserirLinhas(rows, mapFn, nomeArq, sql, COLS);
         }
-
-        if (!rows.length) { console.warn(`[Azure Import] ${nomeArq} sem dados válidos, ignorado.`); continue; }
-        totalLinhas += rows.length;
-        upd({ linhas: totalLinhas });
-        await _inserirLinhas(rows, mapFn, nomeArq, sql, COLS);
       }
 
     } else {
-      let rows = [], mapFn = _mapRowCSV;
-
       if (isCSV) {
-        console.log('[Azure Import] Lendo CSV:', originalname);
-        rows  = await _lerCSV(tmpPath);
+        // CSV: leitura + inserção em streaming — sem carregar o arquivo inteiro na memória
+        console.log('[Azure Import] Lendo CSV em streaming:', originalname);
+        const linhasAntes = totalLinhas;
+        await _lerCSVBatched(tmpPath, 1000, async (batch) => {
+          totalLinhas += batch.length;
+          upd({ linhas: totalLinhas });
+          await _inserirLinhas(batch, _mapRowCSV, originalname, sql, COLS);
+        });
+        if (totalLinhas === linhasAntes) {
+          upd({ status: 'error', erro: 'Arquivo vazio ou sem dados válidos.', concluido: Date.now() });
+          return;
+        }
       } else {
+        // Parquet: ainda carrega na memória (pyarrow → CSV ou parquetjs)
+        let rows = [], mapFn = _mapRowCSV;
         console.log('[Azure Import] Lendo Parquet:', originalname);
         try {
           csvGerado = await _parquetParaCSV(tmpPath);
@@ -2741,17 +3066,15 @@ async function _processarImport(tmpPath, originalname, jobId) {
             return;
           }
         }
+        if (!rows.length) {
+          upd({ status: 'error', erro: 'Arquivo vazio ou sem dados válidos.', concluido: Date.now() });
+          return;
+        }
+        console.log(`[Azure Import] ${rows.length} linhas lidas.`);
+        totalLinhas = rows.length;
+        upd({ linhas: totalLinhas });
+        await _inserirLinhas(rows, mapFn, originalname, sql, COLS);
       }
-
-      if (!rows.length) {
-        upd({ status: 'error', erro: 'Arquivo vazio ou sem dados válidos.', concluido: Date.now() });
-        return;
-      }
-
-      console.log(`[Azure Import] ${rows.length} linhas lidas.`);
-      totalLinhas = rows.length;
-      upd({ linhas: totalLinhas });
-      await _inserirLinhas(rows, mapFn, originalname, sql, COLS);
     }
 
     // Log charge_type breakdown para diagnóstico
@@ -2784,8 +3107,9 @@ if (_multer) {
     filename: (_, file, cb) => cb(null, Date.now() + '_' + file.originalname),
   });
 
-  // Limite de 500 MB — suficiente para exports Azure; 2 GB era excessivo e podia travar o servidor
-  const FILE_SIZE_LIMIT = 500 * 1024 * 1024; // 500 MB
+  // 2 GB — exports Azure multi-part (part_N_0001.csv) podem facilmente superar 500 MB
+  // A leitura CSV é em streaming (readline), sem carregar o arquivo inteiro na memória
+  const FILE_SIZE_LIMIT = 2 * 1024 * 1024 * 1024; // 2 GB
 
   const _upload = _multer({
     storage: _storage,
@@ -2808,7 +3132,7 @@ if (_multer) {
       if (err) {
         if (err.code === 'LIMIT_FILE_SIZE') {
           return res.status(413).json({
-            error: `Arquivo muito grande (limite: 2 GB). Divida em partes menores ou exporte um período menor no Azure Cost Management.`
+            error: `Arquivo muito grande (limite: 500 MB). Divida em partes menores ou exporte um período menor no Azure Cost Management.`
           });
         }
         return res.status(400).json({ error: `Erro no upload: ${err.message}` });
@@ -2834,7 +3158,7 @@ if (_multer) {
       arquivo: req.file.originalname,
       idx, total,
       status: 'running',
-      linhas: 0, inseridos: 0, atualizados: 0, erros: 0,
+      linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
       subArquivo: null, erro: null,
       iniciado: Date.now(), concluido: null,
     };
@@ -2941,6 +3265,61 @@ app.post('/api/price-list/reset-cb', authMiddleware, dbMiddleware, (_req, res) =
   _plCB = { state: 'CLOSED', failures: 0, openUntil: null };
   console.log(`[PriceList CB] Reset manual — estado anterior: ${anterior.state} (${anterior.failures} falhas)`);
   res.json({ ok: true, anterior, atual: { ..._plCB } });
+});
+
+// ── GET /api/price-list/import-status ────────────────────────────────────────
+app.get('/api/price-list/import-status', authMiddleware, (_req, res) => {
+  res.json({ importing: _plImporting, ..._plImportProgress });
+});
+
+// ── POST /api/price-list/import ───────────────────────────────────────────────
+// Aceita .csv, .parquet ou .zip (contendo CSV/Parquet). Fire-and-forget.
+app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
+  if (!_multer) return res.status(500).json({ error: 'multer não disponível' });
+  if (_plImporting) return res.status(409).json({ error: 'Importação já em andamento' });
+
+  const upload = _multer({ dest: _uploadDir, limits: { fileSize: 2 * 1024 * 1024 * 1024 } }).single('file');
+  upload(req, res, async (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE')
+        return res.status(413).json({ error: 'Arquivo muito grande (limite: 2 GB). Divida em partes menores.' });
+      return res.status(400).json({ error: err.message });
+    }
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+
+    const fs       = require('fs');
+    const origname = req.file.originalname || '';
+    const ext      = origname.split('.').pop().toLowerCase();
+
+    if (!['csv', 'parquet', 'zip'].includes(ext))
+      return res.status(400).json({ error: 'Apenas arquivos .csv, .parquet e .zip são aceitos' });
+
+    // Renomear o temp para ter a extensão correta (necessário para _lerArquivoRows detectar o tipo)
+    const path    = require('path');
+    const crypto  = require('crypto');
+    const tmpDest = path.join(_uploadDir, `pl_up_${crypto.randomBytes(6).toString('hex')}.${ext}`);
+    try { fs.renameSync(req.file.path, tmpDest); } catch (_) {}
+
+    res.json({ ok: true, msg: 'Importação iniciada', filename: origname });
+
+    _plImporting = true;
+    _plImportProgress = { total: 0, inserted: 0, skipped: 0, errors: 0, started: new Date().toISOString(), finished: null, error: null, filename: origname };
+
+    (async () => {
+      try {
+        const result = await _importPriceListFromCSV(tmpDest, origname);
+        _plImportProgress = { ...result, started: _plImportProgress.started, finished: new Date().toISOString(), error: null, filename: origname };
+        console.log(`[PriceList Import] ✅ ${origname} — ${result.inserted} inseridos, ${result.skipped} skip, ${result.errors} erros`);
+      } catch (e) {
+        _plImportProgress.error    = e.message;
+        _plImportProgress.finished = new Date().toISOString();
+        console.error('[PriceList Import] ❌', e.message);
+      } finally {
+        _plImporting = false;
+        try { fs.unlinkSync(tmpDest); } catch (_) {}
+      }
+    })();
+  });
 });
 
 // ── GET /api/calculadora/subscriptions ───────────────────────────────────────
@@ -3715,6 +4094,48 @@ app.post('/api/calculadora/estimar', authMiddleware, dbMiddleware, async (req, r
   }
 });
 
+// ── GET /api/azure-costs/diag — Diagnóstico da tabela e cache ────────────────
+app.get('/api/azure-costs/diag', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const [cnt, subs, rgs, sample] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total,
+                         COUNT(subscription_id) AS com_sub,
+                         COUNT(cost_date) AS com_data,
+                         COUNT(cost_in_billing_currency) AS com_custo,
+                         MIN(cost_date) AS data_min,
+                         MAX(cost_date) AS data_max
+                  FROM azure_costs`).catch(() => null),
+      pool.query(`SELECT COUNT(*) AS total FROM azure_subs_cache`).catch(() => null),
+      pool.query(`SELECT COUNT(*) AS total FROM azure_rg_cache`).catch(() => null),
+      pool.query(`SELECT * FROM azure_costs LIMIT 1`).catch(() => null),
+    ]);
+    res.json({
+      azure_costs:     { ...cnt?.rows[0] },
+      subs_cache:      { total: subs?.rows[0]?.total ?? '?' },
+      rg_cache:        { total: rgs?.rows[0]?.total  ?? '?' },
+      colunas_amostra: sample?.rows[0] ? Object.keys(sample.rows[0]) : [],
+      amostra_valores: sample?.rows[0] ? {
+        subscription_id: sample.rows[0].subscription_id,
+        cost_date:       sample.rows[0].cost_date,
+        billing_currency:sample.rows[0].billing_currency,
+        cost_in_billing_currency: sample.rows[0].cost_in_billing_currency,
+      } : null,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/azure-costs/refresh-cache — Força rebuild do cache de dropdowns ─
+app.post('/api/azure-costs/refresh-cache', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await _refreshAzureCache();
+    const [subs, rgs] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total FROM azure_subs_cache`),
+      pool.query(`SELECT COUNT(*) AS total FROM azure_rg_cache`),
+    ]);
+    res.json({ ok: true, subs: parseInt(subs.rows[0].total), rgs: parseInt(rgs.rows[0].total) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── DELETE /api/azure-costs/purge — Apaga todos os dados para re-importação limpa
 app.delete('/api/azure-costs/purge', authMiddleware, dbMiddleware, async (req, res) => {
   try {
@@ -3919,6 +4340,15 @@ async function _cbFetch(url, options = {}, { timeoutMs = 30000, maxRetries = 3, 
 
 async function ensureAzureColetaTable() {
   if (!pool) return;
+
+  // Cada query é separada para que a falha de uma não impeça as seguintes.
+  const run = (sql) => pool.query(sql).catch(e => {
+    // Ignora erros inofensivos: coluna/tabela já existe, tipo já correto
+    if (!e.message.includes('already exists') && !e.message.includes('does not exist'))
+      console.warn('[ColetaTable]', e.message.slice(0, 120));
+  });
+
+  // ── azure_coleta_config ───────────────────────────────────────────────────
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_coleta_config (
       id                  SERIAL PRIMARY KEY,
@@ -3930,17 +4360,26 @@ async function ensureAzureColetaTable() {
       granularidade_dias  INTEGER DEFAULT 7,
       criado_em           TIMESTAMP DEFAULT NOW(),
       atualizado_em       TIMESTAMP DEFAULT NOW()
-    );
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS granularidade_dias  INTEGER DEFAULT 7;
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS nome                VARCHAR(200) DEFAULT 'SP Principal';
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS expiracao_secret    DATE;
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_account     VARCHAR(200);
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_container   VARCHAR(200);
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_prefix      VARCHAR(500);
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_account_id  TEXT;
-    ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_profile_id  TEXT;
-    ALTER TABLE azure_coleta_config ALTER COLUMN billing_account_id TYPE TEXT;
-    ALTER TABLE azure_coleta_config ALTER COLUMN billing_profile_id TYPE TEXT;
+    )
+  `);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS granularidade_dias  INTEGER DEFAULT 7`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS nome                VARCHAR(200) DEFAULT 'SP Principal'`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS expiracao_secret    DATE`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_account     VARCHAR(200)`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_container   VARCHAR(200)`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_prefix      VARCHAR(500)`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_account_id  TEXT`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_profile_id  TEXT`);
+  await run(`ALTER TABLE azure_coleta_config ALTER COLUMN billing_account_id TYPE TEXT`);
+  await run(`ALTER TABLE azure_coleta_config ALTER COLUMN billing_profile_id TYPE TEXT`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS hora_execucao       INTEGER`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS dias_semana         TEXT`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS auto_coleta         BOOLEAN DEFAULT false`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS proxima_coleta      TIMESTAMP`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS is_padrao           BOOLEAN DEFAULT false`);
+
+  // ── azure_storage_config ──────────────────────────────────────────────────
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_storage_config (
       id                SERIAL PRIMARY KEY,
       nome              VARCHAR(200) NOT NULL DEFAULT 'Storage 1',
@@ -3950,18 +4389,17 @@ async function ensureAzureColetaTable() {
       ativo             BOOLEAN DEFAULT true,
       criado_em         TIMESTAMP DEFAULT NOW(),
       atualizado_em     TIMESTAMP DEFAULT NOW()
-    );
-    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS auto_coleta_horas INTEGER;
-    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS proxima_coleta    TIMESTAMP;
-    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS hora_execucao     INTEGER;
-    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS dias_semana       TEXT;
-    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS hora_execucao     INTEGER;
-    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS dias_semana       TEXT;
-    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS auto_coleta       BOOLEAN DEFAULT false;
-    ALTER TABLE azure_coleta_config  ADD COLUMN IF NOT EXISTS proxima_coleta    TIMESTAMP;
-    ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS sp_id             INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL;
-    ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo             VARCHAR(20);
-    ALTER TABLE azure_coleta_config    ADD COLUMN IF NOT EXISTS is_padrao        BOOLEAN DEFAULT false;
+    )
+  `);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS auto_coleta_horas  INTEGER`);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS proxima_coleta     TIMESTAMP`);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS hora_execucao      INTEGER`);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS dias_semana        TEXT`);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS sp_id              INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL`);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS price_list_prefix  VARCHAR(500)`);
+
+  // ── azure_coleta_historico ────────────────────────────────────────────────
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_coleta_historico (
       id                  BIGSERIAL PRIMARY KEY,
       iniciado_em         TIMESTAMP DEFAULT NOW(),
@@ -3975,8 +4413,9 @@ async function ensureAzureColetaTable() {
       linhas_erro         INTEGER DEFAULT 0,
       mensagem            TEXT,
       detalhes            JSONB
-    );
+    )
   `);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo VARCHAR(20)`);
 }
 
 function _encryptSecret(plain) {
@@ -4047,6 +4486,7 @@ function _iniciarAgendador() {
     }
     if (_coletaEmExecucao || !pool) return;
     try {
+      await ensureAzureColetaTable();
       // Storage: suporta agendamento por hora+dia ou por intervalo (legado)
       const rStg = await pool.query(`
         SELECT id, nome, hora_execucao, dias_semana, auto_coleta_horas
@@ -4173,6 +4613,7 @@ app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
 
 app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
+    await ensureAzureColetaTable();
     const r = await pool.query(`SELECT id,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 1`);
     res.json({
       em_execucao:     _coletaEmExecucao,
@@ -4190,6 +4631,7 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
 
 app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req, res) => {
   try {
+    await ensureAzureColetaTable();
     const tipo = req.query.tipo;
     const { rows } = tipo
       ? await pool.query(`SELECT id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem,detalhes FROM azure_coleta_historico WHERE tipo=$1 ORDER BY iniciado_em DESC LIMIT 50`, [tipo])
@@ -4200,6 +4642,7 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req,
 
 app.delete('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
+    await ensureAzureColetaTable();
     await pool.query(`TRUNCATE TABLE azure_coleta_historico RESTART IDENTITY`);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4639,6 +5082,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
   let subCount = 0;
 
   try {
+    await ensureAzureColetaTable();
     const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo) VALUES ('executando','api') RETURNING id`);
     histId = r.rows[0].id;
 
@@ -4813,7 +5257,8 @@ async function _storageDownloadBlob(token, storageAccount, container, blobName) 
   const fs     = require('fs');
   const crypto = require('crypto');
   const os     = require('os');
-  const ext    = blobName.toLowerCase().endsWith('.parquet') ? '.parquet' : '.csv';
+  const _bn    = blobName.toLowerCase();
+  const ext    = _bn.endsWith('.parquet') ? '.parquet' : _bn.endsWith('.zip') ? '.zip' : '.csv';
   const dest   = path.join(os.tmpdir(), `az_stg_${crypto.randomBytes(6).toString('hex')}${ext}`);
   const url    = `https://${storageAccount}.blob.core.windows.net/${container}/${blobName}`;
   const resp   = await fetch(url, { headers: { Authorization: `Bearer ${token}`, 'x-ms-version': '2020-04-08' } });
@@ -4833,6 +5278,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
   let histId, totalIns = 0, totalUpd = 0, totalErr = 0;
 
   try {
+    await ensureAzureColetaTable();
     const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo) VALUES ('executando','storage') RETURNING id`);
     histId = r.rows[0].id;
 
@@ -4864,9 +5310,9 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     _coletaProgresso.fase = 'Listando arquivos no container...';
     _logColeta(`Listando em ${storageAccount}/${container}/${prefix || '*'}`);
     let blobs = await _storageListBlobs(token, storageAccount, container, prefix);
-    blobs = blobs.filter(b => /\.(csv|parquet)$/i.test(b.name));
-    _logColeta(`${blobs.length} arquivo(s) CSV/Parquet encontrado(s)`);
-    if (!blobs.length) throw new Error('Nenhum arquivo CSV/Parquet encontrado no caminho configurado');
+    blobs = blobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
+    _logColeta(`${blobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`);
+    if (!blobs.length) throw new Error('Nenhum arquivo CSV/Parquet/ZIP encontrado no caminho configurado');
     _coletaProgresso.sub_total = blobs.length;
 
     await ensureAzureCostsTable();
@@ -4895,7 +5341,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       let tmpFile;
       try {
         tmpFile = await _storageDownloadBlob(token, storageAccount, container, blob.name);
-        const rows = await _lerCSV(tmpFile);
+        const rows = await _lerArquivoRows(tmpFile, blob.name);
         _logColeta(`  ${rows.length} linhas`);
 
         const client = await pool.connect();
@@ -4938,7 +5384,46 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     }
 
     _refreshAzureCache().catch(() => {});
-    const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros`;
+
+    // ── Price List via Storage (opcional) ──────────────────────────────────────
+    // Se price_list_prefix estiver configurado, coleta CSV/Parquet/ZIP de lá.
+    let plMsg = '';
+    if (stg.price_list_prefix?.trim()) {
+      const plPrefix = stg.price_list_prefix.trim();
+      _coletaProgresso.fase = 'Coletando Price List do Storage...';
+      _logColeta(`[PL] Listando price list em ${storageAccount}/${container}/${plPrefix}`);
+      try {
+        let plBlobs = await _storageListBlobs(token, storageAccount, container, plPrefix);
+        plBlobs = plBlobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
+        _logColeta(`[PL] ${plBlobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s) para price list`);
+        let plIns = 0, plSkip = 0, plErr = 0;
+        for (const pb of plBlobs) {
+          if (_coletaCancelada) break;
+          let plTmp;
+          try {
+            plTmp = await _storageDownloadBlob(token, storageAccount, container, pb.name);
+            const plR = await _importPriceListFromCSV(plTmp, pb.name.split('/').pop());
+            plIns  += plR.inserted;
+            plSkip += plR.skipped;
+            plErr  += plR.errors;
+            _logColeta(`[PL] ${pb.name.split('/').pop()} → ins:${plR.inserted} skip:${plR.skipped} err:${plR.errors}`);
+          } catch (plBlobErr) {
+            _logColeta(`[PL] ERRO ${pb.name.split('/').pop()}: ${plBlobErr.message.slice(0, 60)}`);
+            plErr++;
+          } finally {
+            const fs = require('fs');
+            if (plTmp) try { fs.unlinkSync(plTmp); } catch (_) {}
+          }
+        }
+        plMsg = ` · PriceList: ${plBlobs.length} arquivo(s) · ins:${plIns} skip:${plSkip} err:${plErr}`;
+        _logColeta(`[PL] Concluída${plMsg}`);
+      } catch (plListErr) {
+        _logColeta(`[PL] Erro ao listar price list: ${plListErr.message.slice(0, 80)}`);
+        plMsg = ` · PriceList: erro (${plListErr.message.slice(0, 40)})`;
+      }
+    }
+
+    const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros${plMsg}`;
     _coletaProgresso.fase = 'Concluída';
     _logColeta('Concluída: ' + msg);
     await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
@@ -4969,12 +5454,12 @@ app.get('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (_req,
 
 app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, ativo, sp_id } = req.body;
     await ensureAzureColetaTable();
     if (!storage_account?.trim() || !storage_container?.trim()) return res.status(400).json({ error: 'Storage Account e Container são obrigatórios' });
     const r = await pool.query(
-      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
-      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, ativo ?? true, sp_id || null]
+      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,price_list_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null]
     );
     res.json({ ok: true, id: r.rows[0].id });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4982,10 +5467,10 @@ app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req,
 
 app.put('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, ativo, sp_id } = req.body;
     await pool.query(
-      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,ativo=$5,sp_id=$6,atualizado_em=NOW() WHERE id=$7`,
-      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
+      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,price_list_prefix=$5,ativo=$6,sp_id=$7,atualizado_em=NOW() WHERE id=$8`,
+      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
