@@ -3172,77 +3172,81 @@ if (_multer) {
   });
 }
 
+// ── Cache de cobertura PL (TTL 5 min) — query pesada não bloqueia o status ───
+let _plCobCache = null, _plCobTs = 0;
+function _plCobRefresh() {
+  if (!pool) return;
+  // JOIN em vez de EXISTS por meter_id: muito mais rápido com índice LOWER(meter_id)
+  pool.query(`
+    WITH billing_meters AS (
+      SELECT LOWER(meter_id) AS mid
+      FROM azure_costs
+      WHERE meter_id IS NOT NULL AND meter_id <> ''
+      GROUP BY LOWER(meter_id)
+    ),
+    pl_meters AS (
+      SELECT DISTINCT LOWER(meter_id) AS mid
+      FROM azure_price_list
+      WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = ''
+    )
+    SELECT
+      (SELECT COUNT(*) FROM billing_meters)                          AS billing_meters,
+      (SELECT COUNT(*) FROM billing_meters b
+         INNER JOIN pl_meters p ON p.mid = b.mid)                   AS com_pl,
+      (SELECT COUNT(DISTINCT meter_id) FROM azure_costs
+         WHERE meter_id IS NULL OR meter_id = '')                   AS sem_meter_id
+  `).then(r => {
+    if (!r.rows[0]) return;
+    const bm = parseInt(r.rows[0].billing_meters || 0);
+    _plCobCache = {
+      billing_meters: bm,
+      com_pl:         parseInt(r.rows[0].com_pl       || 0),
+      sem_meter_id:   parseInt(r.rows[0].sem_meter_id || 0),
+      cobertura_pct:  bm > 0 ? Math.round(parseInt(r.rows[0].com_pl || 0) / bm * 100) : 0,
+    };
+    _plCobTs = Date.now();
+  }).catch(() => {});
+}
+
 // ── GET /api/price-list/status ───────────────────────────────────────────────
 app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    // A price list é sempre armazenada em USD/global (sem filtro de região)
     const currency = 'USD';
-    const region   = 'global';
 
-    // Garante tabela existe antes de consultar
-    await ensurePriceListTable();
-
+    // Queries leves em paralelo — responde rápido sem bloquear
     const [meta, cnt] = await Promise.all([
       pool.query(
-        `SELECT key, value, updated_at FROM azure_price_list_meta
-         WHERE key = $1 ORDER BY key`,
+        `SELECT value, updated_at FROM azure_price_list_meta WHERE key = $1`,
         [`last_result_USD_global`]
       ),
       pool.query(`
-        SELECT COUNT(*)                  AS total,
-               COUNT(DISTINCT meter_id) AS meters,
-               MAX(updated_at)          AS last_updated
-        FROM azure_price_list
-        WHERE currency_code = $1
+        SELECT COUNT(*)::int                  AS total,
+               COUNT(DISTINCT meter_id)::int  AS meters,
+               MAX(updated_at)               AS last_updated
+        FROM azure_price_list WHERE currency_code = $1
       `, [currency])
     ]);
 
-    // Lê último resultado gravado no meta
     let last_result = null;
-    if (meta.rows[0]) {
-      try { last_result = JSON.parse(meta.rows[0].value); } catch (_) {}
-    }
+    if (meta.rows[0]) { try { last_result = JSON.parse(meta.rows[0].value); } catch (_) {} }
 
-    // Estado do Circuit Breaker para exibição na UI
     const cbInfo = _plCB.state === 'OPEN'
       ? { state: _plCB.state, blocked_until: new Date(_plCB.openUntil).toISOString(), remaining_min: Math.ceil((_plCB.openUntil - Date.now()) / 60000) }
       : { state: _plCB.state, failures: _plCB.failures };
 
-    // Cobertura: quantos meter_ids do billing têm preço no Price List
-    const cob = await pool.query(`
-      SELECT COUNT(DISTINCT ac.meter_id)                         AS billing_meters,
-             COUNT(DISTINCT ac.meter_id) FILTER (
-               WHERE EXISTS (
-                 SELECT 1 FROM azure_price_list pl
-                 WHERE LOWER(pl.meter_id) = LOWER(ac.meter_id)
-                   AND pl.type IN ('Consumption','DevTestConsumption')
-                   AND pl.reservation_term = ''
-               )
-             )                                                   AS com_pl,
-             COUNT(DISTINCT ac.meter_id) FILTER (
-               WHERE ac.meter_id IS NULL OR ac.meter_id = ''
-             )                                                   AS sem_meter_id
-      FROM azure_costs ac
-    `).catch(() => null);
-
-    const cobInfo = cob?.rows[0] ? {
-      billing_meters:  parseInt(cob.rows[0].billing_meters || 0),
-      com_pl:          parseInt(cob.rows[0].com_pl         || 0),
-      sem_meter_id:    parseInt(cob.rows[0].sem_meter_id   || 0),
-      cobertura_pct:   cob.rows[0].billing_meters > 0
-        ? Math.round(cob.rows[0].com_pl / cob.rows[0].billing_meters * 100)
-        : 0,
-    } : null;
+    // Cobertura: usa cache se < 5 min; dispara refresh em background caso contrário
+    const COB_TTL = 5 * 60 * 1000;
+    if (Date.now() - _plCobTs > COB_TTL) _plCobRefresh();
 
     res.json({
-      total:          parseInt(cnt.rows[0]?.total        || 0),
-      meters:         parseInt(cnt.rows[0]?.meters       || 0),
-      last_updated:   cnt.rows[0]?.last_updated          || null,
+      total:          cnt.rows[0]?.total        || 0,
+      meters:         cnt.rows[0]?.meters       || 0,
+      last_updated:   cnt.rows[0]?.last_updated || null,
       syncing:        _syncingPriceList,
-      progress:       _syncingPriceList ? _syncProgress  : null,
+      progress:       _syncingPriceList ? _syncProgress : null,
       last_result,
       circuit_breaker: cbInfo,
-      cobertura:      cobInfo,
+      cobertura:      _plCobCache,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
