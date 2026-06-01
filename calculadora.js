@@ -3591,9 +3591,8 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     if (tipo === 'reserva') {
       // RN-002: custo amortizado pelo prazo da reserva (1 ou 3 anos)
       const qLinha     = _qLinha(totalQty, _esc(r.unidade || 'un.'));
-      const _rvUomF    = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
       const _rvRetail  = parseFloat(r.retail_price_unit || 0);
-      const _rvOnDem   = _rvRetail > 0 ? (_rvRetail / _rvUomF) * convR : 0;
+      const _rvOnDem   = _rvRetail > 0 ? _rvRetail * convR : 0;
       // Desconto da reserva vs on-demand (quanto você economiza por ter comprado a reserva)
       const _rvDPct    = _rvOnDem > 0 && preco > 0
         ? Math.max(0, parseFloat(((1 - preco / _rvOnDem) * 100).toFixed(1))) : 0;
@@ -3615,9 +3614,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const uomFator   = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
       const h          = horasR > 0 ? Math.round(horasR) : Math.round(totalQty * uomFator);
       const qLinha     = _qLinha(h, 'h consumidas');
-      // Price List: preço retail/h normalizado pelo fator UoM
+      // retail_price_unit já normalizado pelo SQL — só converte moeda
       const retailUnit = parseFloat(r.retail_price_unit || 0);
-      const retailHora = retailUnit > 0 ? (retailUnit / uomFator) * convR : 0;
+      const retailHora = retailUnit > 0 ? retailUnit * convR : 0;
       const dPct       = parseFloat(r.desconto_pct || 0);
       // Linha de desconto (quando há dados do Price List)
       const dBadge     = dPct > 0
@@ -3636,10 +3635,10 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
     if (tipo === 'dia') {
       // RN-003: UoM diária convertida para hora
-      const uomFatorD  = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
       const qLinha     = _qLinha(totalQty, 'dias');
+      // retail_price_unit já normalizado pelo SQL — só converte moeda
       const retailUnit = parseFloat(r.retail_price_unit || 0);
-      const retailHora = retailUnit > 0 ? (retailUnit / uomFatorD) * convR : 0;
+      const retailHora = retailUnit > 0 ? retailUnit * convR : 0;
       const dPct       = parseFloat(r.desconto_pct || 0);
       const dBadge     = dPct > 0
         ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
@@ -3664,9 +3663,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const uomLabel = (r.unidade || '').replace(/^\d+\s+/, '').trim() || 'un.';
     const qLinha   = _qLinha(totalQty, _esc(uomLabel), 'var(--orange,#ff8c42)');
     // Price List para periodo (disco, storage…): retail_price_unit já em BRL
-    const _plUomF   = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+    // retail_price_unit já normalizado pelo SQL — só converte moeda
     const _plRetail = parseFloat(r.retail_price_unit || 0);
-    const _plMes    = _plRetail > 0 ? (_plRetail / _plUomF) * convR : 0;
+    const _plMes    = _plRetail > 0 ? _plRetail * convR : 0;
     const _plMesDia = _plMes / 30;
     const _dPctPer  = _plMes > 0 && mesBrl > 0
       ? Math.max(0, parseFloat(((1 - mesBrl / _plMes) * 100).toFixed(1)))
