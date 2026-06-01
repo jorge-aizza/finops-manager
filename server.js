@@ -3663,7 +3663,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
                  COALESCE(meter_category,''),
                  COALESCE(meter_name,''),
                  COALESCE(unit_of_measure,'')
-      )
+      ),
       -- ── pl_best: melhor preço PL por meter_id — executado UMA vez (hash join) ──
       -- LATERAL anterior fazia 1 lookup por recurso (nested loop = muito lento).
       -- DISTINCT ON garante 1 linha por meter_id; retail_price_norm já é ÷UoM.
