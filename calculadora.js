@@ -3385,9 +3385,17 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         // Grid de valores: tipo-aware (custo · período · cobrado · estimado)
         + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;">'
 
-        + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;"' + col1Tip + '>'
-        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:' + (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)') + ';margin-bottom:2px;">' + col1Lbl + '</div>'
-        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:' + cor + ';">' + col1Val + '<span style="font-size:9px;">' + col1Suf + '</span></div>'
+        + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
+        +   (temPL
+              ? 'background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);'
+              : 'background:var(--bg-card);border:1px solid transparent;')
+        + '"' + col1Tip
+        + (!temPL && tipo !== 'reserva' ? ' title="Sem dados no Price List para este meter.\nMeter ID: ' + _esc(r._meter_id || '—') + '"' : '')
+        + '>'
+        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
+        +   (temPL ? 'var(--green,#22c55e)' : tipo === 'reserva' ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
+        + ';margin-bottom:2px;">' + col1Lbl + '</div>'
+        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:' + cor + ';">' + col1Val + '<span style="font-size:9px;font-weight:400;">' + col1Suf + '</span></div>'
         + (temPL && isHora  ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(chora) + '/h</div>' : '')
         + (temPL && !isHora ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(mesBrl) + '/mês</div>' : '')
         + (tipo === 'reserva' && retailHoraRsv > 0 ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;" title="Preço on-demand do Price List (sem reserva)">on-dem:\xA0📋\xA0' + _brl(retailHoraRsv) + '/h</div>' : '')
@@ -3403,14 +3411,18 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:600;color:var(--text-dim);">' + (bill > 0 ? _brl(bill) : '—') + '</div>'
         + '</div>'
 
-        + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;border:1px solid var(--accent-glow);">'
-        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:2px;">'
-        +   'Estimado'
+        + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
         +   (temPL
-              ? ' <span style="color:var(--green,#22c55e);font-size:9px;">📋</span>'
-              : (tipo === 'periodo' ? ' <span style="font-size:9px;color:var(--text-muted);">/mês*</span>' : ''))
+              ? 'background:rgba(34,197,94,.10);border:2px solid rgba(34,197,94,.45);'
+              : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
+        + '">'
+        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
+        +   (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        + ';margin-bottom:2px;">'
+        +   (temPL ? '📋 ' : '') + 'Estimado'
+        +   (!temPL && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
         + '</div>'
-        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:'
+        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
         +   (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
         + ';">' + _brl(estimado) + '</div>'
         + '</div>'

@@ -3687,6 +3687,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
       -- ── Outer: enriquece com preço retail e desconto ──────────────────────────
       SELECT
         base.resource_id,
+        base._meter_id,
         base.resource_group_name,
         base.nome_recurso,
         base.categoria,
