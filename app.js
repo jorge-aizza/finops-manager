@@ -1924,6 +1924,103 @@ async function syncPriceList() {
   }
 }
 
+async function _plDiag() {
+  const sub = document.getElementById('pl-status-sub');
+  if (sub) sub.textContent = 'Executando diagnóstico...';
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res = await fetch('/api/price-list/diag', { headers: { Authorization: 'Bearer ' + token } });
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+
+    const pl = d.price_list || {};
+    const bl = d.billing    || {};
+    const mt = d.match      || {};
+
+    let modal = document.getElementById('modal-pl-diag');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'modal-pl-diag';
+      modal.className = 'modal-overlay';
+      modal.onclick = e => { if (e.target === modal) modal.classList.remove('open'); };
+      modal.innerHTML = `<div class="modal" style="max-width:720px;width:96%">
+        <div class="modal-header">
+          <h3 class="modal-title">🔍 Diagnóstico Price List × Billing</h3>
+          <button class="modal-close" onclick="document.getElementById('modal-pl-diag').classList.remove('open')">✕</button>
+        </div>
+        <div class="modal-body" id="pl-diag-body" style="padding:16px 20px;font-size:12px;line-height:1.8"></div>
+      </div>`;
+      document.body.appendChild(modal);
+    }
+
+    const _n = v => parseInt(v||0).toLocaleString('pt-BR');
+    const _ok = (v) => v > 0
+      ? `<span style="color:var(--green)">✅ ${_n(v)}</span>`
+      : `<span style="color:var(--danger)">❌ 0</span>`;
+
+    const pct = mt.pct || 0;
+    const pctColor = pct === 0 ? 'var(--danger)' : pct < 30 ? 'var(--orange)' : 'var(--green)';
+
+    let html = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-weight:700;margin-bottom:8px;color:var(--text)">📋 Price List</div>
+          <div>Total registros: ${_ok(pl.total)}</div>
+          <div>Meters únicos: ${_ok(pl.meters_unicos)}</div>
+          <div>Consumption: ${_ok(pl.consumption)}</div>
+          <div>DevTest: <span style="color:var(--text-muted)">${_n(pl.devtest)}</span></div>
+          <div>reservation_term='': ${_ok(pl.sem_reserv_term)}</div>
+          <div>Sem meter_id: <span style="color:${parseInt(pl.sem_meter_id||0)>0?'var(--danger)':'var(--green)'}">
+            ${_n(pl.sem_meter_id)}</span></div>
+        </div>
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-weight:700;margin-bottom:8px;color:var(--text)">💰 Billing (azure_costs)</div>
+          <div>Total linhas: ${_ok(bl.total)}</div>
+          <div>Com meter_id: ${_ok(bl.com_meter_id)}</div>
+          <div>Meters únicos: ${_ok(bl.meters_unicos)}</div>
+          <div>Sem meter_id: <span style="color:${parseInt(bl.sem_meter_id||0)>0?'var(--danger)':'var(--green)'}">
+            ${_n(bl.sem_meter_id)}</span></div>
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:2px solid ${pctColor};border-radius:8px;padding:12px;margin-bottom:16px;text-align:center">
+        <div style="font-size:16px;font-weight:700;color:${pctColor}">${pct}% de cobertura</div>
+        <div style="color:var(--text-muted);font-size:11px">${_n(mt.com_match)} de ${_n(mt.billing_meters)} meters do billing têm preço no Price List</div>
+        ${pct === 0 ? '<div style="color:var(--danger);margin-top:6px;font-weight:600">⚠ Nenhum meter_id bate — Price List precisa ser re-sincronizado ou re-importado</div>' : ''}
+      </div>`;
+
+    if (d.amostra_billing?.length) {
+      html += `<div style="font-weight:600;color:var(--text);margin-bottom:6px">Amostra billing (top-3 por custo)</div>
+        <table class="data-table" style="font-size:11px;width:100%;margin-bottom:16px"><thead><tr>
+          <th>meter_id (billing)</th><th>Categoria</th><th>Custo</th>
+        </tr></thead><tbody>`;
+      for (const r of d.amostra_billing)
+        html += `<tr><td style="font-family:monospace;font-size:10px">${r.meter_id||'—'}</td>
+          <td>${r.categoria||'—'}</td>
+          <td style="text-align:right">R$ ${parseFloat(r.custo_total||0).toLocaleString('pt-BR',{minimumFractionDigits:2})}</td></tr>`;
+      html += `</tbody></table>`;
+    }
+
+    if (d.amostra_pl?.length) {
+      html += `<div style="font-weight:600;color:var(--text);margin-bottom:6px">Amostra Price List (primeiros 3)</div>
+        <table class="data-table" style="font-size:11px;width:100%"><thead><tr>
+          <th>meter_id (PL)</th><th>Serviço</th><th>Tipo</th><th>Reserv. Term</th><th>Retail Price</th>
+        </tr></thead><tbody>`;
+      for (const r of d.amostra_pl)
+        html += `<tr><td style="font-family:monospace;font-size:10px">${r.meter_id||'—'}</td>
+          <td>${r.service_name||'—'}</td><td>${r.type||'—'}</td>
+          <td>${r.reservation_term!=null?'"'+r.reservation_term+'"':'null'}</td>
+          <td style="text-align:right">$${parseFloat(r.retail_price||0).toFixed(6)}</td></tr>`;
+      html += `</tbody></table>`;
+    }
+
+    document.getElementById('pl-diag-body').innerHTML = html;
+    modal.classList.add('open');
+    if (sub) _loadPriceListStatus();
+  } catch (e) {
+    if (sub) sub.textContent = 'Erro no diagnóstico: ' + e.message;
+  }
+}
+
 async function resetPlCb() {
   const btn = document.getElementById('pl-cb-reset-btn');
   if (btn) btn.disabled = true;

@@ -3276,6 +3276,59 @@ app.post('/api/price-list/sync', authMiddleware, dbMiddleware, async (req, res) 
     .catch(e => console.error('[PriceList] Erro na sincronização:', e.message));
 });
 
+// ── GET /api/price-list/diag — Diagnóstico de cobertura do JOIN billing×PL ───
+app.get('/api/price-list/diag', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const [plInfo, billingInfo, matchInfo, amostraBilling, amostraPL] = await Promise.all([
+      // Resumo do Price List
+      pool.query(`
+        SELECT COUNT(*) AS total, COUNT(DISTINCT meter_id) AS meters_unicos,
+               COUNT(*) FILTER (WHERE type='Consumption') AS consumption,
+               COUNT(*) FILTER (WHERE type='DevTestConsumption') AS devtest,
+               COUNT(*) FILTER (WHERE reservation_term='') AS sem_reserv_term,
+               COUNT(*) FILTER (WHERE meter_id IS NULL OR meter_id='') AS sem_meter_id
+        FROM azure_price_list`),
+      // Resumo do billing
+      pool.query(`
+        SELECT COUNT(*) AS total,
+               COUNT(meter_id) AS com_meter_id,
+               COUNT(DISTINCT meter_id) AS meters_unicos,
+               COUNT(*) FILTER (WHERE meter_id IS NULL OR meter_id='') AS sem_meter_id
+        FROM azure_costs`),
+      // Quantos meters do billing têm match no PL
+      pool.query(`
+        WITH bm AS (SELECT DISTINCT LOWER(meter_id) m FROM azure_costs WHERE meter_id IS NOT NULL AND meter_id<>''),
+             pm AS (SELECT DISTINCT LOWER(meter_id) m FROM azure_price_list
+                    WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term='')
+        SELECT COUNT(*) AS billing_meters,
+               COUNT(pm.m) AS com_match
+        FROM bm LEFT JOIN pm ON pm.m = bm.m`),
+      // Amostra de 3 meter_ids do billing com maior custo
+      pool.query(`
+        SELECT meter_id, MAX(meter_category) AS categoria,
+               SUM(cost_in_billing_currency) AS custo_total
+        FROM azure_costs WHERE meter_id IS NOT NULL AND meter_id<>''
+        GROUP BY meter_id ORDER BY SUM(cost_in_billing_currency) DESC NULLS LAST LIMIT 3`),
+      // Amostra de 3 meter_ids do Price List (Consumption)
+      pool.query(`
+        SELECT meter_id, service_name, type, reservation_term, retail_price
+        FROM azure_price_list WHERE type='Consumption' AND reservation_term=''
+        LIMIT 3`),
+    ]);
+
+    const bm = parseInt(matchInfo.rows[0]?.billing_meters || 0);
+    const cm = parseInt(matchInfo.rows[0]?.com_match || 0);
+
+    res.json({
+      price_list:     plInfo.rows[0],
+      billing:        billingInfo.rows[0],
+      match:          { billing_meters: bm, com_match: cm, pct: bm > 0 ? Math.round(cm/bm*100) : 0 },
+      amostra_billing: amostraBilling.rows,
+      amostra_pl:      amostraPL.rows,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/price-list/schedule ─────────────────────────────────────────────
 app.get('/api/price-list/schedule', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
