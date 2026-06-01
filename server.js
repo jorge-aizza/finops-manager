@@ -3706,13 +3706,15 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         base.custo_uom_billing,
         base.custo_uom_usd,
         -- ── Price List: preço retail on-demand normalizado e desconto ──────────
-        -- retail_price_unit: preço de catálogo na UoM original do azure_costs.
-        -- Quando a Price List está em USD e o billing é BRL, converte via taxa_cambio
-        -- (exchange_rate_pricing_to_billing). Fallback: taxa 1 (sem conversão).
+        -- retail_price_unit: preço de catálogo normalizado para 1 unidade (ex: /1h).
+        -- O PL pode ter UoM diferente do billing (ex: "100 Hours" vs "1 Hour").
+        -- Dividimos pelo fator numérico do UoM do PL antes de converter a moeda.
         COALESCE(
-          pl.retail_price * CASE
-            WHEN pl.currency_code = base.moeda THEN 1.0           -- mesma moeda
-            WHEN pl.currency_code = 'USD'                          -- USD → billing
+          (pl.retail_price
+           / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(pl.unit_of_measure,'[^0-9]','','g'),'')::numeric, 1), 1)
+          ) * CASE
+            WHEN pl.currency_code = base.moeda THEN 1.0
+            WHEN pl.currency_code = 'USD'
             THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
             ELSE 1.0
           END,
@@ -3745,12 +3747,21 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
           ELSE NULL
         END AS desconto_pct
       FROM base
-      LEFT JOIN azure_price_list pl
-             ON LOWER(pl.meter_id) = LOWER(base._meter_id)   -- case-insensitive: billing pode ter casing diferente
-            AND pl.type IN ('Consumption', 'DevTestConsumption')  -- inclui Dev/Test
-            AND pl.reservation_term = ''      -- NOT NULL DEFAULT '' — não usar IS NULL
-            -- Aceita tanto a moeda do billing quanto USD (com conversão acima)
-            AND pl.currency_code IN (base._currency, 'USD')
+      LEFT JOIN LATERAL (
+        -- LATERAL com LIMIT 1 garante no máximo 1 linha PL por recurso:
+        -- prioridade: Consumption > DevTest, moeda billing > USD, global > regional
+        SELECT retail_price, currency_code, unit_of_measure, arm_region_name
+        FROM azure_price_list
+        WHERE LOWER(meter_id) = LOWER(base._meter_id)
+          AND type IN ('Consumption', 'DevTestConsumption')
+          AND reservation_term = ''
+          AND currency_code IN (base._currency, 'USD')
+        ORDER BY
+          (type = 'Consumption')              DESC,  -- Consumption tem prioridade
+          (currency_code = base._currency)    DESC,  -- moeda do billing tem prioridade
+          (arm_region_name = 'global')        DESC   -- global como sentinela
+        LIMIT 1
+      ) pl ON TRUE
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 

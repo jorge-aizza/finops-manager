@@ -3082,11 +3082,10 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const choraRaw = parseFloat(r.custo_hora_billing || 0);
         const chora    = isBRL ? choraRaw : choraRaw * convR;
 
-        // Price List: normaliza retail/h com fator UoM
-        const _uomFpl  = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+        // retail_price_unit já normalizado pelo SQL — só converte moeda se necessário
         const _retailU = parseFloat(r.retail_price_unit || 0);
         const _retailH = (tipo === 'hora' || tipo === 'dia') && _retailU > 0
-          ? (_retailU / _uomFpl) * convR : 0;
+          ? _retailU * convR : 0;
         const _choraEst = _retailH > 0 ? _retailH : chora;
         const _temPL    = _retailH > 0;
 
@@ -3189,12 +3188,10 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const mesRaw    = parseFloat(r.custo_mes_billing) ||
                           (parseFloat(r.total_billing || 0) / _diasP * 30);
         const custo_mes = isBRL ? mesRaw : mesRaw * convR2;
-        // Price List: retail/h (hora) ou retail/mês (periodo)
-        const _uomFr     = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+        // retail_price_unit já normalizado pelo SQL — só converte moeda se necessário
         const _retailUr  = parseFloat(r.retail_price_unit || 0);
-        const retailHr   = isHora && _retailUr > 0 ? (_retailUr / _uomFr) * convR2 : 0;
-        const retailMesR = !isHora && tipo2 === 'periodo' && _retailUr > 0
-          ? (_retailUr / _uomFr) * convR2 : 0;
+        const retailHr   = isHora && _retailUr > 0 ? _retailUr * convR2 : 0;
+        const retailMesR = !isHora && tipo2 === 'periodo' && _retailUr > 0 ? _retailUr * convR2 : 0;
         const choraEstR  = isHora && retailHr > 0 ? retailHr : chora;
         // Estimado: PL quando disponível; periodo usa PL/mês proporcional se tiver
         const estimado   = (tipo2 === 'periodo')
@@ -3304,13 +3301,11 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const horasReais = parseFloat(r.horas_reais || 0);
       // Uso parcial: recurso ficou ligado menos de 55% do mês (~400h de 720h)
       const usoParcial = isHora && horasReais > 0 && horasReais < 400;
-      // Price List: normaliza retail_price_unit para /h (hora) ou /mês (periodo)
-      const uomF       = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
+      // retail_price_unit já vem normalizado para 1 unidade pelo SQL (dividido pelo fator UoM do PL)
       const retailUnit = parseFloat(r.retail_price_unit || 0);
-      // Para hora/dia: converte para /h usando fator UoM
-      const retailHora = isHora && retailUnit > 0 ? (retailUnit / uomF) * convR : 0;
-      // Para periodo (disco, storage…): retail_price_unit já está em BRL na UoM do price list (/mês)
-      const retailMes  = !isHora && tipo === 'periodo' && retailUnit > 0 ? (retailUnit / uomF) * convR : 0;
+      // convR converte para BRL quando billing é USD; se billing já é BRL, convR = 1
+      const retailHora = isHora && retailUnit > 0 ? retailUnit * convR : 0;
+      const retailMes  = !isHora && tipo === 'periodo' && retailUnit > 0 ? retailUnit * convR : 0;
       // Desconto: SQL calcula só para hora/dia; para periodo calculamos aqui
       const dPctSQL  = parseFloat(r.desconto_pct || 0);
       const dPctMes  = !isHora && retailMes > 0 && mesBrl > 0
@@ -3325,7 +3320,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const choraEst = isHora && retailHora > 0 ? retailHora : chora;
       const temPL    = (isHora && retailHora > 0) || (!isHora && retailMes > 0);
       // Para reserva: on-demand do PL como referência informacional (estimado permanece amortizado)
-      const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? (retailUnit / uomF) * convR : 0;
+      const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit * convR : 0;
       const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
         ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
       // Estimado: hora → choraEst × horas | periodo → retailMes proporcional (ou billing) | reserva → amortizado
