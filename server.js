@@ -2017,6 +2017,13 @@ async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
       _plCbSuccess();
       return { items: data.Items || [], nextLink: data.NextPageLink || null };
     } catch (err) {
+      // HTTP 400 "Skip value N is greater than total count N" → fim de paginação
+      // A API retorna 400 quando $skip == totalCount (deveria retornar lista vazia)
+      if (err.message && /Skip value \d+ is greater than/i.test(err.message)) {
+        console.log('[PriceList] Fim de paginação detectado (skip >= total) — sync concluído.');
+        _plCbSuccess();
+        return { items: [], nextLink: null };
+      }
       const isRetryable = err.code === 429 || err.code === 'TIMEOUT'
         || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'NETWORK_ERROR';
 
