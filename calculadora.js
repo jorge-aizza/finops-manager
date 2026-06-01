@@ -635,67 +635,72 @@ const Calculadora = (() => {
         <!-- Legenda colapsável -->
         <div id="cov-legenda" style="display:none;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:14px;padding:12px;background:rgba(147,51,234,.05);border:1px solid var(--border);border-radius:10px;">
 
-          <!-- Coluna 1 -->
+          <!-- Coluna 1 — Fonte do Preço + Descontos -->
           <div style="display:flex;flex-direction:column;gap:5px;">
             <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Fonte do Preço</div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:11px;flex-shrink:0;margin-top:1px;">📋</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--green,#22c55e);">PL/h</strong> ou <strong style="color:var(--green,#22c55e);">PL/mês</strong> — preço on-demand do Azure Price List. Estimativa mais precisa.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--green,#22c55e);">📋 PL/h</strong> ou <strong style="color:var(--green,#22c55e);">📋 PL/mês</strong> — preço on-demand do Azure Price List. Estimativa mais precisa. Estimado fica <strong style="color:var(--green,#22c55e);">verde</strong>.</span>
             </div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:11px;flex-shrink:0;margin-top:1px;">💰</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">Custo/h</strong> ou <strong style="color:var(--orange,#ff8c42);">Custo/dia</strong> — média do billing histórico. Usado quando PL não disponível.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">Custo/h</strong> ou <strong style="color:var(--text-muted);">Custo/mês*</strong> — média do billing histórico. Usado quando PL não disponível. Estimado fica <strong style="color:var(--text-muted);">cinza</strong>.</span>
             </div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:11px;flex-shrink:0;margin-top:1px;">🔒</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--blue,#4da6ff);">Amort./h</strong> — custo amortizado da reserva (1 ou 3 anos). Estimado permanece fixo.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--blue,#4da6ff);">Amort./h 🔒</strong> — custo amortizado da reserva (1 ou 3 anos). Estimado = amort./h × horas, permanece fixo.</span>
             </div>
 
             <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Descontos</div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:10px;color:var(--green,#22c55e);font-weight:700;flex-shrink:0;margin-top:1px;">▼%</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--green,#22c55e);">verde</strong> — desconto negociado vs on-demand + economia no período.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--green,#22c55e);">verde</strong> — desconto do seu contrato vs on-demand (PL). Mostra economia total no período.</span>
             </div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:10px;color:var(--blue,#4da6ff);font-weight:700;flex-shrink:0;margin-top:1px;">▼%</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--blue,#4da6ff);">azul</strong> — desconto da reserva vs on-demand. Indica retorno do compromisso.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--blue,#4da6ff);">azul</strong> — desconto da reserva vs on-demand. Retorno do compromisso de 1 ou 3 anos.</span>
             </div>
           </div>
 
-          <!-- Coluna 2 -->
+          <!-- Coluna 2 — Indicadores + Coluna Estimado -->
           <div style="display:flex;flex-direction:column;gap:5px;">
             <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Indicadores</div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:10px;flex-shrink:0;margin-top:1px;">⚡</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">H.reais</strong> — horas que o recurso ficou ligado no período importado (qty × fator UoM). Só aparece para recursos com cobrança horária.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">H.reais</strong> — horas que o recurso ficou ligado no período importado (qty × fator UoM). Só aparece para recursos horários.</span>
             </div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:10px;flex-shrink:0;margin-top:1px;">⚠</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--orange,#ff8c42);">Uso parcial</strong> — recurso ficou ligado menos de 55% do mês (&lt;400h). Estimativa de mês cheio pode superestimar.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--orange,#ff8c42);">Uso parcial</strong> — recurso ligado menos de 55% do mês (&lt;400h). Estimativa de mês cheio pode superestimar.</span>
             </div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
-              <span style="font-size:10px;font-weight:700;flex-shrink:0;margin-top:1px;color:var(--text-muted);">*</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong>/mês*</strong> — estimativa proporcional ao billing. Recursos de consumo variável (storage, bandwidth) não têm taxa horária fixa.</span>
+              <span style="font-size:10px;font-weight:700;flex-shrink:0;margin-top:1px;color:var(--text-muted);">/mês*</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong>/mês*</strong> — storage, bandwidth e similares: sem taxa horária fixa. Estimado = custo mensal × (horas ÷ 720).</span>
             </div>
 
             <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Coluna Estimado</div>
 
             <div style="display:flex;align-items:center;gap:6px;">
-              <span style="width:10px;height:10px;background:var(--green,#22c55e);border-radius:2px;flex-shrink:0;opacity:.8;"></span>
-              <span style="font-size:10px;color:var(--text-dim);">Verde — estimado com base no Price List</span>
+              <span style="font-size:12px;">📋</span>
+              <span style="font-size:10px;color:var(--text-dim);"><strong style="color:var(--green,#22c55e);">Verde 📋</strong> — baseado no Price List on-demand</span>
             </div>
 
             <div style="display:flex;align-items:center;gap:6px;">
               <span style="width:10px;height:10px;background:var(--text-muted);border-radius:2px;flex-shrink:0;opacity:.5;"></span>
-              <span style="font-size:10px;color:var(--text-dim);">Cinza — estimado com base no billing histórico</span>
+              <span style="font-size:10px;color:var(--text-dim);"><strong style="color:var(--text-muted);">Cinza</strong> — baseado no billing histórico (PL indisponível)</span>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:12px;">🔒</span>
+              <span style="font-size:10px;color:var(--text-dim);"><strong style="color:var(--blue,#4da6ff);">Cinza 🔒</strong> — reserva: valor amortizado fixo pelo term do contrato</span>
             </div>
           </div>
 
