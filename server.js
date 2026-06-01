@@ -2562,9 +2562,9 @@ function _lerCSV(filePath) {
     fs.closeSync(fd);
     const preview    = buf.slice(0, bytesRead).toString('utf8').replace(/^\uFEFF/, '');
     const headerLine = preview.split(/\r?\n/)[0] || preview;
-    const delim      = headerLine.includes(';') ? ';' : ',';
+    const delim      = headerLine.includes('\t') ? '\t' : (headerLine.includes(';') ? ';' : ',');
 
-    // Parser CSV respeitando aspas
+    // Parser CSV/TSV respeitando aspas
     function parseLine(line) {
       const fields = [];
       let cur = '', inQ = false;
@@ -2626,7 +2626,7 @@ async function _lerCSVBatched(filePath, batchSize, onBatch) {
   fs.closeSync(fd);
   const preview    = buf.slice(0, bytesRead).toString('utf8').replace(/^﻿/, '');
   const headerLine = preview.split(/\r?\n/)[0] || preview;
-  const delim      = headerLine.includes(';') ? ';' : ',';
+  const delim      = headerLine.includes('\t') ? '\t' : (headerLine.includes(';') ? ';' : ',');
 
   function parseLine(line) {
     const fields = [];
