@@ -3337,8 +3337,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
         col1Tip = ' title="Preço on-demand mensal do Azure Price List — base da estimativa"';
       } else if (tipo === 'periodo') {
-        const custoDia = mesBrl / 30;
-        col1Lbl = 'Custo/dia'; col1Val = _brl(custoDia); col1Suf = '/dia';
+        // Sem PL: usa custo mensal do billing como base proporcional → /mês*
+        col1Lbl = 'Custo/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
+        col1Tip = ' title="Estimativa proporcional ao billing histórico — Price List não disponível para este meter"';
       } else if (temPL) {
         // Price List disponível para hora/dia: mostra PL/h como base da estimativa
         col1Lbl = '📋 PL/h'; col1Val = _brl(retailHora); col1Suf = '/h';
@@ -3398,8 +3399,13 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '</div>'
 
         + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;border:1px solid var(--accent-glow);">'
-        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:2px;">Estimado</div>'
-        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:var(--green);">' + _brl(estimado) + '</div>'
+        + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:2px;">'
+        +   'Estimado'
+        +   (temPL ? ' <span style="color:var(--green,#22c55e);font-size:9px;">📋</span>' : ' <span style="font-size:9px;color:var(--text-muted);">/mês*</span>')
+        + '</div>'
+        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:'
+        +   (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        + ';">' + _brl(estimado) + '</div>'
         + '</div>'
 
         + '</div>'
