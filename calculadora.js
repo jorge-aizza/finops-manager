@@ -9,9 +9,17 @@ const Calculadora = (() => {
   let _dadosServico = [];   // linhas brutas para a visão "Por Serviço"
   let _modoVisao    = 'recursos'; // 'recursos' | 'detalhe' | 'servico'
   let _selecionados = {};
-  let _periodos       = [];   // [{inicio, fim, horas, label}]
+  let _periodos       = [];   // [{inicio, fim, horas, horasTotal, horasLivres, label}]
   let _horasAplicadas = false; // true somente após Aplicar (HORAS) ou Incluir Período
   let _horasPeriodoValidas = false; // true quando datas/horas do período formam intervalo > 0
+
+  // ── Horário Livre (janela sem cobrança) ──────────────────────────────────────
+  let _horarioLivre = {
+    ativo:  false,
+    inicio: '09:00',
+    fim:    '18:00',
+    dias:   [1, 2, 3, 4, 5]   // 0=Dom 1=Seg … 6=Sab; padrão Seg–Sex
+  };
   let _subsSel      = [];   // subscription_ids selecionados
   let _rgsSel       = [];   // resource_group_names selecionados
   let _subAtual     = '';   // compat legada
@@ -779,6 +787,47 @@ const Calculadora = (() => {
                 <span id="cperiodo-total-val" style="font-size:13px;font-weight:700;color:var(--accent);font-family:IBM Plex Mono,monospace;"></span>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- Card: Horário Livre -->
+        <div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);">⏰ Horário Livre</div>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;">
+              <input type="checkbox" id="chl-ativo" onchange="Calculadora._hlToggle(this.checked)"
+                style="width:14px;height:14px;accent-color:var(--accent);cursor:pointer;">
+              <span style="font-size:10px;color:var(--text-muted);">Ativar</span>
+            </label>
+          </div>
+          <div id="chl-corpo" style="display:none;display:none;">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+              <div>
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Início</div>
+                <input type="time" id="chl-ini" class="ci" value="09:00" step="3600"
+                  style="width:100%;height:32px;font-size:13px;padding:0 6px;"
+                  onchange="Calculadora._hlChange()">
+              </div>
+              <div>
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Fim</div>
+                <input type="time" id="chl-fim" class="ci" value="18:00" step="3600"
+                  style="width:100%;height:32px;font-size:13px;padding:0 6px;"
+                  onchange="Calculadora._hlChange()">
+              </div>
+            </div>
+            <div style="font-size:10px;color:var(--text-muted);margin-bottom:5px;">Dias sem cobrança</div>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;">
+              ${['Dom','Seg','Ter','Qua','Qui','Sex','Sab'].map((d,i) =>
+                `<label style="display:flex;align-items:center;gap:2px;cursor:pointer;padding:3px 6px;border-radius:4px;border:1px solid var(--border);background:rgba(147,51,234,.06);font-size:10px;color:var(--text-muted);">
+                  <input type="checkbox" data-dia="${i}" class="chl-dia" ${[1,2,3,4,5].includes(i)?'checked':''} onchange="Calculadora._hlChange()"
+                    style="width:11px;height:11px;accent-color:var(--accent);cursor:pointer;"> ${d}
+                </label>`
+              ).join('')}
+            </div>
+            <div id="chl-res" style="font-size:11px;color:var(--text-muted);padding:6px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);line-height:1.6;min-height:30px;"></div>
+          </div>
+          <div id="chl-hint" style="font-size:10px;color:var(--text-muted);font-style:italic;">
+            Define janela diária sem cobrança. Ex: desligar ambiente das 09h–18h nos dias úteis.
           </div>
         </div>
 
@@ -1996,9 +2045,23 @@ const Calculadora = (() => {
       const [y, m, dd] = d.split('-');
       return `${dd}/${m} ${t ? t.slice(0,5) : ''}`;
     };
-    if (res) { res.style.color = 'var(--accent)'; res.textContent = `${horas}h (${durLabel}) · ${fmtDt(vIni)} → ${fmtDt(vFim)}`; }
+
+    // Horário Livre: mostra horas cobradas se ativo
+    const horasLivres = _calcHorasLivres(vIni, vFim);
+    const horasCob    = Math.max(1, horas - horasLivres);
+    if (res) {
+      res.style.color = 'var(--accent)';
+      if (_horarioLivre.ativo && horasLivres > 0) {
+        res.innerHTML = `${horas}h (${durLabel}) · ${fmtDt(vIni)} → ${fmtDt(vFim)}`
+          + `<br><span style="color:var(--orange);font-size:10px;">−${horasLivres}h livres → </span>`
+          + `<strong style="color:var(--green);font-size:10px;">${horasCob}h cobradas</strong>`;
+      } else {
+        res.textContent = `${horas}h (${durLabel}) · ${fmtDt(vIni)} → ${fmtDt(vFim)}`;
+      }
+    }
     _horasPeriodoValidas = true;
     _atualizarBtnIncluir();
+    _hlAtualizarRes();
     return horas;
   }
 
@@ -2012,11 +2075,13 @@ const Calculadora = (() => {
   }
 
   function _incluirPeriodo() {
-    const horas = _calcHorasPeriodo();
-    if (!horas) return;
+    const horasTotal = _calcHorasPeriodo();
+    if (!horasTotal) return;
     const vIni = _getIniISO();
     const vFim = _getFimISO();
-    _periodos.push({ inicio: vIni, fim: vFim, horas });
+    const horasLivres   = _calcHorasLivres(vIni, vFim);
+    const horasCobradas = Math.max(1, horasTotal - horasLivres);
+    _periodos.push({ inicio: vIni, fim: vFim, horas: horasCobradas, horasTotal, horasLivres });
     _renderPeriodos();
     _aplicarTotalPeriodos();
     // Mantém data início/fim iguais — limpa só a mensagem de resultado
@@ -2032,6 +2097,75 @@ const Calculadora = (() => {
     _aplicarTotalPeriodos();
   }
 
+  // ── Horário Livre — funções de controle ──────────────────────────────────────
+
+  // Calcula quantas horas do intervalo [vIni, vFim] caem na janela livre
+  function _calcHorasLivres(vIni, vFim) {
+    if (!_horarioLivre.ativo || !vIni || !vFim) return 0;
+    const hIni = parseInt(_horarioLivre.inicio.split(':')[0]);
+    const hFim = parseInt(_horarioLivre.fim.split(':')[0]);
+    const janela = Math.max(0, hFim - hIni);
+    if (!janela || !_horarioLivre.dias.length) return 0;
+
+    let livres = 0;
+    const inicio = new Date(vIni);
+    const fim    = new Date(vFim);
+    // Itera dia a dia; T12 evita problemas de DST
+    const d = new Date(inicio.getFullYear(), inicio.getMonth(), inicio.getDate());
+    const fimD = new Date(fim.getFullYear(), fim.getMonth(), fim.getDate());
+    while (d <= fimD) {
+      if (_horarioLivre.dias.includes(d.getDay())) livres += janela;
+      d.setDate(d.getDate() + 1);
+    }
+    return livres;
+  }
+
+  // Atualiza _horarioLivre com os valores dos inputs
+  function _hlLerConfig() {
+    _horarioLivre.inicio = document.getElementById('chl-ini')?.value || '09:00';
+    _horarioLivre.fim    = document.getElementById('chl-fim')?.value || '18:00';
+    _horarioLivre.dias   = Array.from(document.querySelectorAll('.chl-dia:checked'))
+                                .map(cb => parseInt(cb.dataset.dia));
+  }
+
+  // Calcula e exibe o resumo (horas totais / livres / cobradas) no card
+  function _hlAtualizarRes() {
+    const res = document.getElementById('chl-res');
+    if (!res) return;
+    const vIni = _getIniISO();
+    const vFim = _getFimISO();
+    if (!vIni || !vFim) {
+      res.textContent = 'Selecione um período para ver o resumo.';
+      return;
+    }
+    const diff = new Date(vFim) - new Date(vIni);
+    if (diff <= 0) { res.textContent = ''; return; }
+    const horasTotal  = Math.round(diff / 3600000);
+    const horasLivres = _calcHorasLivres(vIni, vFim);
+    const horasCob    = Math.max(0, horasTotal - horasLivres);
+    const pct         = horasTotal > 0 ? Math.round(horasLivres / horasTotal * 100) : 0;
+    res.innerHTML = `<span style="color:var(--text-dim)">${horasTotal}h totais</span>`
+      + ` → <span style="color:var(--orange)">−${horasLivres}h livres (${pct}%)</span>`
+      + ` → <strong style="color:var(--green)">${horasCob}h cobradas</strong>`;
+  }
+
+  // Toggle ativar/desativar janela
+  function _hlToggle(ativo) {
+    _horarioLivre.ativo = ativo;
+    const corpo = document.getElementById('chl-corpo');
+    const hint  = document.getElementById('chl-hint');
+    if (corpo) corpo.style.display = ativo ? 'block' : 'none';
+    if (hint)  hint.style.display  = ativo ? 'none'  : 'block';
+    _hlLerConfig();
+    _hlAtualizarRes();
+  }
+
+  // Chamado quando mudam inputs de hora ou dias
+  function _hlChange() {
+    _hlLerConfig();
+    _hlAtualizarRes();
+  }
+
   function _renderPeriodos() {
     const lista = document.getElementById('cperiodo-lista');
     const bloco = document.getElementById('cperiodo-total');
@@ -2041,12 +2175,16 @@ const Calculadora = (() => {
       const div = document.createElement('div');
       div.style.cssText = 'display:flex;align-items:center;gap:4px;padding:4px 6px;border-radius:5px;background:rgba(147,51,234,.08);border:1px solid rgba(147,51,234,.18);';
       const fmt = v => v.replace('T',' ').slice(0,16);
-      const dias = Math.floor(p.horas/24), hRest = p.horas%24;
-      const dur  = dias > 0 ? `${dias}d${hRest>0?' '+hRest+'h':''}` : `${p.horas}h`;
+      const horasCob = p.horas;
+      const diasCob  = Math.floor(horasCob/24), hRestCob = horasCob%24;
+      const dur  = diasCob > 0 ? `${diasCob}d${hRestCob>0?' '+hRestCob+'h':''}` : `${horasCob}h`;
+      const livresInfo = p.horasLivres > 0
+        ? `<span style="color:var(--orange);font-size:9px;"> (−${p.horasLivres}h livres de ${p.horasTotal}h)</span>`
+        : '';
       div.innerHTML = `
         <div style="flex:1;min-width:0;">
           <div style="font-size:10px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${fmt(p.inicio)} → ${fmt(p.fim)}</div>
-          <div style="font-size:11px;font-weight:700;color:var(--accent);font-family:IBM Plex Mono,monospace;">${p.horas}h <span style="font-weight:400;color:var(--text-muted);">(${dur})</span></div>
+          <div style="font-size:11px;font-weight:700;color:var(--accent);font-family:IBM Plex Mono,monospace;">${horasCob}h <span style="font-weight:400;color:var(--text-muted);">(${dur})</span>${livresInfo}</div>
         </div>
         <button onclick="Calculadora._removerPeriodo(${i})" title="Remover"
           style="flex-shrink:0;width:20px;height:20px;border-radius:4px;border:1px solid rgba(255,77,106,.3);background:rgba(255,77,106,.08);color:var(--danger);font-size:12px;cursor:pointer;line-height:1;">✕</button>`;
@@ -3719,6 +3857,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
            abrirReconciliacao, fecharReconciliacao, _onAzureRefInput,
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
            _diagCache, _forcarRefreshCache,
+           _hlToggle, _hlChange,
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,
