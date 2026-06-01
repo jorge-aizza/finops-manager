@@ -3401,7 +3401,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;border:1px solid var(--accent-glow);">'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:2px;">'
         +   'Estimado'
-        +   (temPL ? ' <span style="color:var(--green,#22c55e);font-size:9px;">📋</span>' : ' <span style="font-size:9px;color:var(--text-muted);">/mês*</span>')
+        +   (temPL
+              ? ' <span style="color:var(--green,#22c55e);font-size:9px;">📋</span>'
+              : (tipo === 'periodo' ? ' <span style="font-size:9px;color:var(--text-muted);">/mês*</span>' : ''))
         + '</div>'
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;font-weight:700;color:'
         +   (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
