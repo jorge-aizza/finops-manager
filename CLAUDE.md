@@ -22,10 +22,10 @@ node encrypt-env.js run       # load .env.enc and start server
 ## File Map
 
 ```
-server.js          (~4 520 lines)  All API routes, auth, DB init, middleware, Excel export
-app.js             (~4 060 lines)  Setup wizard, login, projects/actions CRUD, reservas, session mgmt
-calculadora.js     (~3 300 lines)  Azure cost calculator — self-contained IIFE
-index.html         (~3 260 lines)  SPA shell — all views toggled by showView()
+server.js          (~5 770 lines)  All API routes, auth, DB init, middleware, Excel export
+app.js             (~4 865 lines)  Setup wizard, login, projects/actions CRUD, reservas, session mgmt
+calculadora.js     (~3 727 lines)  Azure cost calculator — self-contained IIFE
+index.html         (~3 506 lines)  SPA shell — all views toggled by showView()
 styles.css         (~1 430 lines)  Dark-mode CSS, Vivo purple theme
 encrypt-env.js     (139 lines)     AES-256-GCM .env encryption utility
 favicon.svg                        App icon (SVG)
@@ -109,12 +109,22 @@ Schema changes go directly in `initDB()` — must be idempotent.
 - Sync: global USD only (`currencyCode eq 'USD'`); `arm_region_name = 'global'` sentinel
 - UPSERT conflict key: `(meter_id, type, reservation_term, currency_code, arm_region_name)`
 - `reservation_term` is `NOT NULL DEFAULT ''` — JOIN must use `= ''` not `IS NULL`
-- Key indexes: `LOWER(meter_id)` functional index for case-insensitive JOIN
-- JOIN with `azure_costs`: `LOWER(pl.meter_id) = LOWER(base._meter_id) AND pl.type IN ('Consumption','DevTestConsumption') AND pl.reservation_term = ''`
+- Key indexes: `LOWER(meter_id)` functional index + partial index `idx_pricelist_join` (WHERE type IN Consumption/DevTest AND reservation_term='')
+- ON CONFLICT: `GREATEST(EXCLUDED.retail_price, current)` — nunca sobrescreve preço válido com 0
+- JOIN via CTE `pl_best` (DISTINCT ON LOWER(meter_id)) — hash join, executa uma vez por query
+- JOIN condition: `LOWER(pl.meter_id) = LOWER(base._meter_id) AND type IN ('Consumption','DevTestConsumption') AND reservation_term = ''`
+
+**Novos endpoints (v2.2):**
+```
+GET  /api/azure-costs/diag          — diagnóstico: contagens, colunas, amostra
+POST /api/azure-costs/refresh-cache — força rebuild cache de dropdowns
+GET  /api/price-list/diag           — cobertura meter_ids billing × PL
+```
 
 **Azure Coleta tables:**
 - `azure_coleta_historico` — log of each automated collection run
 - `azure_coleta_sps` — Service Principals (tenantId, clientId, clientSecret encrypted)
+- `azure_storage_config.price_list_prefix` — optional blob prefix for Price List CSV/ZIP auto-collection
 
 **Performance indexes on azure_costs:**
 ```
@@ -179,12 +189,34 @@ PATCH /api/azure-coleta/sps/:id/padrao — set SP as default
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - No `armRegionName` filter — global sync (filter caused API to return 0 items)
-- Pagination via `NextPageLink` until exhausted
-- Stores `arm_region_name = 'global'` as sentinel
-- `resultKey` declared before `try` block to be accessible in `catch`
+- Pagination via `NextPageLink` until exhausted; HTTP 400 "Skip value >= total" treated as end-of-data
+- Stores `arm_region_name = 'global'` as sentinel for all items
+- ON CONFLICT uses `GREATEST(EXCLUDED.retail_price, current)` — never overwrites valid price with 0
+- Skips items where `retailPrice = 0 AND unitPrice = 0` (free tier / regions without pricing)
+- `DELETE WHERE currency_code = 'USD'` before each sync — full replacement
 
-`GET /api/price-list/status` — returns last sync metadata (timestamp, record count, errors).
-`POST /api/price-list/sync` — triggers sync (background, responds immediately with jobId).
+`_importPriceListFromCSV(csvPath, filename, clearBefore)` — imports CSV/TSV/ZIP/Parquet.
+- `clearBefore=true` (upload manual): `TRUNCATE azure_price_list` before inserting
+- `clearBefore=false` (Storage blob): UPSERT incremental
+- Same GREATEST logic for retail_price conflicts
+
+**Price List coverage cache (`_plCobCache`):** computed in background every 5 min.
+- Counts billing meter_ids that have a match in `azure_price_list` (Consumption/DevTest)
+- Exposed in `GET /api/price-list/status` as `cobertura { billing_meters, com_pl, cobertura_pct }`
+
+**Price List diagnostic:** `GET /api/price-list/diag` — compares billing vs PL meter_ids.
+Returns sample billing meters, sample PL rows, and match percentage.
+Button "🔍 Diagnóstico" in the Price List settings screen calls this endpoint.
+
+**Endpoints:**
+```
+GET  /api/price-list/status        — sync metadata + coverage cache
+POST /api/price-list/sync          — triggers sync (background)
+POST /api/price-list/import        — upload CSV/ZIP/Parquet (clearBefore=true)
+GET  /api/price-list/import-status — import progress
+GET  /api/price-list/diag          — meter_id coverage diagnostic
+POST /api/price-list/reset-cb      — reset circuit breaker
+```
 
 ### Calculadora module
 `calculadora.js` — IIFE `const Calculadora = (() => { ... })()`.
@@ -195,20 +227,52 @@ Entry point: `Calculadora.init()`.
 subscription dropdown → confirm OK → RG dropdown → confirm OK → date range → Buscar
 → `buscarRecursos()` → `_carregarRecursos()` → `GET /api/calculadora/recursos`
 
-**UoM cost model (unified hourly):**
-- UoM contains `hour`/`hora` → `custo_hora = SUM(unit_price × qty) / total_qty`
-- All other UoMs → `custo_hora = total_billing / 30 / 24`
-- Both types use the hours slider. Non-hour resources show `/h*` label.
+**Tipo de custo (`tipo_custo`) — classificação SQL:**
+```
+reserva  → charge_type IN ('Purchase','RoundTrustBill') AND pricing_model = 'Reservation'
+hora     → unit_of_measure ILIKE '%hour%' OR '%hora%'
+dia      → unit_of_measure ILIKE '%day%'
+periodo  → todos os demais (disco, storage, bandwidth, etc.)
+```
 
-**Price List integration (v2.0):**
-- `isHora = tipo === 'hora' || tipo === 'dia'` — guard for hourly PL
-- `hora`/`dia`: `retailHora = retail_price / uomFactor × convR` — discount badge `▼ X% vs tabela`
-- `periodo` (discos/storage): `retailMes = retail_price / uomFactor × convR` — monthly reference
-- `reserva`: `retailHoraRsv` = on-demand reference; badge azul `▼ X% reserva vs on-demand`
-- `fonte_estimado`: `'price_list'` (verde 📋) or `'billing'` (cinza, custo histórico)
+**Custo/hora billing — 4 níveis de prioridade (SQL):**
+```
+1. reserva  → total_billing ÷ (8.760h ou 26.280h conforme term 1/3 anos)
+2. hora     → total_billing ÷ (SUM(qty) × fator_UoM)
+3. dia      → total_billing ÷ (SUM(qty) × 24h)
+4. fallback → total_billing ÷ (dias_ativos × 24h)
+```
+
+**Custo médio para período (disco, storage, rede):**
+```
+custo_mes_billing = SUM(total_billing) ÷ dias_ativos × 30
+taxa_hora         = custo_mes_billing ÷ 720      ← rateio proporcional ao uso
+estimado          = taxa_hora × horas_slider
+```
+Usado para **chargeback de projeto**: aloca custo proporcional às horas selecionadas.
+
+**Price List integration (v2.2):**
+- `retail_price_unit` vem normalizado do SQL: `retail_price_PL ÷ fator_UoM_PL × taxa_câmbio`
+- JOIN via CTE `pl_best` (DISTINCT ON meter_id, executa UMA vez — hash join): prioridade Consumption > DevTest, global > regional
 - `temPL = (isHora && retailHora > 0) || (!isHora && retailMes > 0)` — drives UI indicators
+- Col1 com PL: fundo verde + borda verde + label `📋 PL/h` ou `📋 PL/mês`
+- Col1 sem PL: tooltip com `_meter_id` para diagnóstico
+- Estimado com PL: fundo verde + borda verde 2px + ícone `📋` — valor verde
+- Estimado sem PL: fundo neutro + valor cinza (+ `/mês*` para periodo)
+- `fonte_estimado`: `'price_list'` (verde 📋) or `'billing'` (cinza)
+- Desconto verde `▼ X%`: vs on-demand + economia no período
+- Desconto azul `▼ X%`: reserva vs on-demand (amortizado vs tabela)
 
-**Legenda colapsável** (`#cov-legenda`): botão 📖 na tela Configurar Estimativa abre grid 2 colunas explicando todos os indicadores (fonte, descontos, H.reais, Uso parcial, *, cores do Estimado).
+**CSV/TSV import fix:** `_lerCSV` e `_lerCSVBatched` detectam TAB antes de `;` e `,`.
+Azure Cost Management exporta `.csv` separado por TAB em exportações recentes (MCA).
+
+**Mapeamento de colunas `_mapRowCSV`:** fallback case-insensitive via `_ci()` para
+subscription_id (`SubscriptionGuid`, `Subscription Id`, etc.) e cost_date (`UsageDateTimeKey`).
+
+**Diagnóstico de cache** (`_diagCache`/`_forcarRefreshCache`): exibido no dropdown de
+assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Price List.
+
+**Legenda colapsável** (`#cov-legenda`): botão 📖 na tela Configurar Estimativa abre grid 2 colunas explicando todos os indicadores (fonte, descontos, H.reais, Uso parcial, /mês*, cores do Estimado, reserva).
 
 **End-date calendar:** enabled — user can freely select the end date. `_sincDataFim()` only auto-fills fim if field is currently empty.
 
