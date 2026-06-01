@@ -3802,9 +3802,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 
-    const comPL   = r.rows.filter(x => parseFloat(x.retail_price_unit) > 0).length;
-    const semMeter = r.rows.filter(x => !x._meter_id).length;
-    console.log(`[Recursos] ${r.rows.length} recursos — ${Date.now()-_t0}ms | PL: ${comPL} com preço, ${semMeter} sem meter_id`);
+    console.log(`[Recursos] ${r.rows.length} recursos — ${Date.now()-_t0}ms`);
     res.json(r.rows);
   } catch (err) {
     console.error('Erro /api/calculadora/recursos:', err);
@@ -4146,51 +4144,32 @@ app.post('/api/calculadora/estimar', authMiddleware, dbMiddleware, async (req, r
   }
 });
 
-// ── GET /api/azure-costs/diag — Diagnóstico da tabela, cache e cobertura PL ──
+// ── GET /api/azure-costs/diag — Diagnóstico da tabela e cache ────────────────
 app.get('/api/azure-costs/diag', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
-    const [cnt, subs, rgs, sample, plDiag, meterAmostra] = await Promise.all([
-      pool.query(`SELECT COUNT(*) AS total, COUNT(subscription_id) AS com_sub,
-                         COUNT(cost_date) AS com_data, MIN(cost_date) AS data_min,
-                         MAX(cost_date) AS data_max,
-                         COUNT(meter_id) AS com_meter_id
+    const [cnt, subs, rgs, sample] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total,
+                         COUNT(subscription_id) AS com_sub,
+                         COUNT(cost_date) AS com_data,
+                         COUNT(cost_in_billing_currency) AS com_custo,
+                         MIN(cost_date) AS data_min,
+                         MAX(cost_date) AS data_max
                   FROM azure_costs`).catch(() => null),
       pool.query(`SELECT COUNT(*) AS total FROM azure_subs_cache`).catch(() => null),
       pool.query(`SELECT COUNT(*) AS total FROM azure_rg_cache`).catch(() => null),
       pool.query(`SELECT * FROM azure_costs LIMIT 1`).catch(() => null),
-      // Diagnóstico Price List: conta PL total + tipos disponíveis
-      pool.query(`SELECT COUNT(*) AS total_pl,
-                         COUNT(DISTINCT meter_id) AS meters_pl,
-                         COUNT(*) FILTER (WHERE type='Consumption') AS consumption,
-                         COUNT(*) FILTER (WHERE type='DevTestConsumption') AS devtest,
-                         COUNT(*) FILTER (WHERE reservation_term='') AS sem_term
-                  FROM azure_price_list`).catch(() => null),
-      // Amostra de 5 meter_ids do billing com status no PL
-      pool.query(`SELECT ac.meter_id AS billing_meter_id,
-                         (SELECT pl.retail_price FROM azure_price_list pl
-                          WHERE LOWER(pl.meter_id) = LOWER(ac.meter_id)
-                            AND pl.type IN ('Consumption','DevTestConsumption')
-                            AND pl.reservation_term = ''
-                          LIMIT 1) AS pl_retail_price
-                  FROM azure_costs ac
-                  WHERE ac.meter_id IS NOT NULL AND ac.meter_id <> ''
-                  GROUP BY ac.meter_id
-                  ORDER BY MAX(ac.cost_in_billing_currency) DESC NULLS LAST
-                  LIMIT 5`).catch(() => null),
     ]);
     res.json({
-      azure_costs:    { ...cnt?.rows[0] },
-      subs_cache:     { total: subs?.rows[0]?.total ?? '?' },
-      rg_cache:       { total: rgs?.rows[0]?.total  ?? '?' },
+      azure_costs:     { ...cnt?.rows[0] },
+      subs_cache:      { total: subs?.rows[0]?.total ?? '?' },
+      rg_cache:        { total: rgs?.rows[0]?.total  ?? '?' },
       colunas_amostra: sample?.rows[0] ? Object.keys(sample.rows[0]) : [],
       amostra_valores: sample?.rows[0] ? {
         subscription_id: sample.rows[0].subscription_id,
         cost_date:       sample.rows[0].cost_date,
         billing_currency:sample.rows[0].billing_currency,
-        meter_id:        sample.rows[0].meter_id,
+        cost_in_billing_currency: sample.rows[0].cost_in_billing_currency,
       } : null,
-      price_list:     plDiag?.rows[0] ? { ...plDiag.rows[0] } : null,
-      meter_amostra:  meterAmostra?.rows || [],
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

@@ -1205,29 +1205,8 @@ const Calculadora = (() => {
         if (d.colunas_amostra?.length) html += `<div style="color:var(--text-muted);margin-top:4px">Colunas encontradas: <span style="font-family:monospace">${d.colunas_amostra.join(', ')}</span></div>`;
         if (d.amostra_valores) html += `<div style="color:var(--text-muted)">Amostra: ${JSON.stringify(d.amostra_valores)}</div>`;
       } else {
-        const comMeter = parseInt(d.azure_costs?.com_meter_id || 0);
         html += `<div style="color:var(--green)">✅ ${total.toLocaleString('pt-BR')} linhas · ${comSub.toLocaleString('pt-BR')} com subscription · ${comData.toLocaleString('pt-BR')} com data</div>`;
-        html += `<div style="color:${comMeter===0?'var(--danger)':'var(--text-muted)'}">meter_id: ${comMeter.toLocaleString('pt-BR')} preenchidos${comMeter===0?' ← ⚠ sem meter_id, Price List não vai casar':''}</div>`;
         html += `<div style="color:var(--text-muted)">Cache: ${subs} assinatura(s)</div>`;
-        // Diagnóstico Price List
-        const pl = d.price_list;
-        if (pl) {
-          const plTotal = parseInt(pl.total_pl||0);
-          const plConsump = parseInt(pl.consumption||0);
-          html += `<div style="margin-top:6px;color:${plTotal===0?'var(--danger)':plConsump===0?'var(--orange)':'var(--text-muted)'}">`;
-          html += `Price List: ${plTotal.toLocaleString('pt-BR')} registros`;
-          html += plTotal > 0 ? ` · Consumption: ${plConsump.toLocaleString('pt-BR')} · DevTest: ${parseInt(pl.devtest||0).toLocaleString('pt-BR')}` : ' ← ⚠ vazio, sincronize na aba Price List';
-          html += `</div>`;
-        }
-        // Amostra de meter_ids e cobertura
-        if (d.meter_amostra?.length) {
-          const comPreco = d.meter_amostra.filter(m => m.pl_retail_price != null).length;
-          const total5   = d.meter_amostra.length;
-          html += `<div style="margin-top:4px;color:${comPreco===0?'var(--danger)':'var(--text-muted)'}">`;
-          html += `Amostra top-5 meters: ${comPreco}/${total5} com preço no PL`;
-          if (comPreco === 0 && total5 > 0) html += ` ← ⚠ meter_ids não casam`;
-          html += `</div>`;
-        }
       }
       html += `<button onclick="Calculadora._forcarRefreshCache()" style="margin-top:8px;font-size:11px;padding:3px 12px;background:rgba(147,51,234,.15);border:1px solid rgba(147,51,234,.4);color:var(--accent);border-radius:6px;cursor:pointer">🔄 Forçar rebuild de cache</button>`;
       html += `</div>`;
