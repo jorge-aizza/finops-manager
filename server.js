@@ -2141,6 +2141,7 @@ async function _syncPriceList(requestedCurrency = 'USD') {
 
       await c.query('COMMIT');
       _syncProgress.finished = new Date().toISOString();
+      _plCobTs = 0; // invalida cache de cobertura para recalcular na próxima visita
       console.log(`[PriceList] ✅ Sync concluído: ${total} registros em ${pages} páginas`);
 
       await _gravaMeta(resultKey, { ok: true, total, pages, currency, region: ARM_REGION, ts: _syncProgress.finished });
@@ -2186,7 +2187,9 @@ function _mapPlCol(h) {
   return null;
 }
 
-async function _importPriceListFromCSV(csvPath, filename) {
+// clearBefore=true: apaga todos os dados do PL antes de inserir (substituição completa)
+// clearBefore=false: upsert — mantém dados existentes não presentes no arquivo
+async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
   await ensurePriceListTable();
 
   const ARM_REGION_FALLBACK = 'global';
@@ -2205,6 +2208,10 @@ async function _importPriceListFromCSV(csvPath, filename) {
   const c = await pool.connect();
   try {
     await c.query('BEGIN');
+    if (clearBefore) {
+      await c.query('TRUNCATE TABLE azure_price_list');
+      console.log('[PriceList Import] Dados anteriores removidos (clearBefore=true)');
+    }
 
     const processarRow = async (row) => {
       const spn = `spl_${sp++}`;
@@ -3340,8 +3347,10 @@ app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
 
     (async () => {
       try {
-        const result = await _importPriceListFromCSV(tmpDest, origname);
+        // clearBefore=true: substitui todos os dados existentes pelo novo arquivo
+        const result = await _importPriceListFromCSV(tmpDest, origname, true);
         _plImportProgress = { ...result, started: _plImportProgress.started, finished: new Date().toISOString(), error: null, filename: origname };
+        _plCobTs = 0; // invalida cache de cobertura para recalcular na próxima visita
         console.log(`[PriceList Import] ✅ ${origname} — ${result.inserted} inseridos, ${result.skipped} skip, ${result.errors} erros`);
       } catch (e) {
         _plImportProgress.error    = e.message;
