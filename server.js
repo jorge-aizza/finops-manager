@@ -3470,9 +3470,6 @@ app.get('/api/calculadora/reconciliacao', authMiddleware, dbMiddleware, async (r
 // Aceita subscription_id e resource_group como valores separados por vírgula
 app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    // Garante que a tabela azure_price_list existe antes do LEFT JOIN
-    await ensurePriceListTable();
-
     const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
     const params = []; const cond = [];
 
@@ -3667,6 +3664,26 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
                  COALESCE(meter_name,''),
                  COALESCE(unit_of_measure,'')
       )
+      -- ── pl_best: melhor preço PL por meter_id — executado UMA vez (hash join) ──
+      -- LATERAL anterior fazia 1 lookup por recurso (nested loop = muito lento).
+      -- DISTINCT ON garante 1 linha por meter_id; retail_price_norm já é ÷UoM.
+      pl_best AS (
+        SELECT DISTINCT ON (LOWER(meter_id))
+          LOWER(meter_id) AS meter_id_lower,
+          currency_code,
+          retail_price::numeric
+            / GREATEST(
+                COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric, 1),
+                1
+              ) AS retail_price_norm
+        FROM azure_price_list
+        WHERE type IN ('Consumption', 'DevTestConsumption')
+          AND reservation_term = ''
+        ORDER BY
+          LOWER(meter_id),
+          (type = 'Consumption') DESC,      -- Consumption tem prioridade sobre DevTest
+          (arm_region_name = 'global') DESC  -- global como sentinela
+      )
       -- ── Outer: enriquece com preço retail e desconto ──────────────────────────
       SELECT
         base.resource_id,
@@ -3705,14 +3722,9 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         base.custo_dia_usd,
         base.custo_uom_billing,
         base.custo_uom_usd,
-        -- ── Price List: preço retail on-demand normalizado e desconto ──────────
-        -- retail_price_unit: preço de catálogo normalizado para 1 unidade (ex: /1h).
-        -- O PL pode ter UoM diferente do billing (ex: "100 Hours" vs "1 Hour").
-        -- Dividimos pelo fator numérico do UoM do PL antes de converter a moeda.
+        -- retail_price_unit: retail normalizado (÷UoM PL, ×câmbio) — pré-computado em pl_best
         COALESCE(
-          (pl.retail_price
-           / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(pl.unit_of_measure,'[^0-9]','','g'),'')::numeric, 1), 1)
-          ) * CASE
+          pl.retail_price_norm * CASE
             WHEN pl.currency_code = base.moeda THEN 1.0
             WHEN pl.currency_code = 'USD'
             THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
@@ -3720,48 +3732,25 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
           END,
           0
         )::numeric AS retail_price_unit,
-        -- desconto_pct: % de desconto vs on-demand (só para hora/dia)
+        -- desconto_pct: só para hora/dia; usa retail_price_norm já normalizado
         CASE
-          WHEN COALESCE(pl.retail_price, 0) > 0
+          WHEN pl.retail_price_norm > 0
                AND COALESCE(base.custo_hora_billing, 0) > 0
                AND base.tipo_custo IN ('hora', 'dia')
           THEN ROUND(
-            (1 - base.custo_hora_billing::numeric
-                 / NULLIF(
-                     -- retail convertido para billing_currency / fator UoM
-                     pl.retail_price::numeric
-                     * CASE
-                         WHEN pl.currency_code = base.moeda THEN 1.0
-                         WHEN pl.currency_code = 'USD'
-                         THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-                         ELSE 1.0
-                       END
-                     / GREATEST(
-                         COALESCE(
-                           NULLIF(REGEXP_REPLACE(base.unidade,'[^0-9]','','g'),'')::numeric,
-                           1.0
-                         ), 1.0
-                       )
-                   , 0)
-            ) * 100, 1)
+            (1 - base.custo_hora_billing::numeric / NULLIF(
+              pl.retail_price_norm * CASE
+                WHEN pl.currency_code = base.moeda THEN 1.0
+                WHEN pl.currency_code = 'USD'
+                THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+                ELSE 1.0
+              END
+            , 0)) * 100, 1)
           ELSE NULL
         END AS desconto_pct
       FROM base
-      LEFT JOIN LATERAL (
-        -- LATERAL com LIMIT 1 garante no máximo 1 linha PL por recurso:
-        -- prioridade: Consumption > DevTest, moeda billing > USD, global > regional
-        SELECT retail_price, currency_code, unit_of_measure, arm_region_name
-        FROM azure_price_list
-        WHERE LOWER(meter_id) = LOWER(base._meter_id)
-          AND type IN ('Consumption', 'DevTestConsumption')
-          AND reservation_term = ''
-          AND currency_code IN (base._currency, 'USD')
-        ORDER BY
-          (type = 'Consumption')              DESC,  -- Consumption tem prioridade
-          (currency_code = base._currency)    DESC,  -- moeda do billing tem prioridade
-          (arm_region_name = 'global')        DESC   -- global como sentinela
-        LIMIT 1
-      ) pl ON TRUE
+      -- pl_best: executa UMA vez (hash join) em vez de 1 lookup por recurso (nested loop)
+      LEFT JOIN pl_best pl ON pl.meter_id_lower = LOWER(base._meter_id)
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 
