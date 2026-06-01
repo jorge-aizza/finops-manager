@@ -2099,6 +2099,15 @@ async function _syncPriceList(requestedCurrency = 'USD') {
 
         for (const item of currentItems) {
           if (!item.meterId) continue;
+          // Filtra itens com retail_price = 0 (free tier / regiões sem preço) para
+          // não sobrescrever preços válidos já armazenados do mesmo meter_id.
+          // A API retorna o mesmo meter_id para múltiplas regiões; forçamos
+          // arm_region_name='global' como sentinela, então o último item processado
+          // sobrescreveria os anteriores — mantemos apenas preços > 0.
+          const retailP = item.retailPrice ?? 0;
+          const unitP   = item.unitPrice   ?? 0;
+          if (retailP <= 0 && unitP <= 0) { total++; continue; }
+
           await c.query(`
             INSERT INTO azure_price_list
               (meter_id, currency_code, arm_region_name, retail_price, unit_price,
@@ -2107,8 +2116,8 @@ async function _syncPriceList(requestedCurrency = 'USD') {
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
             ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
             DO UPDATE SET
-              retail_price    = EXCLUDED.retail_price,
-              unit_price      = EXCLUDED.unit_price,
+              retail_price    = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
+              unit_price      = GREATEST(EXCLUDED.unit_price,   azure_price_list.unit_price),
               product_name    = EXCLUDED.product_name,
               sku_name        = EXCLUDED.sku_name,
               effective_start = EXCLUDED.effective_start,
@@ -2116,8 +2125,8 @@ async function _syncPriceList(requestedCurrency = 'USD') {
           `, [
             item.meterId,
             currency, ARM_REGION,
-            item.retailPrice   ?? 0,
-            item.unitPrice     ?? 0,
+            retailP,
+            unitP,
             item.unitOfMeasure ?? null,
             item.productName   ?? null,
             item.skuName       ?? null,
@@ -2247,8 +2256,8 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
           ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
           DO UPDATE SET
-            retail_price    = EXCLUDED.retail_price,
-            unit_price      = EXCLUDED.unit_price,
+            retail_price    = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
+            unit_price      = GREATEST(EXCLUDED.unit_price,   azure_price_list.unit_price),
             product_name    = EXCLUDED.product_name,
             sku_name        = EXCLUDED.sku_name,
             effective_start = EXCLUDED.effective_start,
