@@ -3208,6 +3208,32 @@ app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res)
       ? { state: _plCB.state, blocked_until: new Date(_plCB.openUntil).toISOString(), remaining_min: Math.ceil((_plCB.openUntil - Date.now()) / 60000) }
       : { state: _plCB.state, failures: _plCB.failures };
 
+    // Cobertura: quantos meter_ids do billing têm preço no Price List
+    const cob = await pool.query(`
+      SELECT COUNT(DISTINCT ac.meter_id)                         AS billing_meters,
+             COUNT(DISTINCT ac.meter_id) FILTER (
+               WHERE EXISTS (
+                 SELECT 1 FROM azure_price_list pl
+                 WHERE LOWER(pl.meter_id) = LOWER(ac.meter_id)
+                   AND pl.type IN ('Consumption','DevTestConsumption')
+                   AND pl.reservation_term = ''
+               )
+             )                                                   AS com_pl,
+             COUNT(DISTINCT ac.meter_id) FILTER (
+               WHERE ac.meter_id IS NULL OR ac.meter_id = ''
+             )                                                   AS sem_meter_id
+      FROM azure_costs ac
+    `).catch(() => null);
+
+    const cobInfo = cob?.rows[0] ? {
+      billing_meters:  parseInt(cob.rows[0].billing_meters || 0),
+      com_pl:          parseInt(cob.rows[0].com_pl         || 0),
+      sem_meter_id:    parseInt(cob.rows[0].sem_meter_id   || 0),
+      cobertura_pct:   cob.rows[0].billing_meters > 0
+        ? Math.round(cob.rows[0].com_pl / cob.rows[0].billing_meters * 100)
+        : 0,
+    } : null;
+
     res.json({
       total:          parseInt(cnt.rows[0]?.total        || 0),
       meters:         parseInt(cnt.rows[0]?.meters       || 0),
@@ -3215,7 +3241,8 @@ app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res)
       syncing:        _syncingPriceList,
       progress:       _syncingPriceList ? _syncProgress  : null,
       last_result,
-      circuit_breaker: cbInfo
+      circuit_breaker: cbInfo,
+      cobertura:      cobInfo,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

@@ -1801,13 +1801,21 @@ async function _loadPriceListStatus() {
 
     } else if (tot > 0) {
       // Sucesso: há dados no banco
-      const lr = d.last_result;
+      const lr  = d.last_result;
+      const cob = d.cobertura;
       const infoExtra = lr ? ` (${(lr.total||0).toLocaleString('pt-BR')} reg · ${lr.pages||0} págs)` : '';
       const cbExtra   = cb && cb.state === 'HALF_OPEN' ? ' · ⚡ CB testando' : cb && cb.failures > 0 ? ` · ⚡ CB: ${cb.failures} falha(s)` : '';
-      sub.textContent        = 'Cache atualizado — preços disponíveis na Calculadora.' + infoExtra + cbExtra;
-      badge.textContent      = '✅ Disponível';
-      badge.style.background = 'rgba(34,197,94,.12)';
-      badge.style.color      = 'var(--green,#22c55e)';
+      // Cobertura: % de meter_ids do billing com preço no PL
+      const cobExtra  = cob
+        ? ` · Cobertura: ${cob.com_pl}/${cob.billing_meters} meters (${cob.cobertura_pct}%)`
+          + (cob.sem_meter_id > 0 ? ` · ⚠ ${cob.sem_meter_id} meter_ids nulos no billing` : '')
+        : '';
+      const cobColor  = cob && cob.cobertura_pct === 0 ? 'var(--danger)' : cob && cob.cobertura_pct < 30 ? 'var(--orange)' : 'var(--green,#22c55e)';
+      sub.innerHTML          = `<span>Cache atualizado${infoExtra}${cbExtra}</span>`
+        + (cob ? `<span style="margin-left:8px;font-weight:600;color:${cobColor};">${cobExtra.trim()}</span>` : '');
+      badge.textContent      = cob && cob.cobertura_pct === 0 ? '⚠ Sem cobertura' : '✅ Disponível';
+      badge.style.background = cob && cob.cobertura_pct === 0 ? 'rgba(255,77,106,.12)' : 'rgba(34,197,94,.12)';
+      badge.style.color      = cob && cob.cobertura_pct === 0 ? 'var(--danger)' : 'var(--green,#22c55e)';
 
     } else {
       // Vazio — verifica se há registro de falha
