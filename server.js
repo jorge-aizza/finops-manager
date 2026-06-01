@@ -1789,26 +1789,23 @@ async function _refreshAzureCache() {
         PRIMARY KEY (subscription_id, resource_group_name_upper)
       );
     `);
-    await c.query('BEGIN');
-    // Diagnóstico: conta registros antes de reconstruir o cache
-    const diag = await c.query(`
-      SELECT COUNT(*) AS total,
-             COUNT(subscription_id) AS com_sub,
-             COUNT(cost_date) AS com_data
-      FROM azure_costs
-    `).catch(() => null);
-    if (diag) {
+    // Diagnóstico ANTES do BEGIN — query com .catch não deve estar dentro de transação
+    // pois falha silenciosa no Node deixa o PostgreSQL em estado abortado
+    try {
+      const diag = await c.query(`
+        SELECT COUNT(*) AS total, COUNT(subscription_id) AS com_sub, COUNT(cost_date) AS com_data
+        FROM azure_costs
+      `);
       const { total, com_sub, com_data } = diag.rows[0];
       console.log(`[Azure Cache] azure_costs: ${total} linhas, ${com_sub} com subscription_id, ${com_data} com cost_date`);
       if (parseInt(total) > 0 && parseInt(com_sub) === 0) {
-        // subscription_id nulo em todos — mostra os nomes das colunas para diagnóstico
         const amostra = await c.query(`SELECT * FROM azure_costs LIMIT 1`).catch(() => null);
-        if (amostra?.rows?.length) {
-          console.warn('[Azure Cache] ⚠ subscription_id nulo em todos os registros. Colunas disponíveis:', Object.keys(amostra.rows[0]).join(', '));
-        }
+        if (amostra?.rows?.length)
+          console.warn('[Azure Cache] ⚠ subscription_id nulo. Colunas:', Object.keys(amostra.rows[0]).join(', '));
       }
-    }
+    } catch (_) {}
 
+    await c.query('BEGIN');
     await c.query('DELETE FROM azure_subs_cache');
     await c.query(`
       INSERT INTO azure_subs_cache
