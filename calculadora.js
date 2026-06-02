@@ -790,8 +790,8 @@ const Calculadora = (() => {
           </div>
         </div>
 
-        <!-- Card: Horário Livre -->
-        <div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
+        <!-- Card: Horário Livre — só visível no modo Período -->
+        <div id="chl-card" style="display:none;background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
             <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);">⏰ Horário Livre</div>
             <div style="display:flex;align-items:center;gap:6px;">
@@ -1929,6 +1929,9 @@ const Calculadora = (() => {
     tabP.style.borderColor = isManual ? 'var(--border)' : 'var(--accent)';
     painH.style.display    = isManual ? '' : 'none';
     painP.style.display    = isManual ? 'none' : '';
+    // Card Horário Livre só aparece no modo Período
+    const cardHL = document.getElementById('chl-card');
+    if (cardHL) cardHL.style.display = isManual ? 'none' : '';
 
     if (isManual) {
       // Trocou para HORAS → limpa períodos e reseta flag para exigir novo Aplicar
