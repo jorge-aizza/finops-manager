@@ -794,11 +794,17 @@ const Calculadora = (() => {
         <div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
             <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);">⏰ Horário Livre</div>
-            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;">
-              <input type="checkbox" id="chl-ativo" onchange="Calculadora._hlToggle(this.checked)"
-                style="width:14px;height:14px;accent-color:var(--accent);cursor:pointer;">
-              <span style="font-size:10px;color:var(--text-muted);">Ativar</span>
-            </label>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <button onclick="Calculadora._hlSalvarPadrao()" title="Salvar como padrão"
+                style="height:20px;padding:0 8px;border-radius:4px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--text-muted);font-size:9px;font-weight:700;cursor:pointer;">★ Padrão</button>
+              <button onclick="Calculadora._hlLimparPadrao()" title="Restaurar padrão"
+                style="height:20px;padding:0 8px;border-radius:4px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--text-muted);font-size:9px;font-weight:600;cursor:pointer;">↺</button>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;">
+                <input type="checkbox" id="chl-ativo" onchange="Calculadora._hlToggle(this.checked)"
+                  style="width:14px;height:14px;accent-color:var(--accent);cursor:pointer;">
+                <span style="font-size:10px;color:var(--text-muted);">Ativar</span>
+              </label>
+            </div>
           </div>
           <div id="chl-corpo" style="display:none;display:none;">
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
@@ -3385,6 +3391,8 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     // renderiza cards e totais (modal já visível)
     _ovRenderRecursos();
     _ovAtualizarTotal();
+    // Carrega configuração salva do horário livre
+    _hlCarregar();
   }
 
   function _fecharConfigStep() {
@@ -3638,6 +3646,57 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     _atualizarEstimativa();
   }
 
+  // ── Horário Livre: localStorage ──────────────────────────────────
+  const _LS_HL = 'finops_horario_livre';
+
+  function _hlSalvarPadrao() {
+    _hlLerConfig();
+    localStorage.setItem(_LS_HL, JSON.stringify(_horarioLivre));
+    _toast('Horário livre salvo como padrão.', 'success');
+  }
+
+  function _hlCarregar() {
+    try {
+      const raw = localStorage.getItem(_LS_HL);
+      if (!raw) return;
+      const cfg = JSON.parse(raw);
+      if (cfg && typeof cfg === 'object') {
+        _horarioLivre = { ..._horarioLivre, ...cfg };
+        // Aplicar nos inputs
+        const chk  = document.getElementById('chl-ativo');
+        const ini  = document.getElementById('chl-ini');
+        const fim  = document.getElementById('chl-fim');
+        if (chk) chk.checked  = !!_horarioLivre.ativo;
+        if (ini) ini.value    = _horarioLivre.inicio || '09:00';
+        if (fim) fim.value    = _horarioLivre.fim    || '18:00';
+        document.querySelectorAll('.chl-dia').forEach(cb => {
+          cb.checked = _horarioLivre.dias.includes(parseInt(cb.dataset.dia));
+        });
+        // Mostrar/ocultar corpo
+        const corpo = document.getElementById('chl-corpo');
+        const hint  = document.getElementById('chl-hint');
+        if (corpo) corpo.style.display = _horarioLivre.ativo ? 'block' : 'none';
+        if (hint)  hint.style.display  = _horarioLivre.ativo ? 'none'  : 'block';
+      }
+    } catch (_) {}
+  }
+
+  function _hlLimparPadrao() {
+    localStorage.removeItem(_LS_HL);
+    _horarioLivre = { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] };
+    const chk = document.getElementById('chl-ativo');
+    const ini = document.getElementById('chl-ini');
+    const fim = document.getElementById('chl-fim');
+    if (chk) chk.checked = false;
+    if (ini) ini.value   = '09:00';
+    if (fim) fim.value   = '18:00';
+    document.querySelectorAll('.chl-dia').forEach(cb => {
+      cb.checked = [1,2,3,4,5].includes(parseInt(cb.dataset.dia));
+    });
+    _hlToggle(false);
+    _toast('Horário livre redefinido para o padrão.', 'success');
+  }
+
   // ── Taxas: constantes e localStorage ────────────────────────────
   const _TAXA_IMP_DEF  = 18.65;
   const _TAXA_COND_DEF = 13.00;
@@ -3857,7 +3916,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
            abrirReconciliacao, fecharReconciliacao, _onAzureRefInput,
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
            _diagCache, _forcarRefreshCache,
-           _hlToggle, _hlChange,
+           _hlToggle, _hlChange, _hlSalvarPadrao, _hlLimparPadrao,
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,
