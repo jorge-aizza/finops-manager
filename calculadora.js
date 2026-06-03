@@ -1883,24 +1883,31 @@ const Calculadora = (() => {
 
   function selecionarTodos() {
     const h = parseInt(document.getElementById('chglobal')?.value) || 720;
+    // 1. Atualiza estado em memória — puro JS, rápido
     _recursos.forEach(r => { _selecionados[r._key||r.resource_id] = h; });
-    document.querySelectorAll('input.cck').forEach(ck => {
-      ck.checked = true;
-      const row = ck.closest('tr'); if (row) row.style.background = 'rgba(147,51,234,.04)';
-    });
-    document.querySelectorAll('input.cck-grupo').forEach(ck => { ck.checked = true; ck.indeterminate = false; });
-    _atualizarCnt();        // habilita botão Estimar imediatamente
-    _atualizarEstimativa(); // rápido: só aritmética + resumo compacto
+    // 2. Habilita botão Estimar ANTES de qualquer trabalho DOM pesado
+    _atualizarCnt();
+    // 3. Atualiza visuais dos checkboxes e painel após o browser pintar o botão
+    setTimeout(() => {
+      document.querySelectorAll('input.cck').forEach(ck => {
+        ck.checked = true;
+        const row = ck.closest('tr'); if (row) row.style.background = 'rgba(147,51,234,.04)';
+      });
+      document.querySelectorAll('input.cck-grupo').forEach(ck => { ck.checked = true; ck.indeterminate = false; });
+      _atualizarEstimativa();
+    }, 0);
   }
 
   function deselecionarTodos() {
     _selecionados = {};
-    document.querySelectorAll('input.cck').forEach(ck => {
-      ck.checked = false;
-      const row = ck.closest('tr'); if (row) row.style.background = '';
-    });
-    _atualizarEstimativa();
     _atualizarCnt();
+    setTimeout(() => {
+      document.querySelectorAll('input.cck').forEach(ck => {
+        ck.checked = false;
+        const row = ck.closest('tr'); if (row) row.style.background = '';
+      });
+      _atualizarEstimativa();
+    }, 0);
   }
 
   function aplicarHorasGlobal() {
