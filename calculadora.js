@@ -1636,101 +1636,22 @@ const Calculadora = (() => {
     const c = document.getElementById('ccnt'); if (c) c.textContent = 'Carregando…';
   }
 
-  // Mapa de grupos expandidos (true = expandido)
+  // Mapa de grupos expandidos (true = expandido; undefined/false = colapsado por padrão)
   const _expandidos = {};
+  let _gBases = []; // índice numérico → baseId, reconstruído a cada _renderRecursos()
 
-  function _renderRecursos() {
-    const tbody = document.getElementById('ctbody'); if (!tbody) return;
-    const lista = _filtroTexto ? _recursos.filter(r =>
-      (r.nome_recurso||'').toLowerCase().includes(_filtroTexto) ||
-      (r.categoria||'').toLowerCase().includes(_filtroTexto)    ||
-      (r.produto||'').toLowerCase().includes(_filtroTexto)      ||
-      (r.consumed_service||'').toLowerCase().includes(_filtroTexto) ||
-      (r.charge_type||'').toLowerCase().includes(_filtroTexto)  ||
-      (r.unidade||'').toLowerCase().includes(_filtroTexto)      ||
-      (r.pricing_model||'').toLowerCase().includes(_filtroTexto)||
-      (r.resource_group_name||'').toLowerCase().includes(_filtroTexto) ||
-      (r.publisher_type||'').toLowerCase().includes(_filtroTexto) ||
-      (r.publisher_name||'').toLowerCase().includes(_filtroTexto)
-    ) : _recursos;
-
-    const c = document.getElementById('ccnt');
-
-    if (!lista.length) {
-      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">
-        ${_recursos.length ? 'Nenhum recurso corresponde ao filtro.'
-          : 'Nenhum recurso encontrado para os filtros selecionados.'}
-      </td></tr>`;
-      if (c) c.textContent = '0 recursos';
-      _atualizarEstimativa();
-      _atualizarCnt();
-      return;
-    }
-
-    const isBRL = (lista[0]?.moeda || 'BRL') === 'BRL';
-
-    // Agrupar por resource_id
-    const grupos = {};
-    const ordemGrupos = [];
-    lista.forEach(r => {
-      const bid = r.resource_id || '';
-      if (!grupos[bid]) { grupos[bid] = []; ordemGrupos.push(bid); }
-      grupos[bid].push(r);
-    });
-
-    const total_recursos = ordemGrupos.length;
-    if (c) c.textContent = `${total_recursos} recurso${total_recursos!==1?'s':''}${lista.length > total_recursos ? ' · '+lista.length+' linhas' : ''}`;
-
-    const rows = [];
-
-    ordemGrupos.forEach(baseId => {
-      const filhas = grupos[baseId];
-      const temMultiplos = filhas.length > 1;
-      // expandido por padrão
-      const exp  = _expandidos[baseId] !== false;
-      const nome = filhas[0].nome_recurso || baseId.split('/').filter(Boolean).pop() || baseId.slice(0,60);
-      const rg   = filhas[0].resource_group_name || '—';
-      const totalGrupo = filhas.reduce((s,r) => s + (isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0)*_taxaBrl), 0);
-      const algumSel = filhas.some(r => !!_selecionados[r._key||r.resource_id]);
-      const todosSel = filhas.every(r => !!_selecionados[r._key||r.resource_id]);
-
-      if (temMultiplos) {
-        rows.push(`<tr style="background:var(--bg-hover);cursor:pointer;" onclick="Calculadora._toggleGrupo('${_esc(baseId)}')">
-          <td style="text-align:center;padding:8px 4px;" onclick="event.stopPropagation()">
-            <input type="checkbox" class="cck-grupo" data-baseid="${_esc(baseId)}"
-              ${todosSel?'checked':''} ${algumSel&&!todosSel?'data-indet="1"':''}
-              onchange="Calculadora._checkGrupo('${_esc(baseId)}',this.checked);event.stopPropagation()">
-          </td>
-          <td colspan="5" style="padding:8px 10px;">
-            <div style="display:flex;align-items:center;gap:7px;">
-              <span style="font-size:10px;color:var(--text-muted);display:inline-block;transform:rotate(${exp?90:0}deg);transition:transform .15s;">&#9654;</span>
-              <div>
-                <div style="font-size:12px;font-weight:600;color:var(--text);" title="${_esc(baseId)}">${_esc(nome)}</div>
-                <div style="font-size:10px;color:var(--text-muted);">${_esc(rg)} &nbsp;·&nbsp; <span style="color:var(--accent);">${filhas.length} meters</span></div>
-              </div>
-            </div>
-          </td>
-          <td style="padding:8px 10px;"></td>
-          <td style="text-align:right;padding:8px 14px;">
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);">${_brl(totalGrupo)}</div>
-            <div style="font-size:9px;color:var(--text-muted);">total grupo</div>
-          </td>
-        </tr>`);
-        if (!exp) return;
-      }
-
-      filhas.forEach(r => {
-        const rid    = r._key || r.resource_id || '';
-        const sel    = !!_selecionados[rid];
-        const totBrl = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0)*_taxaBrl;
-        const ctColor = r.charge_type==='Usage'
-          ? 'rgba(147,51,234,.1);color:var(--accent)'
-          : 'rgba(77,166,255,.1);color:var(--blue,#4da6ff)';
-        const pad = temMultiplos ? 'padding-left:28px;' : '';
-        const isMkt = (r.publisher_type||'').toLowerCase() === 'marketplace';
-        const mktBadge = isMkt ? `<span style="display:inline-block;margin-left:5px;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(255,140,66,.18);color:#ff8c42;vertical-align:middle;white-space:nowrap;">MKT</span>` : '';
-
-        rows.push(`<tr style="${sel?'background:rgba(147,51,234,.04);':''}${isMkt?'border-left:2px solid rgba(255,140,66,.4);':''}">
+  // HTML de uma linha-filha — compartilhado por _renderRecursos e _toggleGrupo (lazy)
+  function _htmlFilhaRow(r, gIdx, temMultiplos, rg, nome, isBRL) {
+    const rid     = r._key || r.resource_id || '';
+    const sel     = !!_selecionados[rid];
+    const totBrl  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0)*_taxaBrl;
+    const ctColor = r.charge_type==='Usage'
+      ? 'rgba(147,51,234,.1);color:var(--accent)'
+      : 'rgba(77,166,255,.1);color:var(--blue,#4da6ff)';
+    const pad     = temMultiplos ? 'padding-left:28px;' : '';
+    const isMkt   = (r.publisher_type||'').toLowerCase() === 'marketplace';
+    const mktBadge = isMkt ? `<span style="display:inline-block;margin-left:5px;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(255,140,66,.18);color:#ff8c42;vertical-align:middle;white-space:nowrap;">MKT</span>` : '';
+    return `<tr data-gchild="${gIdx}" style="${sel?'background:rgba(147,51,234,.04);':''}${isMkt?'border-left:2px solid rgba(255,140,66,.4);':''}">
           <td style="text-align:center;padding:8px 4px;">
             <input type="checkbox" class="cck" data-rid="${_esc(rid)}" ${sel?'checked':''}
               onchange="Calculadora._check('${_esc(rid)}',this.checked)">
@@ -1760,8 +1681,93 @@ const Calculadora = (() => {
           <td style="text-align:right;padding:8px 14px;">
             <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap;">${_brl(totBrl)}</div>
           </td>
+        </tr>`;
+  }
+
+  function _renderRecursos() {
+    const tbody = document.getElementById('ctbody'); if (!tbody) return;
+    const lista = _filtroTexto ? _recursos.filter(r =>
+      (r.nome_recurso||'').toLowerCase().includes(_filtroTexto) ||
+      (r.categoria||'').toLowerCase().includes(_filtroTexto)    ||
+      (r.produto||'').toLowerCase().includes(_filtroTexto)      ||
+      (r.consumed_service||'').toLowerCase().includes(_filtroTexto) ||
+      (r.charge_type||'').toLowerCase().includes(_filtroTexto)  ||
+      (r.unidade||'').toLowerCase().includes(_filtroTexto)      ||
+      (r.pricing_model||'').toLowerCase().includes(_filtroTexto)||
+      (r.resource_group_name||'').toLowerCase().includes(_filtroTexto) ||
+      (r.publisher_type||'').toLowerCase().includes(_filtroTexto) ||
+      (r.publisher_name||'').toLowerCase().includes(_filtroTexto)
+    ) : _recursos;
+
+    const c = document.getElementById('ccnt');
+
+    if (!lista.length) {
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">
+        ${_recursos.length ? 'Nenhum recurso corresponde ao filtro.'
+          : 'Nenhum recurso encontrado para os filtros selecionados.'}
+      </td></tr>`;
+      if (c) c.textContent = '0 recursos';
+      _atualizarEstimativa();
+      _atualizarCnt();
+      return;
+    }
+
+    const isBRL = (lista[0]?.moeda || 'BRL') === 'BRL';
+
+    // Agrupar por resource_id
+    const grupos = {};
+    const ordemGrupos = [];
+    lista.forEach(r => {
+      const bid = r.resource_id || '';
+      if (!grupos[bid]) { grupos[bid] = []; ordemGrupos.push(bid); }
+      grupos[bid].push(r);
+    });
+
+    const total_recursos = ordemGrupos.length;
+    if (c) c.textContent = `${total_recursos} recurso${total_recursos!==1?'s':''}${lista.length > total_recursos ? ' · '+lista.length+' linhas' : ''}`;
+
+    const rows = [];
+    _gBases = [];
+
+    ordemGrupos.forEach(baseId => {
+      const gIdx  = _gBases.length;
+      _gBases.push(baseId);
+      const filhas = grupos[baseId];
+      const temMultiplos = filhas.length > 1;
+      // colapsado por padrão — expande só quando o usuário clica
+      const exp  = _expandidos[baseId] === true;
+      const nome = filhas[0].nome_recurso || baseId.split('/').filter(Boolean).pop() || baseId.slice(0,60);
+      const rg   = filhas[0].resource_group_name || '—';
+      const totalGrupo = filhas.reduce((s,r) => s + (isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0)*_taxaBrl), 0);
+      const algumSel = filhas.some(r => !!_selecionados[r._key||r.resource_id]);
+      const todosSel = filhas.every(r => !!_selecionados[r._key||r.resource_id]);
+
+      if (temMultiplos) {
+        rows.push(`<tr data-ghdr="${gIdx}" style="background:var(--bg-hover);cursor:pointer;" onclick="Calculadora._toggleGrupo(${gIdx})">
+          <td style="text-align:center;padding:8px 4px;" onclick="event.stopPropagation()">
+            <input type="checkbox" class="cck-grupo" data-baseid="${_esc(baseId)}"
+              ${todosSel?'checked':''} ${algumSel&&!todosSel?'data-indet="1"':''}
+              onchange="Calculadora._checkGrupo('${_esc(baseId)}',this.checked);event.stopPropagation()">
+          </td>
+          <td colspan="5" style="padding:8px 10px;">
+            <div style="display:flex;align-items:center;gap:7px;">
+              <span class="cgrupo-arrow" style="font-size:10px;color:var(--text-muted);display:inline-block;transform:rotate(${exp?90:0}deg);transition:transform .15s;">&#9654;</span>
+              <div>
+                <div style="font-size:12px;font-weight:600;color:var(--text);" title="${_esc(baseId)}">${_esc(nome)}</div>
+                <div style="font-size:10px;color:var(--text-muted);">${_esc(rg)} &nbsp;·&nbsp; <span style="color:var(--accent);">${filhas.length} meters</span></div>
+              </div>
+            </div>
+          </td>
+          <td style="padding:8px 10px;"></td>
+          <td style="text-align:right;padding:8px 14px;">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);">${_brl(totalGrupo)}</div>
+            <div style="font-size:9px;color:var(--text-muted);">total grupo</div>
+          </td>
         </tr>`);
-      });
+        if (!exp) return; // filhas não renderizadas; inseridas lazily por _toggleGrupo
+      }
+
+      filhas.forEach(r => { rows.push(_htmlFilhaRow(r, gIdx, temMultiplos, rg, nome, isBRL)); });
     });
 
     tbody.innerHTML = rows.join('');
@@ -1770,19 +1776,57 @@ const Calculadora = (() => {
     _atualizarCnt();
   }
 
-  function _toggleGrupo(baseId) {
-    _expandidos[baseId] = (_expandidos[baseId] === false) ? true : false;
-    _renderRecursos();
+  function _toggleGrupo(gIdx) {
+    const baseId = _gBases[gIdx];
+    if (baseId === undefined) return;
+
+    const nowExpanded = !(_expandidos[baseId] === true);
+    _expandidos[baseId] = nowExpanded;
+
+    const hdr = document.querySelector(`[data-ghdr="${gIdx}"]`);
+    if (!hdr) return;
+    const arrow = hdr.querySelector('.cgrupo-arrow');
+    if (arrow) arrow.style.transform = `rotate(${nowExpanded ? 90 : 0}deg)`;
+
+    if (nowExpanded) {
+      // Lazy: insere só as filhas deste grupo sem reconstruir a tabela inteira
+      const filhas = _recursos.filter(r => r.resource_id === baseId);
+      const isBRL  = (filhas[0]?.moeda || 'BRL') === 'BRL';
+      const rg     = filhas[0]?.resource_group_name || '—';
+      const nome   = filhas[0]?.nome_recurso || baseId.split('/').filter(Boolean).pop() || baseId.slice(0,60);
+      hdr.insertAdjacentHTML('afterend', filhas.map(r => _htmlFilhaRow(r, gIdx, true, rg, nome, isBRL)).join(''));
+    } else {
+      // Remove só as filhas deste grupo
+      document.querySelectorAll(`[data-gchild="${gIdx}"]`).forEach(row => row.remove());
+    }
   }
 
   function _checkGrupo(baseId, checked) {
     const h = parseInt(document.getElementById('chglobal')?.value) || 720;
-    _recursos.filter(r => r.resource_id === baseId).forEach(r => {
+    const filhasGrupo = _recursos.filter(r => r.resource_id === baseId);
+    filhasGrupo.forEach(r => {
       const key = r._key || r.resource_id;
       if (checked) _selecionados[key] = h;
       else delete _selecionados[key];
     });
-    _renderRecursos();
+    // Atualiza checkboxes das filhas SE estiverem visíveis no DOM
+    if (_expandidos[baseId] === true) {
+      filhasGrupo.forEach(r => {
+        const key = r._key || r.resource_id;
+        document.querySelectorAll('input.cck').forEach(ck => {
+          if (ck.dataset.rid === key) {
+            ck.checked = checked;
+            const row = ck.closest('tr'); if (row) row.style.background = checked ? 'rgba(147,51,234,.04)' : '';
+          }
+        });
+      });
+    }
+    // Atualiza o checkbox do header do grupo
+    document.querySelectorAll('input.cck-grupo').forEach(ck => {
+      if (ck.dataset.baseid === baseId) { ck.checked = checked; ck.indeterminate = false; }
+    });
+    _atualizarCnt();
+    _atualizarEstimativa();
   }
 
 
