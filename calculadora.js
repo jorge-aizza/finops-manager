@@ -396,12 +396,9 @@ const Calculadora = (() => {
             <th class="cth">Recurso / Produto</th>
             <th class="cth">Resource Group</th>
             <th class="cth">Meter Category</th>
-            <th class="cth">Consumed Service</th>
-            <th class="cth">Charge Type</th>
+            <th class="cth" title="Pricing Model no tooltip da célula">Charge Type</th>
             <th class="cth">Unit of Measure</th>
-            <th class="cth">Pricing Model</th>
             <th class="cth" style="text-align:right;">Consumed Quantity</th>
-            <th class="cth">Unit of Measure</th>
             <th class="cth" style="text-align:right;" title="Hora → taxa real (effective_price)&#10;Reserva → amortizado pelo term&#10;Período → custo mensal estimado">Custo/h · /mês</th>
             <th class="cth" style="text-align:right;">Total Cobrado (BRL)</th>
           </tr>
@@ -1704,7 +1701,7 @@ const Calculadora = (() => {
               ${todosSel?'checked':''} ${algumSel&&!todosSel?'data-indet="1"':''}
               onchange="Calculadora._checkGrupo('${_esc(baseId)}',this.checked);event.stopPropagation()">
           </td>
-          <td colspan="7" style="padding:8px 10px;">
+          <td colspan="5" style="padding:8px 10px;">
             <div style="display:flex;align-items:center;gap:7px;">
               <span style="font-size:10px;color:var(--text-muted);display:inline-block;transform:rotate(${exp?90:0}deg);transition:transform .15s;">&#9654;</span>
               <div>
@@ -1713,7 +1710,7 @@ const Calculadora = (() => {
               </div>
             </div>
           </td>
-          <td colspan="2" style="padding:8px 10px;"></td>
+          <td style="padding:8px 10px;"></td>
           <td style="text-align:right;padding:8px 14px;">
             <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);">${_brl(totalGrupo)}</div>
             <div style="font-size:9px;color:var(--text-muted);">total grupo</div>
@@ -1739,8 +1736,10 @@ const Calculadora = (() => {
               onchange="Calculadora._check('${_esc(rid)}',this.checked)">
           </td>
           <td style="max-width:200px;padding:8px 10px;${pad}">
-            <div style="font-size:${temMultiplos?'11':'12'}px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${temMultiplos?'var(--text-dim)':'var(--text)'};" title="${_esc(r.resource_id||'')}">${_esc(temMultiplos?(r.meter_categories||r.categoria||nome):nome)}${mktBadge}</div>
-            <div style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(r.publisher_name && isMkt ? r.publisher_name : (r.produto||r.subcategoria||r.regiao||''))}</div>
+            <div style="font-size:${temMultiplos?'11':'12'}px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${temMultiplos?'var(--text-dim)':'var(--text)'};"
+              title="${_esc(r.resource_id||'')}${r.consumed_service?' · '+_esc(r.consumed_service):''}${r.pricing_model?' · '+_esc(r.pricing_model):''}"
+            >${_esc(temMultiplos?(r.meter_categories||r.categoria||nome):nome)}${mktBadge}</div>
+            <div style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(r.publisher_name && isMkt ? r.publisher_name : (r.consumed_service||r.produto||r.subcategoria||''))}</div>
           </td>
           <td style="max-width:140px;padding:8px 10px;">
             <div style="font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(temMultiplos?'':rg)}</div>
@@ -1748,23 +1747,14 @@ const Calculadora = (() => {
           <td style="padding:8px 10px;white-space:nowrap;">
             <span class="cbadge">${_esc(r.categoria||'—')}</span>
           </td>
-          <td style="max-width:150px;padding:8px 10px;">
-            <div style="font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(r.consumed_service||'—')}</div>
-          </td>
-          <td style="padding:8px 10px;white-space:nowrap;">
+          <td style="padding:8px 10px;white-space:nowrap;" title="${_esc(r.pricing_model||'')}">
             <span style="padding:2px 7px;border-radius:8px;font-size:10px;font-weight:600;background:${ctColor};">${_esc(r.charge_type||'—')}</span>
           </td>
           <td style="padding:8px 10px;white-space:nowrap;">
             <div style="font-size:11px;color:var(--text-dim);">${_esc(r.unidade||'—')}</div>
           </td>
-          <td style="padding:8px 10px;white-space:nowrap;">
-            <div style="font-size:11px;color:var(--text-dim);">${_esc(r.pricing_model||'—')}</div>
-          </td>
           <td style="text-align:right;padding:8px 10px;">
             <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-dim);white-space:nowrap;">${parseFloat(r.total_qty||0).toLocaleString('pt-BR',{maximumFractionDigits:4})}</div>
-          </td>
-          <td style="padding:8px 10px;white-space:nowrap;">
-            <div style="font-size:11px;color:var(--text-dim);">${_esc(r.unidade||'—')}</div>
           </td>
           <td style="text-align:right;padding:8px 10px;">${_custoHora(r,isBRL,_taxaBrl)}</td>
           <td style="text-align:right;padding:8px 14px;">
