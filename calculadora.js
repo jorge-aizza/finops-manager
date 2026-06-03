@@ -1803,8 +1803,8 @@ const Calculadora = (() => {
     // Atualizar apenas a linha afetada sem reconstruir o tbody inteiro
     const row = document.querySelector(`input.cck[data-rid="${rid}"]`)?.closest('tr');
     if (row) row.style.background = checked ? 'rgba(147,51,234,.04)' : '';
-    _atualizarEstimativa();
     _atualizarCnt();
+    _atualizarEstimativa();
   }
 
   function _checkAll(checked) {
@@ -1888,8 +1888,9 @@ const Calculadora = (() => {
       ck.checked = true;
       const row = ck.closest('tr'); if (row) row.style.background = 'rgba(147,51,234,.04)';
     });
-    _atualizarEstimativa();
-    _atualizarCnt();
+    document.querySelectorAll('input.cck-grupo').forEach(ck => { ck.checked = true; ck.indeterminate = false; });
+    _atualizarCnt();        // habilita botão Estimar imediatamente
+    _atualizarEstimativa(); // rápido: só aritmética + resumo compacto
   }
 
   function deselecionarTodos() {
@@ -3215,73 +3216,58 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     let totalGeral   = 0;
     let totalCobrado = 0;
 
-    lista.innerHTML = sel.map(rid => {
-      const r   = _recursos.find(x => (x._key||x.resource_id) === rid);
-      if (!r) return '';
-      const nome = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,40);
-      const isBRL = (r.moeda || 'BRL') === 'BRL';
-      // RN-005: taxa de câmbio — usa taxa real do export quando disponível (>1 = conversão real)
-      const tcDB  = parseFloat(r.taxa_cambio || 0);
-      const convR = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
-      const bill  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR;
-      totalCobrado += bill;
-      const uom  = (r.unidade || '').toLowerCase();
-      const tipo = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
-      const horas = _selecionados[rid] || 720;
-      let estimado = 0, desc, cor;
+    // rMap: O(1) por recurso — evita O(N²) com find() para cada selecionado
+    const _rMapEst = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
 
-      if (_horasAplicadas) {
-        const choraRaw = parseFloat(r.custo_hora_billing || 0);
-        const chora    = isBRL ? choraRaw : choraRaw * convR;
-
-        // retail_price_unit já normalizado pelo SQL — só converte moeda se necessário
-        const _retailU = parseFloat(r.retail_price_unit || 0);
-        const _retailH = (tipo === 'hora' || tipo === 'dia') && _retailU > 0
-          ? _retailU * convR : 0;
-        const _choraEst = _retailH > 0 ? _retailH : chora;
-        const _temPL    = _retailH > 0;
-
-        if (tipo === 'reserva') {
-          estimado = chora * horas;
-          desc = '🔒 ' + _brl(chora) + '/h amort. × ' + horas + 'h';
-          cor  = 'var(--blue,#4da6ff)';
-
-        } else if (tipo === 'hora' || tipo === 'dia') {
-          // Usa PL/h quando disponível; senão billing/h
-          estimado = _choraEst * horas;
-          desc = (_temPL ? '📋\xA0' : '') + _brl(_choraEst) + '/h \xD7 ' + horas + 'h';
-          cor  = _temPL ? 'var(--green,#22c55e)' : 'var(--accent)';
-
-        } else {
-          // RN-004: Storage, Bandwidth, Functions — referência mensal
-          // Fallback: quando custo_mes_billing é null (servidor não reiniciado ou dado ausente)
-          //           recalcula a partir de total_billing / dias * 30
-          const _dias  = parseInt(r.dias_ativos || 1) || 1;
-          const mesRaw = parseFloat(r.custo_mes_billing) ||
-                         (parseFloat(r.total_billing || 0) / _dias * 30);
-          const mesBrl   = isBRL ? mesRaw : mesRaw * convR;
-          const custoDia = mesBrl / 30;
-          const dias     = Math.round(horas / 24) || 1;
-          estimado = mesBrl * (horas / 720); // proporcional ao slider global
-          desc = _brl(custoDia) + '/dia \xD7 ' + dias + 'd';
-          cor  = 'var(--orange,#ff8c42)';
-        }
-        totalGeral += estimado;
+    sel.forEach(rid => {
+      const r = _rMapEst.get(rid);
+      if (!r) return;
+      const isBRL  = (r.moeda || 'BRL') === 'BRL';
+      const tcDB   = parseFloat(r.taxa_cambio || 0);
+      const convR  = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
+      const cr     = isBRL ? 1 : convR;
+      totalCobrado += parseFloat(r.total_billing||0) * cr;
+      if (!_horasAplicadas) return;
+      const horas   = _selecionados[rid] || 720;
+      const uom     = (r.unidade || '').toLowerCase();
+      const tipo    = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
+      const chora   = parseFloat(r.custo_hora_billing || 0) * cr;
+      const retailU = parseFloat(r.retail_price_unit || 0);
+      const retailH = (tipo === 'hora' || tipo === 'dia') && retailU > 0 ? retailU * convR : 0;
+      let estimado  = 0;
+      if (tipo === 'reserva') {
+        estimado = chora * horas;
+      } else if (tipo === 'hora' || tipo === 'dia') {
+        estimado = (retailH > 0 ? retailH : chora) * horas;
       } else {
-        desc = 'Defina as horas ou período e clique Aplicar';
-        cor  = 'var(--text-muted)';
+        const dias   = parseInt(r.dias_ativos || 1) || 1;
+        const mesRaw = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing||0) / dias * 30);
+        const mesBrl = mesRaw * cr;
+        const retM   = tipo === 'periodo' && retailU > 0 ? retailU * convR : 0;
+        estimado = (retM > 0 ? retM : mesBrl) * (horas / 720);
       }
+      totalGeral += estimado;
+    });
 
-      return '<div style="padding:8px 10px;border-radius:6px;background:var(--bg-hover);border:1px solid var(--border);">'
-        + '<div style="font-size:11px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:3px;" title="' + _esc(nome) + '">' + _esc(nome) + '</div>'
-        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:4px;">'
-        + '<span style="font-size:9px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _esc(desc) + '</span>'
-        + (_horasAplicadas
-            ? '<span style="font-family:IBM Plex Mono,monospace;font-size:11px;font-weight:600;color:' + cor + ';white-space:nowrap;">' + _brl(estimado) + '</span>'
-            : '<span style="font-family:IBM Plex Mono,monospace;font-size:11px;color:var(--text-muted);white-space:nowrap;">—</span>')
-        + '</div>'
-        + '</div>';
-    }).join('');
+    // Painel lateral: resumo compacto — lista detalhada disponível no modal Configurar Estimativa
+    const _nRes = sel.length;
+    lista.innerHTML = '<div style="padding:10px;display:flex;flex-direction:column;gap:8px;">'
+      + '<div style="text-align:center;padding:10px 8px;border-radius:8px;background:var(--accent-dim);border:1px solid var(--border-light);">'
+      + '<div style="font-size:24px;font-weight:700;color:var(--accent);line-height:1;">' + _nRes + '</div>'
+      + '<div style="font-size:10px;color:var(--text-muted);margin-top:3px;">recurso' + (_nRes !== 1 ? 's' : '') + ' selecionado' + (_nRes !== 1 ? 's' : '') + '</div>'
+      + '</div>'
+      + (_horasAplicadas
+        ? '<div style="border-radius:8px;background:var(--bg-hover);border:1px solid var(--border);padding:10px;">'
+          + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px;">Cobrado no período</div>'
+          + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:13px;font-weight:700;color:var(--text);">' + _brl(totalCobrado) + '</div>'
+          + '</div>'
+          + '<div style="border-radius:8px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);padding:10px;">'
+          + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px;">Estimado</div>'
+          + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:14px;font-weight:700;color:var(--accent);">' + _brl(totalGeral) + '</div>'
+          + '</div>'
+        : '<div style="text-align:center;font-size:11px;color:var(--text-muted);padding:8px 10px;border-radius:6px;background:var(--bg-hover);border:1px solid var(--border);">Configure as horas e clique Aplicar</div>'
+      )
+      + '</div>';
 
     const pctImposto = parseFloat(document.getElementById('cimposto')?.value) || 0;
     const pctCond    = parseFloat(document.getElementById('ccondominио')?.value) || 0;
@@ -3391,9 +3377,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const cntEl = document.getElementById('cov-cnt');
     if (cntEl) cntEl.textContent = sel.length + ' recurso' + (sel.length === 1 ? '' : 's') + ' selecionado' + (sel.length === 1 ? '' : 's');
 
-    // renderiza cards e totais (modal já visível)
-    _ovRenderRecursos();
+    // Totais imediatos; cards carregam em chunks após o modal aparecer
     _ovAtualizarTotal();
+    setTimeout(() => _ovRenderRecursos(), 0);
     // Carrega configuração salva do horário livre
     _hlCarregar();
   }
@@ -3416,9 +3402,16 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
   function _ovRenderRecursos() {
     const container = document.getElementById('cov-recursos');
     if (!container) return;
+    container.innerHTML = '';
     const sel = Object.keys(_selecionados);
-    container.innerHTML = sel.map(rid => {
-      const r = _recursos.find(x => (x._key || x.resource_id) === rid);
+    if (!sel.length) return;
+
+    // rMap: O(1) por recurso — evita O(N²) com find() para cada card
+    const _rMapOv = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
+
+    // Pré-computa HTML de todos os cards como strings JS (sem DOM — rápido)
+    const _cards = sel.map(rid => {
+      const r = _rMapOv.get(rid);
       if (!r) return '';
       const nome     = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0, 60);
       const subtit   = r.produto || r.subcategoria || r.regiao || '';
@@ -3604,7 +3597,15 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           : '')
 
         + '</div>';
-    }).join('');
+    });
+
+    // Inserção progressiva em lotes de 15 — libera o browser para pintar entre lotes
+    let _oi = 0;
+    (function _lote() {
+      container.insertAdjacentHTML('beforeend', _cards.slice(_oi, _oi + 15).join(''));
+      _oi += 15;
+      if (_oi < _cards.length) requestAnimationFrame(_lote);
+    })();
   }
 
   function _ovAtualizarTotal() {
