@@ -1856,6 +1856,7 @@ async function ensurePriceListTable() {
         currency_code    VARCHAR(10)   NOT NULL DEFAULT 'BRL',
         arm_region_name  VARCHAR(100)  NOT NULL DEFAULT 'brazilsouth',
         retail_price     NUMERIC(20,10),
+        retail_price_brl NUMERIC(20,10),
         unit_price       NUMERIC(20,10),
         unit_of_measure  VARCHAR(100),
         product_name     VARCHAR(500),
@@ -1882,6 +1883,7 @@ async function ensurePriceListTable() {
     // Migração: garante índices funcionais em instâncias já existentes
     // Reversão: ver rollback_performance_indexes.sql
     await c.query(`
+      ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS retail_price_brl NUMERIC(20,10);
       CREATE INDEX IF NOT EXISTS idx_pricelist_meter_lower ON azure_price_list (LOWER(meter_id));
       CREATE INDEX IF NOT EXISTS idx_pricelist_type        ON azure_price_list (type);
 
@@ -2050,12 +2052,11 @@ async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
   }
 }
 
-function _buildPriceListUrl(currency) {
-  // Nota: armRegionName NÃO é filtrado — a API retorna 0 itens para qualquer região específica.
-  // A API retorna 100 itens/pág e não aceita $top > 100 (retorna HTTP 400).
-  // O throttling é controlado pelo delay entre páginas em _syncPriceList.
-  const f = encodeURIComponent(`currencyCode eq '${currency}'`);
-  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}`;
+function _buildPriceListUrl(currency, region) {
+  // armRegionName vai no $filter; currencyCode vai como query param separado.
+  // currencyCode no $filter retornava 0 itens para BRL — este formato funciona para ambos USD e BRL.
+  const f = encodeURIComponent(`armRegionName eq '${region}'`);
+  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}&currencyCode=${currency}`;
 }
 
 async function _syncPriceList(requestedCurrency = 'USD') {
@@ -2064,22 +2065,40 @@ async function _syncPriceList(requestedCurrency = 'USD') {
   _syncProgress = { pages: 0, total: 0, started: new Date().toISOString(), error: null, finished: null };
 
   let total = 0, pages = 0;
-  // arm_region_name armazenado como 'global' pois não filtramos por região —
-  // a Azure Retail Prices API retorna 0 itens para qualquer armRegionName específico.
-  const ARM_REGION = 'global';
-  // Chave de meta fora do try para ficar acessível no catch
-  const resultKey = `last_result_${requestedCurrency}_${ARM_REGION}`;
+  const ARM_REGION = 'brazilsouth';
+  const resultKey  = `last_result_USD_${ARM_REGION}`;
 
   try {
     await ensurePriceListTable();
 
-    // A Retail Prices API só funciona de forma confiável com USD.
-    // BRL retorna Items vazio — usamos USD diretamente e convertemos via taxa_cambio no SQL.
     const currency = 'USD';
-    console.log(`[PriceList] Iniciando sync — currency: ${currency}, sem filtro de região`);
+    console.log(`[PriceList] Iniciando sync — region: ${ARM_REGION}, USD + BRL`);
 
-    const probe = await _fetchPriceListPage(_buildPriceListUrl(currency));
-    console.log(`[PriceList] Primeira página → ${probe.items.length} item(s)`);
+    // ── Fase 1: coleta preços BRL em memória (brazilsouth) ──────────────────
+    // Mantemos BRL em Map para depois gravar junto com USD no mesmo UPSERT.
+    const brlMap = new Map(); // meterId.toLowerCase() → retailPrice BRL
+    try {
+      let brlItems, brlNext;
+      const brlProbe = await _fetchPriceListPage(_buildPriceListUrl('BRL', ARM_REGION));
+      brlItems = brlProbe.items; brlNext = brlProbe.nextLink;
+      while (true) {
+        for (const item of brlItems) {
+          if (item.meterId && (item.retailPrice ?? 0) > 0)
+            brlMap.set(item.meterId.toLowerCase(), item.retailPrice);
+        }
+        if (!brlNext) break;
+        await new Promise(r => setTimeout(r, 300));
+        const n = await _fetchPriceListPage(brlNext);
+        brlItems = n.items; brlNext = n.nextLink;
+      }
+      console.log(`[PriceList] BRL coletado: ${brlMap.size} meters com preço`);
+    } catch (e) {
+      console.warn(`[PriceList] Falha ao coletar BRL (não crítico — prossegue com USD): ${e.message}`);
+    }
+
+    // ── Fase 2: busca USD (primeira página para validar) ─────────────────────
+    const probe = await _fetchPriceListPage(_buildPriceListUrl(currency, ARM_REGION));
+    console.log(`[PriceList] Primeira página USD → ${probe.items.length} item(s)`);
 
     if (probe.items.length === 0) {
       throw new Error('Nenhum dado retornado pela Azure Retail Prices API. Verifique conectividade com prices.azure.com');
@@ -2088,8 +2107,8 @@ async function _syncPriceList(requestedCurrency = 'USD') {
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
-      // Limpa registros anteriores para essa moeda
-      await c.query(`DELETE FROM azure_price_list WHERE currency_code = $1`, [currency]);
+      // Substituição completa: limpa dados anteriores (incluindo arm_region_name='global' legado)
+      await c.query(`TRUNCATE TABLE azure_price_list`);
 
       let currentItems = probe.items;
       let nextLink     = probe.nextLink;
@@ -2108,24 +2127,26 @@ async function _syncPriceList(requestedCurrency = 'USD') {
           const unitP   = item.unitPrice   ?? 0;
           if (retailP <= 0 && unitP <= 0) { total++; continue; }
 
+          const brlP = brlMap.get(item.meterId.toLowerCase()) ?? null;
           await c.query(`
             INSERT INTO azure_price_list
-              (meter_id, currency_code, arm_region_name, retail_price, unit_price,
+              (meter_id, currency_code, arm_region_name, retail_price, retail_price_brl, unit_price,
                unit_of_measure, product_name, sku_name, service_name, service_family,
                type, reservation_term, effective_start, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW())
             ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
             DO UPDATE SET
-              retail_price    = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
-              unit_price      = GREATEST(EXCLUDED.unit_price,   azure_price_list.unit_price),
-              product_name    = EXCLUDED.product_name,
-              sku_name        = EXCLUDED.sku_name,
-              effective_start = EXCLUDED.effective_start,
-              updated_at      = NOW()
+              retail_price     = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
+              retail_price_brl = COALESCE(EXCLUDED.retail_price_brl, azure_price_list.retail_price_brl),
+              unit_price       = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
+              product_name     = EXCLUDED.product_name,
+              sku_name         = EXCLUDED.sku_name,
+              effective_start  = EXCLUDED.effective_start,
+              updated_at       = NOW()
           `, [
             item.meterId,
             currency, ARM_REGION,
-            retailP,
+            retailP, brlP,
             unitP,
             item.unitOfMeasure ?? null,
             item.productName   ?? null,
@@ -2191,6 +2212,7 @@ function _mapPlCol(h) {
   if (s === 'currencycode')       return 'currency_code';
   if (s === 'armregionname')      return 'arm_region_name';
   if (s === 'retailprice')        return 'retail_price';
+  if (s === 'retailpricebrl' || s === 'pricebrl') return 'retail_price_brl';
   if (s === 'unitprice')          return 'unit_price';
   if (s === 'unitofmeasure')      return 'unit_of_measure';
   if (s === 'productname')        return 'product_name';
@@ -2236,8 +2258,9 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
         if (!meterId) { skipped++; return; }
         const currency      = (row[colMap['currency_code']]    || 'USD').trim() || 'USD';
         const armRegion     = (row[colMap['arm_region_name']]  || ARM_REGION_FALLBACK).trim() || ARM_REGION_FALLBACK;
-        const retailPrice   = parseFloat(row[colMap['retail_price']]  || 0) || 0;
-        const unitPrice     = parseFloat(row[colMap['unit_price']]    || 0) || 0;
+        const retailPrice   = parseFloat(row[colMap['retail_price']]     || 0) || 0;
+        const retailPriceBrl= colMap['retail_price_brl'] ? (parseFloat(row[colMap['retail_price_brl']] || 0) || null) : null;
+        const unitPrice     = parseFloat(row[colMap['unit_price']]     || 0) || 0;
         const unitOfMeasure = (row[colMap['unit_of_measure']]  || null)?.trim() || null;
         const productName   = (row[colMap['product_name']]     || null)?.trim() || null;
         const skuName       = (row[colMap['sku_name']]         || null)?.trim() || null;
@@ -2250,19 +2273,20 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
         await c.query(`SAVEPOINT ${spn}`);
         const r = await c.query(`
           INSERT INTO azure_price_list
-            (meter_id, currency_code, arm_region_name, retail_price, unit_price,
+            (meter_id, currency_code, arm_region_name, retail_price, retail_price_brl, unit_price,
              unit_of_measure, product_name, sku_name, service_name, service_family,
              type, reservation_term, effective_start, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW())
           ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
           DO UPDATE SET
-            retail_price    = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
-            unit_price      = GREATEST(EXCLUDED.unit_price,   azure_price_list.unit_price),
-            product_name    = EXCLUDED.product_name,
-            sku_name        = EXCLUDED.sku_name,
-            effective_start = EXCLUDED.effective_start,
-            updated_at      = NOW()
-        `, [meterId, currency, armRegion, retailPrice, unitPrice,
+            retail_price     = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
+            retail_price_brl = COALESCE(EXCLUDED.retail_price_brl, azure_price_list.retail_price_brl),
+            unit_price       = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
+            product_name     = EXCLUDED.product_name,
+            sku_name         = EXCLUDED.sku_name,
+            effective_start  = EXCLUDED.effective_start,
+            updated_at       = NOW()
+        `, [meterId, currency, armRegion, retailPrice, retailPriceBrl, unitPrice,
             unitOfMeasure, productName, skuName, serviceName, serviceFamily,
             type, rsvTerm, effStart]);
         await c.query(`RELEASE SAVEPOINT ${spn}`);
@@ -3784,14 +3808,20 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
             / GREATEST(
                 COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric, 1),
                 1
-              ) AS retail_price_norm
+              ) AS retail_price_norm,
+          -- BRL nativo: já em reais, sem necessidade de conversão por taxa de câmbio
+          COALESCE(retail_price_brl, 0)::numeric
+            / GREATEST(
+                COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric, 1),
+                1
+              ) AS retail_price_brl_norm
         FROM azure_price_list
         WHERE type IN ('Consumption', 'DevTestConsumption')
           AND reservation_term = ''
         ORDER BY
           LOWER(meter_id),
-          (type = 'Consumption') DESC,      -- Consumption tem prioridade sobre DevTest
-          (arm_region_name = 'global') DESC  -- global como sentinela
+          (type = 'Consumption') DESC,         -- Consumption tem prioridade sobre DevTest
+          (arm_region_name = 'brazilsouth') DESC -- brazilsouth tem prioridade
       )
       -- ── Outer: enriquece com preço retail e desconto ──────────────────────────
       SELECT
@@ -3832,28 +3862,39 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         base.custo_dia_usd,
         base.custo_uom_billing,
         base.custo_uom_usd,
-        -- retail_price_unit: retail normalizado (÷UoM PL, ×câmbio) — pré-computado em pl_best
+        -- retail_price_unit: prefere BRL nativo (sem conversão); fallback USD × câmbio
         COALESCE(
-          pl.retail_price_norm * CASE
-            WHEN pl.currency_code = base.moeda THEN 1.0
-            WHEN pl.currency_code = 'USD'
-            THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-            ELSE 1.0
+          CASE
+            WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0
+            THEN pl.retail_price_brl_norm
+            WHEN pl.currency_code = 'USD' AND COALESCE(pl.retail_price_norm, 0) > 0
+            THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+            WHEN pl.currency_code = base.moeda
+            THEN pl.retail_price_norm
+            ELSE NULL
           END,
           0
         )::numeric AS retail_price_unit,
-        -- desconto_pct: só para hora/dia; usa retail_price_norm já normalizado
+        -- desconto_pct: só para hora/dia; usa o mesmo preço de referência que retail_price_unit
         CASE
-          WHEN pl.retail_price_norm > 0
-               AND COALESCE(base.custo_hora_billing, 0) > 0
+          WHEN COALESCE(base.custo_hora_billing, 0) > 0
                AND base.tipo_custo IN ('hora', 'dia')
+               AND COALESCE(
+                     CASE
+                       WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0
+                       THEN pl.retail_price_brl_norm
+                       WHEN pl.currency_code = 'USD' THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+                       WHEN pl.currency_code = base.moeda THEN pl.retail_price_norm
+                       ELSE NULL
+                     END, 0) > 0
           THEN ROUND(
             (1 - base.custo_hora_billing::numeric / NULLIF(
-              pl.retail_price_norm * CASE
-                WHEN pl.currency_code = base.moeda THEN 1.0
-                WHEN pl.currency_code = 'USD'
-                THEN COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-                ELSE 1.0
+              CASE
+                WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0
+                THEN pl.retail_price_brl_norm
+                WHEN pl.currency_code = 'USD' THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+                WHEN pl.currency_code = base.moeda THEN pl.retail_price_norm
+                ELSE NULL
               END
             , 0)) * 100, 1)
           ELSE NULL
