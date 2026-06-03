@@ -3409,10 +3409,15 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     // rMap: O(1) por recurso — evita O(N²) com find() para cada card
     const _rMapOv = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
 
-    // Pré-computa HTML de todos os cards como strings JS (sem DOM — rápido)
-    const _cards = sel.map(rid => {
-      const r = _rMapOv.get(rid);
-      if (!r) return '';
+    // Computa E insere 10 cards por frame — sem pré-computação bloqueante
+    let _oi = 0;
+    function _lote() {
+      let _html = '';
+      const _end = Math.min(_oi + 10, sel.length);
+      for (; _oi < _end; _oi++) {
+        const rid = sel[_oi];
+        const r   = _rMapOv.get(rid);
+        if (!r) continue;
       const nome     = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0, 60);
       const subtit   = r.produto || r.subcategoria || r.regiao || '';
       const isBRL    = (r.moeda || 'BRL') === 'BRL';
@@ -3501,7 +3506,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const col2Lbl = 'Horas';
       const col2Val = horas + 'h';
 
-      return '<div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:12px 14px;transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--border-light)\'" onmouseout="this.style.borderColor=\'var(--border)\'">'
+      _html += '<div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:12px 14px;transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--border-light)\'" onmouseout="this.style.borderColor=\'var(--border)\'">'
 
         // Nome + subtítulo
         + '<div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;" title="' + _esc(r.resource_id || nome) + '">' + _esc(nome) + '</div>'
@@ -3597,15 +3602,11 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           : '')
 
         + '</div>';
-    });
-
-    // Inserção progressiva em lotes de 15 — libera o browser para pintar entre lotes
-    let _oi = 0;
-    (function _lote() {
-      container.insertAdjacentHTML('beforeend', _cards.slice(_oi, _oi + 15).join(''));
-      _oi += 15;
-      if (_oi < _cards.length) requestAnimationFrame(_lote);
-    })();
+      } // fim do for
+      if (_html) container.insertAdjacentHTML('beforeend', _html);
+      if (_oi < sel.length) requestAnimationFrame(_lote);
+    }
+    requestAnimationFrame(_lote); // primeiro lote também via rAF — modal pinta antes
   }
 
   function _ovAtualizarTotal() {
