@@ -3440,24 +3440,33 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     await abrirInvoice();
   }
 
+  // Estado de paginação do modal — persistido entre lotes
+  let _ovSel = [], _ovRMap = null, _ovIdx = 0;
+  const _OV_LOTE = 100; // cards por lote
+
   function _ovRenderRecursos() {
     const container = document.getElementById('cov-recursos');
     if (!container) return;
     container.innerHTML = '';
-    const sel = Object.keys(_selecionados);
-    if (!sel.length) return;
+    _ovSel  = Object.keys(_selecionados);
+    _ovRMap = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
+    _ovIdx  = 0;
+    if (!_ovSel.length) return;
+    _ovRenderLote(container);
+  }
 
-    // rMap: O(1) por recurso — evita O(N²) com find() para cada card
-    const _rMapOv = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
+  function _ovCarregarMais() {
+    const container = document.getElementById('cov-recursos');
+    document.getElementById('cov-mais')?.remove();
+    if (container) _ovRenderLote(container);
+  }
 
-    // Computa E insere 10 cards por frame — sem pré-computação bloqueante
-    let _oi = 0;
-    function _lote() {
-      let _html = '';
-      const _end = Math.min(_oi + 10, sel.length);
-      for (; _oi < _end; _oi++) {
-        const rid = sel[_oi];
-        const r   = _rMapOv.get(rid);
+  function _ovRenderLote(container) {
+    const end = Math.min(_ovIdx + _OV_LOTE, _ovSel.length);
+    let _html = '';
+    for (let _oi = _ovIdx; _oi < end; _oi++) {
+        const rid = _ovSel[_oi];
+        const r   = _ovRMap.get(rid);
         if (!r) continue;
       const nome     = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0, 60);
       const subtit   = r.produto || r.subcategoria || r.regiao || '';
@@ -3643,11 +3652,20 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           : '')
 
         + '</div>';
-      } // fim do for
-      if (_html) container.insertAdjacentHTML('beforeend', _html);
-      if (_oi < sel.length) requestAnimationFrame(_lote);
+    } // fim do for
+    if (_html) container.insertAdjacentHTML('beforeend', _html);
+    _ovIdx = end;
+    if (_ovIdx < _ovSel.length) {
+      const rest = _ovSel.length - _ovIdx;
+      container.insertAdjacentHTML('beforeend',
+        `<div id="cov-mais" style="text-align:center;padding:16px 0 8px;">
+          <button class="cbtn-sec" onclick="Calculadora._ovCarregarMais()"
+            style="font-size:12px;padding:8px 20px;border-radius:8px;">
+            Mostrar mais ${rest.toLocaleString('pt-BR')} recursos ▼
+          </button>
+        </div>`
+      );
     }
-    requestAnimationFrame(_lote); // primeiro lote também via rAF — modal pinta antes
   }
 
   function _ovAtualizarTotal() {
@@ -3966,6 +3984,6 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,
-           _ovGerarEstimativa,
+           _ovGerarEstimativa, _ovCarregarMais,
            _switchVisao, _toggleDetalhe };
 })();
