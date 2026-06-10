@@ -1880,20 +1880,70 @@ async function ensurePriceListTable() {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
-    // Migração: garante índices funcionais em instâncias já existentes
-    // Reversão: ver rollback_performance_indexes.sql
+    // ── Índices funcionais (idempotentes) ────────────────────────────────────
     await c.query(`
       ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS retail_price_brl NUMERIC(20,10);
       CREATE INDEX IF NOT EXISTS idx_pricelist_meter_lower ON azure_price_list (LOWER(meter_id));
       CREATE INDEX IF NOT EXISTS idx_pricelist_type        ON azure_price_list (type);
 
-      -- Partial index: cobre exatamente o JOIN da Calculadora (subconjunto mais usado)
+      -- Partial index meter_id — cobre pl_best (match primário)
       CREATE INDEX IF NOT EXISTS idx_pricelist_join
         ON azure_price_list (LOWER(meter_id))
         WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = '';
-    `).catch(() => {}); // silencia se já existir ou se a tabela ainda não tiver dados
+
+      -- Partial index sku+service — cobre pl_sku (fallback por nome)
+      CREATE INDEX IF NOT EXISTS idx_pricelist_sku_svc
+        ON azure_price_list (LOWER(sku_name), LOWER(service_name))
+        WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = '';
+    `).catch(() => {});
+
+    // ── Materialized Views — substituem CTEs pesados na query de recursos ────
+    // Criadas apenas se não existirem; populadas após cada sync (_syncPriceList).
+    // Se azure_price_list estiver vazia (pré-sync), as views ficam vazias também —
+    // o LEFT JOIN retorna NULL e a calculadora opera sem PL (comportamento correto).
+    await c.query(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS pl_best_mv AS
+        SELECT DISTINCT ON (LOWER(meter_id))
+          LOWER(meter_id) AS meter_id_lower,
+          currency_code,
+          retail_price::numeric
+            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
+            AS retail_price_norm,
+          COALESCE(retail_price_brl,0)::numeric
+            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
+            AS retail_price_brl_norm
+        FROM azure_price_list
+        WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = ''
+        ORDER BY LOWER(meter_id), (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
+    `).catch(() => {});
+    await c.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS pl_best_mv_idx ON pl_best_mv (meter_id_lower);
+    `).catch(() => {});
+
+    await c.query(`
+      CREATE MATERIALIZED VIEW IF NOT EXISTS pl_sku_mv AS
+        SELECT DISTINCT ON (LOWER(COALESCE(sku_name,'')), LOWER(COALESCE(service_name,'')))
+          LOWER(COALESCE(sku_name,''))     AS sku_lower,
+          LOWER(COALESCE(service_name,'')) AS svc_lower,
+          currency_code,
+          retail_price::numeric
+            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
+            AS retail_price_norm,
+          COALESCE(retail_price_brl,0)::numeric
+            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
+            AS retail_price_brl_norm
+        FROM azure_price_list
+        WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = ''
+          AND sku_name IS NOT NULL AND sku_name <> ''
+        ORDER BY LOWER(COALESCE(sku_name,'')), LOWER(COALESCE(service_name,'')),
+                 (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
+    `).catch(() => {});
+    await c.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS pl_sku_mv_idx ON pl_sku_mv (sku_lower, svc_lower);
+    `).catch(() => {});
+
     _priceListReady = true;
-    console.log('[PriceList] Tabela pronta ✅');
+    console.log('[PriceList] Tabela + views prontas ✅');
   } catch (err) {
     console.warn('[PriceList] Erro ao criar tabela:', err.message);
   } finally {
@@ -2052,11 +2102,11 @@ async function _fetchPriceListPage(urlOrFilter, maxRetries = 5) {
   }
 }
 
-function _buildPriceListUrl(currency, region) {
-  // armRegionName vai no $filter; currencyCode vai como query param separado.
-  // currencyCode no $filter retornava 0 itens para BRL — este formato funciona para ambos USD e BRL.
-  const f = encodeURIComponent(`armRegionName eq '${region}'`);
-  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=${f}&currencyCode=${currency}`;
+function _buildPriceListUrl(currency) {
+  // Sem filtro de região — busca todos os meters disponíveis globalmente.
+  // arm_region_name é salvo por item (campo armRegionName da API).
+  // pl_best/pl_sku priorizam brazilsouth via ORDER BY.
+  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&currencyCode=${currency}`;
 }
 
 async function _syncPriceList(requestedCurrency = 'USD') {
@@ -2065,40 +2115,17 @@ async function _syncPriceList(requestedCurrency = 'USD') {
   _syncProgress = { pages: 0, total: 0, started: new Date().toISOString(), error: null, finished: null };
 
   let total = 0, pages = 0;
-  const ARM_REGION = 'brazilsouth';
-  const resultKey  = `last_result_USD_${ARM_REGION}`;
+  const resultKey = 'last_result_USD_global';
 
   try {
     await ensurePriceListTable();
 
     const currency = 'USD';
-    console.log(`[PriceList] Iniciando sync — region: ${ARM_REGION}, USD + BRL`);
+    console.log(`[PriceList] Iniciando sync — todos os meters (sem filtro de região), currency: ${currency}`);
 
-    // ── Fase 1: coleta preços BRL em memória (brazilsouth) ──────────────────
-    // Mantemos BRL em Map para depois gravar junto com USD no mesmo UPSERT.
-    const brlMap = new Map(); // meterId.toLowerCase() → retailPrice BRL
-    try {
-      let brlItems, brlNext;
-      const brlProbe = await _fetchPriceListPage(_buildPriceListUrl('BRL', ARM_REGION));
-      brlItems = brlProbe.items; brlNext = brlProbe.nextLink;
-      while (true) {
-        for (const item of brlItems) {
-          if (item.meterId && (item.retailPrice ?? 0) > 0)
-            brlMap.set(item.meterId.toLowerCase(), item.retailPrice);
-        }
-        if (!brlNext) break;
-        await new Promise(r => setTimeout(r, 300));
-        const n = await _fetchPriceListPage(brlNext);
-        brlItems = n.items; brlNext = n.nextLink;
-      }
-      console.log(`[PriceList] BRL coletado: ${brlMap.size} meters com preço`);
-    } catch (e) {
-      console.warn(`[PriceList] Falha ao coletar BRL (não crítico — prossegue com USD): ${e.message}`);
-    }
-
-    // ── Fase 2: busca USD (primeira página para validar) ─────────────────────
-    const probe = await _fetchPriceListPage(_buildPriceListUrl(currency, ARM_REGION));
-    console.log(`[PriceList] Primeira página USD → ${probe.items.length} item(s)`);
+    // Busca primeira página para validar conectividade
+    const probe = await _fetchPriceListPage(_buildPriceListUrl(currency));
+    console.log(`[PriceList] Primeira página → ${probe.items.length} item(s)`);
 
     if (probe.items.length === 0) {
       throw new Error('Nenhum dado retornado pela Azure Retail Prices API. Verifique conectividade com prices.azure.com');
@@ -2107,7 +2134,6 @@ async function _syncPriceList(requestedCurrency = 'USD') {
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
-      // Substituição completa: limpa dados anteriores (incluindo arm_region_name='global' legado)
       await c.query(`TRUNCATE TABLE azure_price_list`);
 
       let currentItems = probe.items;
@@ -2118,35 +2144,31 @@ async function _syncPriceList(requestedCurrency = 'USD') {
 
         for (const item of currentItems) {
           if (!item.meterId) continue;
-          // Filtra itens com retail_price = 0 (free tier / regiões sem preço) para
-          // não sobrescrever preços válidos já armazenados do mesmo meter_id.
-          // A API retorna o mesmo meter_id para múltiplas regiões; forçamos
-          // arm_region_name='global' como sentinela, então o último item processado
-          // sobrescreveria os anteriores — mantemos apenas preços > 0.
           const retailP = item.retailPrice ?? 0;
           const unitP   = item.unitPrice   ?? 0;
           if (retailP <= 0 && unitP <= 0) { total++; continue; }
 
-          const brlP = brlMap.get(item.meterId.toLowerCase()) ?? null;
+          // arm_region_name vem da API — região real do item (brazilsouth, eastus, global, etc.)
+          const armRegion = item.armRegionName || '';
+
           await c.query(`
             INSERT INTO azure_price_list
-              (meter_id, currency_code, arm_region_name, retail_price, retail_price_brl, unit_price,
+              (meter_id, currency_code, arm_region_name, retail_price, unit_price,
                unit_of_measure, product_name, sku_name, service_name, service_family,
                type, reservation_term, effective_start, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
             ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
             DO UPDATE SET
-              retail_price     = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
-              retail_price_brl = COALESCE(EXCLUDED.retail_price_brl, azure_price_list.retail_price_brl),
-              unit_price       = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
-              product_name     = EXCLUDED.product_name,
-              sku_name         = EXCLUDED.sku_name,
-              effective_start  = EXCLUDED.effective_start,
-              updated_at       = NOW()
+              retail_price    = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
+              unit_price      = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
+              product_name    = EXCLUDED.product_name,
+              sku_name        = EXCLUDED.sku_name,
+              effective_start = EXCLUDED.effective_start,
+              updated_at      = NOW()
           `, [
             item.meterId,
-            currency, ARM_REGION,
-            retailP, brlP,
+            currency, armRegion,
+            retailP,
             unitP,
             item.unitOfMeasure ?? null,
             item.productName   ?? null,
@@ -2178,11 +2200,28 @@ async function _syncPriceList(requestedCurrency = 'USD') {
 
       await c.query('COMMIT');
       _syncProgress.finished = new Date().toISOString();
-      _plCobTs = 0; // invalida cache de cobertura para recalcular na próxima visita
+      _plCobTs = 0;
       console.log(`[PriceList] ✅ Sync concluído: ${total} registros em ${pages} páginas`);
 
-      await _gravaMeta(resultKey, { ok: true, total, pages, currency, region: ARM_REGION, ts: _syncProgress.finished });
-      return { ok: true, total, pages, currency, region: ARM_REGION };
+      // Refresh materialized views após commit — substitui CTEs pesados nas queries
+      console.log('[PriceList] Atualizando materialized views...');
+      try {
+        await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY pl_best_mv');
+        await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY pl_sku_mv');
+        console.log('[PriceList] Views atualizadas ✅');
+      } catch (ve) {
+        // CONCURRENTLY falha se não houver unique index ainda — tenta sem CONCURRENTLY
+        try {
+          await pool.query('REFRESH MATERIALIZED VIEW pl_best_mv');
+          await pool.query('REFRESH MATERIALIZED VIEW pl_sku_mv');
+          console.log('[PriceList] Views atualizadas (sem CONCURRENTLY) ✅');
+        } catch (ve2) {
+          console.warn('[PriceList] Refresh de views falhou (não crítico):', ve2.message);
+        }
+      }
+
+      await _gravaMeta(resultKey, { ok: true, total, pages, currency, region: 'all', ts: _syncProgress.finished });
+      return { ok: true, total, pages, currency, region: 'all' };
 
     } catch (err) {
       await c.query('ROLLBACK').catch(() => {});
@@ -3796,34 +3835,8 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
                  COALESCE(meter_category,''),
                  COALESCE(meter_name,''),
                  COALESCE(unit_of_measure,'')
-      ),
-      -- ── pl_best: melhor preço PL por meter_id — executado UMA vez (hash join) ──
-      -- LATERAL anterior fazia 1 lookup por recurso (nested loop = muito lento).
-      -- DISTINCT ON garante 1 linha por meter_id; retail_price_norm já é ÷UoM.
-      pl_best AS (
-        SELECT DISTINCT ON (LOWER(meter_id))
-          LOWER(meter_id) AS meter_id_lower,
-          currency_code,
-          retail_price::numeric
-            / GREATEST(
-                COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric, 1),
-                1
-              ) AS retail_price_norm,
-          -- BRL nativo: já em reais, sem necessidade de conversão por taxa de câmbio
-          COALESCE(retail_price_brl, 0)::numeric
-            / GREATEST(
-                COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric, 1),
-                1
-              ) AS retail_price_brl_norm
-        FROM azure_price_list
-        WHERE type IN ('Consumption', 'DevTestConsumption')
-          AND reservation_term = ''
-        ORDER BY
-          LOWER(meter_id),
-          (type = 'Consumption') DESC,         -- Consumption tem prioridade sobre DevTest
-          (arm_region_name = 'brazilsouth') DESC -- brazilsouth tem prioridade
       )
-      -- ── Outer: enriquece com preço retail e desconto ──────────────────────────
+      -- pl_best_mv e pl_sku_mv: materialized views pré-computadas (refresh após sync)
       SELECT
         base.resource_id,
         base._meter_id,
@@ -3862,46 +3875,58 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         base.custo_dia_usd,
         base.custo_uom_billing,
         base.custo_uom_usd,
-        -- retail_price_unit: prefere BRL nativo (sem conversão); fallback USD × câmbio
+        -- retail_price_unit: 1º meter_id (pl_best) → 2º sku+service (pl_sku) → 0
         COALESCE(
+          -- Prioridade 1: match por meter_id
           CASE
             WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0
             THEN pl.retail_price_brl_norm
             WHEN pl.currency_code = 'USD' AND COALESCE(pl.retail_price_norm, 0) > 0
             THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-            WHEN pl.currency_code = base.moeda
+            WHEN pl.currency_code = base.moeda AND COALESCE(pl.retail_price_norm, 0) > 0
             THEN pl.retail_price_norm
+            ELSE NULL
+          END,
+          -- Prioridade 2: fallback por sku_name + service_name (ex: VMs sem meter_id match)
+          CASE
+            WHEN base.moeda = 'BRL' AND COALESCE(pls.retail_price_brl_norm, 0) > 0
+            THEN pls.retail_price_brl_norm
+            WHEN pls.currency_code = 'USD' AND COALESCE(pls.retail_price_norm, 0) > 0
+            THEN pls.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+            WHEN pls.currency_code = base.moeda AND COALESCE(pls.retail_price_norm, 0) > 0
+            THEN pls.retail_price_norm
             ELSE NULL
           END,
           0
         )::numeric AS retail_price_unit,
-        -- desconto_pct: só para hora/dia; usa o mesmo preço de referência que retail_price_unit
+        -- desconto_pct: usa o mesmo preço efetivo (meter_id → sku → sem desconto)
         CASE
           WHEN COALESCE(base.custo_hora_billing, 0) > 0
                AND base.tipo_custo IN ('hora', 'dia')
-               AND COALESCE(
-                     CASE
-                       WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0
-                       THEN pl.retail_price_brl_norm
-                       WHEN pl.currency_code = 'USD' THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-                       WHEN pl.currency_code = base.moeda THEN pl.retail_price_norm
-                       ELSE NULL
-                     END, 0) > 0
           THEN ROUND(
             (1 - base.custo_hora_billing::numeric / NULLIF(
-              CASE
-                WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0
-                THEN pl.retail_price_brl_norm
-                WHEN pl.currency_code = 'USD' THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-                WHEN pl.currency_code = base.moeda THEN pl.retail_price_norm
-                ELSE NULL
-              END
+              COALESCE(
+                CASE
+                  WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0 THEN pl.retail_price_brl_norm
+                  WHEN pl.currency_code = 'USD' AND COALESCE(pl.retail_price_norm, 0) > 0 THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+                  ELSE NULL
+                END,
+                CASE
+                  WHEN base.moeda = 'BRL' AND COALESCE(pls.retail_price_brl_norm, 0) > 0 THEN pls.retail_price_brl_norm
+                  WHEN pls.currency_code = 'USD' AND COALESCE(pls.retail_price_norm, 0) > 0 THEN pls.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
+                  ELSE NULL
+                END
+              )
             , 0)) * 100, 1)
           ELSE NULL
         END AS desconto_pct
       FROM base
-      -- pl_best: executa UMA vez (hash join) em vez de 1 lookup por recurso (nested loop)
-      LEFT JOIN pl_best pl ON pl.meter_id_lower = LOWER(base._meter_id)
+      -- pl_best_mv: match por meter_id — O(1) via unique index (pré-computado)
+      LEFT JOIN pl_best_mv pl  ON pl.meter_id_lower = LOWER(base._meter_id)
+      -- pl_sku_mv: fallback por sku+service — só ativa quando meter_id não casou
+      LEFT JOIN pl_sku_mv  pls ON pl.meter_id_lower IS NULL
+        AND pls.sku_lower = LOWER(COALESCE(base.meter_categories,''))
+        AND pls.svc_lower = LOWER(COALESCE(base.categoria,''))
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 

@@ -1231,7 +1231,7 @@ const Calculadora = (() => {
         _diagCache();
         return;
       }
-      _dds.csub.data = data.map(s => { const ini=(s.periodo_inicio||'').slice(0,10),fim=(s.periodo_fim||'').slice(0,10); return { value:s.subscription_id, label:`${s.subscription_name||s.subscription_id}${ini?' ('+ini+' → '+fim+')':''}`, labelShort:s.subscription_name||s.subscription_id, sub:ini?`${ini} → ${fim}`:'', periodo_fim:fim }; });
+      _dds.csub.data = data.map(s => { const ini=(s.periodo_inicio||'').slice(0,10),fim=(s.periodo_fim||'').slice(0,10); const nome=s.subscription_name||s.subscription_id; return { value:s.subscription_id, label:nome, labelShort:nome, sub:'', periodo_fim:fim }; });
       _renderOpcoes('csub');
     } catch(err) { opts.innerHTML=`<div style="padding:8px 12px;font-size:12px;color:#ff4d6a;">Erro: ${_esc(err.message)}</div>`; }
   }
@@ -3279,13 +3279,18 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       if (tipo === 'reserva') {
         estimado = chora * horas;
       } else if (tipo === 'hora' || tipo === 'dia') {
-        estimado = (retailH > 0 ? retailH : chora) * horas;
+        estimado = chora * horas;
       } else {
-        const dias   = parseInt(r.dias_ativos || 1) || 1;
-        const mesRaw = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing||0) / dias * 30);
-        const mesBrl = mesRaw * cr;
-        const retM   = tipo === 'periodo' && retailU > 0 ? retailU * convR : 0;
-        estimado = (retM > 0 ? retM : mesBrl) * (horas / 720);
+        // periodo: PL/mês ÷ 720 × horas  (PL disponível)
+        //          unit_price×qty / 720 × horas  (fallback — on-demand do export)
+        const retM     = tipo === 'periodo' && retailU > 0 ? retailU * convR : 0;
+        const upqBrl   = parseFloat(r.total_upq_brl || 0) * cr;  // effective_price×qty×taxa
+        const dias     = parseInt(r.dias_ativos || 1) || 1;
+        const mesRaw   = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / dias * 30);
+        const mesBrl   = mesRaw * cr;
+        // fallback: effective_price×qty normalizado ao mês; se zero, usa custo_mes_billing
+        const fallback = upqBrl > 0 ? (upqBrl / dias * 30) : mesBrl;
+        estimado = (retM > 0 ? retM : fallback) / 720 * horas;
       }
       totalGeral += estimado;
     });
@@ -3371,11 +3376,15 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const _retailUr  = parseFloat(r.retail_price_unit || 0);
         const retailHr   = isHora && _retailUr > 0 ? _retailUr * convR2 : 0;
         const retailMesR = !isHora && tipo2 === 'periodo' && _retailUr > 0 ? _retailUr * convR2 : 0;
-        const choraEstR  = isHora && retailHr > 0 ? retailHr : chora;
-        // Estimado: PL quando disponível; periodo usa PL/mês proporcional se tiver
-        const estimado   = (tipo2 === 'periodo')
-          ? (retailMesR > 0 ? retailMesR * (horas / 720) : custo_mes * (horas / 720))
-          : choraEstR * horas;
+        // Estimado: periodo → PL/mês ÷ 720 | fallback unit_price×qty ÷ 720 | hora → billing/h × horas
+        const _diasP2    = parseInt(r.dias_ativos || 1) || 1;
+        const _mesR2     = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / _diasP2 * 30);
+        const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
+        const custo_mes2 = isBRL ? _mesR2 : _mesR2 * convR2;
+        const _fallback2 = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 * 30) : custo_mes2;
+        const estimado = (tipo2 === 'periodo')
+          ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
+          : chora * horas;
         const temPLR = retailHr > 0 || retailMesR > 0;
         return {
           resource_id:      rid,
@@ -3517,18 +3526,18 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       // Economia total no período selecionado
       const economiaPeriodo = isHora && retailHora > 0
         ? (retailHora - chora) * horas
-        : (!isHora && retailMes > 0 ? (retailMes - mesBrl) * (horas / 720) : 0);
-      // Custo/h para estimativa hora: usa Price List quando disponível, senão billing
-      const choraEst = isHora && retailHora > 0 ? retailHora : chora;
-      const temPL    = (isHora && retailHora > 0) || (!isHora && retailMes > 0);
+        : (!isHora && retailMes > 0 ? (retailMes - mesBrl) * (horas / 730) : 0);
+      const temPL    = (!isHora && retailMes > 0);
       // Para reserva: on-demand do PL como referência informacional (estimado permanece amortizado)
       const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit * convR : 0;
       const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
         ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
-      // Estimado: hora → choraEst × horas | periodo → retailMes proporcional (ou billing) | reserva → amortizado
+      // Estimado: periodo → PL/mês ÷ 720 | fallback unit_price×qty ÷ 720 | hora → billing/h × horas
+      const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
+      const _fallback3 = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
       const estimado = (tipo === 'periodo')
-        ? (retailMes > 0 ? retailMes * (horas / 720) : mesBrl * (horas / 720))
-        : choraEst * horas;
+        ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
+        : chora * horas;
 
       // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
@@ -3944,7 +3953,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const mesRaw   = parseFloat(r.custo_mes_billing) ||
                      (parseFloat(r.total_billing || 0) / _diasC * 30);
     const mesBrl   = isBRL ? mesRaw : mesRaw * convR;
-    const custoDia = mesBrl / 30;
+    const custoDia = mesBrl / 730;
     // Remove o prefixo "1 " do UoM para exibir só a unidade: "1 GB" → "GB", "1 Unit" → "Unit"
     const uomLabel = (r.unidade || '').replace(/^\d+\s+/, '').trim() || 'un.';
     const qLinha   = _qLinha(totalQty, _esc(uomLabel), 'var(--orange,#ff8c42)');
@@ -3952,7 +3961,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     // retail_price_unit já normalizado pelo SQL — só converte moeda
     const _plRetail = parseFloat(r.retail_price_unit || 0);
     const _plMes    = _plRetail > 0 ? _plRetail * convR : 0;
-    const _plMesDia = _plMes / 30;
+    const _plMesDia = _plMes / 730;
     const _dPctPer  = _plMes > 0 && mesBrl > 0
       ? Math.max(0, parseFloat(((1 - mesBrl / _plMes) * 100).toFixed(1)))
       : 0;
