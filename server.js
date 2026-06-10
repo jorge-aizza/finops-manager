@@ -418,6 +418,15 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_reservas_status_venc ON reservas_cloud (status, data_vencimento);
     `);
 
+    // Portal público — configuração de acesso sem login
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS portal_config (
+        key        VARCHAR(100) PRIMARY KEY,
+        value      TEXT,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
     // Limpeza de sessões antigas (> 90 dias) — evita crescimento ilimitado da tabela
     try {
       const del = await c.query(`DELETE FROM sessoes WHERE criado_em < NOW() - INTERVAL '90 days'`);
@@ -3495,6 +3504,190 @@ app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
     })();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PORTAL PÚBLICO — sem autenticação; dados filtrados pelo admin
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper: lê config do portal do banco
+async function _getPortalConfig() {
+  try {
+    const r = await pool.query(`SELECT value FROM portal_config WHERE key = 'config'`);
+    if (!r.rows.length) return { ativo: false, subscription_ids: [], resource_groups: [], titulo: 'Portal de Serviço', descricao: '' };
+    return JSON.parse(r.rows[0].value);
+  } catch (_) { return { ativo: false, subscription_ids: [], resource_groups: [] }; }
+}
+
+// Middleware: bloqueia se portal inativo
+async function _portalMiddleware(req, res, next) {
+  if (!pool) return res.status(503).json({ error: 'Banco de dados não disponível' });
+  try {
+    const cfg = await _getPortalConfig();
+    if (!cfg.ativo) return res.status(403).json({ error: 'Portal desativado' });
+    req.portalCfg = cfg;
+    next();
+  } catch (e) { res.status(500).json({ error: e.message }); }
+}
+
+// ── GET /api/admin/portal-config ─────────────────────────────────────────────
+app.get('/api/admin/portal-config', authMiddleware, dbMiddleware, async (_req, res) => {
+  try { res.json(await _getPortalConfig()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/admin/portal-config ────────────────────────────────────────────
+app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { ativo, subscription_ids = [], resource_groups = [], titulo = 'Portal de Serviço', descricao = '' } = req.body;
+    const cfg = { ativo: !!ativo, subscription_ids, resource_groups, titulo, descricao, updated_at: new Date().toISOString() };
+    await pool.query(`
+      INSERT INTO portal_config (key, value, updated_at)
+      VALUES ('config', $1, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [JSON.stringify(cfg)]);
+    console.log(`[Portal] Config atualizada — ativo: ${cfg.ativo}, subs: ${subscription_ids.length}, rgs: ${resource_groups.length}`);
+    res.json({ ok: true, ...cfg });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/public/calculadora/config ───────────────────────────────────────
+app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
+  const { titulo, descricao } = req.portalCfg;
+  res.json({ titulo, descricao });
+});
+
+// ── GET /api/public/calculadora/subscriptions ────────────────────────────────
+app.get('/api/public/calculadora/subscriptions', _portalMiddleware, async (req, res) => {
+  try {
+    const { subscription_ids } = req.portalCfg;
+    if (!subscription_ids.length) return res.json([]);
+    const r = await pool.query(`
+      SELECT subscription_id, subscription_name, periodo_inicio, periodo_fim, moeda
+      FROM azure_subs_cache
+      WHERE subscription_id = ANY($1)
+      ORDER BY subscription_name
+    `, [subscription_ids]);
+    // fallback direto na azure_costs se cache vazio
+    if (!r.rows.length) {
+      const rf = await pool.query(`
+        SELECT subscription_id, MAX(subscription_name) AS subscription_name,
+               MIN(cost_date) AS periodo_inicio, MAX(cost_date) AS periodo_fim,
+               MIN(billing_currency) AS moeda
+        FROM azure_costs
+        WHERE subscription_id = ANY($1)
+        GROUP BY subscription_id ORDER BY MAX(subscription_name)
+      `, [subscription_ids]);
+      return res.json(rf.rows);
+    }
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/public/calculadora/resource-groups ──────────────────────────────
+app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req, res) => {
+  try {
+    const { subscription_ids, resource_groups } = req.portalCfg;
+    const { subscription_id } = req.query;
+    const cond = []; const params = [];
+    if (subscription_id) {
+      const ids = subscription_id.split(',').map(s => s.trim()).filter(Boolean);
+      // valida que são subs permitidas
+      const allowed = ids.filter(id => subscription_ids.includes(id));
+      if (!allowed.length) return res.json([]);
+      cond.push(`subscription_id = ANY($${params.length+1})`); params.push(allowed);
+    } else {
+      if (!subscription_ids.length) return res.json([]);
+      cond.push(`subscription_id = ANY($${params.length+1})`); params.push(subscription_ids);
+    }
+    if (resource_groups.length) {
+      cond.push(`UPPER(resource_group_name) = ANY($${params.length+1})`);
+      params.push(resource_groups.map(rg => rg.toUpperCase()));
+    }
+    const r = await pool.query(`
+      SELECT DISTINCT UPPER(resource_group_name) AS resource_group_name_upper,
+             MAX(resource_group_name) AS resource_group_name,
+             MAX(subscription_id) AS subscription_id
+      FROM azure_costs
+      WHERE ${cond.join(' AND ')} AND resource_group_name IS NOT NULL
+      GROUP BY UPPER(resource_group_name)
+      ORDER BY resource_group_name
+      LIMIT 500
+    `, params);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/public/calculadora/recursos ─────────────────────────────────────
+// Reutiliza lógica do endpoint privado mas valida filtros pelo portalCfg
+app.get('/api/public/calculadora/recursos', _portalMiddleware, async (req, res) => {
+  try {
+    const { subscription_ids: allowedSubs, resource_groups: allowedRGs } = req.portalCfg;
+    const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
+
+    // Validação: só permite subs/RGs configurados pelo admin
+    const reqSubs = subscription_id ? subscription_id.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const filteredSubs = reqSubs.length
+      ? reqSubs.filter(id => allowedSubs.includes(id))
+      : allowedSubs;
+    if (!filteredSubs.length) return res.json([]);
+
+    const reqRGs = resource_group ? resource_group.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [];
+    const filteredRGs = reqRGs.length
+      ? reqRGs.filter(rg => !allowedRGs.length || allowedRGs.map(r => r.toUpperCase()).includes(rg))
+      : allowedRGs.map(r => r.toUpperCase());
+
+    // Monta query reutilizando a mesma lógica — repassa como query params válidos
+    req.query.subscription_id = filteredSubs.join(',');
+    if (filteredRGs.length) req.query.resource_group = filteredRGs.join(',');
+    if (data_inicio) req.query.data_inicio = data_inicio;
+    if (data_fim)    req.query.data_fim    = data_fim;
+
+    // Delega para o handler privado reutilizando a mesma função de query
+    // (chama o próximo handler via internal forward — evita duplicar SQL)
+    req.url = '/api/calculadora/recursos' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+    req._portalForward = true;
+    res._portalDelegateDone = false;
+
+    // Executa a lógica do endpoint privado diretamente
+    const _buildRecursosQuery = async (queryReq, queryRes) => {
+      // re-usa o mesmo handler registrado — forward interno
+      const handler = app._router.stack
+        .filter(l => l.route && l.route.path === '/api/calculadora/recursos')
+        .map(l => l.route.stack[l.route.stack.length - 1].handle)[0];
+      if (handler) await handler(queryReq, queryRes, () => {});
+    };
+    await _buildRecursosQuery(req, res);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/public/calculadora/estimar ─────────────────────────────────────
+app.post('/api/public/calculadora/estimar', _portalMiddleware, async (req, res) => {
+  try {
+    const { subscription_ids: allowedSubs } = req.portalCfg;
+    // Valida recursos — só permite resource_ids cujo subscription_id seja permitido
+    const { recursos = [] } = req.body;
+    if (!recursos.length) return res.status(400).json({ error: 'Nenhum recurso selecionado.' });
+    const ids = recursos.map(r => r.resource_id);
+    const check = await pool.query(
+      `SELECT DISTINCT resource_id FROM azure_costs WHERE resource_id = ANY($1) AND subscription_id = ANY($2)`,
+      [ids, allowedSubs]
+    );
+    const validIds = new Set(check.rows.map(r => r.resource_id));
+    req.body.recursos = recursos.filter(r => validIds.has(r.resource_id));
+    if (!req.body.recursos.length) return res.status(403).json({ error: 'Recursos não autorizados para este portal.' });
+
+    // Delega para handler privado
+    const handler = app._router.stack
+      .filter(l => l.route && l.route.path === '/api/calculadora/estimar')
+      .map(l => l.route.stack[l.route.stack.length - 1].handle)[0];
+    if (handler) await handler(req, res, () => {});
+    else res.status(500).json({ error: 'Handler não encontrado' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULADORA PRIVADA
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ── GET /api/calculadora/subscriptions ───────────────────────────────────────
 app.get('/api/calculadora/subscriptions', authMiddleware, dbMiddleware, async (_req, res) => {

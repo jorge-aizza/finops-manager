@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portal de Serviço — Calculadora Azure</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    /* ── Reset / base ───────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Inter', 'Segoe UI', sans-serif; }
+
+    /* ── Header do portal ──────────────────────────────────── */
+    .portal-header {
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(18,2,32,.85);
+      backdrop-filter: blur(18px);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 24px; height: 56px;
+    }
+    .portal-brand {
+      display: flex; align-items: center; gap: 12px;
+    }
+    .portal-brand svg { flex-shrink: 0; }
+    .portal-brand-name {
+      font-size: 18px; font-weight: 800; letter-spacing: .04em;
+      background: linear-gradient(90deg, #c084fc, #9333ea);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .portal-brand-sub {
+      font-size: 11px; color: var(--text-muted); letter-spacing: .06em;
+      text-transform: uppercase; margin-top: 1px;
+    }
+    .portal-badge {
+      font-size: 10px; background: rgba(147,51,234,.18);
+      border: 1px solid rgba(147,51,234,.4); border-radius: 20px;
+      padding: 2px 10px; color: var(--accent); font-weight: 600;
+      letter-spacing: .06em;
+    }
+
+    /* ── Hero (front add) ──────────────────────────────────── */
+    .portal-hero {
+      padding: 40px 24px 28px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+      background: radial-gradient(ellipse at 50% 0%, rgba(147,51,234,.12) 0%, transparent 70%);
+    }
+    .portal-hero h1 {
+      font-size: clamp(22px, 4vw, 36px);
+      font-weight: 800;
+      background: linear-gradient(90deg, #c084fc 0%, #9333ea 50%, #7c3aed 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      filter: drop-shadow(0 0 12px rgba(147,51,234,.4));
+      margin-bottom: 10px;
+    }
+    .portal-hero p {
+      font-size: 14px; color: var(--text-muted); max-width: 560px; margin: 0 auto 20px;
+      line-height: 1.6;
+    }
+    .portal-hero-chips {
+      display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+    }
+    .portal-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      background: rgba(147,51,234,.1); border: 1px solid rgba(147,51,234,.3);
+      border-radius: 20px; padding: 4px 12px;
+      font-size: 11px; color: var(--text-dim); letter-spacing: .04em;
+    }
+
+    /* ── Wrapper da calculadora ────────────────────────────── */
+    .portal-calc-wrap {
+      max-width: 1400px; margin: 0 auto; padding: 0 16px 40px;
+    }
+    /* Oculta features que precisam de auth no modo público */
+    body.portal-mode #cvista-detalhe,
+    body.portal-mode #cvista-servico,
+    body.portal-mode #cimport-area,
+    body.portal-mode .calc-import-btn,
+    body.portal-mode [onclick*="abrirImport"],
+    body.portal-mode #cdiag-area { display: none !important; }
+
+    /* Spinner de carregamento inicial */
+    #portal-loading {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 300px; gap: 16px; color: var(--text-muted);
+    }
+    .portal-spinner {
+      width: 40px; height: 40px; border: 3px solid rgba(147,51,234,.2);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Mensagem de portal inativo */
+    #portal-inactive {
+      display: none; text-align: center; padding: 60px 24px;
+    }
+    #portal-inactive .pi-icon { font-size: 48px; margin-bottom: 16px; }
+    #portal-inactive h2 { color: var(--text); margin-bottom: 8px; font-size: 20px; }
+    #portal-inactive p  { color: var(--text-muted); font-size: 14px; }
+  </style>
+</head>
+<body class="portal-mode">
+
+<!-- Header -->
+<header class="portal-header">
+  <div class="portal-brand">
+    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+      <rect width="32" height="32" rx="8" fill="rgba(147,51,234,.15)"/>
+      <path d="M8 16h4l3-8 4 16 3-8h4" stroke="#9333ea" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div>
+      <div class="portal-brand-name" id="portal-titulo">Portal de Serviço</div>
+      <div class="portal-brand-sub">Calculadora Azure</div>
+    </div>
+  </div>
+  <span class="portal-badge">⚡ Público</span>
+</header>
+
+<!-- Hero / Front Add -->
+<section class="portal-hero" id="portal-hero">
+  <h1 id="portal-hero-titulo">Calculadora de Custos Azure</h1>
+  <p id="portal-hero-desc">Estime o custo dos seus recursos Azure de forma rápida e transparente. Selecione os recursos, defina as horas e visualize o custo estimado com impostos.</p>
+  <div class="portal-hero-chips">
+    <span class="portal-chip">🔍 Busca por Subscription</span>
+    <span class="portal-chip">⏱ Estimativa por horas</span>
+    <span class="portal-chip">📋 Price List Azure</span>
+    <span class="portal-chip">📄 Relatório exportável</span>
+  </div>
+</section>
+
+<!-- Estado: carregando -->
+<div id="portal-loading">
+  <div class="portal-spinner"></div>
+  <span>Carregando portal...</span>
+</div>
+
+<!-- Estado: portal inativo -->
+<div id="portal-inactive">
+  <div class="pi-icon">🔒</div>
+  <h2>Portal temporariamente indisponível</h2>
+  <p>Este portal de serviço está desativado. Entre em contato com o administrador.</p>
+</div>
+
+<!-- Calculadora (injetada quando ativo) -->
+<div class="portal-calc-wrap" id="portal-calc-wrap" style="display:none;">
+  <div id="view-calculadora"></div>
+</div>
+
+<script src="/calculadora.js"></script>
+<script>
+(async function initPortal() {
+  const loadingEl  = document.getElementById('portal-loading');
+  const inactiveEl = document.getElementById('portal-inactive');
+  const calcWrap   = document.getElementById('portal-calc-wrap');
+  const heroEl     = document.getElementById('portal-hero');
+
+  try {
+    // Verifica se portal está ativo e obtém configuração
+    const cfgRes = await fetch('/api/public/calculadora/config');
+
+    if (!cfgRes.ok) {
+      // Portal inativo (403) ou erro
+      loadingEl.style.display = 'none';
+      inactiveEl.style.display = 'block';
+      return;
+    }
+
+    const cfg = await cfgRes.json();
+
+    // Atualiza título/descrição com o configurado pelo admin
+    if (cfg.titulo) {
+      document.title = cfg.titulo + ' — Portal de Serviço';
+      document.getElementById('portal-titulo').textContent     = cfg.titulo;
+      document.getElementById('portal-hero-titulo').textContent = cfg.titulo;
+    }
+    if (cfg.descricao) {
+      document.getElementById('portal-hero-desc').textContent = cfg.descricao;
+    }
+
+    // Mostra a calculadora
+    loadingEl.style.display = 'none';
+    calcWrap.style.display  = 'block';
+
+    // Inicia calculadora no modo público
+    Calculadora.init({
+      apiBase: '/api/public/calculadora',
+      publico: true
+    });
+
+  } catch (e) {
+    loadingEl.style.display = 'none';
+    inactiveEl.style.display = 'block';
+    console.error('[Portal] Erro ao iniciar:', e.message);
+  }
+})();
+</script>
+</body>
+</html>

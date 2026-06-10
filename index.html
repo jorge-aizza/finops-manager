@@ -2870,6 +2870,7 @@
           <div class="settings-tab" onclick="switchSettingsTab('integracao')">🔗 Integração AD / Entra ID</div>
           <div class="settings-tab" onclick="switchSettingsTab('banco')">🗄️ Banco de Dados</div>
           <div class="settings-tab" onclick="switchSettingsTab('pricelist')">💰 Price List</div>
+          <div class="settings-tab" onclick="switchSettingsTab('portal'); loadPortalConfig();">🌐 Portal Público</div>
         </div>
 
         <!-- Tab: Usuários -->
@@ -3314,6 +3315,75 @@
 
         </div>
         <!-- /Tab Price List -->
+
+        <!-- Tab Portal Público -->
+        <div id="stab-portal" class="settings-panel">
+          <div style="padding:20px;display:flex;flex-direction:column;gap:18px;">
+
+            <!-- Ativar portal -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                <div>
+                  <div style="font-size:14px;font-weight:600;color:var(--text);">Portal Público</div>
+                  <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">Calculadora sem login em <code style="font-size:11px;color:var(--accent);">/portal.html</code></div>
+                </div>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                  <input type="checkbox" id="portal-cfg-ativo" onchange="savePortalConfig()" style="width:16px;height:16px;accent-color:var(--accent);">
+                  <span style="font-size:12px;color:var(--text-muted);">Ativar</span>
+                </label>
+              </div>
+              <div id="portal-cfg-link" style="display:none;padding:8px;background:rgba(147,51,234,.08);border-radius:6px;border:1px solid rgba(147,51,234,.2);"></div>
+            </div>
+
+            <!-- Título e descrição -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Aparência</div>
+              <div>
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Título do Portal</label>
+                <input id="portal-cfg-titulo" type="text" value="Portal de Serviço"
+                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;"
+                  placeholder="Portal de Serviço Azure">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Descrição (subtítulo)</label>
+                <textarea id="portal-cfg-desc" rows="2"
+                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;resize:vertical;"
+                  placeholder="Estime o custo dos seus recursos Azure..."></textarea>
+              </div>
+            </div>
+
+            <!-- Subscriptions permitidas -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Filtros de Acesso</div>
+              <div>
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">
+                  Subscription IDs permitidos <span style="opacity:.6;">(um por linha)</span>
+                </label>
+                <textarea id="portal-cfg-subs" rows="4"
+                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;font-family:monospace;resize:vertical;"
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx&#10;yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"></textarea>
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">
+                  Resource Groups visíveis <span style="opacity:.6;">(um por linha — vazio = todos os RGs das subs acima)</span>
+                </label>
+                <textarea id="portal-cfg-rgs" rows="3"
+                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;font-family:monospace;resize:vertical;"
+                  placeholder="rg-producao&#10;rg-homologacao"></textarea>
+              </div>
+            </div>
+
+            <!-- Botão salvar -->
+            <div style="display:flex;align-items:center;gap:12px;">
+              <button onclick="savePortalConfig()" class="btn-primary" style="padding:9px 20px;font-size:13px;">💾 Salvar configuração</button>
+              <a href="/portal.html" target="_blank" class="btn-ghost" style="padding:9px 16px;font-size:13px;text-decoration:none;">🔗 Abrir portal</a>
+            </div>
+            <div id="portal-cfg-msg" style="font-size:12px;display:none;"></div>
+
+          </div>
+        </div>
+        </div>
+        <!-- /Tab Portal Público -->
 
       </div>
     </div>

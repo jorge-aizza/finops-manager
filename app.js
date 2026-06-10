@@ -2247,6 +2247,69 @@ function _updatePlSchedProx(cfg) {
     + ' às ' + String(hora).padStart(2, '0') + ':00';
 }
 
+// ── Portal Público — Configuração ──────────────────────────────────────────────
+
+async function loadPortalConfig() {
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res = await fetch('/api/admin/portal-config', { headers: { Authorization: 'Bearer ' + token } });
+    const d   = await res.json();
+    const ativo = document.getElementById('portal-cfg-ativo');
+    const titulo = document.getElementById('portal-cfg-titulo');
+    const desc   = document.getElementById('portal-cfg-desc');
+    const subs   = document.getElementById('portal-cfg-subs');
+    const rgs    = document.getElementById('portal-cfg-rgs');
+    if (ativo)  ativo.checked    = !!d.ativo;
+    if (titulo) titulo.value     = d.titulo   || 'Portal de Serviço';
+    if (desc)   desc.value       = d.descricao || '';
+    if (subs)   subs.value       = (d.subscription_ids || []).join('\n');
+    if (rgs)    rgs.value        = (d.resource_groups  || []).join('\n');
+    _updatePortalLink(d);
+  } catch (e) { console.warn('[Portal Config] loadPortalConfig:', e.message); }
+}
+
+async function savePortalConfig() {
+  const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+  const ativo  = document.getElementById('portal-cfg-ativo')?.checked || false;
+  const titulo = document.getElementById('portal-cfg-titulo')?.value?.trim() || 'Portal de Serviço';
+  const desc   = document.getElementById('portal-cfg-desc')?.value?.trim()   || '';
+  const subs   = (document.getElementById('portal-cfg-subs')?.value || '')
+    .split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+  const rgs    = (document.getElementById('portal-cfg-rgs')?.value || '')
+    .split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+  const msgEl  = document.getElementById('portal-cfg-msg');
+  try {
+    const res = await fetch('/api/admin/portal-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify({ ativo, titulo, descricao: desc, subscription_ids: subs, resource_groups: rgs })
+    });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'Erro ao salvar');
+    _updatePortalLink(d);
+    if (msgEl) {
+      msgEl.style.display = 'block';
+      msgEl.style.color   = 'var(--green,#22c55e)';
+      msgEl.textContent   = ativo ? '✅ Portal ativado e salvo' : '⏸ Portal desativado';
+      setTimeout(() => { if (msgEl) msgEl.style.display = 'none'; }, 3000);
+    }
+  } catch (e) {
+    if (msgEl) { msgEl.style.display = 'block'; msgEl.style.color = 'var(--danger)'; msgEl.textContent = '❌ ' + e.message; }
+  }
+}
+
+function _updatePortalLink(cfg) {
+  const linkEl = document.getElementById('portal-cfg-link');
+  if (!linkEl) return;
+  const url = window.location.origin + '/portal.html';
+  if (cfg && cfg.ativo) {
+    linkEl.style.display = 'block';
+    linkEl.innerHTML = `<a href="${url}" target="_blank" style="color:var(--accent);font-size:12px;">🔗 ${url}</a>`;
+  } else {
+    linkEl.style.display = 'none';
+  }
+}
+
 function closeSettingsModal() {
   document.getElementById('modal-settings').classList.remove('open');
   if (_coletaPolling) { clearInterval(_coletaPolling); _coletaPolling = null; }

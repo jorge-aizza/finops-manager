@@ -32,13 +32,23 @@ const Calculadora = (() => {
   let _reconciliacao  = null;
   let _azureRefValue  = 0;
   let _iniciado     = false;
+  let _apiBase      = '/api/calculadora'; // sobrescrito por init({ apiBase }) no portal público
+  let _modoPublico  = false;              // true quando iniciado pelo portal sem login
 
   // ── API helper ───────────────────────────────────────────────────
   async function _api(method, path, body) {
     const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
-    const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token } };
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
-    const r = await fetch(window.location.origin + '/api' + path, opts);
+    // path pode ser relativo (/subscriptions) ou absoluto (/api/azure-costs/...)
+    // Remove prefixo legado /calculadora/ se presente (compatibilidade)
+    const cleanPath = path.replace(/^\/calculadora\//, '/');
+    const url = cleanPath.startsWith('/api/')
+      ? window.location.origin + cleanPath
+      : window.location.origin + _apiBase + cleanPath;
+    const r = await fetch(url, opts);
     const ct = r.headers.get('content-type') || '';
     if (!ct.includes('application/json')) {
       throw new Error(`Servidor retornou HTTP ${r.status} — reinicie o servidor e tente novamente.`);
@@ -908,17 +918,22 @@ const Calculadora = (() => {
   // ═══════════════════════════════════════════════════════════════
   // init — chamado pelo showView('calculadora')
   // ═══════════════════════════════════════════════════════════════
-  function init() {
+  function init(opts) {
+    // opts.apiBase  → troca base da API (ex: '/api/public/calculadora' para portal público)
+    // opts.publico  → desativa features que requerem auth (import, diagnóstico, etc.)
+    if (opts && opts.apiBase)  { _apiBase = opts.apiBase; }
+    if (opts && opts.publico)  { _modoPublico = true; }
+
     const view = document.getElementById('view-calculadora');
     if (!view) { console.error('Calculadora: #view-calculadora não encontrada'); return; }
 
     if (!_iniciado) {
       view.innerHTML = _html();
       _iniciado = true;
-      _setupImport();
+      if (!_modoPublico) _setupImport();
       _setupDateListeners();
-      _setupClickFora();  // fecha dropdowns ao clicar fora
-      _carregarTaxas();   // carrega taxas salvas (padrão: 18,65% e 13%)
+      _setupClickFora();
+      _carregarTaxas();
     }
 
     _carregarSubscriptions();
