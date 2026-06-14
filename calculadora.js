@@ -28,7 +28,6 @@ const Calculadora = (() => {
   let _dataFim      = '';
   let _taxaBrl      = 5.70;
   let _estimativa   = null;
-  let _dbTaxaMap    = new Map(); // rg_lower → { taxa, valida, totalHoras, totalBrl, recursos }
   let _filtroTexto    = '';
   let _reconciliacao  = null;
   let _azureRefValue  = 0;
@@ -1387,7 +1386,6 @@ const Calculadora = (() => {
         _key: (r.resource_id||'') + '||' + (r.categoria||'') + '||' + (r.meter_categories||'') + '||' + (r.unidade||'')
       }));
       _selecionados = {};
-      _dbComputeTaxas(); // computa taxas blended por workspace Databricks
       _renderRecursos();
       // Reconciliação em background (não bloqueia o render)
       _reconciliacao = null;
@@ -1407,54 +1405,6 @@ const Calculadora = (() => {
         _atualizarNotaRodape();
       }
     } catch (_) { /* silencioso */ }
-  }
-
-  // ── Databricks: taxa blended por workspace (RG) ──────────────────────────────
-  // Calculada a partir dos dados já carregados — sem chamada extra ao servidor.
-  // Threshold: ≥ 24h executadas E ≥ 2 recursos distintos → taxa válida.
-  // Recursos com horas_reais=0 (quantity=0) são excluídos do numerador e denominador.
-  function _dbComputeTaxas() {
-    const raw = new Map(); // rg_lower → { totalBrl, totalHoras, ids: Set }
-    _recursos.forEach(r => {
-      const rg = (r.resource_group_name || '').toLowerCase();
-      if (!rg.startsWith('databricks-rg-')) return;
-      if (r.tipo_custo !== 'hora') return;
-      const horasReais = parseFloat(r.horas_reais || 0);
-      if (horasReais <= 0) return; // exclui resources sem quantity real
-      const isBRL = (r.moeda || 'BRL') === 'BRL';
-      const tcDB  = parseFloat(r.taxa_cambio || 0);
-      const convR = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
-      const billing = parseFloat(r.total_billing || 0) * convR;
-      if (!raw.has(rg)) raw.set(rg, { totalBrl: 0, totalHoras: 0, ids: new Set() });
-      const e = raw.get(rg);
-      e.totalBrl   += billing;
-      e.totalHoras += horasReais;
-      e.ids.add(r.resource_id || r._key || rg + '_' + e.ids.size);
-    });
-    _dbTaxaMap = new Map();
-    raw.forEach((v, rg) => {
-      const valida = v.totalHoras >= 24 && v.ids.size >= 2;
-      const taxa   = valida ? v.totalBrl / v.totalHoras : 0;
-      _dbTaxaMap.set(rg, {
-        taxa, valida,
-        totalHoras: Math.round(v.totalHoras),
-        totalBrl:   v.totalBrl,
-        recursos:   v.ids.size,
-      });
-      if (valida) {
-        console.log(`[Databricks] ⚡ ${rg} → R$ ${taxa.toFixed(4)}/h (${Math.round(v.totalHoras)}h · ${v.ids.size} recursos)`);
-      } else {
-        console.warn(`[Databricks] ⚠ ${rg} → amostra insuficiente (${Math.round(v.totalHoras)}h · ${v.ids.size} recursos) — fallback billing individual`);
-      }
-    });
-    if (raw.size === 0) console.log('[Databricks] Nenhum workspace databricks-rg-* encontrado nos recursos carregados.');
-  }
-
-  // Retorna o entry do workspace Databricks para um recurso, ou null se não for Databricks
-  function _dbInfoParaRecurso(r) {
-    const rg = (r.resource_group_name || '').toLowerCase();
-    if (!rg.startsWith('databricks-rg-')) return null;
-    return _dbTaxaMap.get(rg) || null;
   }
 
   function _atualizarNotaRodape() {
@@ -2601,17 +2551,12 @@ const Calculadora = (() => {
                 return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand mensal (Azure Price List)">📋\xA0' + _brl(_plRef) + '/mês</span>';
               return '<span class="mono" title="Custo mensal estimado do billing (÷30÷24)">' + _brl(r.custo_mes || r.custo_hora * 720) + '/mês*</span>';
             }
-            // Databricks workspace rate tem prioridade sobre PL
-            if (r.databricks_valida && r.databricks_taxa > 0)
-              return '<span class="mono" style="color:#0ea5e9;" title="Taxa blended do workspace Databricks">⚡\xA0' + _brl(r.databricks_taxa) + '/h</span>';
             if (_temPL)
               return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand por hora (Azure Price List)">📋\xA0' + _brl(_plRef) + '/h</span>';
             return '<span class="mono">' + _brl(r.custo_hora) + '/h</span>';
           })()
         : '<span class="na">&mdash;</span>';
-      const _corEst = r.fonte_estimado === 'databricks'
-        ? 'td-db'
-        : (r.fonte_estimado === 'price_list' || (_temPL && r.tipo_custo !== 'reserva')) ? 'td-green' : 'td-gray';
+      const _corEst = (r.fonte_estimado === 'price_list' || (_temPL && r.tipo_custo !== 'reserva')) ? 'td-green' : 'td-gray';
       return '<tr>'
         + '<td class="td-nm">' + _esc(r.nome) + '</td>'
         + '<td class="td-sm">' + _esc(r.categoria) + '</td>'
@@ -2754,7 +2699,6 @@ td{padding:8px 10px;vertical-align:middle}
 .td-brl{text-align:right;font-family:'IBM Plex Mono','Courier New',monospace;font-weight:700;font-size:10pt}
 .td-green{color:#6d28d9}
 .td-gray{color:#9aa0be;font-weight:400;font-size:9pt}
-.td-db{color:#0ea5e9}
 .na{color:#cbd5e1}
 .mono{font-family:'IBM Plex Mono','Courier New',monospace}
 /* ── TOTAIS ── */
@@ -3408,14 +3352,11 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         return;
       }
       const retailH = (tipo === 'hora' || tipo === 'dia') && retailU > 0 ? retailU * convR : 0;
-      // Databricks: substitui custo_hora individual pela taxa blended do workspace
-      const _dbInf  = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
-      const choraEfetiva = (_dbInf && _dbInf.valida) ? _dbInf.taxa : chora;
       let estimado  = 0;
       if (tipo === 'reserva') {
         estimado = chora * horas;
       } else if (tipo === 'hora' || tipo === 'dia') {
-        estimado = choraEfetiva * horas;
+        estimado = chora * horas;
       } else {
         // periodo: PL/mês ÷ 720 × horas  (PL disponível)
         //          unit_price×qty / 720 × horas  (fallback — on-demand do export)
@@ -3516,11 +3457,6 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const _retailUr  = parseFloat(r.retail_price_unit || 0);
         const retailHr   = isHora && _retailUr > 0 ? _retailUr * convR2 : 0;
         const retailMesR = !isHora && (tipo2 === 'periodo' || tipo2 === 'mes') && _retailUr > 0 ? _retailUr * convR2 : 0;
-        // Databricks: usa taxa blended do workspace para recursos hora
-        const _dbInf2   = tipo2 === 'hora' ? _dbInfoParaRecurso(r) : null;
-        const _dbValida = _dbInf2 && _dbInf2.valida;
-        const choraEfetiva2 = _dbValida ? _dbInf2.taxa : chora;
-
         // mes: custo fixo mensal — estimado_brl = custo do mês (não proporcional às horas)
         if (tipo2 === 'mes') {
           return {
@@ -3552,30 +3488,27 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const _fallback2 = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 * 30) : custo_mes2;
         const estimado = (tipo2 === 'periodo')
           ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
-          : choraEfetiva2 * horas;
+          : chora * horas;
         const temPLR = retailHr > 0 || retailMesR > 0;
         return {
-          resource_id:       rid,
-          nome:              r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
-          categoria:         r.categoria || '',
-          consumed_service:  r.consumed_service || '',
-          resource_group:    r.resource_group_name || '',
-          uom:               r.unidade || '',
-          tipo_custo:        tipo2,
-          fixo_mensal:       false,
+          resource_id:      rid,
+          nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+          categoria:        r.categoria || '',
+          consumed_service: r.consumed_service || '',
+          resource_group:   r.resource_group_name || '',
+          uom:              r.unidade || '',
+          tipo_custo:       tipo2,
+          fixo_mensal:      false,
           isHora,
           horas,
-          custo_hora:        chora,
-          custo_hora_efetivo: choraEfetiva2,
-          databricks_taxa:   _dbValida ? _dbInf2.taxa : 0,
-          databricks_valida: !!_dbValida,
+          custo_hora:       chora,
           retail_price_hora: retailHr || retailMesR,
-          fonte_estimado:    temPLR ? 'price_list' : (_dbValida ? 'databricks' : 'billing'),
-          custo_mes:         custo_mes,
-          dias_ativos:       parseInt(r.dias_ativos) || 0,
-          total_cobrado:     bill,
-          estimado_brl:      estimado,
-          moeda:             r.moeda || 'BRL',
+          fonte_estimado:   temPLR ? 'price_list' : 'billing',
+          custo_mes:        custo_mes,
+          dias_ativos:      parseInt(r.dias_ativos) || 0,
+          total_cobrado:    bill,
+          estimado_brl:     estimado,
+          moeda:            r.moeda || 'BRL',
         };
       }).filter(Boolean)
     };
@@ -3656,17 +3589,12 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       // RN-001..004: usa tipo_custo do banco; fallback por UoM
       const tipo     = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
       const isHora   = tipo === 'hora' || tipo === 'dia';
-      // Databricks: taxa blended do workspace
-      const _dbInf3   = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
-      const _dbValida3 = _dbInf3 && _dbInf3.valida;
-      const isDatabricks = !!_dbInf3;
       // RN-005: taxa real do export quando >1, senão _taxaBrl
       const tcDB     = parseFloat(r.taxa_cambio || 0);
       const convR    = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
       const horas    = _selecionados[rid] || 720;
       const choraRaw  = parseFloat(r.custo_hora_billing || 0);
       const chora     = choraRaw * convR;
-      const choraEfetiva3 = (_dbValida3) ? _dbInf3.taxa : chora;
       const diasAtiv  = parseInt(r.dias_ativos || 1) || 1;
       const totalBill = parseFloat(r.total_billing || 0);
       // custo_mes_billing: campo do banco ou fallback total_billing / dias * 30
@@ -3717,7 +3645,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         ? estimadoMes
         : (tipo === 'periodo')
           ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
-          : choraEfetiva3 * horas;
+          : chora * horas;
 
       // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
@@ -3737,14 +3665,6 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         // Sem PL: usa custo mensal do billing como base proporcional → /mês*
         col1Lbl = 'Custo/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
         col1Tip = ' title="Estimativa proporcional ao billing histórico — Price List não disponível para este meter"';
-      } else if (_dbValida3) {
-        // Databricks: taxa blended do workspace (válida)
-        col1Lbl = '⚡ Workspace/h'; col1Val = _brl(_dbInf3.taxa); col1Suf = '/h';
-        col1Tip = ' title="Taxa blended do workspace Databricks (' + _dbInf3.totalHoras + 'h · ' + _dbInf3.recursos + ' recursos)"';
-      } else if (isDatabricks && !_dbValida3) {
-        // Databricks: amostra insuficiente, usa billing individual
-        col1Lbl = '⚠ Custo/h'; col1Val = _brl(chora); col1Suf = '/h';
-        col1Tip = ' title="Amostra insuficiente para taxa workspace (< 24h ou < 2 recursos) — usando billing individual"';
       } else if (temPL) {
         // Price List disponível para hora/dia: mostra PL/h como base da estimativa
         col1Lbl = '📋 PL/h'; col1Val = _brl(retailHora); col1Suf = '/h';
@@ -3772,8 +3692,6 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + (rg  ? '<span style="font-size:10px;background:rgba(77,166,255,.08);color:var(--blue);border-radius:4px;padding:2px 7px;">' + rg + '</span>' : '')
         + (svc ? '<span style="font-size:10px;background:var(--bg-card);color:var(--text-dim);border-radius:4px;padding:2px 7px;border:1px solid var(--border);">' + svc + '</span>' : '')
         + (usoParcial ? '<span style="font-size:10px;background:rgba(255,140,66,.15);color:var(--orange,#ff8c42);border-radius:4px;padding:2px 7px;" title="Recurso ficou ligado menos de 55% do m\xEAs no per\xEDodo importado">⚠ Uso parcial</span>' : '')
-        + (_dbValida3 ? '<span style="font-size:10px;background:rgba(56,189,248,.12);color:#38bdf8;border-radius:4px;padding:2px 7px;" title="Taxa blended do workspace Databricks: ' + _brl(_dbInf3.taxa) + '/h (' + _dbInf3.totalHoras + 'h \xB7 ' + _dbInf3.recursos + ' recursos)">⚡ Databricks</span>' : '')
-        + (isDatabricks && !_dbValida3 ? '<span style="font-size:10px;background:rgba(255,140,66,.10);color:var(--orange,#ff8c42);border-radius:4px;padding:2px 7px;" title="Amostra insuficiente para taxa workspace — usando billing individual">⚡ DB ⚠ insuf.</span>' : '')
         + '</div>'
 
         // Linha de metadados (unidade · qty · horas_reais · pricing_model)
