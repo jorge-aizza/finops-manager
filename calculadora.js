@@ -895,6 +895,13 @@ const Calculadora = (() => {
             <span style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-dim);font-weight:700;">Total Estimado</span>
             <span id="cov-total" style="font-family:'IBM Plex Mono',monospace;font-size:1.5rem;font-weight:700;color:var(--accent);">R$ 0,00</span>
           </div>
+          <div id="cov-row-fixo" style="display:none;flex-direction:column;gap:3px;border-radius:7px;background:rgba(255,140,66,.06);border:1px solid rgba(255,140,66,.25);padding:7px 10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-size:10px;color:var(--orange,#ff8c42);font-weight:700;letter-spacing:.04em;">🔒 Infra Fixa/mês</span>
+              <span id="cov-vl-fixo" style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--orange,#ff8c42);">R$ 0,00</span>
+            </div>
+            <div style="font-size:9px;color:var(--text-muted);line-height:1.4;">Custo mensal fixo — não entra no Total Estimado. Cobrado independente das horas do projeto.</div>
+          </div>
         </div>
 
       </div><!-- /RIGHT -->
@@ -2520,7 +2527,14 @@ const Calculadora = (() => {
   }
 
   function _buildPDFHtml(p) {
-    const linhas = (p.itens || []).map(r => {
+    const _todosItens   = p.itens || [];
+    const itensDinamicos = _todosItens.filter(r => r.tipo_custo !== 'mes');
+    const itensFixos     = _todosItens.filter(r => r.tipo_custo === 'mes');
+    const totalFixoMes   = p.total_fixo_mes != null
+      ? parseFloat(p.total_fixo_mes)
+      : itensFixos.reduce((s, r) => s + parseFloat(r.estimado_brl || r.custo_mes || 0), 0);
+
+    const linhas = itensDinamicos.map(r => {
       const quantCell = (r.horas || 0).toLocaleString('pt-BR') + ' h';
       const _plRef = parseFloat(r.retail_price_hora || 0);
       const _temPL = _plRef > 0;
@@ -2528,25 +2542,20 @@ const Calculadora = (() => {
         ? (() => {
             const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
             if (tc === 'reserva') {
-              // Amortizado + referência on-demand do PL quando disponível
               const base = _brl(r.custo_hora) + '/h\xA0🔒';
               const od   = _temPL ? '\xA0<span style="opacity:.55;font-size:9px;" title="On-demand Price List">📋\xA0' + _brl(_plRef) + '/h</span>' : '';
               return '<span class="mono" title="Amortizado pelo term da reserva">' + base + od + '</span>';
             }
             if (tc === 'periodo') {
-              // Usa PL/mês quando disponível — sem * pois é preço de catálogo real
               if (_temPL)
                 return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand mensal (Azure Price List)">📋\xA0' + _brl(_plRef) + '/mês</span>';
-              // Fallback billing com * indicando estimativa
               return '<span class="mono" title="Custo mensal estimado do billing (÷30÷24)">' + _brl(r.custo_mes || r.custo_hora * 720) + '/mês*</span>';
             }
-            // hora / dia — usa PL/h quando disponível
             if (_temPL)
               return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand por hora (Azure Price List)">📋\xA0' + _brl(_plRef) + '/h</span>';
             return '<span class="mono">' + _brl(r.custo_hora) + '/h</span>';
           })()
         : '<span class="na">&mdash;</span>';
-      // Cor da coluna Estimado: verde quando PL disponível (qualquer tipo), cinza quando só billing
       const _corEst = (r.fonte_estimado === 'price_list' || (_temPL && r.tipo_custo !== 'reserva')) ? 'td-green' : 'td-gray';
       return '<tr>'
         + '<td class="td-nm">' + _esc(r.nome) + '</td>'
@@ -2556,6 +2565,44 @@ const Calculadora = (() => {
         + '<td class="td-brl ' + _corEst + '">' + _brl(r.estimado_brl) + '</td>'
         + '</tr>';
     }).join('');
+
+    // Seção de custos fixos mensais (tipo=mes) — exibida separadamente, fora do Total Estimado
+    const linhasFixo = itensFixos.map(r => {
+      const _plRef = parseFloat(r.retail_price_hora || 0);
+      const _temPL = _plRef > 0;
+      const precoFixo = _temPL
+        ? '<span class="mono" style="color:#c05621;" title="Preço on-demand mensal (Azure Price List)">📋\xA0' + _brl(_plRef) + '/mês</span>'
+        : '<span class="mono" title="Custo mensal histórico do billing">' + _brl(r.custo_mes || 0) + '/mês</span>';
+      const valorFixo = _brl(r.estimado_brl || r.custo_mes || 0);
+      return '<tr>'
+        + '<td class="td-nm">' + _esc(r.nome) + '</td>'
+        + '<td class="td-sm">' + _esc(r.categoria) + '</td>'
+        + '<td class="td-sm td-right td-mono" style="color:#c05621;font-size:8pt;">Fixo/mês</td>'
+        + '<td class="td-sm td-right">' + precoFixo + '</td>'
+        + '<td class="td-brl" style="color:#c05621;">' + valorFixo + '</td>'
+        + '</tr>';
+    }).join('');
+    const secaoFixoHtml = itensFixos.length > 0
+      ? '<div class="sec-hdr" style="background:linear-gradient(90deg,#7a3000 0%,#c05621 50%,#7a3000 100%);">'
+        + '<svg viewBox="0 0 16 16" fill="none" width="14" height="14"><path d="M8 1L10.5 6h4.5l-3.5 3.5 1.5 5L8 12 3 15.5l1.5-5L1 6.5H5.5L8 1z" stroke="#fde68a" stroke-width="1.3" stroke-linejoin="round"/></svg>'
+        + '<span>🔒 Custos Fixos Mensais</span>'
+        + '<span style="font-size:6pt;color:rgba(253,230,138,.6);margin-left:auto;">cobrado independente das horas do projeto</span>'
+        + '</div>'
+        + '<table><thead><tr>'
+        + '<th style="width:38%">Recurso</th><th style="width:14%">Categoria</th>'
+        + '<th style="width:8%;text-align:right">Tipo</th>'
+        + '<th style="width:20%;text-align:right">Preço base</th>'
+        + '<th style="width:20%;text-align:right">Custo/mês</th>'
+        + '</tr></thead><tbody>' + linhasFixo + '</tbody>'
+        + '<tfoot><tr class="tr-sub" style="background:#fff7ed;">'
+        + '<td colspan="4" style="color:#c05621;font-weight:700;">🔒 Total Infra Fixa / mês</td>'
+        + '<td style="text-align:right;font-family:\'IBM Plex Mono\',monospace;font-weight:700;color:#c05621;">' + _brl(totalFixoMes) + '</td>'
+        + '</tr></tfoot></table>'
+        + '<div style="padding:8px 22px 10px;background:#fff7ed;border-top:1px solid #fed7aa;font-size:7.5pt;color:#92400e;font-style:italic;">'
+        + '⚠ Os custos fixos acima não estão incluídos no Total Estimado. São cobrados mensalmente pelo Azure independente das horas de uso do projeto.'
+        + '</div>'
+      : '';
+
     const totalFinal = p.total_final || p.total_brl || 0;
 
     // Seção de períodos (só renderiza quando estimativa foi feita por datas)
@@ -2773,13 +2820,13 @@ window.onload=function(){
   <div class="mc mc-total">
     <div class="mc-lbl">Total Estimado (BRL)</div>
     <div class="mc-val">${_brl(totalFinal)}</div>
-    <div class="mc-sub">${(p.itens || []).length} recurso${(p.itens || []).length !== 1 ? 's' : ''} analisado${(p.itens || []).length !== 1 ? 's' : ''}</div>
+    <div class="mc-sub">${itensDinamicos.length} recurso${itensDinamicos.length !== 1 ? 's' : ''} · ${itensFixos.length > 0 ? itensFixos.length + ' fixo' + (itensFixos.length !== 1 ? 's' : '') + ' separado' + (itensFixos.length !== 1 ? 's' : '') : 'sem custos fixos'}</div>
   </div>
 </div>
 ${periodosHtml}
 <div class="sec-hdr">
   <svg viewBox="0 0 16 16" fill="none" width="12" height="12"><rect x="1" y="1" width="6" height="6" rx="1" fill="#0d0f14"/><rect x="9" y="1" width="6" height="6" rx="1" fill="#0d0f14" opacity=".7"/><rect x="1" y="9" width="6" height="6" rx="1" fill="#0d0f14" opacity=".7"/><rect x="9" y="9" width="6" height="6" rx="1" fill="#0d0f14" opacity=".4"/></svg>
-  <span>Detalhamento por Recurso</span>
+  <span>Estimativa por Horas</span>
 </div>
 <table>
   <thead>
@@ -2799,6 +2846,7 @@ ${periodosHtml}
     <tr class="tr-total"><td colspan="4">Total Estimado</td><td>${_brl(totalFinal)}</td></tr>
   </tfoot>
 </table>
+${secaoFixoHtml}
 ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div><div class="obs-txt">' + _esc(p.obs) + '</div></div>' : ''}
 <div class="disc">
   <div class="disc-bar"></div>
@@ -2872,13 +2920,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
     const html = _buildPDFHtml({
       invoiceNum, dataFmt, titulo, dataValid, nomeProjeto, resp, obs, itens,
-      total_brl:   _estimativa.total_brl,
-      total_final: _estimativa.total_final,
-      pct_imposto: _estimativa.pct_imposto,
-      vl_imposto:  _estimativa.vl_imposto,
-      pct_cond:    _estimativa.pct_cond,
-      vl_cond:     _estimativa.vl_cond,
-      periodos:    _periodos.length > 0 ? [..._periodos] : null
+      total_brl:      _estimativa.total_brl,
+      total_fixo_mes: _estimativa.total_fixo_mes,
+      total_final:    _estimativa.total_final,
+      pct_imposto:    _estimativa.pct_imposto,
+      vl_imposto:     _estimativa.vl_imposto,
+      pct_cond:       _estimativa.pct_cond,
+      vl_cond:        _estimativa.vl_cond,
+      periodos:       _periodos.length > 0 ? [..._periodos] : null
     });
 
 
@@ -2892,20 +2941,24 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const dataFmt   = new Date(dataVal + 'T12:00:00').toLocaleDateString('pt-BR');
     const valDias   = parseInt(e.validade_dias) || 5;
     const dataValid = new Date(new Date(dataVal + 'T12:00:00').getTime() + valDias * 86400000).toLocaleDateString('pt-BR');
+    const _recursos = Array.isArray(e.recursos) ? e.recursos : [];
+    const _fixoMes  = _recursos.filter(r => r.tipo_custo === 'mes')
+                               .reduce((s, r) => s + parseFloat(r.estimado_brl || r.custo_mes || 0), 0);
     const html = _buildPDFHtml({
-      invoiceNum:  e.numero || 'EST-000000',
+      invoiceNum:     e.numero || 'EST-000000',
       dataFmt, dataValid,
-      nomeProjeto: e.projeto_nome || '',
-      titulo:      e.titulo || 'Estimativa de Custos Azure',
-      resp:        e.responsavel || '',
-      obs:         e.observacoes || '',
-      itens:       Array.isArray(e.recursos) ? e.recursos : [],
-      total_brl:   parseFloat(e.total_brl || 0),
-      total_final: parseFloat(e.total_final || 0),
-      pct_imposto: parseFloat(e.pct_imposto || 0),
-      vl_imposto:  parseFloat(e.vl_imposto || 0),
-      pct_cond:    parseFloat(e.pct_cond || 0),
-      vl_cond:     parseFloat(e.vl_cond || 0)
+      nomeProjeto:    e.projeto_nome || '',
+      titulo:         e.titulo || 'Estimativa de Custos Azure',
+      resp:           e.responsavel || '',
+      obs:            e.observacoes || '',
+      itens:          _recursos,
+      total_brl:      parseFloat(e.total_brl || 0),
+      total_fixo_mes: _fixoMes,
+      total_final:    parseFloat(e.total_final || 0),
+      pct_imposto:    parseFloat(e.pct_imposto || 0),
+      vl_imposto:     parseFloat(e.vl_imposto || 0),
+      pct_cond:       parseFloat(e.pct_cond || 0),
+      vl_cond:        parseFloat(e.vl_cond || 0)
     });
     _abrirPreviewModal(html, (e.titulo || 'Estimativa') + ' · ' + (e.numero || ''));
   }
@@ -3271,6 +3324,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
     let totalGeral   = 0;
     let totalCobrado = 0;
+    let totalFixoMes = 0;
 
     // rMap: O(1) por recurso — evita O(N²) com find() para cada selecionado
     const _rMapEst = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
@@ -3289,6 +3343,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const tipo    = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
       const chora   = parseFloat(r.custo_hora_billing || 0) * cr;
       const retailU = parseFloat(r.retail_price_unit || 0);
+      const dias    = parseInt(r.dias_ativos || 1) || 1;
+      const mesRaw  = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / dias * 30);
+      const mesBrl  = mesRaw * cr;
+      // RN-mes: custo mensal fixo (disco, licença por unidade/mês) — não entra no Total Estimado
+      if (tipo === 'mes') {
+        totalFixoMes += mesBrl;
+        return;
+      }
       const retailH = (tipo === 'hora' || tipo === 'dia') && retailU > 0 ? retailU * convR : 0;
       let estimado  = 0;
       if (tipo === 'reserva') {
@@ -3300,10 +3362,6 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         //          unit_price×qty / 720 × horas  (fallback — on-demand do export)
         const retM     = tipo === 'periodo' && retailU > 0 ? retailU * convR : 0;
         const upqBrl   = parseFloat(r.total_upq_brl || 0) * cr;  // effective_price×qty×taxa
-        const dias     = parseInt(r.dias_ativos || 1) || 1;
-        const mesRaw   = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / dias * 30);
-        const mesBrl   = mesRaw * cr;
-        // fallback: effective_price×qty normalizado ao mês; se zero, usa custo_mes_billing
         const fallback = upqBrl > 0 ? (upqBrl / dias * 30) : mesBrl;
         estimado = (retM > 0 ? retM : fallback) / 720 * horas;
       }
@@ -3323,9 +3381,16 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:13px;font-weight:700;color:var(--text);">' + _brl(totalCobrado) + '</div>'
           + '</div>'
           + '<div style="border-radius:8px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);padding:10px;">'
-          + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px;">Estimado</div>'
+          + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px;">Total Estimado (horas)</div>'
           + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:14px;font-weight:700;color:var(--accent);">' + _brl(totalGeral) + '</div>'
           + '</div>'
+          + (totalFixoMes > 0
+            ? '<div style="border-radius:8px;background:rgba(255,140,66,.07);border:1px solid rgba(255,140,66,.28);padding:10px;">'
+              + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--orange,#ff8c42);margin-bottom:3px;">🔒 Infra Fixa/mês</div>'
+              + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:13px;font-weight:700;color:var(--orange,#ff8c42);">' + _brl(totalFixoMes) + '</div>'
+              + '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">não entra no Total Estimado</div>'
+              + '</div>'
+            : '')
         : '<div style="text-align:center;font-size:11px;color:var(--text-muted);padding:8px 10px;border-radius:6px;background:var(--bg-hover);border:1px solid var(--border);">Configure as horas e clique Aplicar</div>'
       )
       + '</div>';
@@ -3361,13 +3426,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
     // Salvar para uso no invoice
     _estimativa = {
-      total_cobrado: totalCobrado,
-      total_brl: totalGeral,
-      total_final: totalFinal,
-      pct_imposto: pctImposto,
-      vl_imposto: vlImposto,
-      pct_cond: pctCond,
-      vl_cond: vlCond,
+      total_cobrado:  totalCobrado,
+      total_brl:      totalGeral,
+      total_fixo_mes: totalFixoMes,
+      total_final:    totalFinal,
+      pct_imposto:    pctImposto,
+      vl_imposto:     vlImposto,
+      pct_cond:       pctCond,
+      vl_cond:        vlCond,
       horas: parseInt(document.getElementById('chglobal')?.value) || 720,
       resultados: sel.map(rid => {
         const r   = _recursos.find(x => (x._key||x.resource_id) === rid);
@@ -3390,9 +3456,32 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         // retail_price_unit já normalizado pelo SQL — só converte moeda se necessário
         const _retailUr  = parseFloat(r.retail_price_unit || 0);
         const retailHr   = isHora && _retailUr > 0 ? _retailUr * convR2 : 0;
-        const retailMesR = !isHora && tipo2 === 'periodo' && _retailUr > 0 ? _retailUr * convR2 : 0;
+        const retailMesR = !isHora && (tipo2 === 'periodo' || tipo2 === 'mes') && _retailUr > 0 ? _retailUr * convR2 : 0;
+        // mes: custo fixo mensal — estimado_brl = custo do mês (não proporcional às horas)
+        if (tipo2 === 'mes') {
+          return {
+            resource_id:      rid,
+            nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+            categoria:        r.categoria || '',
+            consumed_service: r.consumed_service || '',
+            resource_group:   r.resource_group_name || '',
+            uom:              r.unidade || '',
+            tipo_custo:       'mes',
+            fixo_mensal:      true,
+            isHora:           false,
+            horas:            0,
+            custo_hora:       0,
+            retail_price_hora: retailMesR,
+            fonte_estimado:   retailMesR > 0 ? 'price_list' : 'billing',
+            custo_mes:        custo_mes,
+            dias_ativos:      _diasP,
+            total_cobrado:    bill,
+            estimado_brl:     retailMesR > 0 ? retailMesR : custo_mes,
+            moeda:            r.moeda || 'BRL',
+          };
+        }
         // Estimado: periodo → PL/mês ÷ 720 | fallback unit_price×qty ÷ 720 | hora → billing/h × horas
-        const _diasP2    = parseInt(r.dias_ativos || 1) || 1;
+        const _diasP2    = _diasP;
         const _mesR2     = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / _diasP2 * 30);
         const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
         const custo_mes2 = isBRL ? _mesR2 : _mesR2 * convR2;
@@ -3409,6 +3498,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           resource_group:   r.resource_group_name || '',
           uom:              r.unidade || '',
           tipo_custo:       tipo2,
+          fixo_mensal:      false,
           isHora,
           horas,
           custo_hora:       chora,
@@ -3513,7 +3603,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const mesBrl    = mesRaw * convR;
       const bill      = totalBill * convR;
       const qty      = parseFloat(r.total_qty || 0).toLocaleString('pt-BR', {maximumFractionDigits: 4});
-      const cor      = tipo === 'reserva' ? 'var(--blue)' : tipo === 'periodo' ? 'var(--orange)' : 'var(--accent)';
+      const cor      = tipo === 'reserva' ? 'var(--blue)' : (tipo === 'periodo' || tipo === 'mes') ? 'var(--orange)' : 'var(--accent)';
       const cat      = _esc(r.categoria || '');
       const svc      = _esc(r.consumed_service || '');
       const rg       = _esc(r.resource_group_name || '');
@@ -3531,8 +3621,8 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const retailUnit = parseFloat(r.retail_price_unit || 0);
       // convR converte para BRL quando billing é USD; se billing já é BRL, convR = 1
       const retailHora = isHora && retailUnit > 0 ? retailUnit * convR : 0;
-      const retailMes  = !isHora && tipo === 'periodo' && retailUnit > 0 ? retailUnit * convR : 0;
-      // Desconto: SQL calcula só para hora/dia; para periodo calculamos aqui
+      const retailMes  = !isHora && (tipo === 'periodo' || tipo === 'mes') && retailUnit > 0 ? retailUnit * convR : 0;
+      // Desconto: SQL calcula só para hora/dia; para periodo/mes calculamos aqui
       const dPctSQL  = parseFloat(r.desconto_pct || 0);
       const dPctMes  = !isHora && retailMes > 0 && mesBrl > 0
         ? Math.max(0, parseFloat(((1 - mesBrl / retailMes) * 100).toFixed(1)))
@@ -3547,17 +3637,26 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit * convR : 0;
       const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
         ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
-      // Estimado: periodo → PL/mês ÷ 720 | fallback unit_price×qty ÷ 720 | hora → billing/h × horas
+      // Estimado: mes → custo mensal fixo | periodo → PL/mês ÷ 720 × horas | hora → billing/h × horas
       const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
       const _fallback3 = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
-      const estimado = (tipo === 'periodo')
-        ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
-        : chora * horas;
+      const estimadoMes  = retailMes > 0 ? retailMes : mesBrl;   // custo fixo/mês para tipo=mes
+      const estimado = (tipo === 'mes')
+        ? estimadoMes
+        : (tipo === 'periodo')
+          ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
+          : chora * horas;
 
       // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
       if (tipo === 'reserva') {
         col1Lbl = 'Amort./h 🔒'; col1Val = _brl(chora); col1Suf = '/h';
+      } else if (tipo === 'mes' && temPL) {
+        col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
+        col1Tip = ' title="Preço on-demand mensal do Azure Price List"';
+      } else if (tipo === 'mes') {
+        col1Lbl = '🔒 Fixo/mês'; col1Val = _brl(mesBrl); col1Suf = '/mês';
+        col1Tip = ' title="Custo mensal fixo baseado no billing histórico"';
       } else if (tipo === 'periodo' && temPL) {
         // Price List disponível para disco/storage: mostra PL/mês como base
         col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
@@ -3576,9 +3675,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         col1Lbl = 'Custo/h'; col1Val = _brl(chora); col1Suf = '/h';
       }
 
-      // Coluna 2: horas do slider (todos os tipos usam o mesmo slider global)
-      const col2Lbl = 'Horas';
-      const col2Val = horas + 'h';
+      // Coluna 2: horas do slider — para mes mostra "Mensal" pois não depende de horas
+      const col2Lbl = tipo === 'mes' ? 'Modelo' : 'Horas';
+      const col2Val = tipo === 'mes' ? 'Mensal' : horas + 'h';
 
       _html += '<div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:12px 14px;transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--border-light)\'" onmouseout="this.style.borderColor=\'var(--border)\'">'
 
@@ -3633,19 +3732,21 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '</div>'
 
         + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
-        +   (temPL
-              ? 'background:rgba(34,197,94,.10);border:2px solid rgba(34,197,94,.45);'
-              : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
+        +   (tipo === 'mes'
+              ? 'background:rgba(255,140,66,.10);border:2px solid rgba(255,140,66,.40);'
+              : temPL
+                ? 'background:rgba(34,197,94,.10);border:2px solid rgba(34,197,94,.45);'
+                : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
         + '">'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
-        +   (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
         + ';margin-bottom:2px;">'
-        +   (temPL ? '📋 ' : '') + 'Estimado'
+        +   (tipo === 'mes' ? '🔒 Infra Fixa' : (temPL ? '📋 ' : '') + 'Estimado')
         +   (!temPL && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
         + '</div>'
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
-        +   (temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
-        + ';">' + _brl(estimado) + '</div>'
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        + ';">' + _brl(estimado) + (tipo === 'mes' ? '<span style="font-size:9px;font-weight:400;">/mês</span>' : '') + '</div>'
         + '</div>'
 
         + '</div>'
@@ -3704,6 +3805,8 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const lc   = document.getElementById('cov-lbl-cond');
     const vc   = document.getElementById('cov-vl-cond');
     const tot  = document.getElementById('cov-total');
+    const rf   = document.getElementById('cov-row-fixo');
+    const vf   = document.getElementById('cov-vl-fixo');
     if (sub) sub.textContent = _brl(_estimativa.total_brl);
     if (ri)  ri.style.display  = _estimativa.pct_imposto > 0 ? 'flex' : 'none';
     if (li)  li.textContent    = '+ Imposto (' + _estimativa.pct_imposto + '%)';
@@ -3712,6 +3815,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     if (lc)  lc.textContent    = '+ Condomínio (' + _estimativa.pct_cond + '%)';
     if (vc)  vc.textContent    = _brl(_estimativa.vl_cond);
     if (tot) tot.textContent   = _brl(_estimativa.total_final);
+    const fixo = _estimativa.total_fixo_mes || 0;
+    if (rf)  rf.style.display  = fixo > 0 ? 'flex' : 'none';
+    if (vf)  vf.textContent    = _brl(fixo);
   }
 
   function _ovAplicarHoras() {

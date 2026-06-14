@@ -3911,7 +3911,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
             , 2)
             ELSE NULL
           END AS horas_reais,
-          -- ── TIPO DE CUSTO (RN-001 a RN-004) ──────────────────────────────────
+          -- ── TIPO DE CUSTO (RN-001 a RN-005) ──────────────────────────────────
           CASE
             WHEN MAX(COALESCE(charge_type,'')) IN ('Purchase','RoundTrustBill')
                  AND MAX(COALESCE(pricing_model,'')) = 'Reservation'
@@ -3920,6 +3920,12 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
             THEN 'hora'
             WHEN MAX(unit_of_measure) ILIKE '%day%'
             THEN 'dia'
+            WHEN MAX(unit_of_measure) ILIKE '%month%'
+                 AND MAX(unit_of_measure) NOT ILIKE '%gb%'
+                 AND MAX(unit_of_measure) NOT ILIKE '%gib%'
+                 AND MAX(unit_of_measure) NOT ILIKE '%tib%'
+                 AND MAX(unit_of_measure) NOT ILIKE '%tb%'
+            THEN 'mes'
             ELSE 'periodo'
           END AS tipo_custo,
           -- ── TAXA HORÁRIA via effective_price ─────────────────────────────────
