@@ -1434,14 +1434,20 @@ const Calculadora = (() => {
     _dbTaxaMap = new Map();
     raw.forEach((v, rg) => {
       const valida = v.totalHoras >= 24 && v.ids.size >= 2;
+      const taxa   = valida ? v.totalBrl / v.totalHoras : 0;
       _dbTaxaMap.set(rg, {
-        taxa:       valida ? v.totalBrl / v.totalHoras : 0,
-        valida,
+        taxa, valida,
         totalHoras: Math.round(v.totalHoras),
         totalBrl:   v.totalBrl,
         recursos:   v.ids.size,
       });
+      if (valida) {
+        console.log(`[Databricks] ⚡ ${rg} → R$ ${taxa.toFixed(4)}/h (${Math.round(v.totalHoras)}h · ${v.ids.size} recursos)`);
+      } else {
+        console.warn(`[Databricks] ⚠ ${rg} → amostra insuficiente (${Math.round(v.totalHoras)}h · ${v.ids.size} recursos) — fallback billing individual`);
+      }
     });
+    if (raw.size === 0) console.log('[Databricks] Nenhum workspace databricks-rg-* encontrado nos recursos carregados.');
   }
 
   // Retorna o entry do workspace Databricks para um recurso, ou null se não for Databricks
