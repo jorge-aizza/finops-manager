@@ -766,6 +766,18 @@ const Calculadora = (() => {
               <span style="font-size:13px;color:var(--text-muted);flex-shrink:0;">horas</span>
               <button class="cbtn-sec" onclick="Calculadora.aplicarHorasGlobal()" style="height:38px;padding:0 12px;flex-shrink:0;">Aplicar</button>
             </div>
+            <div id="cov-horas-sugestao" style="display:none;margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(147,51,234,.08);border:1px solid rgba(147,51,234,.25);">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <div style="min-width:0;">
+                  <div id="cov-horas-sug-txt" style="font-size:11px;color:var(--text-dim);line-height:1.4;"></div>
+                  <div id="cov-horas-sug-note" style="font-size:9px;color:var(--text-muted);margin-top:1px;"></div>
+                </div>
+                <button onclick="Calculadora._ovUsarHorasReais()"
+                  style="flex-shrink:0;height:26px;padding:0 10px;border-radius:6px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--accent);font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;">
+                  → Usar
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- Painel período de datas -->
@@ -3269,8 +3281,10 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     if (vazio) vazio.style.display = 'none';
     if (rodape) rodape.style.display = _horasAplicadas ? 'flex' : 'none';
 
-    let totalGeral   = 0;
-    let totalCobrado = 0;
+    let totalGeral    = 0;
+    let totalCobrado  = 0;
+    let totalFixoMes  = 0;
+    let subCentItems  = 0;
 
     // rMap: O(1) por recurso — evita O(N²) com find() para cada selecionado
     const _rMapEst = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
@@ -3286,28 +3300,39 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       if (!_horasAplicadas) return;
       const horas   = _selecionados[rid] || 720;
       const uom     = (r.unidade || '').toLowerCase();
-      const tipo    = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
-      const chora   = parseFloat(r.custo_hora_billing || 0) * cr;
-      const retailU = parseFloat(r.retail_price_unit || 0);
-      const retailH = (tipo === 'hora' || tipo === 'dia') && retailU > 0 ? retailU * convR : 0;
-      let estimado  = 0;
-      if (tipo === 'reserva') {
-        estimado = chora * horas;
-      } else if (tipo === 'hora' || tipo === 'dia') {
-        estimado = chora * horas;
+      // Tipo: 'mes' para UoM month (exceto storage); luego tipo_custo do SQL; fallback por UoM
+      const tipo    = (uom.includes('month') && !uom.includes('gb') && !uom.includes('gib') && !uom.includes('tib') && !uom.includes('tb'))
+        ? 'mes'
+        : r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : uom.includes('day') ? 'dia' : 'periodo');
+      // retail_price_unit já em BRL (SQL aplica taxa_cambio) — não reaplicar convR
+      const retailU    = parseFloat(r.retail_price_unit || 0);
+      const _plMonthly = !!r.pl_is_monthly;
+      const retailU_h  = _plMonthly && (tipo === 'hora' || tipo === 'dia') ? retailU / 720 : retailU;
+      const retailH    = (tipo === 'hora' || tipo === 'dia') && retailU_h > 0 ? retailU_h : 0;
+      // Infra fixa mensal (disco, IP, LB): custo sunk — não entra no estimado por hora
+      if (tipo === 'mes') {
+        const _bDias = parseInt(r.dias_ativos || 1) || 1;
+        totalFixoMes += parseFloat(r.total_billing || 0) * cr / _bDias * 30;
+        return;
+      }
+      const _dias      = parseInt(r.dias_ativos || 1) || 1;
+      const _billing   = parseFloat(r.total_billing || 0) * cr;
+      const _upqBrl    = parseFloat(r.total_upq_brl  || 0) * cr;
+      const chora      = parseFloat(r.custo_hora_billing || 0) * cr;
+      // Fallback quando UsageQty=0 (dados sem reimport): billing proporcional ao período
+      const _choraEff  = chora > 0 ? chora : (_billing / _dias / 24);
+      const _retM      = retailU >= 0.10 ? retailU : 0;
+      let estimado = 0;
+      if (tipo === 'reserva' || tipo === 'hora' || tipo === 'dia') {
+        estimado = (retailH > 0 ? retailH : _choraEff) * horas;
       } else {
-        // periodo: PL/mês ÷ 720 × horas  (PL disponível)
-        //          unit_price×qty / 720 × horas  (fallback — on-demand do export)
-        const retM     = tipo === 'periodo' && retailU > 0 ? retailU * convR : 0;
-        const upqBrl   = parseFloat(r.total_upq_brl || 0) * cr;  // effective_price×qty×taxa
-        const dias     = parseInt(r.dias_ativos || 1) || 1;
-        const mesRaw   = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / dias * 30);
-        const mesBrl   = mesRaw * cr;
-        // fallback: effective_price×qty normalizado ao mês; se zero, usa custo_mes_billing
-        const fallback = upqBrl > 0 ? (upqBrl / dias * 30) : mesBrl;
-        estimado = (retM > 0 ? retM : fallback) / 720 * horas;
+        // periodo (storage, banda): rateio proporcional — PL/720 ou billing/(dias×24)
+        const _retHr   = _retM > 0 ? _retM / 720 : 0;
+        const _custoHr = _upqBrl > 0 ? (_upqBrl / _dias / 24) : (_billing / _dias / 24);
+        estimado = (_retHr > 0 ? _retHr : _custoHr) * horas;
       }
       totalGeral += estimado;
+      if (estimado > 0 && estimado < 0.01) subCentItems++;
     });
 
     // Painel lateral: resumo compacto — lista detalhada disponível no modal Configurar Estimativa
@@ -3325,7 +3350,15 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           + '<div style="border-radius:8px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);padding:10px;">'
           + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:3px;">Estimado</div>'
           + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:14px;font-weight:700;color:var(--accent);">' + _brl(totalGeral) + '</div>'
+          + (subCentItems > 0 ? '<div style="font-size:9px;color:var(--text-muted);margin-top:3px;">✓ inclui ' + subCentItems + ' item' + (subCentItems > 1 ? 's' : '') + ' &lt; R$0,01</div>' : '')
           + '</div>'
+          + (totalFixoMes > 0
+            ? '<div style="border-radius:8px;background:rgba(77,166,255,.07);border:1px solid rgba(77,166,255,.25);padding:10px;">'
+              + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--blue,#4da6ff);margin-bottom:3px;">🔒 Infra Fixa</div>'
+              + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:13px;font-weight:700;color:var(--blue,#4da6ff);">' + _brl(totalFixoMes) + '</div>'
+              + '<div style="font-size:9px;color:var(--text-muted);margin-top:3px;">disco, IP, LB — não cobrado por hora</div>'
+              + '</div>'
+            : '')
         : '<div style="text-align:center;font-size:11px;color:var(--text-muted);padding:8px 10px;border-radius:6px;background:var(--bg-hover);border:1px solid var(--border);">Configure as horas e clique Aplicar</div>'
       )
       + '</div>';
@@ -3361,64 +3394,69 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
     // Salvar para uso no invoice
     _estimativa = {
-      total_cobrado: totalCobrado,
-      total_brl: totalGeral,
-      total_final: totalFinal,
-      pct_imposto: pctImposto,
-      vl_imposto: vlImposto,
-      pct_cond: pctCond,
-      vl_cond: vlCond,
+      total_cobrado:  totalCobrado,
+      total_brl:      totalGeral,
+      total_fixo_mes: totalFixoMes,
+      sub_cent_items: subCentItems,
+      total_final:    totalFinal,
+      pct_imposto:    pctImposto,
+      vl_imposto:     vlImposto,
+      pct_cond:       pctCond,
+      vl_cond:        vlCond,
       horas: parseInt(document.getElementById('chglobal')?.value) || 720,
       resultados: sel.map(rid => {
         const r   = _recursos.find(x => (x._key||x.resource_id) === rid);
         if (!r) return null;
         const isBRL  = (r.moeda || 'BRL') === 'BRL';
-        // RN-005: taxa real do export quando disponível, senão _taxaBrl do usuário
         const tcDB2  = parseFloat(r.taxa_cambio || 0);
         const convR2 = !isBRL ? (tcDB2 > 1 ? tcDB2 : _taxaBrl) : 1;
         const bill   = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
         const uom2   = (r.unidade || '').toLowerCase();
-        const tipo2  = r.tipo_custo || (uom2.includes('hour') || uom2.includes('hora') ? 'hora' : 'periodo');
+        const tipo2  = (uom2.includes('month') && !uom2.includes('gb') && !uom2.includes('gib') && !uom2.includes('tib') && !uom2.includes('tb'))
+          ? 'mes'
+          : r.tipo_custo || (uom2.includes('hour') || uom2.includes('hora') ? 'hora' : uom2.includes('day') ? 'dia' : 'periodo');
         const isHora = tipo2 === 'hora' || tipo2 === 'dia';
         const horas  = _selecionados[rid] || 720;
-        const choraRaw  = parseFloat(r.custo_hora_billing || 0);
-        const chora     = isBRL ? choraRaw : choraRaw * convR2;
-        const _diasP    = parseInt(r.dias_ativos || 1) || 1;
-        const mesRaw    = parseFloat(r.custo_mes_billing) ||
-                          (parseFloat(r.total_billing || 0) / _diasP * 30);
-        const custo_mes = isBRL ? mesRaw : mesRaw * convR2;
-        // retail_price_unit já normalizado pelo SQL — só converte moeda se necessário
-        const _retailUr  = parseFloat(r.retail_price_unit || 0);
-        const retailHr   = isHora && _retailUr > 0 ? _retailUr * convR2 : 0;
-        const retailMesR = !isHora && tipo2 === 'periodo' && _retailUr > 0 ? _retailUr * convR2 : 0;
-        // Estimado: periodo → PL/mês ÷ 720 | fallback unit_price×qty ÷ 720 | hora → billing/h × horas
-        const _diasP2    = parseInt(r.dias_ativos || 1) || 1;
-        const _mesR2     = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / _diasP2 * 30);
-        const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
-        const custo_mes2 = isBRL ? _mesR2 : _mesR2 * convR2;
-        const _fallback2 = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 * 30) : custo_mes2;
-        const estimado = (tipo2 === 'periodo')
-          ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
-          : chora * horas;
+        const choraRaw   = parseFloat(r.custo_hora_billing || 0);
+        const chora      = isBRL ? choraRaw : choraRaw * convR2;
+        const _diasP     = parseInt(r.dias_ativos || 1) || 1;
+        const mesRaw     = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / _diasP * 30);
+        const custo_mes  = isBRL ? mesRaw : mesRaw * convR2;
+        // retail_price_unit já em BRL (SQL converte) — não reaplicar convR2
+        const _retailUr   = parseFloat(r.retail_price_unit || 0);
+        const _plMonthlyR = !!r.pl_is_monthly;
+        const _retailUr_h = _plMonthlyR && isHora ? _retailUr / 720 : _retailUr;
+        const retailHr    = isHora && _retailUr_h > 0 ? _retailUr_h : 0;
+        const retailMesR  = !isHora && (tipo2 === 'periodo' || tipo2 === 'mes') && _retailUr >= 0.10 ? _retailUr : 0;
+        const _diasP2     = parseInt(r.dias_ativos || 1) || 1;
+        const _bill2      = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
+        const _upqBrl2    = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
+        const _custoHr2   = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 / 24) : (_bill2 / _diasP2 / 24);
+        const _retHr2     = retailMesR > 0 ? retailMesR / 720 : 0;
+        const _choraEff2  = chora > 0 ? chora : (_bill2 / _diasP2 / 24);
+        const estimado = (tipo2 === 'mes' || tipo2 === 'periodo')
+          ? (_retHr2 > 0 ? _retHr2 : _custoHr2) * horas
+          : (retailHr > 0 ? retailHr : _choraEff2) * horas;
         const temPLR = retailHr > 0 || retailMesR > 0;
         return {
-          resource_id:      rid,
-          nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
-          categoria:        r.categoria || '',
-          consumed_service: r.consumed_service || '',
-          resource_group:   r.resource_group_name || '',
-          uom:              r.unidade || '',
-          tipo_custo:       tipo2,
+          resource_id:       rid,
+          nome:              r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+          categoria:         r.categoria || '',
+          consumed_service:  r.consumed_service || '',
+          resource_group:    r.resource_group_name || '',
+          uom:               r.unidade || '',
+          tipo_custo:        tipo2,
           isHora,
           horas,
-          custo_hora:       chora,
+          custo_hora:        _choraEff2,
           retail_price_hora: retailHr || retailMesR,
-          fonte_estimado:   temPLR ? 'price_list' : 'billing',
-          custo_mes:        custo_mes,
-          dias_ativos:      parseInt(r.dias_ativos) || 0,
-          total_cobrado:    bill,
-          estimado_brl:     estimado,
-          moeda:            r.moeda || 'BRL',
+          fonte_estimado:    temPLR ? 'price_list' : 'billing',
+          custo_mes:         custo_mes,
+          dias_ativos:       parseInt(r.dias_ativos) || 0,
+          total_cobrado:     bill,
+          estimado_brl:      estimado,
+          fixo_mensal:       tipo2 === 'mes' ? custo_mes : 0,
+          moeda:             r.moeda || 'BRL',
         };
       }).filter(Boolean)
     };
@@ -3444,9 +3482,43 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
     // Totais imediatos; cards carregam em chunks após o modal aparecer
     _ovAtualizarTotal();
+    _ovAtualizarSugestaoHoras();
     setTimeout(() => _ovRenderRecursos(), 0);
     // Carrega configuração salva do horário livre
     _hlCarregar();
+  }
+
+  function _ovAtualizarSugestaoHoras() {
+    const el = document.getElementById('cov-horas-sugestao');
+    if (!el) return;
+    const rmap = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
+    const comHoras = Object.keys(_selecionados)
+      .map(rid => rmap.get(rid))
+      .filter(r => r && r.tipo_custo === 'hora' && parseFloat(r.horas_reais || 0) > 0);
+    if (!comHoras.length) { el.style.display = 'none'; return; }
+    const totalH       = comHoras.reduce((s, r) => s + parseFloat(r.horas_reais || 0), 0);
+    const mediaH       = Math.max(1, Math.round(totalH / comHoras.length));
+    const isDatabricks = comHoras.some(r => (r.resource_group_name || '').toLowerCase().includes('databricks'));
+    const txt  = document.getElementById('cov-horas-sug-txt');
+    const note = document.getElementById('cov-horas-sug-note');
+    if (txt) txt.innerHTML = (isDatabricks ? '⚡\xA0' : '💡\xA0')
+      + (comHoras.length === 1
+          ? '<strong>' + mediaH + 'h</strong> reais no período'
+          : '<strong>' + mediaH + 'h</strong> média real (' + comHoras.length + ' VMs)');
+    if (note) note.textContent = isDatabricks
+      ? 'Cluster Databricks — horas do export Azure'
+      : 'Horas reais do export Azure';
+    el._sugestaoH = mediaH;
+    el.style.display = 'block';
+  }
+
+  function _ovUsarHorasReais() {
+    const el = document.getElementById('cov-horas-sugestao');
+    const h  = el && el._sugestaoH > 0 ? el._sugestaoH : 0;
+    if (!h) return;
+    const input = document.getElementById('chglobal');
+    if (input) { input.value = h; _onHorasInput(h); }
+    aplicarHorasGlobal();
   }
 
   function _fecharConfigStep() {
@@ -3497,7 +3569,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const isBRL    = (r.moeda || 'BRL') === 'BRL';
       const uom      = (r.unidade || '').toLowerCase();
       // RN-001..004: usa tipo_custo do banco; fallback por UoM
-      const tipo     = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
+      const tipo     = (uom.includes('month') && !uom.includes('gb') && !uom.includes('gib') && !uom.includes('tib') && !uom.includes('tb'))
+        ? 'mes'
+        : r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : uom.includes('day') ? 'dia' : 'periodo');
       const isHora   = tipo === 'hora' || tipo === 'dia';
       // RN-005: taxa real do export quando >1, senão _taxaBrl
       const tcDB     = parseFloat(r.taxa_cambio || 0);
@@ -3527,11 +3601,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const horasReais = parseFloat(r.horas_reais || 0);
       // Uso parcial: recurso ficou ligado menos de 55% do mês (~400h de 720h)
       const usoParcial = isHora && horasReais > 0 && horasReais < 400;
-      // retail_price_unit já vem normalizado para 1 unidade pelo SQL (dividido pelo fator UoM do PL)
-      const retailUnit = parseFloat(r.retail_price_unit || 0);
-      // convR converte para BRL quando billing é USD; se billing já é BRL, convR = 1
-      const retailHora = isHora && retailUnit > 0 ? retailUnit * convR : 0;
-      const retailMes  = !isHora && tipo === 'periodo' && retailUnit > 0 ? retailUnit * convR : 0;
+      // retail_price_unit já em BRL (SQL aplica taxa_cambio) — não reaplicar convR
+      const retailUnit   = parseFloat(r.retail_price_unit || 0);
+      const _plMonthly3  = !!r.pl_is_monthly;
+      const retailUnit_h = _plMonthly3 && isHora ? retailUnit / 720 : retailUnit;
+      const retailHora   = isHora && retailUnit_h > 0 ? retailUnit_h : 0;
+      const retailMes    = !isHora && tipo === 'periodo' && retailUnit >= 0.10 ? retailUnit : 0;
+      // Fallback quando UsageQty=0: billing/(dias×24)
+      const _choraEff3   = chora > 0 ? chora : (totalBill * convR / diasAtiv / 24);
       // Desconto: SQL calcula só para hora/dia; para periodo calculamos aqui
       const dPctSQL  = parseFloat(r.desconto_pct || 0);
       const dPctMes  = !isHora && retailMes > 0 && mesBrl > 0
@@ -3540,40 +3617,40 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const dPct = dPctSQL > 0 ? dPctSQL : dPctMes;
       // Economia total no período selecionado
       const economiaPeriodo = isHora && retailHora > 0
-        ? (retailHora - chora) * horas
+        ? (retailHora - _choraEff3) * horas
         : (!isHora && retailMes > 0 ? (retailMes - mesBrl) * (horas / 730) : 0);
-      const temPL    = (!isHora && retailMes > 0);
-      // Para reserva: on-demand do PL como referência informacional (estimado permanece amortizado)
-      const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit * convR : 0;
-      const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
-        ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
-      // Estimado: periodo → PL/mês ÷ 720 | fallback unit_price×qty ÷ 720 | hora → billing/h × horas
+      const temPL = (isHora && retailHora > 0) || (!isHora && retailMes > 0);
+      // Para reserva: on-demand do PL como referência informacional
+      const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit : 0;
+      const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && _choraEff3 > 0
+        ? Math.max(0, parseFloat(((1 - _choraEff3 / retailHoraRsv) * 100).toFixed(1))) : 0;
+      // Estimado: hora/dia → PL/h (ou billing/h) × horas | periodo → PL/mês÷720 (ou billing proporcional)
       const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
-      const _fallback3 = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
+      const _custoHr3  = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv / 24) : (totalBill * convR / diasAtiv / 24);
+      const _retHr3    = retailMes > 0 ? retailMes / 720 : 0;
       const estimado = (tipo === 'periodo')
-        ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
-        : chora * horas;
+        ? (_retHr3 > 0 ? _retHr3 : _custoHr3) * horas
+        : (retailHora > 0 ? retailHora : _choraEff3) * horas;
 
       // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
       if (tipo === 'reserva') {
-        col1Lbl = 'Amort./h 🔒'; col1Val = _brl(chora); col1Suf = '/h';
+        col1Lbl = 'Amort./h 🔒'; col1Val = _brl(_choraEff3); col1Suf = '/h';
       } else if (tipo === 'periodo' && temPL) {
-        // Price List disponível para disco/storage: mostra PL/mês como base
         col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
         col1Tip = ' title="Preço on-demand mensal do Azure Price List — base da estimativa"';
       } else if (tipo === 'periodo') {
-        // Sem PL: usa custo mensal do billing como base proporcional → /mês*
         col1Lbl = 'Custo/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
         col1Tip = ' title="Estimativa proporcional ao billing histórico — Price List não disponível para este meter"';
       } else if (temPL) {
-        // Price List disponível para hora/dia: mostra PL/h como base da estimativa
         col1Lbl = '📋 PL/h'; col1Val = _brl(retailHora); col1Suf = '/h';
         col1Tip = ' title="Preço on-demand do Azure Price List — base da estimativa"';
       } else if (tipo === 'dia') {
-        col1Lbl = 'Custo/h·dia'; col1Val = _brl(chora); col1Suf = '/h';
+        col1Lbl = chora > 0 ? 'Custo/h·dia' : '~Custo/h*'; col1Val = _brl(_choraEff3); col1Suf = '/h';
+        if (!chora) col1Tip = ' title="UsageQuantity não disponível — aproximação billing/(dias×24)"';
       } else {
-        col1Lbl = 'Custo/h'; col1Val = _brl(chora); col1Suf = '/h';
+        col1Lbl = chora > 0 ? 'Custo/h' : '~Custo/h*'; col1Val = _brl(_choraEff3); col1Suf = '/h';
+        if (!chora) col1Tip = ' title="UsageQuantity não disponível — aproximação billing/(dias×24)"';
       }
 
       // Coluna 2: horas do slider (todos os tipos usam o mesmo slider global)
@@ -3924,9 +4001,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const uomFator   = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
       const h          = horasR > 0 ? Math.round(horasR) : Math.round(totalQty * uomFator);
       const qLinha     = _qLinha(h, 'h consumidas');
-      // retail_price_unit já normalizado pelo SQL — só converte moeda
+      // retail_price_unit já em BRL (SQL converte via taxa_cambio)
       const retailUnit = parseFloat(r.retail_price_unit || 0);
-      const retailHora = retailUnit > 0 ? retailUnit * convR : 0;
+      const retailHora = retailUnit > 0 ? retailUnit : 0;
       const dPct       = parseFloat(r.desconto_pct || 0);
       // Linha de desconto (quando há dados do Price List)
       const dBadge     = dPct > 0
@@ -3946,9 +4023,9 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     if (tipo === 'dia') {
       // RN-003: UoM diária convertida para hora
       const qLinha     = _qLinha(totalQty, 'dias');
-      // retail_price_unit já normalizado pelo SQL — só converte moeda
+      // retail_price_unit já em BRL (SQL converte via taxa_cambio)
       const retailUnit = parseFloat(r.retail_price_unit || 0);
-      const retailHora = retailUnit > 0 ? retailUnit * convR : 0;
+      const retailHora = retailUnit > 0 ? retailUnit : 0;
       const dPct       = parseFloat(r.desconto_pct || 0);
       const dBadge     = dPct > 0
         ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
@@ -4008,6 +4085,6 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,
-           _ovGerarEstimativa, _ovCarregarMais,
+           _ovGerarEstimativa, _ovCarregarMais, _ovUsarHorasReais,
            _switchVisao, _toggleDetalhe };
 })();
