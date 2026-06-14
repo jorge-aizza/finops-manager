@@ -28,6 +28,7 @@ const Calculadora = (() => {
   let _dataFim      = '';
   let _taxaBrl      = 5.70;
   let _estimativa   = null;
+  let _dbTaxaMap    = new Map(); // RN-DB-001: rg_lower → { C_vm, H_vm, taxa, valida, recursos }
   let _filtroTexto    = '';
   let _reconciliacao  = null;
   let _azureRefValue  = 0;
@@ -1386,6 +1387,7 @@ const Calculadora = (() => {
         _key: (r.resource_id||'') + '||' + (r.categoria||'') + '||' + (r.meter_categories||'') + '||' + (r.unidade||'')
       }));
       _selecionados = {};
+      _dbComputeTaxas(); // RN-DB-001: computa taxas proporcionais por workspace Databricks
       _renderRecursos();
       // Reconciliação em background (não bloqueia o render)
       _reconciliacao = null;
@@ -1405,6 +1407,48 @@ const Calculadora = (() => {
         _atualizarNotaRodape();
       }
     } catch (_) { /* silencioso */ }
+  }
+
+  // ── RN-DB-001: Databricks proportional estimation ────────────────
+  // Computes per-workspace composite rate: taxa = C_vm / H_vm
+  // Only considers tipo=hora resources with quantity > 0
+  // Threshold: H_vm ≥ 24h AND ≥ 2 distinct resource_ids
+  function _dbComputeTaxas() {
+    const raw = new Map(); // rg_lower → { totalBrl, totalHoras, ids: Set }
+    _recursos.forEach(r => {
+      const rg = (r.resource_group_name || '').toLowerCase();
+      if (!rg.startsWith('databricks-rg-')) return;
+      if (r.tipo_custo !== 'hora') return;
+      const horasReais = parseFloat(r.horas_reais || 0);
+      if (horasReais <= 0) return;
+      const isBRL = (r.moeda || 'BRL') === 'BRL';
+      const tcDB  = parseFloat(r.taxa_cambio || 0);
+      const convR = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
+      const billing = parseFloat(r.total_billing || 0) * convR;
+      if (!raw.has(rg)) raw.set(rg, { totalBrl: 0, totalHoras: 0, ids: new Set() });
+      const e = raw.get(rg);
+      e.totalBrl   += billing;
+      e.totalHoras += horasReais;
+      e.ids.add(r.resource_id || r._key || rg + '_' + e.ids.size);
+    });
+    _dbTaxaMap = new Map();
+    raw.forEach((v, rg) => {
+      const valida = v.totalHoras >= 24 && v.ids.size >= 2;
+      const taxa   = valida ? v.totalBrl / v.totalHoras : 0;
+      _dbTaxaMap.set(rg, { taxa, valida, C_vm: v.totalBrl, H_vm: Math.round(v.totalHoras), recursos: v.ids.size });
+      if (valida) {
+        console.log(`[Databricks] ⚡ ${rg} → R$ ${taxa.toFixed(4)}/h (${Math.round(v.totalHoras)}h \xB7 ${v.ids.size} recursos \xB7 base R$ ${v.totalBrl.toFixed(2)})`);
+      } else {
+        console.warn(`[Databricks] ⚠ ${rg} → amostra insuficiente (${Math.round(v.totalHoras)}h \xB7 ${v.ids.size} recursos)`);
+      }
+    });
+    if (raw.size === 0) console.log('[Databricks] Nenhum workspace databricks-rg-* encontrado.');
+  }
+
+  function _dbInfoParaRecurso(r) {
+    const rg = (r.resource_group_name || '').toLowerCase();
+    if (!rg.startsWith('databricks-rg-')) return null;
+    return _dbTaxaMap.get(rg) || null;
   }
 
   function _atualizarNotaRodape() {
@@ -2541,6 +2585,15 @@ const Calculadora = (() => {
       const precoCell = r.custo_hora != null
         ? (() => {
             const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
+            // RN-DB-001: Databricks proportional — mostra taxa do workspace
+            if (r.databricks_valida && tc === 'hora') {
+              const taxaDB = parseFloat(r.databricks_taxa || 0);
+              const hvmDB  = parseInt(r.databricks_H_vm || 0);
+              return '<span class="mono" style="color:#3b82f6;" title="Taxa composta do workspace Databricks (C_vm \xF7 H_vm)">'
+                + '⚡\xA0' + _brl(taxaDB) + '/h'
+                + '<span style="opacity:.55;font-size:9px;">\xA0billing:\xA0' + _brl(r.custo_hora) + '/h</span>'
+                + '</span>';
+            }
             if (tc === 'reserva') {
               const base = _brl(r.custo_hora) + '/h\xA0🔒';
               const od   = _temPL ? '\xA0<span style="opacity:.55;font-size:9px;" title="On-demand Price List">📋\xA0' + _brl(_plRef) + '/h</span>' : '';
@@ -2556,7 +2609,7 @@ const Calculadora = (() => {
             return '<span class="mono">' + _brl(r.custo_hora) + '/h</span>';
           })()
         : '<span class="na">&mdash;</span>';
-      const _corEst = (r.fonte_estimado === 'price_list' || (_temPL && r.tipo_custo !== 'reserva')) ? 'td-green' : 'td-gray';
+      const _corEst = r.databricks_valida ? 'td-blue' : (r.fonte_estimado === 'price_list' || (_temPL && r.tipo_custo !== 'reserva')) ? 'td-green' : 'td-gray';
       return '<tr>'
         + '<td class="td-nm">' + _esc(r.nome) + '</td>'
         + '<td class="td-sm">' + _esc(r.categoria) + '</td>'
@@ -2698,6 +2751,7 @@ td{padding:8px 10px;vertical-align:middle}
 .td-mono{font-family:'IBM Plex Mono','Courier New',monospace;font-size:8.5pt}
 .td-brl{text-align:right;font-family:'IBM Plex Mono','Courier New',monospace;font-weight:700;font-size:10pt}
 .td-green{color:#6d28d9}
+.td-blue{color:#3b82f6;font-weight:700}
 .td-gray{color:#9aa0be;font-weight:400;font-size:9pt}
 .na{color:#cbd5e1}
 .mono{font-family:'IBM Plex Mono','Courier New',monospace}
@@ -3356,7 +3410,10 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       if (tipo === 'reserva') {
         estimado = chora * horas;
       } else if (tipo === 'hora' || tipo === 'dia') {
-        estimado = chora * horas;
+        // RN-DB-001: Databricks proporcional — taxa = C_vm / H_vm do workspace
+        const _dbInf = _dbInfoParaRecurso(r);
+        const choraEf = (_dbInf && _dbInf.valida) ? _dbInf.taxa : chora;
+        estimado = choraEf * horas;
       } else {
         // periodo: PL/mês ÷ 720 × horas  (PL disponível)
         //          unit_price×qty / 720 × horas  (fallback — on-demand do export)
@@ -3486,9 +3543,13 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
         const custo_mes2 = isBRL ? _mesR2 : _mesR2 * convR2;
         const _fallback2 = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 * 30) : custo_mes2;
+        // RN-DB-001: Databricks proporcional — usa taxa do workspace quando válida
+        const _dbInf2   = tipo2 === 'hora' ? _dbInfoParaRecurso(r) : null;
+        const _dbValida = _dbInf2 && _dbInf2.valida;
+        const choraEf2  = _dbValida ? _dbInf2.taxa : chora;
         const estimado = (tipo2 === 'periodo')
           ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
-          : chora * horas;
+          : choraEf2 * horas;
         const temPLR = retailHr > 0 || retailMesR > 0;
         return {
           resource_id:      rid,
@@ -3509,6 +3570,10 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           total_cobrado:    bill,
           estimado_brl:     estimado,
           moeda:            r.moeda || 'BRL',
+          databricks_valida: _dbValida || false,
+          databricks_taxa:   _dbInf2 ? _dbInf2.taxa : 0,
+          databricks_C_vm:   _dbInf2 ? _dbInf2.C_vm : 0,
+          databricks_H_vm:   _dbInf2 ? _dbInf2.H_vm : 0,
         };
       }).filter(Boolean)
     };
@@ -3637,7 +3702,12 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit * convR : 0;
       const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
         ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
-      // Estimado: mes → custo mensal fixo | periodo → PL/mês ÷ 720 × horas | hora → billing/h × horas
+      // RN-DB-001: Databricks proportional rate override
+      const _dbInfOv  = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
+      const _dbValidaOv = _dbInfOv && _dbInfOv.valida;
+      const choraEfOv  = _dbValidaOv ? _dbInfOv.taxa : chora;
+
+      // Estimado: mes → custo mensal fixo | periodo → PL/mês ÷ 720 × horas | hora → taxa efetiva × horas
       const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
       const _fallback3 = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
       const estimadoMes  = retailMes > 0 ? retailMes : mesBrl;   // custo fixo/mês para tipo=mes
@@ -3645,12 +3715,19 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         ? estimadoMes
         : (tipo === 'periodo')
           ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
-          : chora * horas;
+          : choraEfOv * horas;
 
       // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
       if (tipo === 'reserva') {
         col1Lbl = 'Amort./h 🔒'; col1Val = _brl(chora); col1Suf = '/h';
+      } else if (_dbValidaOv) {
+        // RN-DB-001: mostra taxa composta do workspace Databricks
+        const propPct = _dbInfOv.H_vm > 0 ? ((horas / _dbInfOv.H_vm) * 100).toFixed(1) : '—';
+        col1Lbl = '⚡ Proporcional';
+        col1Val = _brl(_dbInfOv.taxa);
+        col1Suf = '/h';
+        col1Tip = ' title="Taxa composta do workspace Databricks: R$ ' + _dbInfOv.C_vm.toFixed(2) + ' \xF7 ' + _dbInfOv.H_vm + 'h = R$ ' + _dbInfOv.taxa.toFixed(4) + '/h\n' + horas + 'h solicitadas = ' + propPct + '% do workspace"';
       } else if (tipo === 'mes' && temPL) {
         col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
         col1Tip = ' title="Preço on-demand mensal do Azure Price List"';
@@ -3685,13 +3762,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '<div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;" title="' + _esc(r.resource_id || nome) + '">' + _esc(nome) + '</div>'
         + (subtit ? '<div style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:8px;">' + _esc(subtit) + '</div>' : '<div style="margin-bottom:6px;"></div>')
 
-        // Badges: categoria, charge_type, rg, consumed_service, uso parcial
+        // Badges: categoria, charge_type, rg, consumed_service, uso parcial, databricks
         + '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;">'
         + (cat ? '<span style="font-size:10px;background:var(--accent-dim);color:var(--text-dim);border-radius:4px;padding:2px 7px;">' + cat + '</span>' : '')
         + (ct  ? '<span style="font-size:10px;border-radius:4px;padding:2px 7px;' + ctColor + ';">' + _esc(ct) + '</span>' : '')
         + (rg  ? '<span style="font-size:10px;background:rgba(77,166,255,.08);color:var(--blue);border-radius:4px;padding:2px 7px;">' + rg + '</span>' : '')
         + (svc ? '<span style="font-size:10px;background:var(--bg-card);color:var(--text-dim);border-radius:4px;padding:2px 7px;border:1px solid var(--border);">' + svc + '</span>' : '')
         + (usoParcial ? '<span style="font-size:10px;background:rgba(255,140,66,.15);color:var(--orange,#ff8c42);border-radius:4px;padding:2px 7px;" title="Recurso ficou ligado menos de 55% do m\xEAs no per\xEDodo importado">⚠ Uso parcial</span>' : '')
+        + (_dbValidaOv ? '<span style="font-size:10px;background:rgba(77,166,255,.12);color:var(--blue,#4da6ff);border-radius:4px;padding:2px 7px;" title="Custo estimado pela taxa proporcional do workspace Databricks">⚡ Databricks</span>' : '')
         + '</div>'
 
         // Linha de metadados (unidade · qty · horas_reais · pricing_model)
@@ -3706,18 +3784,22 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;">'
 
         + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
-        +   (temPL
-              ? 'background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);'
-              : 'background:var(--bg-card);border:1px solid transparent;')
+        +   (_dbValidaOv
+              ? 'background:rgba(77,166,255,.08);border:1px solid rgba(77,166,255,.30);'
+              : temPL
+                ? 'background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);'
+                : 'background:var(--bg-card);border:1px solid transparent;')
         + '"' + col1Tip
-        + (!temPL && tipo !== 'reserva' ? ' title="Sem dados no Price List para este meter.\nMeter ID: ' + _esc(r._meter_id || '—') + '"' : '')
+        + (!temPL && !_dbValidaOv && tipo !== 'reserva' ? ' title="Sem dados no Price List para este meter.\nMeter ID: ' + _esc(r._meter_id || '—') + '"' : '')
         + '>'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
-        +   (temPL ? 'var(--green,#22c55e)' : tipo === 'reserva' ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
+        +   (_dbValidaOv ? 'var(--blue,#4da6ff)' : temPL ? 'var(--green,#22c55e)' : tipo === 'reserva' ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';margin-bottom:2px;">' + col1Lbl + '</div>'
-        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:' + cor + ';">' + col1Val + '<span style="font-size:9px;font-weight:400;">' + col1Suf + '</span></div>'
-        + (temPL && isHora  ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(chora) + '/h</div>' : '')
-        + (temPL && !isHora ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(mesBrl) + '/mês</div>' : '')
+        + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
+        +   (_dbValidaOv ? 'var(--blue,#4da6ff)' : cor) + ';">' + col1Val + '<span style="font-size:9px;font-weight:400;">' + col1Suf + '</span></div>'
+        + (_dbValidaOv ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">billing:\xA0' + _brl(chora) + '/h</div>' : '')
+        + (!_dbValidaOv && temPL && isHora  ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(chora) + '/h</div>' : '')
+        + (!_dbValidaOv && temPL && !isHora ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(mesBrl) + '/mês</div>' : '')
         + (tipo === 'reserva' && retailHoraRsv > 0 ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;" title="Preço on-demand do Price List (sem reserva)">on-dem:\xA0📋\xA0' + _brl(retailHoraRsv) + '/h</div>' : '')
         + '</div>'
 
@@ -3734,18 +3816,20 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
         +   (tipo === 'mes'
               ? 'background:rgba(255,140,66,.10);border:2px solid rgba(255,140,66,.40);'
-              : temPL
-                ? 'background:rgba(34,197,94,.10);border:2px solid rgba(34,197,94,.45);'
-                : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
+              : _dbValidaOv
+                ? 'background:rgba(77,166,255,.10);border:2px solid rgba(77,166,255,.40);'
+                : temPL
+                  ? 'background:rgba(34,197,94,.10);border:2px solid rgba(34,197,94,.45);'
+                  : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
         + '">'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
         + ';margin-bottom:2px;">'
-        +   (tipo === 'mes' ? '🔒 Infra Fixa' : (temPL ? '📋 ' : '') + 'Estimado')
-        +   (!temPL && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
+        +   (tipo === 'mes' ? '🔒 Infra Fixa' : (_dbValidaOv ? '⚡ ' : temPL ? '📋 ' : '') + 'Estimado')
+        +   (!temPL && !_dbValidaOv && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
         + '</div>'
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
         + ';">' + _brl(estimado) + (tipo === 'mes' ? '<span style="font-size:9px;font-weight:400;">/mês</span>' : '') + '</div>'
         + '</div>'
 
