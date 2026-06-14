@@ -3410,10 +3410,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       if (tipo === 'reserva') {
         estimado = chora * horas;
       } else if (tipo === 'hora' || tipo === 'dia') {
-        // RN-DB-001: Databricks proporcional — taxa = C_vm / H_vm do workspace
+        // RN-DB-001: Databricks proporcional — estimado = (billing_recurso / H_vm) × horas
         const _dbInf = _dbInfoParaRecurso(r);
-        const choraEf = (_dbInf && _dbInf.valida) ? _dbInf.taxa : chora;
-        estimado = choraEf * horas;
+        if (_dbInf && _dbInf.valida) {
+          const billRec = parseFloat(r.total_billing || 0) * cr;
+          estimado = (billRec / _dbInf.H_vm) * horas;
+        } else {
+          estimado = chora * horas;
+        }
       } else {
         // periodo: PL/mês ÷ 720 × horas  (PL disponível)
         //          unit_price×qty / 720 × horas  (fallback — on-demand do export)
@@ -3543,13 +3547,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
         const custo_mes2 = isBRL ? _mesR2 : _mesR2 * convR2;
         const _fallback2 = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 * 30) : custo_mes2;
-        // RN-DB-001: Databricks proporcional — usa taxa do workspace quando válida
+        // RN-DB-001: Databricks proporcional — estimado = (billing_recurso / H_vm) × horas
         const _dbInf2   = tipo2 === 'hora' ? _dbInfoParaRecurso(r) : null;
         const _dbValida = _dbInf2 && _dbInf2.valida;
-        const choraEf2  = _dbValida ? _dbInf2.taxa : chora;
+        const billRec2  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
+        const taxaEf2   = _dbValida && _dbInf2.H_vm > 0 ? billRec2 / _dbInf2.H_vm : 0;
         const estimado = (tipo2 === 'periodo')
           ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
-          : choraEf2 * horas;
+          : _dbValida ? taxaEf2 * horas : chora * horas;
         const temPLR = retailHr > 0 || retailMesR > 0;
         return {
           resource_id:      rid,
@@ -3571,7 +3576,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           estimado_brl:     estimado,
           moeda:            r.moeda || 'BRL',
           databricks_valida: _dbValida || false,
-          databricks_taxa:   _dbInf2 ? _dbInf2.taxa : 0,
+          databricks_taxa:   taxaEf2,
           databricks_C_vm:   _dbInf2 ? _dbInf2.C_vm : 0,
           databricks_H_vm:   _dbInf2 ? _dbInf2.H_vm : 0,
         };
@@ -3705,7 +3710,8 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       // RN-DB-001: Databricks proportional rate override
       const _dbInfOv  = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
       const _dbValidaOv = _dbInfOv && _dbInfOv.valida;
-      const choraEfOv  = _dbValidaOv ? _dbInfOv.taxa : chora;
+      // RN-DB-001: taxa efetiva por recurso = billing_próprio / H_vm_workspace
+      const taxaEfOv  = _dbValidaOv && _dbInfOv.H_vm > 0 ? bill / _dbInfOv.H_vm : chora;
 
       // Estimado: mes → custo mensal fixo | periodo → PL/mês ÷ 720 × horas | hora → taxa efetiva × horas
       const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
@@ -3715,19 +3721,19 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         ? estimadoMes
         : (tipo === 'periodo')
           ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
-          : choraEfOv * horas;
+          : taxaEfOv * horas;
 
       // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
       if (tipo === 'reserva') {
         col1Lbl = 'Amort./h 🔒'; col1Val = _brl(chora); col1Suf = '/h';
       } else if (_dbValidaOv) {
-        // RN-DB-001: mostra taxa composta do workspace Databricks
+        // RN-DB-001: taxa efetiva = billing_recurso / H_vm (proporcional ao custo próprio)
         const propPct = _dbInfOv.H_vm > 0 ? ((horas / _dbInfOv.H_vm) * 100).toFixed(1) : '—';
         col1Lbl = '⚡ Proporcional';
-        col1Val = _brl(_dbInfOv.taxa);
+        col1Val = _brl(taxaEfOv);
         col1Suf = '/h';
-        col1Tip = ' title="Taxa composta do workspace Databricks: R$ ' + _dbInfOv.C_vm.toFixed(2) + ' \xF7 ' + _dbInfOv.H_vm + 'h = R$ ' + _dbInfOv.taxa.toFixed(4) + '/h\n' + horas + 'h solicitadas = ' + propPct + '% do workspace"';
+        col1Tip = ' title="Taxa proporcional: billing R$ ' + bill.toFixed(2) + ' \xF7 ' + _dbInfOv.H_vm + 'h workspace = R$ ' + taxaEfOv.toFixed(4) + '/h\n' + horas + 'h solicitadas = ' + propPct + '% do per\xEDodo"';
       } else if (tipo === 'mes' && temPL) {
         col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
         col1Tip = ' title="Preço on-demand mensal do Azure Price List"';
