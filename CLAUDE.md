@@ -256,13 +256,18 @@ Usado para **chargeback de projeto**: aloca custo proporcional às horas selecio
 Clusters Databricks são compostos por driver + N workers que rodam em paralelo. O custo por hora de ambiente ativo é a soma de todos os VMs simultâneos, não de um VM individual.
 
 ```
-H_driver      = MAX(horas_reais) entre todos os VMs do RG
-                ← VM com mais horas ≈ driver node (fica ligado enquanto o cluster existe)
-taxa_cluster  = C_total_rg / H_driver
+soma_h_driver = SUM(MAX(horas_recurso_dia) por dia)   ← abordagem diária (SQL)
+                fallback: MAX(horas_reais) global       ← se soma_h_driver não disponível
+taxa_cluster  = C_total_rg / soma_h_driver
                 ← custo médio por hora de cluster ativo (inclui todos os workers)
-estimado_vm_i = (billing_i / H_driver) × horas_slider
+estimado_vm_i = (billing_i / soma_h_driver) × horas_slider
                 ← participação proporcional de cada VM no custo do cluster
 ```
+
+**Por que abordagem diária é mais precisa:**
+- Para job-clusters (VMs novas a cada sessão), `MAX(horas_reais)` pega só a sessão mais longa do período.
+- `soma_h_driver = SUM(MAX_diário)` soma o uptime real de cada dia, capturando múltiplas sessões.
+- Para all-purpose clusters (VMs contínuas), as duas abordagens são equivalentes.
 
 Threshold de validade: `H_driver ≥ 24h AND ids_distintos ≥ 2` — garante que é um workspace real com múltiplos VMs.
 
@@ -274,11 +279,13 @@ Por que não usar `SUM(horas_reais)` como denominador (abordagem "blended"):
 Campos armazenados em `_dbTaxaMap` por RG:
 ```javascript
 { taxa, valida, totalBrl, hDriver, totalHoras, recursos }
-// taxa       = C_total / H_driver  (taxa do workspace)
-// hDriver    = MAX(horas_reais)    (uptime do cluster)
-// totalHoras = SUM(horas_reais)    (soma acumulada — só para log)
+// taxa       = C_total / soma_h_driver  (taxa do workspace — abordagem diária)
+// hDriver    = soma_h_driver arredondado (ou MAX global como fallback)
+// totalHoras = SUM(horas_reais)          (soma acumulada — só para log)
 // recursos   = nº de resource_ids distintos
 ```
+
+Endpoint de diagnóstico: `GET /api/calculadora/diag-databricks?data_inicio=&data_fim=` — compara abordagem atual vs diária por RG, retorna `delta_pct` para avaliar impacto.
 
 UI: col1 mostra label `⚡ Cluster/h` com tooltip exibindo `billing_vm ÷ H_driver` e a `taxa_cluster` do workspace como contexto.
 

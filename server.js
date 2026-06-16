@@ -3521,11 +3521,13 @@ app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
 
 // Helper: lê config do portal do banco
 async function _getPortalConfig() {
+  const _defaults = { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [], titulo: 'Portal de Serviço', descricao: '' };
   try {
     const r = await pool.query(`SELECT value FROM portal_config WHERE key = 'config'`);
-    if (!r.rows.length) return { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [], titulo: 'Portal de Serviço', descricao: '' };
-    return JSON.parse(r.rows[0].value);
-  } catch (_) { return { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [] }; }
+    if (!r.rows.length) return _defaults;
+    // merge com defaults para garantir campos que podem não existir em configs antigas
+    return { ..._defaults, ...JSON.parse(r.rows[0].value) };
+  } catch (_) { return _defaults; }
 }
 
 // Middleware: bloqueia se portal inativo
@@ -3644,7 +3646,7 @@ app.get('/api/public/calculadora/subscriptions', _portalMiddleware, async (req, 
 // ── GET /api/public/calculadora/resource-groups ──────────────────────────────
 app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req, res) => {
   try {
-    const { subscription_ids, resource_groups } = req.portalCfg;
+    const { subscription_ids = [], resource_groups = [] } = req.portalCfg;
     const { subscription_id } = req.query;
     const cond = []; const params = [];
     if (subscription_id) {
@@ -3679,7 +3681,7 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
 // Reutiliza lógica do endpoint privado mas valida filtros pelo portalCfg
 app.get('/api/public/calculadora/recursos', _portalMiddleware, async (req, res) => {
   try {
-    const { subscription_ids: allowedSubs, resource_groups: allowedRGs } = req.portalCfg;
+    const { subscription_ids: allowedSubs = [], resource_groups: allowedRGs = [] } = req.portalCfg;
     const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
 
     // Validação: só permite subs/RGs configurados pelo admin
@@ -3918,7 +3920,8 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
     if (data_inicio) { cond.push(`cost_date >= $${params.length + 1}`); params.push(data_inicio); }
     if (data_fim)    { cond.push(`cost_date <= $${params.length + 1}`); params.push(data_fim); }
 
-    const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+    const where    = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+    const andCond  = cond.length ? 'AND '   + cond.join(' AND ') : '';
 
     const _t0 = Date.now();
 
@@ -4092,6 +4095,33 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
                  COALESCE(meter_category,''),
                  COALESCE(meter_name,''),
                  COALESCE(unit_of_measure,'')
+      ),
+      -- ── RN-DB-001: soma_h_driver por RG Databricks (abordagem diária) ──────────
+      -- H_driver_dia = MAX(horas_recurso) por dia → soma_h_driver = SUM(H_driver_dia)
+      -- Mais preciso que MAX global para job-clusters que sobem/descem por sessão
+      db_daily AS (
+        SELECT
+          UPPER(resource_group_name) AS rg,
+          SUM(max_h)                 AS soma_h_driver
+        FROM (
+          SELECT
+            UPPER(resource_group_name) AS resource_group_name,
+            cost_date,
+            MAX(
+              CASE
+                WHEN unit_of_measure ILIKE '%hour%' OR unit_of_measure ILIKE '%hora%'
+                THEN COALESCE(quantity,0)
+                  * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1.0),1.0)
+                ELSE NULL
+              END
+            ) AS max_h
+          FROM azure_costs
+          WHERE UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%'
+            ${andCond}
+          GROUP BY UPPER(resource_group_name), cost_date
+        ) daily
+        WHERE max_h IS NOT NULL AND max_h > 0
+        GROUP BY UPPER(resource_group_name)
       )
       -- pl_best_mv e pl_sku_mv: materialized views pré-computadas (refresh após sync)
       SELECT
@@ -4132,6 +4162,8 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         base.custo_dia_usd,
         base.custo_uom_billing,
         base.custo_uom_usd,
+        -- RN-DB-001: soma dos MAX diários de horas por RG Databricks (abordagem diária)
+        COALESCE(db.soma_h_driver, 0) AS soma_h_driver,
         -- retail_price_unit: 1º meter_id (pl_best) → 2º sku+service (pl_sku) → 0
         COALESCE(
           -- Prioridade 1: match por meter_id
@@ -4184,6 +4216,8 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
       LEFT JOIN pl_sku_mv  pls ON pl.meter_id_lower IS NULL
         AND pls.sku_lower = LOWER(COALESCE(base.meter_categories,''))
         AND pls.svc_lower = LOWER(COALESCE(base.categoria,''))
+      -- RN-DB-001: soma_h_driver diário por RG Databricks
+      LEFT JOIN db_daily db ON db.rg = base.resource_group_name
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 
@@ -4526,6 +4560,129 @@ app.post('/api/calculadora/estimar', authMiddleware, dbMiddleware, async (req, r
   } catch (err) {
     console.error('Erro /api/calculadora/estimar:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/calculadora/diag-databricks ─────────────────────────────────────
+// Compara abordagem atual (MAX global) vs melhorada (SUM de MAX diário) por RG
+app.get('/api/calculadora/diag-databricks', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_id, data_inicio, data_fim } = req.query;
+    if (!data_inicio || !data_fim) return res.status(400).json({ error: 'data_inicio e data_fim obrigatórios' });
+
+    const params = [data_inicio, data_fim];
+    const subCond = subscription_id ? `AND subscription_id = $${params.push(subscription_id) && params.length}` : '';
+
+    const r = await pool.query(`
+      WITH
+      -- Granularidade: por RG + resource_id + dia
+      daily_resource AS (
+        SELECT
+          UPPER(resource_group_name)  AS rg,
+          resource_id,
+          cost_date,
+          SUM(COALESCE(cost_in_billing_currency, 0)) AS billing_dia,
+          CASE
+            WHEN MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%'
+            THEN SUM(COALESCE(quantity,0))
+              * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(MAX(unit_of_measure),'[^0-9]','','g'),'')::numeric,1.0),1.0)
+            ELSE NULL
+          END AS horas_dia
+        FROM azure_costs
+        WHERE cost_date BETWEEN $1 AND $2
+          ${subCond}
+          AND UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%'
+        GROUP BY UPPER(resource_group_name), resource_id, cost_date
+      ),
+      -- Abordagem A (atual): MAX acumulado por recurso no período inteiro
+      acumulado_por_recurso AS (
+        SELECT
+          rg,
+          resource_id,
+          SUM(billing_dia)  AS billing_total_vm,
+          SUM(horas_dia)    AS horas_total_vm
+        FROM daily_resource
+        GROUP BY rg, resource_id
+      ),
+      abordagem_atual AS (
+        SELECT
+          rg,
+          SUM(billing_total_vm)   AS c_total,
+          MAX(horas_total_vm)     AS h_driver_atual,
+          COUNT(DISTINCT resource_id) AS n_vms
+        FROM acumulado_por_recurso
+        GROUP BY rg
+      ),
+      -- Abordagem B (melhorada): MAX por dia, somado ao longo dos dias
+      max_por_dia AS (
+        SELECT
+          rg,
+          cost_date,
+          SUM(billing_dia)  AS c_dia,
+          MAX(horas_dia)    AS h_driver_dia,
+          COUNT(DISTINCT resource_id) AS vms_dia
+        FROM daily_resource
+        GROUP BY rg, cost_date
+      ),
+      abordagem_diaria AS (
+        SELECT
+          rg,
+          COUNT(cost_date)  AS dias_ativos,
+          SUM(c_dia)        AS c_total_check,
+          SUM(h_driver_dia) AS soma_h_driver,
+          MAX(vms_dia)      AS max_vms_dia
+        FROM max_por_dia
+        GROUP BY rg
+      )
+      SELECT
+        a.rg,
+        a.c_total,
+        a.n_vms,
+        -- Abordagem atual
+        a.h_driver_atual,
+        ROUND(a.c_total / NULLIF(a.h_driver_atual,0), 4) AS taxa_atual,
+        -- Abordagem melhorada
+        d.dias_ativos,
+        d.soma_h_driver,
+        ROUND(a.c_total / NULLIF(d.soma_h_driver,0), 4)  AS taxa_diaria,
+        d.max_vms_dia,
+        -- Diferença %
+        ROUND(100.0 * (
+          (a.c_total / NULLIF(d.soma_h_driver,0)) -
+          (a.c_total / NULLIF(a.h_driver_atual,0))
+        ) / NULLIF(a.c_total / NULLIF(a.h_driver_atual,0), 0), 1) AS delta_pct
+      FROM abordagem_atual a
+      JOIN abordagem_diaria d ON a.rg = d.rg
+      WHERE a.h_driver_atual >= 24 AND a.n_vms >= 2
+      ORDER BY a.c_total DESC
+    `, params);
+
+    res.json({
+      periodo: { data_inicio, data_fim },
+      rgs: r.rows.map(row => ({
+        rg:             row.rg,
+        n_vms:          Number(row.n_vms),
+        dias_ativos:    Number(row.dias_ativos),
+        max_vms_dia:    Number(row.max_vms_dia),
+        c_total:        Number(row.c_total),
+        // abordagem atual
+        h_driver_atual: Number(row.h_driver_atual),
+        taxa_atual:     Number(row.taxa_atual),
+        // abordagem melhorada
+        soma_h_driver:  Number(row.soma_h_driver),
+        taxa_diaria:    Number(row.taxa_diaria),
+        // diferença
+        delta_pct:      Number(row.delta_pct),
+        comentario: Number(row.delta_pct) > 5
+          ? 'job-cluster: taxa diária mais precisa'
+          : Math.abs(Number(row.delta_pct)) <= 2
+          ? 'all-purpose: ambas equivalentes'
+          : 'diferença moderada'
+      }))
+    });
+  } catch (e) {
+    console.error('Erro /api/calculadora/diag-databricks:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 

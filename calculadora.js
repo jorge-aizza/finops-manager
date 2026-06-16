@@ -684,13 +684,13 @@ const Calculadora = (() => {
             </div>
           </div>
 
-          <!-- Coluna 2 — Indicadores + Coluna Estimado -->
+          <!-- Coluna 2 — Indicadores + Databricks + Coluna Estimado -->
           <div style="display:flex;flex-direction:column;gap:5px;">
             <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Indicadores</div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
-              <span style="font-size:10px;flex-shrink:0;margin-top:1px;">⚡</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">H.reais</strong> — horas que o recurso ficou ligado no período importado (qty × fator UoM). Só aparece para recursos horários.</span>
+              <span style="font-size:10px;flex-shrink:0;margin-top:1px;opacity:.6;">⏱</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">H.reais</strong> — horas que o recurso ficou ligado no período (qty × fator UoM). Só aparece para recursos horários.</span>
             </div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
@@ -701,6 +701,18 @@ const Calculadora = (() => {
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:10px;font-weight:700;flex-shrink:0;margin-top:1px;color:var(--text-muted);">/mês*</span>
               <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong>/mês*</strong> — storage, bandwidth e similares: sem taxa horária fixa. Estimado = custo mensal × (horas ÷ 720).</span>
+            </div>
+
+            <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--blue,#4da6ff);margin-bottom:2px;">⚡ Databricks</div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:10px;flex-shrink:0;margin-top:1px;">⚡</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">Cluster/h</strong> — taxa do workspace Databricks: C_total ÷ H_driver. H_driver = soma dos picos diários de horas (abordagem diária), captura múltiplas sessões do cluster.</span>
+            </div>
+
+            <div style="display:flex;align-items:flex-start;gap:6px;">
+              <span style="font-size:10px;background:rgba(77,166,255,.12);color:var(--blue,#4da6ff);border-radius:4px;padding:1px 5px;flex-shrink:0;margin-top:1px;">⚡</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--blue,#4da6ff);">Badge azul ⚡</strong> — estimativa proporcional: billing_VM ÷ H_driver × horas. Soma de todas as VMs do RG = taxa_cluster × horas.</span>
             </div>
 
             <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Coluna Estimado</div>
@@ -1412,11 +1424,13 @@ const Calculadora = (() => {
   }
 
   // ── RN-DB-001: Databricks cluster rate estimation ────────────────────────────
-  // taxa_cluster = C_total_rg / H_driver  (H_driver = MAX(horas_reais) = uptime do cluster)
+  // H_driver = soma_h_driver (SUM de MAX diário — abordagem diária, vem do SQL)
+  //            fallback: MAX(horas_reais) global se soma_h_driver não disponível
+  // taxa_cluster = C_total_rg / H_driver
   // estimado_recurso = (billing_recurso / H_driver) × horas_slider
   // Threshold: H_driver ≥ 24h AND ≥ 2 distinct resource_ids
   function _dbComputeTaxas() {
-    const raw = new Map(); // rg_lower → { totalBrl, totalHoras, maxHoras, ids: Set }
+    const raw = new Map(); // rg_lower → { totalBrl, totalHoras, maxHoras, somaHDriver, ids: Set }
     _recursos.forEach(r => {
       const rg = (r.resource_group_name || '').toLowerCase();
       if (!rg.startsWith('databricks-rg-')) return;
@@ -1427,20 +1441,26 @@ const Calculadora = (() => {
       const tcDB  = parseFloat(r.taxa_cambio || 0);
       const convR = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
       const billing = parseFloat(r.total_billing || 0) * convR;
-      if (!raw.has(rg)) raw.set(rg, { totalBrl: 0, totalHoras: 0, maxHoras: 0, ids: new Set() });
+      if (!raw.has(rg)) raw.set(rg, { totalBrl: 0, totalHoras: 0, maxHoras: 0, somaHDriver: 0, ids: new Set() });
       const e = raw.get(rg);
       e.totalBrl   += billing;
       e.totalHoras += horasReais;
       e.maxHoras    = Math.max(e.maxHoras, horasReais);
+      // soma_h_driver: mesmo valor para todos os recursos do RG — guarda o maior (evita 0 de recurso sem campo)
+      const shd = parseFloat(r.soma_h_driver || 0);
+      if (shd > e.somaHDriver) e.somaHDriver = shd;
       e.ids.add(r.resource_id || r._key || rg + '_' + e.ids.size);
     });
     _dbTaxaMap = new Map();
     raw.forEach((v, rg) => {
-      const valida = v.maxHoras >= 24 && v.ids.size >= 2;
-      const taxa   = valida ? v.totalBrl / v.maxHoras : 0;
-      _dbTaxaMap.set(rg, { taxa, valida, totalBrl: v.totalBrl, hDriver: Math.round(v.maxHoras), totalHoras: Math.round(v.totalHoras), recursos: v.ids.size });
-      if (valida) console.log(`[Databricks] ⚡ ${rg} → taxa_cluster R$ ${taxa.toFixed(4)}/h · C_total R$ ${v.totalBrl.toFixed(2)} ÷ H_driver ${Math.round(v.maxHoras)}h · ${v.ids.size} VMs`);
-      else        console.warn(`[Databricks] ⚠ ${rg} → amostra insuficiente (H_driver ${Math.round(v.maxHoras)}h · ${v.ids.size} VMs)`);
+      // Prefere abordagem diária (soma_h_driver); fallback para maxHoras global
+      const hDriver = v.somaHDriver > 0 ? v.somaHDriver : v.maxHoras;
+      const metodo  = v.somaHDriver > 0 ? 'diário' : 'global';
+      const valida  = hDriver >= 24 && v.ids.size >= 2;
+      const taxa    = valida ? v.totalBrl / hDriver : 0;
+      _dbTaxaMap.set(rg, { taxa, valida, totalBrl: v.totalBrl, hDriver: Math.round(hDriver), totalHoras: Math.round(v.totalHoras), recursos: v.ids.size });
+      if (valida) console.log(`[Databricks] ⚡ ${rg} → taxa_cluster R$ ${taxa.toFixed(4)}/h · C_total R$ ${v.totalBrl.toFixed(2)} ÷ H_driver ${Math.round(hDriver)}h (${metodo}) · ${v.ids.size} VMs`);
+      else        console.warn(`[Databricks] ⚠ ${rg} → amostra insuficiente (H_driver ${Math.round(hDriver)}h · ${v.ids.size} VMs)`);
     });
     if (raw.size === 0) console.log('[Databricks] Nenhum workspace databricks-rg-* encontrado.');
   }
