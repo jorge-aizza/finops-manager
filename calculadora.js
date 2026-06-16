@@ -29,6 +29,7 @@ const Calculadora = (() => {
   let _taxaBrl      = 5.70;
   let _estimativa   = null;
   let _dbTaxaMap    = new Map(); // RN-DB-001: rg_lower → { C_vm, H_vm, taxa, valida, recursos }
+  let _managedRgMap = new Map(); // rg_upper → { managed_type, managed_label } — detectado via API
   let _filtroTexto    = '';
   let _reconciliacao  = null;
   let _azureRefValue  = 0;
@@ -1199,7 +1200,14 @@ const Calculadora = (() => {
     const lista = filtro ? state.data.filter(d => d.label.toLowerCase().includes(filtro.toLowerCase())) : state.data;
     state.filtered = lista;
     if (!lista.length) { opts.innerHTML = `<div style="padding:10px 12px;font-size:12px;color:var(--text-muted);">${state.data.length?'Nenhum resultado.':'Nenhum item.'}</div>`; return; }
-    opts.innerHTML = lista.map(d => `<label class="cms-option"><input type="checkbox" ${state.selected.has(d.value)?'checked':''} onchange="Calculadora._toggleOpcao('${id}','${_esc(d.value)}',this.checked)"><span class="cms-option-label" title="${_esc(d.label)}">${_esc(d.label)}</span>${d.sub?`<span class="cms-option-sub">${_esc(d.sub)}</span>`:''}</label>`).join('');
+    opts.innerHTML = lista.map(d => {
+      const subColor = d.managed_type === 'databricks'
+        ? 'color:var(--accent);'
+        : d.managed_type === 'aks'
+        ? 'color:var(--orange,#ff8c42);'
+        : '';
+      return `<label class="cms-option"><input type="checkbox" ${state.selected.has(d.value)?'checked':''} onchange="Calculadora._toggleOpcao('${id}','${_esc(d.value)}',this.checked)"><span class="cms-option-label" title="${_esc(d.label)}">${_esc(d.label)}</span>${d.sub?`<span class="cms-option-sub" style="${subColor}">${_esc(d.sub)}</span>`:''}</label>`;
+    }).join('');
   }
 
   function _toggleOpcao(id, value, checked) {
@@ -1246,7 +1254,15 @@ const Calculadora = (() => {
     try {
       const data = await _api('GET', `/calculadora/resource-groups?subscription_id=${_subsSel.map(encodeURIComponent).join(',')}`);
       if (!Array.isArray(data)||!data.length) { document.getElementById('crg-options').innerHTML='<div style="padding:8px 12px;font-size:12px;color:var(--text-muted);">Nenhum RG encontrado.</div>'; return; }
-      _dds.crg.data = data.map(r => ({ value:r.resource_group_name, label:r.resource_group_name, labelShort:r.resource_group_name, sub:'' }));
+      _managedRgMap.clear();
+      _dds.crg.data = data.map(r => {
+        const mt = r.managed_type;
+        const ml = r.managed_label || '';
+        if (mt) _managedRgMap.set((r.resource_group_name || '').toUpperCase(), { managed_type: mt, managed_label: ml });
+        const icon = mt === 'databricks' ? '⚡' : mt === 'aks' ? '☸' : null;
+        const sub  = icon ? icon + ' ' + (mt === 'databricks' ? 'Databricks — workspace: ' + ml : 'AKS — cluster: ' + ml) : '';
+        return { value: r.resource_group_name, label: r.resource_group_name, labelShort: r.resource_group_name, sub, managed_type: mt };
+      });
       _renderOpcoes('crg');
     } catch(err) { document.getElementById('crg-options').innerHTML=`<div style="padding:8px 12px;font-size:12px;color:#ff4d6a;">Erro: ${_esc(err.message)}</div>`; }
   }
@@ -3803,7 +3819,21 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         + '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;">'
         + (cat ? '<span style="font-size:10px;background:var(--accent-dim);color:var(--text-dim);border-radius:4px;padding:2px 7px;">' + cat + '</span>' : '')
         + (ct  ? '<span style="font-size:10px;border-radius:4px;padding:2px 7px;' + ctColor + ';">' + _esc(ct) + '</span>' : '')
-        + (rg  ? '<span style="font-size:10px;background:rgba(77,166,255,.08);color:var(--blue);border-radius:4px;padding:2px 7px;">' + rg + '</span>' : '')
+        + (rg ? (()=>{
+            const _mi = _managedRgMap.get((r.resource_group_name||'').toUpperCase());
+            const _mt = _mi?.managed_type;
+            const _ml = _mi?.managed_label || '';
+            const _rgStyle = _mt === 'aks'
+              ? 'background:rgba(255,140,66,.12);color:var(--orange,#ff8c42);'
+              : _mt === 'databricks'
+              ? 'background:rgba(147,51,234,.12);color:var(--accent);'
+              : 'background:rgba(77,166,255,.08);color:var(--blue);';
+            const _prefix = _mt === 'aks' ? '☸ ' : _mt === 'databricks' ? '⚡ ' : '';
+            const _title  = _mt === 'aks' ? 'RG gerenciado pelo AKS — cluster: ' + _ml
+                          : _mt === 'databricks' ? 'RG gerenciado pelo Databricks — workspace: ' + _ml
+                          : '';
+            return '<span style="font-size:10px;border-radius:4px;padding:2px 7px;' + _rgStyle + '" title="' + _esc(_title||rg) + '">' + _prefix + rg + '</span>';
+          })() : '')
         + (svc ? '<span style="font-size:10px;background:var(--bg-card);color:var(--text-dim);border-radius:4px;padding:2px 7px;border:1px solid var(--border);">' + svc + '</span>' : '')
         + (usoParcial ? '<span style="font-size:10px;background:rgba(255,140,66,.15);color:var(--orange,#ff8c42);border-radius:4px;padding:2px 7px;" title="Recurso ficou ligado menos de 55% do m\xEAs no per\xEDodo importado">⚠ Uso parcial</span>' : '')
         + (_dbValidaOv ? '<span style="font-size:10px;background:rgba(77,166,255,.12);color:var(--blue,#4da6ff);border-radius:4px;padding:2px 7px;" title="Custo estimado pela taxa proporcional do workspace Databricks">⚡ Databricks</span>' : '')

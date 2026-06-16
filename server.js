@@ -3673,7 +3673,7 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
       ORDER BY resource_group_name
       LIMIT 500
     `, params);
-    res.json(r.rows);
+    res.json(r.rows.map(row => ({ ...row, ..._detectManagedRg(row.resource_group_name) })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -3784,6 +3784,28 @@ app.get('/api/calculadora/subscriptions', authMiddleware, dbMiddleware, async (_
   }
 });
 
+// ── Helper: detecta RGs gerenciados (AKS, Databricks) ────────────────────────
+function _detectManagedRg(name) {
+  if (!name) return {};
+  const upper = name.toUpperCase();
+  if (upper.startsWith('DATABRICKS-RG-')) {
+    // databricks-rg-{workspace}-{randomId}
+    const bare = name.slice('databricks-rg-'.length);
+    const lastDash = bare.lastIndexOf('-');
+    const workspace = lastDash > 0 ? bare.slice(0, lastDash) : bare;
+    return { managed_type: 'databricks', managed_label: workspace };
+  }
+  if (upper.startsWith('MC_')) {
+    // MC_{resourceGroup}_{clusterName}_{location}
+    const inner = name.slice(3);
+    const parts  = inner.split('_');
+    const cluster = parts.length >= 2 ? parts[parts.length - 2] : inner;
+    const region  = parts.length >= 1 ? parts[parts.length - 1] : '';
+    return { managed_type: 'aks', managed_label: cluster, managed_region: region };
+  }
+  return {};
+}
+
 // ── GET /api/calculadora/resource-groups ─────────────────────────────────────
 app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async (req, res) => {
   try {
@@ -3818,7 +3840,7 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
       rows = fd.rows;
     }
     console.log(`[ResourceGroups] ${rows.length} grupos — ${Date.now()-_t0}ms`);
-    res.json(rows);
+    res.json(rows.map(r => ({ ...r, ..._detectManagedRg(r.resource_group_name) })));
   } catch (err) {
     console.error('[ResourceGroups]', err.message);
     res.status(500).json({ error: err.message });
