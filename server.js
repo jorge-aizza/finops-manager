@@ -3570,6 +3570,17 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── GET /api/public/calculadora/projetos ─────────────────────────────────────
+app.get('/api/public/calculadora/projetos', _portalMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, nome, descricao, responsavel, status
+       FROM projetos WHERE status = 'Ativo' ORDER BY nome`
+    );
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/public/calculadora/config ───────────────────────────────────────
 app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
   const { titulo, descricao, dominios_aceitos = [], taxa_imposto = 18.65, taxa_cond = 13.00,

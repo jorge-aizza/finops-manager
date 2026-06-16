@@ -2577,24 +2577,33 @@ const Calculadora = (() => {
     const inp  = document.getElementById('cinv-data');
     if (inp && !inp.value) inp.value = hoje;
 
-    // Carregar projetos da API
-    const sel = document.getElementById('cinv-projeto');
+    // Pré-preencher responsável com dados da identificação do portal
     if (_modoPublico) {
-      sel.innerHTML = '<option value="">— projetos não disponíveis no portal —</option>';
-    } else {
-      sel.innerHTML = '<option value="">Carregando...</option>';
       try {
-        const data = await _api('GET', '/api/projetos');
-        if (!Array.isArray(data) || !data.length) {
-          sel.innerHTML = '<option value="">Nenhum projeto cadastrado</option>';
-        } else {
-          sel.innerHTML = '<option value="">— selecione o projeto —</option>' +
-            data.map(p => `<option value="${p.id}" data-dir="${_esc(p.diretoria||'')}" data-desc="${_esc(p.descricao||'')}">${_esc(p.nome)}${p.diretoria ? ' · ' + p.diretoria : ''}</option>`).join('');
-          sel.onchange = () => _atualizarInfoProjeto(data);
-        }
-      } catch (e) {
-        sel.innerHTML = `<option value="">Erro: ${_esc(e.message)}</option>`;
+        const ident = JSON.parse(sessionStorage.getItem('portal_ident') || 'null');
+        const respEl = document.getElementById('cinv-resp');
+        if (respEl && ident?.nome && !respEl.value)
+          respEl.value = ident.nome + (ident.email ? ' <' + ident.email + '>' : '');
+      } catch {}
+    }
+
+    // Carregar projetos da API
+    // Modo público → /projetos relativo ao _apiBase = /api/public/calculadora/projetos
+    // Modo autenticado → /api/projetos (path absoluto)
+    const sel = document.getElementById('cinv-projeto');
+    sel.innerHTML = '<option value="">Carregando...</option>';
+    try {
+      const projetosUrl = _modoPublico ? '/projetos' : '/api/projetos';
+      const data = await _api('GET', projetosUrl);
+      if (!Array.isArray(data) || !data.length) {
+        sel.innerHTML = '<option value="">Nenhum projeto cadastrado</option>';
+      } else {
+        sel.innerHTML = '<option value="">— selecione o projeto —</option>' +
+          data.map(p => `<option value="${p.id}" data-dir="${_esc(p.diretoria||'')}" data-desc="${_esc(p.descricao||'')}">${_esc(p.nome)}${p.diretoria ? ' · ' + p.diretoria : ''}</option>`).join('');
+        sel.onchange = () => _atualizarInfoProjeto(data);
       }
+    } catch (e) {
+      sel.innerHTML = `<option value="">Erro: ${_esc(e.message)}</option>`;
     }
 
     _atualizarPreviewInvoice();
