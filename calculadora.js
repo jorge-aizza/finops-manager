@@ -30,6 +30,8 @@ const Calculadora = (() => {
   let _estimativa   = null;
   let _dbTaxaMap    = new Map(); // RN-DB-001: rg_lower → { C_vm, H_vm, taxa, valida, recursos }
   let _managedRgMap = new Map(); // rg_upper → { managed_type, managed_label } — detectado via API
+  let _filtroTipos  = new Set(); // tipos selecionados no chip-bar (vazio = todos)
+  let _rgTotalMap   = new Map(); // rg_upper → total billing do período (todos os recursos do RG)
   let _filtroTexto    = '';
   let _reconciliacao  = null;
   let _azureRefValue  = 0;
@@ -397,6 +399,9 @@ const Calculadora = (() => {
         <svg viewBox="0 0 16 16" fill="none" width="12" height="12"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Estimar
       </button>
+    </div>
+    <!-- Chips de tipo de recurso -->
+    <div id="ctipos-bar" style="display:none;padding:6px 13px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
     </div>
     <!-- Visão: Recursos (padrão) -->
     <div id="crecursos-wrap" style="flex:1;overflow-y:auto;">
@@ -1373,6 +1378,63 @@ const Calculadora = (() => {
     if (_subsSel.length) await buscarRecursos();
   }
 
+  function _tipoRecurso(r) {
+    const svc = (r.consumed_service || '').toLowerCase();
+    const cat = (r.meter_category   || '').toLowerCase();
+    if (svc.includes('databricks') || cat.includes('databricks')) return 'Databricks';
+    if (svc.includes('containerservice') || cat.includes('kubernetes')) return 'AKS';
+    if (cat.includes('virtual machine') || (svc.includes('compute') && cat.includes('compute'))) return 'VMs';
+    if (cat.includes('managed disk') || cat.includes('disk')) return 'Discos';
+    if (cat.includes('storage')) return 'Storage';
+    if (cat.includes('load balancer')) return 'Load Balancer';
+    if (cat.includes('bandwidth') || cat.includes('content delivery') || cat.includes('egress')) return 'Rede/CDN';
+    if (svc.includes('network') || cat.includes('ip address') || cat.includes('virtual network')) return 'Rede';
+    if (svc.includes('sql') || cat.includes('sql')) return 'SQL';
+    if (svc.includes('web') || cat.includes('app service')) return 'App Service';
+    if (svc.includes('keyvault') || cat.includes('key vault')) return 'Key Vault';
+    if (svc.includes('monitor') || cat.includes('monitor') || cat.includes('log analytics')) return 'Monitoramento';
+    if (r.charge_type === 'Purchase' || r.pricing_model === 'Reservation') return 'Reservas';
+    return 'Outros';
+  }
+
+  function _renderTiposBar() {
+    const bar = document.getElementById('ctipos-bar');
+    if (!bar) return;
+    if (!_recursos.length) { bar.style.display = 'none'; return; }
+
+    const contagem = {};
+    _recursos.forEach(r => {
+      const t = _tipoRecurso(r);
+      contagem[t] = (contagem[t] || 0) + 1;
+    });
+
+    const tipos = Object.entries(contagem).sort((a, b) => b[1] - a[1]);
+    if (tipos.length <= 1) { bar.style.display = 'none'; _filtroTipos.clear(); return; }
+
+    bar.style.display = 'flex';
+    bar.innerHTML = '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;flex-shrink:0;">Tipo:</span>'
+      + tipos.map(([tipo, cnt]) => {
+          const ativo = _filtroTipos.size === 0 || _filtroTipos.has(tipo);
+          const col   = tipo === 'VMs' ? 'var(--accent)' : tipo === 'Discos' || tipo === 'Storage' ? 'var(--orange,#ff8c42)' : tipo === 'Rede' || tipo === 'Rede/CDN' ? 'var(--blue,#4da6ff)' : tipo === 'Databricks' ? 'var(--accent)' : tipo === 'AKS' ? 'var(--orange,#ff8c42)' : 'var(--text-dim)';
+          const bg    = ativo ? 'rgba(147,51,234,.15)' : 'rgba(255,255,255,.04)';
+          const bord  = ativo ? 'var(--accent)' : 'var(--border)';
+          return `<button onclick="Calculadora._toggleTipo('${tipo.replace(/'/g,"\\'")}',this)"
+            style="font-size:10px;padding:2px 9px;border-radius:10px;border:1px solid ${bord};background:${bg};color:${ativo?col:'var(--text-muted)'};cursor:pointer;white-space:nowrap;transition:all .15s;"
+            title="${tipo}: ${cnt} recurso${cnt!==1?'s':''}">${tipo} <span style="opacity:.7;">${cnt}</span></button>`;
+        }).join('');
+  }
+
+  function _toggleTipo(tipo, btn) {
+    if (_filtroTipos.has(tipo)) {
+      _filtroTipos.delete(tipo);
+      if (!_filtroTipos.size) _filtroTipos.clear(); // todos ativos
+    } else {
+      _filtroTipos.add(tipo);
+    }
+    _renderTiposBar();
+    _renderRecursos();
+  }
+
   function onTaxaChange() {
     _taxaBrl = parseFloat(document.getElementById('ctaxa').value) || 5.70;
     _renderRecursos();
@@ -1417,7 +1479,18 @@ const Calculadora = (() => {
         _key: (r.resource_id||'') + '||' + (r.categoria||'') + '||' + (r.meter_categories||'') + '||' + (r.unidade||'')
       }));
       _selecionados = {};
+      _filtroTipos.clear();
+      // Pré-computa total de billing por RG (usado no cabeçalho dos cards de estimativa)
+      _rgTotalMap.clear();
+      _recursos.forEach(r => {
+        const rg  = (r.resource_group_name || '').toUpperCase();
+        const isBRL = (r.moeda || 'BRL') === 'BRL';
+        const tcDB  = parseFloat(r.taxa_cambio || 0);
+        const val   = parseFloat(r.total_billing || 0) * (isBRL ? 1 : (tcDB > 1 ? tcDB : _taxaBrl));
+        _rgTotalMap.set(rg, (_rgTotalMap.get(rg) || 0) + val);
+      });
       _dbComputeTaxas(); // RN-DB-001: computa taxas proporcionais por workspace Databricks
+      _renderTiposBar();
       _renderRecursos();
       // Reconciliação em background (não bloqueia o render)
       _reconciliacao = null;
@@ -1788,7 +1861,7 @@ const Calculadora = (() => {
 
   function _renderRecursos() {
     const tbody = document.getElementById('ctbody'); if (!tbody) return;
-    const lista = _filtroTexto ? _recursos.filter(r =>
+    const _textoOk = r =>
       (r.nome_recurso||'').toLowerCase().includes(_filtroTexto) ||
       (r.categoria||'').toLowerCase().includes(_filtroTexto)    ||
       (r.produto||'').toLowerCase().includes(_filtroTexto)      ||
@@ -1798,8 +1871,11 @@ const Calculadora = (() => {
       (r.pricing_model||'').toLowerCase().includes(_filtroTexto)||
       (r.resource_group_name||'').toLowerCase().includes(_filtroTexto) ||
       (r.publisher_type||'').toLowerCase().includes(_filtroTexto) ||
-      (r.publisher_name||'').toLowerCase().includes(_filtroTexto)
-    ) : _recursos;
+      (r.publisher_name||'').toLowerCase().includes(_filtroTexto);
+    const lista = _recursos.filter(r =>
+      (!_filtroTexto || _textoOk(r)) &&
+      (!_filtroTipos.size || _filtroTipos.has(_tipoRecurso(r)))
+    );
 
     const c = document.getElementById('ccnt');
 
@@ -3302,7 +3378,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
       // Limpar estado local
       _recursos = []; _selecionados = {}; _subAtual = ''; _rgAtual = '';
-      _subsSel = []; _rgsSel = [];
+      _subsSel = []; _rgsSel = []; _filtroTipos.clear(); _rgTotalMap.clear(); _ovCurRg = null;
       _dds.csub.selected.clear(); _dds.crg.selected.clear();
       _atualizarBadge('csub'); _atualizarBadge('crg');
 
@@ -3681,12 +3757,19 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
     const container = document.getElementById('cov-recursos');
     if (!container) return;
     container.innerHTML = '';
-    _ovSel  = Object.keys(_selecionados);
     _ovRMap = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
+    // Ordena selecionados por RG para agrupar no render
+    _ovSel = Object.keys(_selecionados).sort((a, b) => {
+      const ra = (_ovRMap.get(a)?.resource_group_name || '').toUpperCase();
+      const rb = (_ovRMap.get(b)?.resource_group_name || '').toUpperCase();
+      return ra < rb ? -1 : ra > rb ? 1 : 0;
+    });
     _ovIdx  = 0;
+    _ovCurRg = null; // rastreia RG atual para emitir cabeçalhos de grupo
     if (!_ovSel.length) return;
     _ovRenderLote(container);
   }
+  let _ovCurRg = null;
 
   function _ovCarregarMais() {
     const container = document.getElementById('cov-recursos');
@@ -3701,6 +3784,38 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const rid = _ovSel[_oi];
         const r   = _ovRMap.get(rid);
         if (!r) continue;
+
+      // ── Cabeçalho de RG (emite quando muda o grupo) ──────────────────────────
+      const _rgUp = (r.resource_group_name || '').toUpperCase();
+      if (_rgUp !== _ovCurRg) {
+        _ovCurRg = _rgUp;
+        const _mi       = _managedRgMap.get(_rgUp);
+        const _mt       = _mi?.managed_type;
+        const _ml       = _mi?.managed_label || '';
+        const _icon     = _mt === 'databricks' ? '⚡ ' : _mt === 'aks' ? '☸ ' : '';
+        const _badge    = _mt
+          ? `<span style="font-size:10px;padding:1px 7px;border-radius:8px;${_mt==='aks'?'background:rgba(255,140,66,.15);color:var(--orange)':'background:rgba(147,51,234,.15);color:var(--accent)'};">${_mt==='aks'?'AKS':'Databricks'} · ${_ml}</span>`
+          : '';
+        const _rgTotal  = _rgTotalMap.get(_rgUp) || 0;
+        // Total selecionado neste RG
+        const _selTotal = _ovSel.filter(k => {
+          const rk = _ovRMap.get(k); return rk && (rk.resource_group_name||'').toUpperCase() === _rgUp;
+        }).reduce((s, k) => {
+          const rk = _ovRMap.get(k); if (!rk) return s;
+          const isBRL = (rk.moeda||'BRL')==='BRL'; const tcDB=parseFloat(rk.taxa_cambio||0);
+          return s + parseFloat(rk.total_billing||0)*(isBRL?1:(tcDB>1?tcDB:_taxaBrl));
+        }, 0);
+        const _pct = _rgTotal > 0 ? Math.round(_selTotal / _rgTotal * 100) : 0;
+        const _pctColor = _pct >= 80 ? 'var(--green,#22c55e)' : _pct >= 40 ? 'var(--orange,#ff8c42)' : 'var(--text-muted)';
+        _html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 4px 4px;margin-top:${_oi===_ovIdx?'0':'14px'};">
+          <span style="font-size:11px;font-weight:700;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_icon}${_esc(r.resource_group_name||'—')}</span>
+          ${_badge}
+          <span style="flex:1;height:1px;background:var(--border);flex-shrink:1;min-width:8px;"></span>
+          ${_rgTotal>0?`<span style="font-size:10px;white-space:nowrap;color:var(--text-muted);" title="Total do RG no período: ${_brl(_rgTotal)}">💰 ${_brl(_rgTotal)}/período</span>
+          <span style="font-size:10px;font-weight:700;white-space:nowrap;color:${_pctColor};" title="Cobertura: itens selecionados vs total do RG">${_pct}% coberto</span>`:''}
+        </div>`;
+      }
+      // ─────────────────────────────────────────────────────────────────────────
       const nome     = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0, 60);
       const subtit   = r.produto || r.subcategoria || r.regiao || '';
       const isBRL    = (r.moeda || 'BRL') === 'BRL';
