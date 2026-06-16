@@ -32,9 +32,10 @@ const Calculadora = (() => {
   let _filtroTexto    = '';
   let _reconciliacao  = null;
   let _azureRefValue  = 0;
-  let _iniciado     = false;
-  let _apiBase      = '/api/calculadora'; // sobrescrito por init({ apiBase }) no portal público
-  let _modoPublico  = false;              // true quando iniciado pelo portal sem login
+  let _iniciado      = false;
+  let _apiBase       = '/api/calculadora'; // sobrescrito por init({ apiBase }) no portal público
+  let _modoPublico   = false;              // true quando iniciado pelo portal sem login
+  let _defaultConfig = null;               // config do servidor aplicada no portal público (imposto, cond, hl)
 
   // ── API helper ───────────────────────────────────────────────────
   async function _api(method, path, body) {
@@ -929,8 +930,9 @@ const Calculadora = (() => {
   function init(opts) {
     // opts.apiBase  → troca base da API (ex: '/api/public/calculadora' para portal público)
     // opts.publico  → desativa features que requerem auth (import, diagnóstico, etc.)
-    if (opts && opts.apiBase)  { _apiBase = opts.apiBase; }
-    if (opts && opts.publico)  { _modoPublico = true; }
+    if (opts && opts.apiBase)       { _apiBase = opts.apiBase; }
+    if (opts && opts.publico)       { _modoPublico = true; }
+    if (opts && opts.defaultConfig) { _defaultConfig = opts.defaultConfig; }
 
     const view = document.getElementById('view-calculadora');
     if (!view) { console.error('Calculadora: #view-calculadora não encontrada'); return; }
@@ -1409,12 +1411,12 @@ const Calculadora = (() => {
     } catch (_) { /* silencioso */ }
   }
 
-  // ── RN-DB-001: Databricks proportional estimation ────────────────
-  // taxa_workspace = C_vm / periodo_horas  (período do export, não soma de VM-hours)
-  // estimado_recurso = (billing_recurso / periodo_horas) × horas_slider
-  // Threshold: H_vm ≥ 24h AND ≥ 2 distinct resource_ids
+  // ── RN-DB-001: Databricks cluster rate estimation ────────────────────────────
+  // taxa_cluster = C_total_rg / H_driver  (H_driver = MAX(horas_reais) = uptime do cluster)
+  // estimado_recurso = (billing_recurso / H_driver) × horas_slider
+  // Threshold: H_driver ≥ 24h AND ≥ 2 distinct resource_ids
   function _dbComputeTaxas() {
-    const raw = new Map(); // rg_lower → { totalBrl, totalHoras, maxDias, ids: Set }
+    const raw = new Map(); // rg_lower → { totalBrl, totalHoras, maxHoras, ids: Set }
     _recursos.forEach(r => {
       const rg = (r.resource_group_name || '').toLowerCase();
       if (!rg.startsWith('databricks-rg-')) return;
@@ -1425,33 +1427,20 @@ const Calculadora = (() => {
       const tcDB  = parseFloat(r.taxa_cambio || 0);
       const convR = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
       const billing = parseFloat(r.total_billing || 0) * convR;
-      const dias    = parseInt(r.dias_ativos || 0) || 0;
-      if (!raw.has(rg)) raw.set(rg, { totalBrl: 0, totalHoras: 0, maxDias: 0, ids: new Set() });
+      if (!raw.has(rg)) raw.set(rg, { totalBrl: 0, totalHoras: 0, maxHoras: 0, ids: new Set() });
       const e = raw.get(rg);
       e.totalBrl   += billing;
       e.totalHoras += horasReais;
-      e.maxDias     = Math.max(e.maxDias, dias);
+      e.maxHoras    = Math.max(e.maxHoras, horasReais);
       e.ids.add(r.resource_id || r._key || rg + '_' + e.ids.size);
     });
     _dbTaxaMap = new Map();
     raw.forEach((v, rg) => {
-      const valida       = v.totalHoras >= 24 && v.ids.size >= 2;
-      // periodo_horas: comprimento do export em horas (máx dias_ativos × 24, mín 24h)
-      const periodo_horas = Math.max(v.maxDias * 24, 24) || 720;
-      // taxa = custo do workspace por hora de período (não por VM-hour)
-      const taxa          = valida ? v.totalBrl / periodo_horas : 0;
-      _dbTaxaMap.set(rg, {
-        taxa, valida,
-        C_vm:          v.totalBrl,
-        H_vm:          Math.round(v.totalHoras),
-        periodo_horas,
-        recursos:      v.ids.size,
-      });
-      if (valida) {
-        console.log(`[Databricks] ⚡ ${rg} → R$ ${taxa.toFixed(4)}/h · C_vm R$ ${v.totalBrl.toFixed(2)} · período ${periodo_horas}h · ${v.ids.size} recursos`);
-      } else {
-        console.warn(`[Databricks] ⚠ ${rg} → amostra insuficiente (${Math.round(v.totalHoras)}h · ${v.ids.size} recursos)`);
-      }
+      const valida = v.maxHoras >= 24 && v.ids.size >= 2;
+      const taxa   = valida ? v.totalBrl / v.maxHoras : 0;
+      _dbTaxaMap.set(rg, { taxa, valida, totalBrl: v.totalBrl, hDriver: Math.round(v.maxHoras), totalHoras: Math.round(v.totalHoras), recursos: v.ids.size });
+      if (valida) console.log(`[Databricks] ⚡ ${rg} → taxa_cluster R$ ${taxa.toFixed(4)}/h · C_total R$ ${v.totalBrl.toFixed(2)} ÷ H_driver ${Math.round(v.maxHoras)}h · ${v.ids.size} VMs`);
+      else        console.warn(`[Databricks] ⚠ ${rg} → amostra insuficiente (H_driver ${Math.round(v.maxHoras)}h · ${v.ids.size} VMs)`);
     });
     if (raw.size === 0) console.log('[Databricks] Nenhum workspace databricks-rg-* encontrado.');
   }
@@ -2478,18 +2467,22 @@ const Calculadora = (() => {
 
     // Carregar projetos da API
     const sel = document.getElementById('cinv-projeto');
-    sel.innerHTML = '<option value="">Carregando...</option>';
-    try {
-      const data = await _api('GET', '/projetos');
-      if (!Array.isArray(data) || !data.length) {
-        sel.innerHTML = '<option value="">Nenhum projeto cadastrado</option>';
-      } else {
-        sel.innerHTML = '<option value="">— selecione o projeto —</option>' +
-          data.map(p => `<option value="${p.id}" data-dir="${_esc(p.diretoria||'')}" data-desc="${_esc(p.descricao||'')}">${_esc(p.nome)}${p.diretoria ? ' · ' + p.diretoria : ''}</option>`).join('');
-        sel.onchange = () => _atualizarInfoProjeto(data);
+    if (_modoPublico) {
+      sel.innerHTML = '<option value="">— projetos não disponíveis no portal —</option>';
+    } else {
+      sel.innerHTML = '<option value="">Carregando...</option>';
+      try {
+        const data = await _api('GET', '/api/projetos');
+        if (!Array.isArray(data) || !data.length) {
+          sel.innerHTML = '<option value="">Nenhum projeto cadastrado</option>';
+        } else {
+          sel.innerHTML = '<option value="">— selecione o projeto —</option>' +
+            data.map(p => `<option value="${p.id}" data-dir="${_esc(p.diretoria||'')}" data-desc="${_esc(p.descricao||'')}">${_esc(p.nome)}${p.diretoria ? ' · ' + p.diretoria : ''}</option>`).join('');
+          sel.onchange = () => _atualizarInfoProjeto(data);
+        }
+      } catch (e) {
+        sel.innerHTML = `<option value="">Erro: ${_esc(e.message)}</option>`;
       }
-    } catch (e) {
-      sel.innerHTML = `<option value="">Erro: ${_esc(e.message)}</option>`;
     }
 
     _atualizarPreviewInvoice();
@@ -2596,11 +2589,10 @@ const Calculadora = (() => {
       const precoCell = r.custo_hora != null
         ? (() => {
             const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
-            // RN-DB-001: Databricks proportional — mostra taxa do workspace
+            // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver (uptime do cluster)
             if (r.databricks_valida && tc === 'hora') {
               const taxaDB = parseFloat(r.databricks_taxa || 0);
-              const hvmDB  = parseInt(r.databricks_H_vm || 0);
-              return '<span class="mono" style="color:#3b82f6;" title="Taxa composta do workspace Databricks (C_vm \xF7 H_vm)">'
+              return '<span class="mono" style="color:#3b82f6;" title="Taxa Databricks: billing \xF7 H_driver (uptime do cluster)">'
                 + '⚡\xA0' + _brl(taxaDB) + '/h'
                 + '<span style="opacity:.55;font-size:9px;">\xA0billing:\xA0' + _brl(r.custo_hora) + '/h</span>'
                 + '</span>';
@@ -2816,18 +2808,30 @@ window.onload=function(){
         var bgR=0,bgG=0,bgB=0;
         for(var ci=0;ci<cs.length;ci++){var p4=(cs[ci][1]*W+cs[ci][0])*4;bgR+=px[p4];bgG+=px[p4+1];bgB+=px[p4+2];}
         bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
-        var rS=0,gS=0,bS=0,n=0;
+        // Tinta 65% roxo Vivo (#9333ea = 147,51,234) nos pixels do mascote
+        var HARD=80,SOFT=120;
         for(var i=0;i<px.length;i+=4){
           var r=px[i],g=px[i+1],b=px[i+2];
           var dr=r-bgR,dg=g-bgG,db=b-bgB,dSq=dr*dr+dg*dg+db*db;
-          if(dSq>80*80){var mx=Math.max(r,g,b),mn=Math.min(r,g,b);if(mx-mn>30){rS+=r;gS+=g;bS+=b;n++;}}
+          if(dSq<HARD*HARD){
+            px[i+3]=0;
+          } else if(dSq<SOFT*SOFT){
+            var d2=Math.sqrt(dSq);
+            px[i+3]=Math.round(255*(d2-HARD)/(SOFT-HARD));
+            px[i]  =Math.round(r*0.35+147*0.65);
+            px[i+1]=Math.round(g*0.35+ 51*0.65);
+            px[i+2]=Math.round(b*0.35+234*0.65);
+          } else {
+            px[i+3]=255;
+            px[i]  =Math.round(r*0.35+147*0.65);
+            px[i+1]=Math.round(g*0.35+ 51*0.65);
+            px[i+2]=Math.round(b*0.35+234*0.65);
+          }
         }
-        if(n>0){
-          var hx=function(v){return('0'+Math.round(v).toString(16)).slice(-2);};
-          var col='#'+hx(rS/n)+hx(gS/n)+hx(bS/n);
-          var t=document.getElementById('pdf-vivo-text');
-          if(t){t.setAttribute('fill',col);t.style.filter='drop-shadow(0 0 5px '+col+'88)';}
-        }
+        ctx.putImageData(d,0,0);
+        // substitui a imagem exibida pela versão com tinta roxa
+        img.src=cvs.toDataURL('image/png');
+        // "pdf-vivo-text" permanece fixo em #9333ea — sem extração de cor dominante
       }
     }catch(e){}
     if(cb)cb();
@@ -3421,11 +3425,11 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       if (tipo === 'reserva') {
         estimado = chora * horas;
       } else if (tipo === 'hora' || tipo === 'dia') {
-        // RN-DB-001: Databricks proporcional — estimado = (billing_recurso / periodo_horas) × horas
+        // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver × horas
         const _dbInf = _dbInfoParaRecurso(r);
         if (_dbInf && _dbInf.valida) {
           const billRec = parseFloat(r.total_billing || 0) * cr;
-          estimado = (billRec / _dbInf.periodo_horas) * horas;
+          estimado = _dbInf.hDriver > 0 ? (billRec / _dbInf.hDriver) * horas : chora * horas;
         } else {
           estimado = chora * horas;
         }
@@ -3558,11 +3562,11 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
         const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
         const custo_mes2 = isBRL ? _mesR2 : _mesR2 * convR2;
         const _fallback2 = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 * 30) : custo_mes2;
-        // RN-DB-001: Databricks proporcional — estimado = (billing_recurso / periodo_horas) × horas
-        const _dbInf2   = tipo2 === 'hora' ? _dbInfoParaRecurso(r) : null;
+        // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
+        const _dbInf2  = tipo2 === 'hora' ? _dbInfoParaRecurso(r) : null;
         const _dbValida = _dbInf2 && _dbInf2.valida;
         const billRec2  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
-        const taxaEf2   = _dbValida && _dbInf2.periodo_horas > 0 ? billRec2 / _dbInf2.periodo_horas : 0;
+        const taxaEf2   = _dbValida && _dbInf2.hDriver > 0 ? billRec2 / _dbInf2.hDriver : 0;
         const estimado = (tipo2 === 'periodo')
           ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
           : _dbValida ? taxaEf2 * horas : chora * horas;
@@ -3588,8 +3592,6 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
           moeda:            r.moeda || 'BRL',
           databricks_valida: _dbValida || false,
           databricks_taxa:   taxaEf2,
-          databricks_C_vm:   _dbInf2 ? _dbInf2.C_vm : 0,
-          databricks_H_vm:   _dbInf2 ? _dbInf2.H_vm : 0,
         };
       }).filter(Boolean)
     };
@@ -3718,11 +3720,10 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit * convR : 0;
       const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
         ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
-      // RN-DB-001: Databricks proportional rate override
-      const _dbInfOv  = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
+      // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
+      const _dbInfOv    = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
       const _dbValidaOv = _dbInfOv && _dbInfOv.valida;
-      // RN-DB-001: taxa efetiva por recurso = billing_próprio / periodo_horas
-      const taxaEfOv  = _dbValidaOv && _dbInfOv.periodo_horas > 0 ? bill / _dbInfOv.periodo_horas : chora;
+      const taxaEfOv    = _dbValidaOv && _dbInfOv.hDriver > 0 ? bill / _dbInfOv.hDriver : chora;
 
       // Estimado: mes → custo mensal fixo | periodo → PL/mês ÷ 720 × horas | hora → taxa efetiva × horas
       const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
@@ -3739,12 +3740,11 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
       if (tipo === 'reserva') {
         col1Lbl = 'Amort./h 🔒'; col1Val = _brl(chora); col1Suf = '/h';
       } else if (_dbValidaOv) {
-        // RN-DB-001: taxa efetiva = billing_recurso / H_vm (proporcional ao custo próprio)
-        const propPct = _dbInfOv.H_vm > 0 ? ((horas / _dbInfOv.H_vm) * 100).toFixed(1) : '—';
-        col1Lbl = '⚡ Proporcional';
+        // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
+        col1Lbl = '⚡ Cluster/h';
         col1Val = _brl(taxaEfOv);
         col1Suf = '/h';
-        col1Tip = ' title="Taxa proporcional: billing R$ ' + bill.toFixed(2) + ' \xF7 ' + _dbInfOv.periodo_horas + 'h per\xEDodo = R$ ' + taxaEfOv.toFixed(4) + '/h | workspace: R$ ' + _dbInfOv.C_vm.toFixed(2) + ' \xF7 ' + _dbInfOv.periodo_horas + 'h = R$ ' + _dbInfOv.taxa.toFixed(4) + '/h total"';
+        col1Tip = ' title="Custo proporcional: billing R$ ' + bill.toFixed(2) + ' \xF7 ' + _dbInfOv.hDriver + 'h (uptime cluster) = R$ ' + taxaEfOv.toFixed(4) + '/h | workspace: R$ ' + _dbInfOv.taxa.toFixed(4) + '/h (' + _dbInfOv.recursos + ' VMs)"';
       } else if (tipo === 'mes' && temPL) {
         col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
         col1Tip = ' title="Preço on-demand mensal do Azure Price List"';
@@ -3952,9 +3952,14 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 
   function _hlCarregar() {
     try {
-      const raw = localStorage.getItem(_LS_HL);
-      if (!raw) return;
-      const cfg = JSON.parse(raw);
+      let cfg;
+      if (_modoPublico && _defaultConfig?.horario_livre) {
+        cfg = _defaultConfig.horario_livre;
+      } else {
+        const raw = localStorage.getItem(_LS_HL);
+        if (!raw) return;
+        cfg = JSON.parse(raw);
+      }
       if (cfg && typeof cfg === 'object') {
         _horarioLivre = { ..._horarioLivre, ...cfg };
         // Aplicar nos inputs
@@ -4001,14 +4006,20 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
   const _LS_COND_PAD   = 'finops_taxa_cond_padrao';
 
   function _carregarTaxas() {
-    const si = localStorage.getItem(_LS_IMP);
-    const sc = localStorage.getItem(_LS_COND);
-    const vi = si !== null ? parseFloat(si) : _TAXA_IMP_DEF;
-    const vc = sc !== null ? parseFloat(sc) : _TAXA_COND_DEF;
-    if (si === null) localStorage.setItem(_LS_IMP,  vi);
-    if (sc === null) localStorage.setItem(_LS_COND, vc);
-    if (!localStorage.getItem(_LS_IMP_PAD))  localStorage.setItem(_LS_IMP_PAD,  vi);
-    if (!localStorage.getItem(_LS_COND_PAD)) localStorage.setItem(_LS_COND_PAD, vc);
+    let vi, vc;
+    if (_modoPublico && _defaultConfig) {
+      vi = parseFloat(_defaultConfig.taxa_imposto ?? _TAXA_IMP_DEF);
+      vc = parseFloat(_defaultConfig.taxa_cond    ?? _TAXA_COND_DEF);
+    } else {
+      const si = localStorage.getItem(_LS_IMP);
+      const sc = localStorage.getItem(_LS_COND);
+      vi = si !== null ? parseFloat(si) : _TAXA_IMP_DEF;
+      vc = sc !== null ? parseFloat(sc) : _TAXA_COND_DEF;
+      if (si === null) localStorage.setItem(_LS_IMP,  vi);
+      if (sc === null) localStorage.setItem(_LS_COND, vc);
+      if (!localStorage.getItem(_LS_IMP_PAD))  localStorage.setItem(_LS_IMP_PAD,  vi);
+      if (!localStorage.getItem(_LS_COND_PAD)) localStorage.setItem(_LS_COND_PAD, vc);
+    }
     const ii = document.getElementById('cimposto');
     const ic = document.getElementById('ccondominио');
     if (ii) ii.value = vi;

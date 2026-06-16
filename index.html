@@ -351,9 +351,9 @@
       width: 520px; height: 520px;
       transform: translate(-50%,-50%);
       background: radial-gradient(ellipse at center,
-        rgba(200,80,255,.55) 0%,
-        rgba(147,51,234,.35) 25%,
-        rgba(80,0,160,.20) 55%,
+        rgba(147,51,234,.58) 0%,
+        rgba(109,40,217,.34) 25%,
+        rgba(76,29,149,.18) 55%,
         transparent 75%);
       animation: vivo-pulse 4s ease-in-out infinite;
       pointer-events: none;
@@ -368,7 +368,7 @@
       background:
         repeating-conic-gradient(
           from 0deg,
-          rgba(220,120,255,.18) 0deg 1.5deg,
+          rgba(147,51,234,.18) 0deg 1.5deg,
           transparent 1.5deg 9deg
         );
       border-radius: 50%;
@@ -384,7 +384,7 @@
       background:
         repeating-conic-gradient(
           from 0deg,
-          rgba(255,180,255,.10) 0deg .7deg,
+          rgba(124,58,237,.10) 0deg .7deg,
           transparent .7deg 6deg
         );
       border-radius: 50%;
@@ -398,7 +398,7 @@
       width: 320px; height: 320px;
       transform: translate(-50%,-50%);
       background: radial-gradient(ellipse at center,
-        rgba(220,100,255,.30) 0%,
+        rgba(147,51,234,.32) 0%,
         transparent 70%);
       animation: vivo-pulse 3s ease-in-out infinite .8s;
       pointer-events: none;
@@ -1090,8 +1090,8 @@
                   bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
 
                   // Limiar agressivo: HARD=corte total; SOFT=transição suave até opaco
-                  // drop-shadow CSS segue o canal alpha → glow em volta do mascote, não do retângulo
-                  var HARD=90, SOFT=130, rS=0,gS=0,bS=0,n=0;
+                  // Tinta 65% roxo Vivo (#9333ea = 147,51,234) nos pixels do mascote
+                  var HARD=90, SOFT=130;
                   for (var i = 0; i < px.length; i += 4) {
                     var r=px[i],g=px[i+1],b=px[i+2];
                     var dr=r-bgR,dg=g-bgG,db=b-bgB;
@@ -1101,23 +1101,22 @@
                     } else if (dSq < SOFT*SOFT) {
                       var d2=Math.sqrt(dSq);
                       px[i+3]=Math.round(255*(d2-HARD)/(SOFT-HARD)); // borda suave
+                      px[i]  =Math.round(r*0.35+147*0.65);
+                      px[i+1]=Math.round(g*0.35+ 51*0.65);
+                      px[i+2]=Math.round(b*0.35+234*0.65);
                     } else {
-                      // mascote → opaco; coleta cor dominante
-                      var mx=Math.max(r,g,b),mn=Math.min(r,g,b);
-                      if(mx-mn>35){rS+=r;gS+=g;bS+=b;n++;}
+                      // mascote → opaco + tinta 65% roxo Vivo
+                      px[i]  =Math.round(r*0.35+147*0.65);
+                      px[i+1]=Math.round(g*0.35+ 51*0.65);
+                      px[i+2]=Math.round(b*0.35+234*0.65);
                     }
                   }
                   tctx.putImageData(d, 0, 0);
 
                   cvs.getContext('2d').drawImage(tmp, 0, 0, cvs.width, cvs.height);
 
+                  // "vivo" permanece fixo em #9333ea — sem extração de cor dominante
                   var svg=document.getElementById('vivo-logo-svg');
-                  if (n > 0) {
-                    var hx=function(v){return('0'+Math.round(v).toString(16)).slice(-2);};
-                    var cor='#'+hx(rS/n)+hx(gS/n)+hx(bS/n);
-                    var txt=document.getElementById('vivo-logo-text');
-                    if(txt)txt.setAttribute('fill',cor);
-                  }
                   // revela vivo e mascote ao mesmo tempo (evita flash do estilo antigo)
                   cvs.style.opacity='1';
                   if(svg)svg.style.opacity='1';
@@ -3354,23 +3353,96 @@
 
             <!-- Subscriptions permitidas -->
             <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
-              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Filtros de Acesso</div>
-              <div>
-                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">
-                  Subscription IDs permitidos <span style="opacity:.6;">(um por linha)</span>
-                </label>
-                <textarea id="portal-cfg-subs" rows="4"
-                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;font-family:monospace;resize:vertical;"
-                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx&#10;yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"></textarea>
+              <div style="display:flex;align-items:center;justify-content:space-between;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Filtros de Acesso</div>
+                <button onclick="recarregarSubsPortal()" class="btn-ghost" style="padding:4px 10px;font-size:11px;">↻ Atualizar lista</button>
               </div>
               <div>
-                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">
-                  Resource Groups visíveis <span style="opacity:.6;">(um por linha — vazio = todos os RGs das subs acima)</span>
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
+                  Assinaturas permitidas <span style="opacity:.6;">(vazio = todas)</span>
                 </label>
-                <textarea id="portal-cfg-rgs" rows="3"
-                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;font-family:monospace;resize:vertical;"
-                  placeholder="rg-producao&#10;rg-homologacao"></textarea>
+                <div id="portal-cfg-subs-list" style="display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;">
+                  <span style="font-size:12px;color:var(--text-muted);font-style:italic;">Carregando assinaturas...</span>
+                </div>
+                <!-- fallback hidden — mantém IDs para savePortalConfig() ler -->
+                <textarea id="portal-cfg-subs" style="display:none;"></textarea>
               </div>
+            </div>
+
+            <!-- Calculadora Pública — Padrões -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;">
+              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Padrões da Calculadora Pública</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                <div>
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Imposto (%)</label>
+                  <input id="portal-cfg-imposto" type="number" value="18.65" min="0" max="100" step="0.01"
+                    style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Condomínio (%)</label>
+                  <input id="portal-cfg-cond" type="number" value="13" min="0" max="100" step="0.01"
+                    style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
+                </div>
+              </div>
+              <!-- Horário Livre -->
+              <div style="border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-hl-ativo" onchange="togglePortalHL(this.checked)"
+                    style="width:14px;height:14px;accent-color:var(--accent);">
+                  <span style="font-weight:600;">Ativar Horário Livre</span>
+                  <span style="color:var(--text-muted);font-size:11px;">(descontar horas fora do expediente)</span>
+                </label>
+                <div id="portal-cfg-hl-corpo" style="display:none;flex-direction:column;gap:8px;">
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <div>
+                      <label style="font-size:11px;color:var(--text-muted);">Início</label>
+                      <input type="time" id="portal-cfg-hl-ini" value="09:00"
+                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;">
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--text-muted);">Fim</label>
+                      <input type="time" id="portal-cfg-hl-fim" value="18:00"
+                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;">
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="0" style="width:12px;height:12px;accent-color:var(--accent);">Dom</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="1" checked style="width:12px;height:12px;accent-color:var(--accent);">Seg</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="2" checked style="width:12px;height:12px;accent-color:var(--accent);">Ter</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="3" checked style="width:12px;height:12px;accent-color:var(--accent);">Qua</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="4" checked style="width:12px;height:12px;accent-color:var(--accent);">Qui</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="5" checked style="width:12px;height:12px;accent-color:var(--accent);">Sex</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="6" style="width:12px;height:12px;accent-color:var(--accent);">Sáb</label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Identificação de usuários -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Identificação de Usuários</div>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text);">
+                <input type="checkbox" id="portal-cfg-solicitar-ident"
+                  style="width:14px;height:14px;accent-color:var(--accent);">
+                <span style="font-weight:600;">Solicitar identificação ao acessar o portal</span>
+              </label>
+              <div style="font-size:11px;color:var(--text-muted);">Quando ativado, o portal exibe um formulário de nome e e-mail antes de mostrar a calculadora.</div>
+              <div>
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">
+                  Domínios de e-mail aceitos <span style="opacity:.6;">(um por linha — vazio = sem restrição)</span>
+                </label>
+                <textarea id="portal-cfg-dominios" rows="3"
+                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;font-family:monospace;resize:vertical;"
+                  placeholder="vivo.com.br&#10;telefonica.com"></textarea>
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
+                Quando configurado, o portal solicita <strong style="color:var(--text-dim);">nome e e-mail corporativo</strong> antes de exibir a calculadora.
+                Apenas e-mails com os domínios listados serão aceitos. Os acessos ficam registrados no log abaixo.
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <button onclick="verAcessosPortal()" class="btn-ghost" style="padding:6px 14px;font-size:12px;">📋 Ver log de acessos</button>
+              </div>
+              <div id="portal-acessos-log" style="display:none;max-height:200px;overflow-y:auto;font-size:11px;font-family:monospace;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;color:var(--text-muted);"></div>
             </div>
 
             <!-- Botão salvar -->

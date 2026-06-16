@@ -251,6 +251,37 @@ estimado          = taxa_hora × horas_slider
 ```
 Usado para **chargeback de projeto**: aloca custo proporcional às horas selecionadas.
 
+**RN-DB-001 — Databricks cluster rate (workspaces `databricks-rg-*`):**
+
+Clusters Databricks são compostos por driver + N workers que rodam em paralelo. O custo por hora de ambiente ativo é a soma de todos os VMs simultâneos, não de um VM individual.
+
+```
+H_driver      = MAX(horas_reais) entre todos os VMs do RG
+                ← VM com mais horas ≈ driver node (fica ligado enquanto o cluster existe)
+taxa_cluster  = C_total_rg / H_driver
+                ← custo médio por hora de cluster ativo (inclui todos os workers)
+estimado_vm_i = (billing_i / H_driver) × horas_slider
+                ← participação proporcional de cada VM no custo do cluster
+```
+
+Threshold de validade: `H_driver ≥ 24h AND ids_distintos ≥ 2` — garante que é um workspace real com múltiplos VMs.
+
+Por que não usar `SUM(horas_reais)` como denominador (abordagem "blended"):
+- Workers rodam **em paralelo**, não em sequência.
+- `C_total / SUM_horas` divide como se fossem sequenciais → subestima muito a taxa real.
+- Exemplo: 4 workers × 100h cada = 400h somadas, mas o cluster ficou ativo apenas 100h → taxa blended é ¼ do real.
+
+Campos armazenados em `_dbTaxaMap` por RG:
+```javascript
+{ taxa, valida, totalBrl, hDriver, totalHoras, recursos }
+// taxa       = C_total / H_driver  (taxa do workspace)
+// hDriver    = MAX(horas_reais)    (uptime do cluster)
+// totalHoras = SUM(horas_reais)    (soma acumulada — só para log)
+// recursos   = nº de resource_ids distintos
+```
+
+UI: col1 mostra label `⚡ Cluster/h` com tooltip exibindo `billing_vm ÷ H_driver` e a `taxa_cluster` do workspace como contexto.
+
 **Price List integration (v2.2):**
 - `retail_price_unit` vem normalizado do SQL: `retail_price_PL ÷ fator_UoM_PL × taxa_câmbio`
 - JOIN via CTE `pl_best` (DISTINCT ON meter_id, executa UMA vez — hash join): prioridade Consumption > DevTest, global > regional

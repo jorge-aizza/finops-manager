@@ -426,6 +426,16 @@ async function initDB() {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS portal_acessos (
+        id          SERIAL PRIMARY KEY,
+        nome        TEXT NOT NULL,
+        email       TEXT NOT NULL,
+        ip          TEXT,
+        user_agent  TEXT,
+        acessado_em TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
 
     // Limpeza de sessões antigas (> 90 dias) — evita crescimento ilimitado da tabela
     try {
@@ -3513,9 +3523,9 @@ app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
 async function _getPortalConfig() {
   try {
     const r = await pool.query(`SELECT value FROM portal_config WHERE key = 'config'`);
-    if (!r.rows.length) return { ativo: false, subscription_ids: [], resource_groups: [], titulo: 'Portal de Serviço', descricao: '' };
+    if (!r.rows.length) return { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [], titulo: 'Portal de Serviço', descricao: '' };
     return JSON.parse(r.rows[0].value);
-  } catch (_) { return { ativo: false, subscription_ids: [], resource_groups: [] }; }
+  } catch (_) { return { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [] }; }
 }
 
 // Middleware: bloqueia se portal inativo
@@ -3538,22 +3548,70 @@ app.get('/api/admin/portal-config', authMiddleware, dbMiddleware, async (_req, r
 // ── POST /api/admin/portal-config ────────────────────────────────────────────
 app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { ativo, subscription_ids = [], resource_groups = [], titulo = 'Portal de Serviço', descricao = '' } = req.body;
-    const cfg = { ativo: !!ativo, subscription_ids, resource_groups, titulo, descricao, updated_at: new Date().toISOString() };
+    const { ativo, subscription_ids = [], dominios_aceitos = [], titulo = 'Portal de Serviço', descricao = '',
+            taxa_imposto, taxa_cond, horario_livre, solicitar_identificacao } = req.body;
+    const cfg = {
+      ativo: !!ativo, subscription_ids, dominios_aceitos, titulo, descricao,
+      taxa_imposto:           taxa_imposto  != null ? parseFloat(taxa_imposto)  : 18.65,
+      taxa_cond:              taxa_cond     != null ? parseFloat(taxa_cond)     : 13.00,
+      horario_livre:          horario_livre || { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] },
+      solicitar_identificacao: !!solicitar_identificacao,
+      updated_at: new Date().toISOString()
+    };
     await pool.query(`
       INSERT INTO portal_config (key, value, updated_at)
       VALUES ('config', $1, NOW())
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [JSON.stringify(cfg)]);
-    console.log(`[Portal] Config atualizada — ativo: ${cfg.ativo}, subs: ${subscription_ids.length}, rgs: ${resource_groups.length}`);
+    console.log(`[Portal] Config atualizada — ativo: ${cfg.ativo}, subs: ${subscription_ids.length}, dominios: ${dominios_aceitos.length}`);
     res.json({ ok: true, ...cfg });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /api/public/calculadora/config ───────────────────────────────────────
 app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
-  const { titulo, descricao } = req.portalCfg;
-  res.json({ titulo, descricao });
+  const { titulo, descricao, dominios_aceitos = [], taxa_imposto = 18.65, taxa_cond = 13.00,
+          horario_livre = { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] },
+          solicitar_identificacao = false } = req.portalCfg;
+  res.json({ titulo, descricao, dominios_aceitos, taxa_imposto, taxa_cond, horario_livre, solicitar_identificacao });
+});
+
+// ── POST /api/public/calculadora/identificar ──────────────────────────────────
+app.post('/api/public/calculadora/identificar', _portalMiddleware, async (req, res) => {
+  try {
+    const { nome, email } = req.body || {};
+    if (!nome || !nome.trim()) return res.status(400).json({ error: 'Nome é obrigatório.' });
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      return res.status(400).json({ error: 'E-mail inválido.' });
+
+    const dominios = req.portalCfg.dominios_aceitos || [];
+    if (dominios.length) {
+      const dominio = email.split('@')[1].toLowerCase();
+      const aceito  = dominios.some(d => d.toLowerCase() === dominio);
+      if (!aceito) return res.status(403).json({ error: `Domínio @${dominio} não autorizado para este portal.` });
+    }
+
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
+    const ua = req.headers['user-agent'] || '';
+    await pool.query(
+      `INSERT INTO portal_acessos (nome, email, ip, user_agent) VALUES ($1, $2, $3, $4)`,
+      [nome.trim(), email.trim().toLowerCase(), ip, ua]
+    );
+    console.log(`[Portal] Acesso identificado — ${nome.trim()} <${email.trim().toLowerCase()}> IP:${ip}`);
+    res.json({ ok: true, nome: nome.trim(), email: email.trim().toLowerCase() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/admin/portal-acessos ────────────────────────────────────────────
+app.get('/api/admin/portal-acessos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || 100), 500);
+    const { rows } = await pool.query(
+      `SELECT id, nome, email, ip, acessado_em FROM portal_acessos ORDER BY acessado_em DESC LIMIT $1`,
+      [limit]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /api/public/calculadora/subscriptions ────────────────────────────────

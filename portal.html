@@ -39,6 +39,118 @@
       padding: 2px 10px; color: var(--accent); font-weight: 600;
       letter-spacing: .06em;
     }
+    .portal-user-badge {
+      display: flex; align-items: center; gap: 8px;
+      background: rgba(34,197,94,.10); border: 1px solid rgba(34,197,94,.3);
+      border-radius: 8px; padding: 6px 14px;
+      font-size: 12px; color: #22c55e; font-weight: 600;
+    }
+    .portal-user-badge .pub-nome {
+      color: #22c55e; font-weight: 700;
+    }
+    .portal-user-badge .pub-email {
+      color: rgba(34,197,94,.75); font-weight: 400; font-size: 11px;
+    }
+    .portal-user-badge .pub-sair {
+      background: none; border: none; cursor: pointer;
+      color: rgba(34,197,94,.55); font-size: 14px; padding: 0 0 0 4px;
+      line-height: 1;
+    }
+    .portal-user-badge .pub-sair:hover { color: #22c55e; }
+
+    /* ── Modal de identificação ────────────────────────────── */
+    @keyframes ident-rotate { from { transform:translate(-50%,-50%) rotate(0deg); } to { transform:translate(-50%,-50%) rotate(360deg); } }
+    @keyframes ident-pulse  { 0%,100%{opacity:.55;transform:translate(-50%,-50%) scale(1);} 50%{opacity:.80;transform:translate(-50%,-50%) scale(1.08);} }
+    @keyframes ident-float  { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-7px);} }
+    @keyframes ident-logo-glow {
+      0%,100% { filter: drop-shadow(0 0 3px rgba(147,51,234,.6)); }
+      50%      { filter: drop-shadow(0 0 6px rgba(147,51,234,1)) drop-shadow(0 0 12px rgba(147,51,234,.35)); }
+    }
+    .ident-vivo-text    { animation: ident-logo-glow 3s ease-in-out infinite; }
+    .ident-vivo-mascote { animation: ident-logo-glow 3s ease-in-out infinite; }
+
+    #modal-ident {
+      position: fixed; inset: 0; z-index: 200;
+      background: #0c0014;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+    }
+    /* Núcleo roxo central */
+    #modal-ident::before {
+      content: '';
+      position: absolute; left: 50%; top: 46%;
+      width: 480px; height: 480px;
+      transform: translate(-50%,-50%);
+      background: radial-gradient(ellipse at center,
+        rgba(147,51,234,.55) 0%, rgba(109,40,217,.32) 25%,
+        rgba(76,29,149,.15) 55%, transparent 75%);
+      animation: ident-pulse 4s ease-in-out infinite;
+      pointer-events: none;
+    }
+    /* Disco de raios girando */
+    #modal-ident::after {
+      content: '';
+      position: absolute; left: 50%; top: 46%;
+      width: 860px; height: 860px;
+      transform: translate(-50%,-50%) rotate(0deg);
+      background: repeating-conic-gradient(
+        from 0deg, rgba(147,51,234,.18) 0deg 1.5deg, transparent 1.5deg 9deg);
+      border-radius: 50%;
+      animation: ident-rotate 18s linear infinite;
+      pointer-events: none;
+    }
+    .ident-rays {
+      position: absolute; left: 50%; top: 46%;
+      width: 1100px; height: 1100px;
+      transform: translate(-50%,-50%) rotate(0deg);
+      background: repeating-conic-gradient(
+        from 0deg, rgba(124,58,237,.10) 0deg .7deg, transparent .7deg 6deg);
+      border-radius: 50%;
+      animation: ident-rotate 9s linear infinite reverse;
+      pointer-events: none;
+    }
+    .ident-glow {
+      position: absolute; left: 50%; top: 46%;
+      width: 300px; height: 300px;
+      transform: translate(-50%,-50%);
+      background: radial-gradient(ellipse at center, rgba(147,51,234,.32) 0%, transparent 70%);
+      animation: ident-pulse 3s ease-in-out infinite .8s;
+      pointer-events: none;
+    }
+    .ident-card {
+      background: rgba(18,2,32,.82); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(147,51,234,.35);
+      border-radius: 20px; padding: 36px 32px; width: 100%; max-width: 400px;
+      box-shadow: 0 0 60px rgba(147,51,234,.20), 0 24px 64px rgba(0,0,0,.6);
+      position: relative; z-index: 2;
+      animation: ident-float 6s ease-in-out infinite;
+      display: flex; flex-direction: column; align-items: center;
+    }
+    .ident-logo {
+      display: flex; justify-content: center; margin-bottom: 14px;
+    }
+    .ident-card h2 {
+      font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 4px; text-align: center;
+    }
+    .ident-card p {
+      font-size: 12px; color: var(--text-muted); margin-bottom: 20px; line-height: 1.5; text-align: center;
+    }
+    .ident-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; width: 100%; }
+    .ident-field label { font-size: 11px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+    .ident-field input {
+      background: rgba(0,0,0,.35); border: 1px solid var(--border-light);
+      color: var(--text); border-radius: 8px; padding: 9px 12px; font-size: 14px;
+      outline: none; transition: border-color .2s; width: 100%;
+    }
+    .ident-field input:focus { border-color: var(--accent); }
+    #ident-erro { font-size: 12px; color: var(--danger); min-height: 18px; margin-bottom: 10px; }
+    .ident-btn {
+      width: 100%; padding: 11px; font-size: 14px; font-weight: 700;
+      background: var(--accent); color: #fff; border: none; border-radius: 8px;
+      cursor: pointer; transition: opacity .2s;
+    }
+    .ident-btn:hover { opacity: .85; }
+    .ident-btn:disabled { opacity: .5; cursor: default; }
 
     /* ── Hero (front add) ──────────────────────────────────── */
     .portal-hero {
@@ -73,6 +185,13 @@
     .portal-calc-wrap {
       max-width: 1400px; margin: 0 auto; padding: 0 16px 40px;
     }
+    /* Override: no portal o #view-calculadora não usa height:100%/overflow:hidden */
+    body.portal-mode #view-calculadora.active {
+      height: auto !important;
+      overflow: visible !important;
+      display: block !important;
+    }
+
     /* Oculta features que precisam de auth no modo público */
     body.portal-mode #cvista-detalhe,
     body.portal-mode #cvista-servico,
@@ -116,8 +235,87 @@
       <div class="portal-brand-sub">Calculadora Azure</div>
     </div>
   </div>
-  <span class="portal-badge">⚡ Público</span>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div id="portal-user-badge" class="portal-user-badge" style="display:none;"></div>
+    <span class="portal-badge">⚡ Público</span>
+  </div>
 </header>
+
+<!-- Modal de identificação -->
+<div id="modal-ident" style="display:none;">
+  <div class="ident-rays"></div>
+  <div class="ident-glow"></div>
+  <div class="ident-card">
+    <!-- Logo vivo + mascote (mesmo padrão do login) -->
+    <div class="ident-logo">
+      <div style="display:inline-flex;align-items:center;justify-content:center;gap:0;">
+        <svg id="ident-vivo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 54" width="90" height="44"
+             style="opacity:0;transition:opacity .3s ease;">
+          <text id="ident-vivo-text" class="ident-vivo-text" x="2" y="44"
+                font-family="'Arial Black','Arial Bold',Arial"
+                font-weight="900" font-size="46"
+                fill="#9333ea" letter-spacing="-1">vivo</text>
+        </svg>
+        <canvas id="ident-mascote-cvs" height="50" class="ident-vivo-mascote"
+          style="display:block;margin-bottom:2px;margin-left:-6px;opacity:0;transition:opacity .3s ease;flex-shrink:0;"></canvas>
+        <script>
+          (function() {
+            var cvs = document.getElementById('ident-mascote-cvs');
+            var svg = document.getElementById('ident-vivo-svg');
+            var off = new Image();
+            off.onload = function() {
+              try {
+                var W = off.naturalWidth, H = off.naturalHeight;
+                var scale = 50 / H;
+                cvs.width = Math.round(W * scale); cvs.height = 50;
+                var tmp = document.createElement('canvas');
+                tmp.width = W; tmp.height = H;
+                var tc = tmp.getContext('2d');
+                tc.drawImage(off, 0, 0);
+                var d = tc.getImageData(0,0,W,H), px = d.data;
+                var cs=[[0,0],[W-1,0],[0,H-1],[W-1,H-1],[Math.floor(W/2),0],[0,Math.floor(H/2)],[W-1,Math.floor(H/2)],[Math.floor(W/2),H-1]];
+                var bgR=0,bgG=0,bgB=0;
+                for(var ci=0;ci<cs.length;ci++){var p4=(cs[ci][1]*W+cs[ci][0])*4;bgR+=px[p4];bgG+=px[p4+1];bgB+=px[p4+2];}
+                bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
+                var HARD=90,SOFT=130;
+                for(var i=0;i<px.length;i+=4){
+                  var r=px[i],g=px[i+1],b=px[i+2];
+                  var dr=r-bgR,dg=g-bgG,db=b-bgB,dSq=dr*dr+dg*dg+db*db;
+                  if(dSq<HARD*HARD){px[i+3]=0;}
+                  else if(dSq<SOFT*SOFT){px[i+3]=Math.round(255*(Math.sqrt(dSq)-HARD)/(SOFT-HARD));}
+                  else {
+                    // Tint roxo Vivo #9333ea — 65% roxo, 35% cor original
+                    px[i]   = Math.round(r * 0.35 + 147 * 0.65);
+                    px[i+1] = Math.round(g * 0.35 +  51 * 0.65);
+                    px[i+2] = Math.round(b * 0.35 + 234 * 0.65);
+                  }
+                }
+                tc.putImageData(d,0,0);
+                cvs.getContext('2d').drawImage(tmp,0,0,cvs.width,cvs.height);
+                // "vivo" mantém o roxo Vivo fixo — não extrai cor do mascote
+                cvs.style.opacity='1'; if(svg)svg.style.opacity='1';
+              } catch(e){ cvs.style.opacity='1'; if(svg)svg.style.opacity='1'; }
+            };
+            off.onerror = function(){ if(svg)svg.style.opacity='1'; cvs.style.display='none'; };
+            off.src = 'mascote.png?' + Date.now();
+          })();
+        </script>
+      </div>
+    </div>
+    <h2>Identificação</h2>
+    <p id="ident-desc">Informe seu nome e e-mail corporativo para acessar o portal.</p>
+    <div class="ident-field">
+      <label>Nome completo</label>
+      <input id="ident-nome" type="text" placeholder="Ex: João Silva" autocomplete="name">
+    </div>
+    <div class="ident-field">
+      <label>E-mail corporativo</label>
+      <input id="ident-email" type="email" placeholder="joao.silva@empresa.com.br" autocomplete="email">
+    </div>
+    <div id="ident-erro"></div>
+    <button class="ident-btn" id="ident-btn" onclick="submitIdentificacao()">Confirmar e acessar</button>
+  </div>
+</div>
 
 <!-- Hero / Front Add -->
 <section class="portal-hero" id="portal-hero">
@@ -151,51 +349,138 @@
 
 <script src="/calculadora.js"></script>
 <script>
-(async function initPortal() {
+let _portalCfg = null;
+
+async function initPortal() {
   const loadingEl  = document.getElementById('portal-loading');
   const inactiveEl = document.getElementById('portal-inactive');
   const calcWrap   = document.getElementById('portal-calc-wrap');
-  const heroEl     = document.getElementById('portal-hero');
 
   try {
-    // Verifica se portal está ativo e obtém configuração
     const cfgRes = await fetch('/api/public/calculadora/config');
-
     if (!cfgRes.ok) {
-      // Portal inativo (403) ou erro
       loadingEl.style.display = 'none';
       inactiveEl.style.display = 'block';
       return;
     }
 
-    const cfg = await cfgRes.json();
+    _portalCfg = await cfgRes.json();
 
-    // Atualiza título/descrição com o configurado pelo admin
-    if (cfg.titulo) {
-      document.title = cfg.titulo + ' — Portal de Serviço';
-      document.getElementById('portal-titulo').textContent     = cfg.titulo;
-      document.getElementById('portal-hero-titulo').textContent = cfg.titulo;
+    // Título e descrição
+    if (_portalCfg.titulo) {
+      document.title = _portalCfg.titulo + ' — Portal de Serviço';
+      document.getElementById('portal-titulo').textContent      = _portalCfg.titulo;
+      document.getElementById('portal-hero-titulo').textContent = _portalCfg.titulo;
     }
-    if (cfg.descricao) {
-      document.getElementById('portal-hero-desc').textContent = cfg.descricao;
-    }
+    if (_portalCfg.descricao)
+      document.getElementById('portal-hero-desc').textContent = _portalCfg.descricao;
 
-    // Mostra a calculadora
     loadingEl.style.display = 'none';
-    calcWrap.style.display  = 'block';
 
-    // Inicia calculadora no modo público
-    Calculadora.init({
-      apiBase: '/api/public/calculadora',
-      publico: true
-    });
+    // Se identificação está ativada, exige nome+email antes de mostrar calculadora
+    const dominios   = _portalCfg.dominios_aceitos || [];
+    const pedirIdent = _portalCfg.solicitar_identificacao || dominios.length > 0;
+    const sessao     = _getIdentSessao();
+    if (pedirIdent && !sessao) {
+      _mostrarModalIdent(dominios);
+      return; // calculadora abre depois de identificar
+    }
+
+    if (sessao) _mostrarBadgeUsuario(sessao);
+    _abrirCalculadora(calcWrap);
 
   } catch (e) {
-    loadingEl.style.display = 'none';
-    inactiveEl.style.display = 'block';
+    document.getElementById('portal-loading').style.display = 'none';
+    document.getElementById('portal-inactive').style.display = 'block';
     console.error('[Portal] Erro ao iniciar:', e.message);
   }
-})();
+}
+
+function _getIdentSessao() {
+  try { return JSON.parse(sessionStorage.getItem('portal_ident')); } catch { return null; }
+}
+
+function _mostrarModalIdent(dominios) {
+  const modal = document.getElementById('modal-ident');
+  const desc  = document.getElementById('ident-desc');
+  if (dominios.length)
+    desc.textContent = `Informe seu nome e e-mail corporativo (${dominios.map(d => '@' + d).join(', ')}).`;
+  modal.style.display = 'flex';
+  document.getElementById('ident-nome').focus();
+  document.getElementById('ident-nome').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('ident-email').focus(); });
+  document.getElementById('ident-email').addEventListener('keydown', e => { if (e.key === 'Enter') submitIdentificacao(); });
+}
+
+async function submitIdentificacao() {
+  const nome  = document.getElementById('ident-nome').value.trim();
+  const email = document.getElementById('ident-email').value.trim();
+  const erroEl = document.getElementById('ident-erro');
+  const btn    = document.getElementById('ident-btn');
+  erroEl.textContent = '';
+
+  if (!nome)  { erroEl.textContent = 'Informe seu nome.'; return; }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    { erroEl.textContent = 'Informe um e-mail válido.'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Aguarde...';
+  try {
+    const res  = await fetch('/api/public/calculadora/identificar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nome, email })
+    });
+    const data = await res.json();
+    if (!res.ok) { erroEl.textContent = data.error || 'Erro ao identificar.'; return; }
+
+    const ident = { nome: data.nome, email: data.email };
+    sessionStorage.setItem('portal_ident', JSON.stringify(ident));
+    document.getElementById('modal-ident').style.display = 'none';
+    _mostrarBadgeUsuario(ident);
+    _abrirCalculadora(document.getElementById('portal-calc-wrap'));
+  } catch (e) {
+    erroEl.textContent = 'Erro de conexão. Tente novamente.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Confirmar e acessar';
+  }
+}
+
+function _mostrarBadgeUsuario(ident) {
+  const badge = document.getElementById('portal-user-badge');
+  if (!badge) return;
+  badge.style.display = 'flex';
+  badge.innerHTML =
+    '👤 <span class="pub-nome">' + ident.nome + '</span>' +
+    '<span class="pub-email">' + ident.email + '</span>' +
+    '<button class="pub-sair" title="Trocar identificação" onclick="sairPortalIdent()">✕</button>';
+}
+
+function sairPortalIdent() {
+  sessionStorage.removeItem('portal_ident');
+  const badge = document.getElementById('portal-user-badge');
+  if (badge) badge.style.display = 'none';
+  const calcWrap = document.getElementById('portal-calc-wrap');
+  if (calcWrap) calcWrap.style.display = 'none';
+  const dominios = _portalCfg?.dominios_aceitos || [];
+  _mostrarModalIdent(dominios);
+}
+
+function _abrirCalculadora(calcWrap) {
+  calcWrap.style.display = 'block';
+  Calculadora.init({
+    apiBase: '/api/public/calculadora',
+    publico: true,
+    defaultConfig: {
+      taxa_imposto:  _portalCfg.taxa_imposto  ?? 18.65,
+      taxa_cond:     _portalCfg.taxa_cond     ?? 13.00,
+      horario_livre: _portalCfg.horario_livre || { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] }
+    }
+  });
+  document.getElementById('view-calculadora')?.classList.add('active');
+}
+
+initPortal();
 </script>
 </body>
 </html>

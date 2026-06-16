@@ -2259,12 +2259,32 @@ async function loadPortalConfig() {
     const desc   = document.getElementById('portal-cfg-desc');
     const subs   = document.getElementById('portal-cfg-subs');
     const rgs    = document.getElementById('portal-cfg-rgs');
-    if (ativo)  ativo.checked    = !!d.ativo;
-    if (titulo) titulo.value     = d.titulo   || 'Portal de Serviço';
-    if (desc)   desc.value       = d.descricao || '';
-    if (subs)   subs.value       = (d.subscription_ids || []).join('\n');
-    if (rgs)    rgs.value        = (d.resource_groups  || []).join('\n');
+    const dominios = document.getElementById('portal-cfg-dominios');
+    if (ativo)    ativo.checked    = !!d.ativo;
+    if (titulo)   titulo.value     = d.titulo    || 'Portal de Serviço';
+    if (desc)     desc.value       = d.descricao || '';
+    if (subs)     subs.value       = (d.subscription_ids  || []).join('\n');
+    if (rgs)      rgs.value        = (d.resource_groups   || []).join('\n');
+    if (dominios) dominios.value   = (d.dominios_aceitos  || []).join('\n');
+    const imposto    = document.getElementById('portal-cfg-imposto');
+    const cond       = document.getElementById('portal-cfg-cond');
+    const hlAtivo    = document.getElementById('portal-cfg-hl-ativo');
+    const hlIni      = document.getElementById('portal-cfg-hl-ini');
+    const hlFim      = document.getElementById('portal-cfg-hl-fim');
+    const solIdent   = document.getElementById('portal-cfg-solicitar-ident');
+    if (imposto)  imposto.value    = d.taxa_imposto ?? 18.65;
+    if (cond)     cond.value       = d.taxa_cond    ?? 13.00;
+    if (solIdent) solIdent.checked = !!d.solicitar_identificacao;
+    const hl = d.horario_livre || {};
+    if (hlAtivo) { hlAtivo.checked = !!hl.ativo; togglePortalHL(!!hl.ativo); }
+    if (hlIni)   hlIni.value = hl.inicio || '09:00';
+    if (hlFim)   hlFim.value = hl.fim    || '18:00';
+    const dias = hl.dias || [1,2,3,4,5];
+    document.querySelectorAll('.portal-hl-dia').forEach(cb => {
+      cb.checked = dias.includes(parseInt(cb.dataset.dia));
+    });
     _updatePortalLink(d);
+    await _carregarSubsPortalList(d.subscription_ids || []);
   } catch (e) { console.warn('[Portal Config] loadPortalConfig:', e.message); }
 }
 
@@ -2273,16 +2293,32 @@ async function savePortalConfig() {
   const ativo  = document.getElementById('portal-cfg-ativo')?.checked || false;
   const titulo = document.getElementById('portal-cfg-titulo')?.value?.trim() || 'Portal de Serviço';
   const desc   = document.getElementById('portal-cfg-desc')?.value?.trim()   || '';
-  const subs   = (document.getElementById('portal-cfg-subs')?.value || '')
-    .split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+  // Lê IDs marcados nos checkboxes; fallback para o textarea hidden
+  const checkboxes = document.querySelectorAll('#portal-cfg-subs-list input[type=checkbox]:checked');
+  const subs = checkboxes.length
+    ? Array.from(checkboxes).map(c => c.value)
+    : (document.getElementById('portal-cfg-subs')?.value || '').split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
   const rgs    = (document.getElementById('portal-cfg-rgs')?.value || '')
     .split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+  const dominios = (document.getElementById('portal-cfg-dominios')?.value || '')
+    .split(/[\n,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
   const msgEl  = document.getElementById('portal-cfg-msg');
   try {
     const res = await fetch('/api/admin/portal-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify({ ativo, titulo, descricao: desc, subscription_ids: subs, resource_groups: rgs })
+      body: JSON.stringify({
+        ativo, titulo, descricao: desc, subscription_ids: subs, dominios_aceitos: dominios,
+        taxa_imposto: parseFloat(document.getElementById('portal-cfg-imposto')?.value) || 18.65,
+        taxa_cond:    parseFloat(document.getElementById('portal-cfg-cond')?.value)    || 13.00,
+        solicitar_identificacao: document.getElementById('portal-cfg-solicitar-ident')?.checked || false,
+        horario_livre: {
+          ativo:  document.getElementById('portal-cfg-hl-ativo')?.checked || false,
+          inicio: document.getElementById('portal-cfg-hl-ini')?.value  || '09:00',
+          fim:    document.getElementById('portal-cfg-hl-fim')?.value   || '18:00',
+          dias:   Array.from(document.querySelectorAll('.portal-hl-dia:checked')).map(c => parseInt(c.dataset.dia))
+        }
+      })
     });
     const d = await res.json();
     if (!d.ok) throw new Error(d.error || 'Erro ao salvar');
@@ -2296,6 +2332,66 @@ async function savePortalConfig() {
   } catch (e) {
     if (msgEl) { msgEl.style.display = 'block'; msgEl.style.color = 'var(--danger)'; msgEl.textContent = '❌ ' + e.message; }
   }
+}
+
+async function _carregarSubsPortalList(selectedIds = []) {
+  const token   = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+  const listEl  = document.getElementById('portal-cfg-subs-list');
+  if (!listEl) return;
+  listEl.innerHTML = '<span style="font-size:12px;color:var(--text-muted);font-style:italic;">Carregando...</span>';
+  try {
+    const res  = await fetch('/api/calculadora/subscriptions', { headers: { Authorization: 'Bearer ' + token } });
+    const subs = await res.json();
+    if (!Array.isArray(subs) || !subs.length) {
+      listEl.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">Nenhuma assinatura encontrada no banco.</span>';
+      return;
+    }
+    listEl.innerHTML = subs.map(s => {
+      const checked = selectedIds.includes(s.subscription_id) ? ' checked' : '';
+      const nome    = s.subscription_name || s.subscription_id;
+      return `<label style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-radius:5px;cursor:pointer;font-size:12px;color:var(--text);">
+        <input type="checkbox" value="${s.subscription_id}"${checked}
+          style="width:14px;height:14px;accent-color:var(--accent);flex-shrink:0;">
+        <span>${nome}</span>
+      </label>`;
+    }).join('');
+  } catch (e) {
+    listEl.innerHTML = '<span style="font-size:12px;color:var(--danger);">Erro ao carregar: ' + e.message + '</span>';
+  }
+}
+
+function togglePortalHL(ativo) {
+  const corpo = document.getElementById('portal-cfg-hl-corpo');
+  if (!corpo) return;
+  corpo.style.display = ativo ? 'flex' : 'none';
+  corpo.style.flexDirection = 'column';
+}
+
+async function recarregarSubsPortal() {
+  const checked = Array.from(document.querySelectorAll('#portal-cfg-subs-list input[type=checkbox]:checked')).map(c => c.value);
+  await _carregarSubsPortalList(checked);
+}
+
+async function verAcessosPortal() {
+  const token  = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+  const logEl  = document.getElementById('portal-acessos-log');
+  if (!logEl) return;
+  logEl.style.display = 'block';
+  logEl.textContent = 'Carregando...';
+  try {
+    const res  = await fetch('/api/admin/portal-acessos?limit=50', { headers: { Authorization: 'Bearer ' + token } });
+    const rows = await res.json();
+    if (!rows.length) { logEl.textContent = 'Nenhum acesso registrado.'; return; }
+    logEl.innerHTML = rows.map(r => {
+      const dt = new Date(r.acessado_em).toLocaleString('pt-BR');
+      return `<div style="padding:2px 0;border-bottom:1px solid rgba(255,255,255,.05);">`
+        + `<span style="color:var(--accent);">${dt}</span>  `
+        + `<strong style="color:var(--text);">${r.nome}</strong>  `
+        + `<span style="color:var(--text-muted);">&lt;${r.email}&gt;</span>  `
+        + `<span style="opacity:.4;">${r.ip || ''}</span>`
+        + `</div>`;
+    }).join('');
+  } catch (e) { logEl.textContent = 'Erro: ' + e.message; }
 }
 
 function _updatePortalLink(cfg) {
