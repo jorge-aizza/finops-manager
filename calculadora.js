@@ -2680,6 +2680,19 @@ const Calculadora = (() => {
     }
     html += '</tbody></table>';
 
+    // ── Horas estimadas + taxa média ──
+    const _hPrev   = parseFloat(_estimativa.horas || 0);
+    const _totPrev = parseFloat(_estimativa.total_brl || 0);
+    const _taxPrev = _hPrev > 0 ? _totPrev / _hPrev : 0;
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;'
+      + 'margin:6px 0 4px;padding:5px 8px;border-radius:5px;'
+      + 'background:rgba(147,51,234,.07);border:1px solid rgba(147,51,234,.15);">'
+      + '<span style="font-size:11px;color:var(--accent);font-weight:600;">⏱ Horas estimadas</span>'
+      + '<span style="font-family:IBM Plex Mono,monospace;font-size:12px;font-weight:700;color:var(--accent);">'
+      + _hPrev.toLocaleString('pt-BR') + ' h'
+      + (_taxPrev > 0 ? '<span style="font-size:9px;color:var(--text-muted);margin-left:6px;">≈ ' + _brl(_taxPrev) + '/h</span>' : '')
+      + '</span></div>';
+
     // ── Totais ──
     html += (_estimativa.pct_imposto > 0
       ? '<div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:11px;">'
@@ -2937,7 +2950,8 @@ window.onload=function(){
   <div class="mb">
     <div class="mb-lbl">Projeto</div>
     <div class="mb-val">${_esc((p.nomeProjeto || '').split('\xB7')[0].trim())}</div>
-    ${p.resp ? '<div class="mb-sub">Resp: <strong>' + _esc(p.resp) + '</strong>' + (p.email ? ' &mdash; <span style="font-size:6pt;">' + _esc(p.email) + '</span>' : '') + '</div>' : ''}
+    ${p.resp  ? '<div class="mb-sub">Resp: <strong>' + _esc(p.resp) + '</strong></div>' : ''}
+    ${p.email ? '<div class="mb-sub" style="font-size:6pt;color:#64748b;">✉ ' + _esc(p.email) + '</div>' : ''}
   </div>
   <div class="mb">
     <div class="mb-lbl">T&iacute;tulo</div>
@@ -2951,6 +2965,11 @@ window.onload=function(){
   <div class="mb">
     <div class="mb-lbl">Total Estimado BRL</div>
     <div class="mb-val">${_brl(totalFinal)}</div>
+    ${p.horas ? '<div class="mb-sub" style="margin-top:3px;">'
+      + '<span style="color:#9aa0be;font-size:6pt;">⏱\xA0</span>'
+      + '<strong style="color:#c084fc;font-family:\'IBM Plex Mono\',monospace;">' + parseFloat(p.horas).toLocaleString('pt-BR') + '\xA0h</strong>'
+      + (parseFloat(p.horas) > 0 ? '<span style="color:#6b5480;font-size:5.5pt;margin-left:5px;">≈\xA0' + _brl((p.total_brl||0) / parseFloat(p.horas)) + '/h</span>' : '')
+      + '</div>' : ''}
   </div>
 </div>
 ${catRows ? `<table>
@@ -3032,6 +3051,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
 
     const html = _buildPDFHtml({
       invoiceNum, dataFmt, titulo, dataValid, nomeProjeto, resp, email, obs, itens,
+      horas:          _estimativa.horas,
       total_brl:      _estimativa.total_brl,
       total_fixo_mes: _estimativa.total_fixo_mes,
       total_final:    _estimativa.total_final,
