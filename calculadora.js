@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════════
 // calculadora.js — Calculadora de Custo/Hora Azure  v2
 // Injeta conteúdo dentro de #view-calculadora (já presente no index)
 // ═══════════════════════════════════════════════════════════════════
@@ -2696,110 +2696,80 @@ const Calculadora = (() => {
   }
 
   function _buildPDFHtml(p) {
-    const _todosItens   = p.itens || [];
+    const _todosItens    = p.itens || [];
     const itensDinamicos = _todosItens.filter(r => r.tipo_custo !== 'mes');
     const itensFixos     = _todosItens.filter(r => r.tipo_custo === 'mes');
     const totalFixoMes   = p.total_fixo_mes != null
       ? parseFloat(p.total_fixo_mes)
       : itensFixos.reduce((s, r) => s + parseFloat(r.estimado_brl || r.custo_mes || 0), 0);
 
+    // Resumo por categoria
+    const catMap = new Map();
+    for (const r of itensDinamicos) {
+      const cat = r.categoria || 'Outros';
+      if (!catMap.has(cat)) catMap.set(cat, { count: 0, total: 0 });
+      const c = catMap.get(cat);
+      c.count++;
+      c.total += parseFloat(r.estimado_brl || 0);
+    }
+    const catCards = Array.from(catMap.entries()).map(([cat, info]) =>
+      '<div class="cat-card"><div class="cat-nm">' + _esc(cat) + '</div>'
+      + '<div class="cat-ct">' + info.count + ' recurso' + (info.count !== 1 ? 's' : '') + '</div>'
+      + '<div class="cat-vl">' + _brl(info.total) + '</div></div>'
+    ).join('');
+
+    // Linhas compactas — 3 colunas: Recurso | Horas/Tipo | Estimativa BRL
     const linhas = itensDinamicos.map(r => {
-      const quantCell = (r.horas || 0).toLocaleString('pt-BR') + ' h';
+      const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
+      let quantCell;
+      if (r.databricks_valida && tc === 'hora') {
+        quantCell = '⚡\xA0' + (r.horas || 0).toLocaleString('pt-BR') + ' h';
+      } else if (tc === 'reserva') {
+        quantCell = (r.horas || 0).toLocaleString('pt-BR') + ' h\xA0🔒';
+      } else if (tc === 'periodo') {
+        quantCell = '/m\xEAs';
+      } else {
+        quantCell = (r.horas || 0).toLocaleString('pt-BR') + ' h';
+      }
       const _plRef = parseFloat(r.retail_price_hora || 0);
       const _temPL = _plRef > 0;
-      const precoCell = r.custo_hora != null
-        ? (() => {
-            const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
-            // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver (uptime do cluster)
-            if (r.databricks_valida && tc === 'hora') {
-              const taxaDB = parseFloat(r.databricks_taxa || 0);
-              return '<span class="mono" style="color:#3b82f6;" title="Taxa Databricks: billing \xF7 H_driver (uptime do cluster)">'
-                + '⚡\xA0' + _brl(taxaDB) + '/h'
-                + '<span style="opacity:.55;font-size:9px;">\xA0billing:\xA0' + _brl(r.custo_hora) + '/h</span>'
-                + '</span>';
-            }
-            if (tc === 'reserva') {
-              const base = _brl(r.custo_hora) + '/h\xA0🔒';
-              const od   = _temPL ? '\xA0<span style="opacity:.55;font-size:9px;" title="On-demand Price List">📋\xA0' + _brl(_plRef) + '/h</span>' : '';
-              return '<span class="mono" title="Amortizado pelo term da reserva">' + base + od + '</span>';
-            }
-            if (tc === 'periodo') {
-              if (_temPL)
-                return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand mensal (Azure Price List)">📋\xA0' + _brl(_plRef) + '/mês</span>';
-              return '<span class="mono" title="Custo mensal estimado do billing (÷30÷24)">' + _brl(r.custo_mes || r.custo_hora * 720) + '/mês*</span>';
-            }
-            if (_temPL)
-              return '<span class="mono" style="color:var(--green,#22c55e)" title="Preço on-demand por hora (Azure Price List)">📋\xA0' + _brl(_plRef) + '/h</span>';
-            return '<span class="mono">' + _brl(r.custo_hora) + '/h</span>';
-          })()
-        : '<span class="na">&mdash;</span>';
-      const _corEst = r.databricks_valida ? 'td-blue' : (r.fonte_estimado === 'price_list' || (_temPL && r.tipo_custo !== 'reserva')) ? 'td-green' : 'td-gray';
+      const _corEst = r.databricks_valida ? 'td-blue' : (r.fonte_estimado === 'price_list' || (_temPL && tc !== 'reserva')) ? 'td-green' : '';
       return '<tr>'
         + '<td class="td-nm">' + _esc(r.nome) + '</td>'
-        + '<td class="td-sm">' + _esc(r.categoria) + '</td>'
-        + '<td class="td-sm td-right td-mono">' + quantCell + '</td>'
-        + '<td class="td-sm td-right">' + precoCell + '</td>'
+        + '<td class="td-qty">' + quantCell + '</td>'
         + '<td class="td-brl ' + _corEst + '">' + _brl(r.estimado_brl) + '</td>'
         + '</tr>';
     }).join('');
 
-    // Seção de custos fixos mensais (tipo=mes) — exibida separadamente, fora do Total Estimado
-    const linhasFixo = itensFixos.map(r => {
-      const _plRef = parseFloat(r.retail_price_hora || 0);
-      const _temPL = _plRef > 0;
-      const precoFixo = _temPL
-        ? '<span class="mono" style="color:#c05621;" title="Preço on-demand mensal (Azure Price List)">📋\xA0' + _brl(_plRef) + '/mês</span>'
-        : '<span class="mono" title="Custo mensal histórico do billing">' + _brl(r.custo_mes || 0) + '/mês</span>';
-      const valorFixo = _brl(r.estimado_brl || r.custo_mes || 0);
-      return '<tr>'
-        + '<td class="td-nm">' + _esc(r.nome) + '</td>'
-        + '<td class="td-sm">' + _esc(r.categoria) + '</td>'
-        + '<td class="td-sm td-right td-mono" style="color:#c05621;font-size:8pt;">Fixo/mês</td>'
-        + '<td class="td-sm td-right">' + precoFixo + '</td>'
-        + '<td class="td-brl" style="color:#c05621;">' + valorFixo + '</td>'
-        + '</tr>';
-    }).join('');
-    const secaoFixoHtml = itensFixos.length > 0
-      ? '<div class="sec-hdr" style="background:linear-gradient(90deg,#7a3000 0%,#c05621 50%,#7a3000 100%);">'
-        + '<svg viewBox="0 0 16 16" fill="none" width="14" height="14"><path d="M8 1L10.5 6h4.5l-3.5 3.5 1.5 5L8 12 3 15.5l1.5-5L1 6.5H5.5L8 1z" stroke="#fde68a" stroke-width="1.3" stroke-linejoin="round"/></svg>'
-        + '<span>🔒 Custos Fixos Mensais</span>'
-        + '<span style="font-size:6pt;color:rgba(253,230,138,.6);margin-left:auto;">cobrado independente das horas do projeto</span>'
-        + '</div>'
-        + '<table><thead><tr>'
-        + '<th style="width:38%">Recurso</th><th style="width:14%">Categoria</th>'
-        + '<th style="width:8%;text-align:right">Tipo</th>'
-        + '<th style="width:20%;text-align:right">Preço base</th>'
-        + '<th style="width:20%;text-align:right">Custo/mês</th>'
-        + '</tr></thead><tbody>' + linhasFixo + '</tbody>'
-        + '<tfoot><tr class="tr-sub" style="background:#fff7ed;">'
-        + '<td colspan="4" style="color:#c05621;font-weight:700;">🔒 Total Infra Fixa / mês</td>'
-        + '<td style="text-align:right;font-family:\'IBM Plex Mono\',monospace;font-weight:700;color:#c05621;">' + _brl(totalFixoMes) + '</td>'
-        + '</tr></tfoot></table>'
-        + '<div style="padding:8px 22px 10px;background:#fff7ed;border-top:1px solid #fed7aa;font-size:7.5pt;color:#92400e;font-style:italic;">'
-        + '⚠ Os custos fixos acima não estão incluídos no Total Estimado. São cobrados mensalmente pelo Azure independente das horas de uso do projeto.'
-        + '</div>'
+    // Custos fixos mensais — linha separadora dentro da mesma tabela
+    const linhasFixo = itensFixos.length > 0
+      ? '<tr class="tr-sep-fix"><td colspan="3">🔒 Custos Fixos Mensais — cobrado independente das horas do projeto</td></tr>'
+        + itensFixos.map(r =>
+          '<tr>'
+          + '<td class="td-nm" style="color:#c05621;">' + _esc(r.nome) + '</td>'
+          + '<td class="td-qty" style="color:#c05621;">Fixo/m\xEAs</td>'
+          + '<td class="td-brl" style="color:#c05621;">' + _brl(r.estimado_brl || r.custo_mes || 0) + '</td>'
+          + '</tr>'
+        ).join('')
+        + '<tr class="tr-sub-fix"><td colspan="2" style="color:#c05621;font-weight:700;">🔒 Total Infra Fixa / m\xEAs</td>'
+        + '<td style="text-align:right;font-family:\'IBM Plex Mono\',monospace;font-weight:700;color:#c05621;">' + _brl(totalFixoMes) + '</td></tr>'
       : '';
 
     const totalFinal = p.total_final || p.total_brl || 0;
 
-    // Seção de períodos (só renderiza quando estimativa foi feita por datas)
+    // Períodos — compacto (só renderiza quando estimativa foi feita por datas)
     const periodosHtml = (p.periodos && p.periodos.length > 0) ? (() => {
-      const fmt = v => v ? v.replace('T', ' ').slice(0, 16) : '';
-      const rows = p.periodos.map((per, i) =>
-        '<tr>'
-        + '<td class="p-num">Per&#237;odo ' + (i + 1) + '</td>'
-        + '<td class="p-dt">' + _esc(fmt(per.inicio)) + '</td>'
-        + '<td class="p-arr">&rarr;</td>'
-        + '<td class="p-dt">' + _esc(fmt(per.fim)) + '</td>'
-        + '<td class="p-h">' + per.horas + ' h</td>'
-        + '</tr>'
-      ).join('');
+      const fmt = v => v ? v.slice(0, 10) : '';
       const totalH = p.periodos.reduce((s, per) => s + per.horas, 0);
-      return '<div class="per-wrap">'
-        + '<div class="per-lbl">Per&#237;odos de Estimativa</div>'
+      const rows = p.periodos.map((per, i) =>
+        '<tr><td class="p-num">P' + (i + 1) + '</td>'
+        + '<td class="p-dt">' + _esc(fmt(per.inicio)) + ' → ' + _esc(fmt(per.fim)) + '</td>'
+        + '<td class="p-h">' + per.horas + ' h</td></tr>'
+      ).join('');
+      return '<div class="per-wrap"><span class="per-lbl">Per\xEDodos de Estimativa</span>'
         + '<table class="per-tbl"><tbody>' + rows
-        + '<tr class="p-total"><td colspan="4" style="padding:6px 10px;">Total de Horas</td>'
-        + '<td class="p-h" style="padding:6px 10px;">' + totalH + ' h</td></tr>'
+        + '<tr class="p-total"><td></td><td style="text-align:right;font-weight:700;font-size:7pt;">Total</td>'
+        + '<td class="p-h">' + totalH + ' h</td></tr>'
         + '</tbody></table></div>';
     })() : '';
 
@@ -2807,109 +2777,87 @@ const Calculadora = (() => {
     return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <title>${_esc(p.titulo)}</title>
 <style>
-@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:300 700;font-display:swap;src:url('${_origin}/fonts/ibm-plex-sans-latin-ext-400.woff2') format('woff2')}
 @font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:300 700;font-display:swap;src:url('${_origin}/fonts/ibm-plex-sans-latin-400.woff2') format('woff2')}
-@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('${_origin}/fonts/ibm-plex-mono-latin-ext-400.woff2') format('woff2')}
 @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('${_origin}/fonts/ibm-plex-mono-latin-400.woff2') format('woff2')}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'IBM Plex Sans','Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;color:#1a202c;background:#0d0f14;padding:24px}
+body{font-family:'IBM Plex Sans','Segoe UI',Arial,sans-serif;font-size:9pt;color:#1a202c;background:#0d0f14;padding:16px}
 .page{background:#fff;max-width:960px;margin:0 auto;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.55)}
-/* ── CABEÇALHO ── */
-.hdr{background:linear-gradient(135deg,#0d0218 0%,#1a0035 45%,#0d0014 100%);display:flex;align-items:stretch;min-height:96px;position:relative;overflow:hidden}
-.hdr::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 20% 50%,rgba(147,51,234,.18) 0%,transparent 60%),radial-gradient(ellipse at 80% 50%,rgba(100,0,180,.12) 0%,transparent 55%)}
-.hdr::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:rgba(147,51,234,.25)}
-.hdr-logo{padding:14px 22px;display:flex;align-items:center;justify-content:center;border-right:1px solid rgba(147,51,234,.15);flex-shrink:0;position:relative;z-index:1}
-.hdr-brand-wrap{display:flex;flex-direction:column;align-items:center;gap:5px}
-.hdr-brand-top{display:flex;align-items:center;gap:4px}
-.hdr-mascote{height:44px;width:auto;object-fit:contain;filter:drop-shadow(0 0 7px rgba(147,51,234,.4))}
-.hdr-vivo-svg{display:block;flex-shrink:0;filter:drop-shadow(0 0 6px rgba(147,51,234,.5))}
-.hdr-brand-bottom{text-align:center}
-.hdr-name{font-size:11pt;font-weight:700;color:#c084fc;letter-spacing:.02em;line-height:1.2}
-.hdr-sub{font-size:6pt;color:#7c5fa0;letter-spacing:.16em;text-transform:uppercase;margin-top:2px}
-.hdr-mid{flex:1;position:relative;z-index:1;display:flex;align-items:center;justify-content:center}
-.hdr-watermark{font-size:52pt;font-weight:900;color:rgba(147,51,234,.04);letter-spacing:-.02em;user-select:none;font-family:'Arial Black',Arial,sans-serif;line-height:1}
-.hdr-r{padding:16px 26px;text-align:right;display:flex;flex-direction:column;justify-content:center;gap:5px;border-left:1px solid rgba(147,51,234,.15);flex-shrink:0;position:relative;z-index:1}
-.hdr-tag{font-size:6pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#6b5480}
-.hdr-num{font-size:11.5pt;font-weight:700;color:#9333ea;font-family:'IBM Plex Mono','Courier New',monospace;letter-spacing:.06em}
-.hdr-date{font-size:7.5pt;color:#7c5fa0;margin-top:2px}
+/* ── CABEÇALHO compacto 52px ── */
+.hdr{background:linear-gradient(135deg,#0d0218 0%,#1a0035 45%,#0d0014 100%);display:flex;align-items:center;height:52px;padding:0 18px;gap:14px;position:relative;overflow:hidden}
+.hdr::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:rgba(147,51,234,.3)}
+.hdr-vivo{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.hdr-mascote{height:30px;width:auto;object-fit:contain;filter:drop-shadow(0 0 5px rgba(147,51,234,.4));vertical-align:middle}
+.hdr-divider{width:1px;height:26px;background:rgba(147,51,234,.2);flex-shrink:0}
+.hdr-meta{flex:1;display:flex;flex-direction:column;justify-content:center;gap:1px}
+.hdr-title{font-size:9pt;font-weight:700;color:#c084fc;letter-spacing:.01em}
+.hdr-sub{font-size:6pt;color:#6b5480;letter-spacing:.14em;text-transform:uppercase}
+.hdr-r{text-align:right;flex-shrink:0}
+.hdr-num{font-size:8.5pt;font-weight:700;color:#9333ea;font-family:'IBM Plex Mono',monospace;letter-spacing:.05em}
+.hdr-date{font-size:6pt;color:#7c5fa0;margin-top:1px}
 /* ── STRIPE ── */
-.stripe{height:4px;background:linear-gradient(90deg,#2d0060 0%,#660099 25%,#9333ea 50%,#660099 75%,#2d0060 100%)}
-/* ── TÍTULO ── */
-.title-wrap{padding:22px 28px 18px;border-bottom:1px solid #ede9f7;display:flex;align-items:flex-end;justify-content:space-between;background:linear-gradient(180deg,#faf7ff 0%,#fff 100%)}
-.title-l{flex:1}
-.title-cap{font-size:6.5pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#7c3aed;margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.title-cap-dot{width:6px;height:6px;border-radius:50%;background:#9333ea;display:inline-block;flex-shrink:0}
-.title-main{font-size:18pt;font-weight:700;color:#0d0f14;line-height:1.2}
-.title-r{text-align:right;flex-shrink:0;padding-left:20px}
-.status-badge{display:inline-block;padding:5px 14px;border-radius:20px;font-size:7.5pt;font-weight:700;background:linear-gradient(135deg,rgba(147,51,234,.12),rgba(100,0,180,.08));color:#7c3aed;letter-spacing:.08em;text-transform:uppercase;border:1px solid rgba(147,51,234,.3)}
-/* ── CARDS ── */
-.meta{display:grid;grid-template-columns:2fr 1.5fr 2fr;border-bottom:3px solid #0d0014}
-.mc{padding:16px 22px;border-right:1px solid #ede9f7;position:relative;background:#fff}
-.mc::before{content:'';position:absolute;left:0;top:10px;bottom:10px;width:3px;background:transparent;border-radius:0 2px 2px 0}
-.mc:first-child::before{background:#9333ea}
-.mc:last-child{border-right:none}
-.mc-lbl{font-size:6pt;font-weight:700;text-transform:uppercase;letter-spacing:.18em;color:#9aa0be;margin-bottom:7px}
-.mc-val{font-size:11pt;font-weight:600;color:#1a202c}
-.mc-sub{font-size:8.5pt;color:#64748b;margin-top:3px}
-.mc-total{background:linear-gradient(135deg,#0d0218 0%,#1a0035 100%)}
-.mc-total .mc-lbl{color:#6b5480}
-.mc-total .mc-val{font-size:16pt;font-weight:700;color:#c084fc;font-family:'IBM Plex Mono','Courier New',monospace;letter-spacing:.01em}
-.mc-total .mc-sub{color:#7c5fa0}
-.mc-total::before{background:#9333ea}
-/* ── SEÇÃO ── */
-.sec-hdr{padding:9px 22px;background:linear-gradient(90deg,#3d006b 0%,#660099 50%,#4a0080 100%);display:flex;align-items:center;gap:8px}
-.sec-hdr span{font-size:7pt;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#e9d5ff}
-.sec-hdr svg{flex-shrink:0}
-/* ── TABELA ── */
-table{width:100%;border-collapse:collapse;font-size:9pt}
+.stripe{height:3px;background:linear-gradient(90deg,#2d0060 0%,#660099 25%,#9333ea 50%,#660099 75%,#2d0060 100%)}
+/* ── META BAR ── */
+.meta-bar{display:grid;grid-template-columns:2fr 2fr 1fr 1.6fr;border-bottom:2px solid #0d0014}
+.mb{padding:9px 14px;border-right:1px solid #ede9f7;background:#fff}
+.mb:last-child{border-right:none;background:linear-gradient(135deg,#0d0218,#1a0035)}
+.mb-lbl{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.17em;color:#9aa0be;margin-bottom:3px}
+.mb-val{font-size:9pt;font-weight:600;color:#1a202c;line-height:1.2}
+.mb-sub{font-size:6.5pt;color:#64748b;margin-top:2px}
+.mb:last-child .mb-lbl{color:#6b5480}
+.mb:last-child .mb-val{font-size:12pt;font-weight:700;color:#c084fc;font-family:'IBM Plex Mono',monospace}
+/* ── SUMÁRIO POR CATEGORIA ── */
+.cat-wrap{padding:9px 14px 10px;border-bottom:1px solid #ede9f7}
+.cat-title{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.17em;color:#7c3aed;margin-bottom:7px}
+.cat-grid{display:flex;flex-wrap:wrap;gap:5px}
+.cat-card{background:#f5f0ff;border:1px solid #ede9f7;border-radius:5px;padding:5px 9px;min-width:100px;flex:1}
+.cat-nm{font-size:7pt;font-weight:700;color:#5b21b6;margin-bottom:1px}
+.cat-ct{font-size:6pt;color:#9aa0be}
+.cat-vl{font-size:8.5pt;font-weight:700;color:#7c3aed;font-family:'IBM Plex Mono',monospace;margin-top:2px}
+/* ── TABELA COMPACTA ── */
+table{width:100%;border-collapse:collapse;font-size:7.5pt}
 thead tr{background:#13161e}
-thead th{padding:9px 10px;font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9aa0be;text-align:left;white-space:nowrap;border-bottom:2px solid #9333ea}
+thead th{padding:6px 8px;font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9aa0be;text-align:left;white-space:nowrap;border-bottom:2px solid #9333ea}
+thead th:last-child{text-align:right}
 tbody tr{border-bottom:1px solid #f0eef8}
 tbody tr:nth-child(odd){background:#fff}
 tbody tr:nth-child(even){background:#faf7ff}
-tbody tr:hover{background:#f3eeff}
-td{padding:8px 10px;vertical-align:middle}
-.td-nm{font-weight:600;color:#0f172a;max-width:190px;word-break:break-word;font-size:9pt}
-.td-sm{font-size:8.5pt;color:#4a5568}
-.td-right{text-align:right}
-.td-mono{font-family:'IBM Plex Mono','Courier New',monospace;font-size:8.5pt}
-.td-brl{text-align:right;font-family:'IBM Plex Mono','Courier New',monospace;font-weight:700;font-size:10pt}
+td{padding:4px 8px;vertical-align:middle}
+.td-nm{font-weight:600;color:#0f172a;word-break:break-word}
+.td-qty{color:#4a5568;white-space:nowrap;font-family:'IBM Plex Mono',monospace;font-size:7pt;width:90px}
+.td-brl{text-align:right;font-family:'IBM Plex Mono',monospace;font-weight:700;color:#1a202c;width:110px}
 .td-green{color:#6d28d9}
-.td-blue{color:#3b82f6;font-weight:700}
-.td-gray{color:#9aa0be;font-weight:400;font-size:9pt}
-.na{color:#cbd5e1}
-.mono{font-family:'IBM Plex Mono','Courier New',monospace}
+.td-blue{color:#3b82f6}
+/* ── SEPARADOR FIXO ── */
+.tr-sep-fix td{background:#fff7ed;color:#92400e;font-size:6pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;padding:4px 8px;border-top:1px solid #fed7aa;border-bottom:1px solid #fed7aa}
+.tr-sub-fix td{background:#fff7ed;border-top:1px solid #fed7aa;font-size:7.5pt;padding:5px 8px}
 /* ── TOTAIS ── */
-tfoot td{padding:9px 10px}
-.tr-sub td{background:#f5f0ff;color:#5b21b6;border-top:1px solid #ede9f7;font-size:9pt}
-.tr-sub td:last-child{font-family:'IBM Plex Mono','Courier New',monospace;text-align:right;font-weight:600;color:#6d28d9}
-.tr-add td{background:#f5f0ff;color:#64748b;font-size:8.5pt;border-top:1px solid #ede9f7}
-.tr-add td:last-child{font-family:'IBM Plex Mono','Courier New',monospace;text-align:right}
-.tr-total td{background:linear-gradient(90deg,#0d0218,#1a0035);color:#9aa0be;font-weight:700;font-size:11pt;letter-spacing:.03em;border-top:3px solid #9333ea;padding:13px 10px}
-.tr-total td:first-child{padding-left:24px;color:#e9d5ff;letter-spacing:.05em;text-transform:uppercase;font-size:9.5pt}
-.tr-total td:last-child{font-family:'IBM Plex Mono','Courier New',monospace;font-size:15pt;text-align:right;color:#c084fc;padding-right:24px;font-weight:700}
-/* ── OBS / LEGAL / RODAPÉ ── */
-.obs{padding:14px 22px;border-top:1px solid #ede9f7;background:#faf7ff;border-left:3px solid #9333ea}
-.obs-lbl{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#7c3aed;margin-bottom:5px}
-.obs-txt{font-size:9.5pt;color:#374151;line-height:1.7}
-.disc{padding:12px 22px 14px;border-top:1px solid #ede9f7;display:flex;gap:12px;align-items:flex-start}
-.disc-bar{width:3px;flex-shrink:0;background:#9333ea;border-radius:2px;align-self:stretch;min-height:44px;opacity:.4}
-.disc-txt{font-size:7.5pt;color:#64748b;line-height:1.9}
-.disc-txt strong{color:#374151}
-.foot{padding:11px 24px;background:linear-gradient(135deg,#0d0218 0%,#1a0035 45%,#0d0014 100%);display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(147,51,234,.2)}
-.foot-l{font-size:8pt;color:#7c5fa0;display:flex;align-items:center;gap:8px}
-.foot-dot{width:4px;height:4px;border-radius:50%;background:#9333ea;display:inline-block;opacity:.7}
-.foot-r{font-size:7.5pt;color:#6b5480;font-family:'IBM Plex Mono','Courier New',monospace;letter-spacing:.04em}
-/* ── PERÍODOS ── */
-.per-wrap{padding:12px 22px 14px;background:#faf7ff;border-bottom:1px solid #ede9f7}
-.per-lbl{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#7c3aed;margin-bottom:8px}
-.per-tbl{width:100%;border-collapse:collapse;font-size:9pt}
-.per-tbl td{padding:5px 10px;border-bottom:1px solid #ede9f7;color:#4a5568}
-.per-tbl .p-num{color:#660099;font-weight:700;white-space:nowrap;width:80px}
-.per-tbl .p-dt{white-space:nowrap;font-family:'IBM Plex Mono','Courier New',monospace;font-size:8.5pt}
-.per-tbl .p-arr{color:#9aa0be;text-align:center;width:20px}
-.per-tbl .p-h{font-family:'IBM Plex Mono','Courier New',monospace;text-align:right;color:#6d28d9;font-weight:600;white-space:nowrap}
-.per-tbl .p-total td{background:#ede9f7;font-weight:700;color:#4a0080;border-top:2px solid #9333ea}
+tfoot td{padding:5px 8px}
+.tr-sub td{background:#f5f0ff;color:#5b21b6;border-top:1px solid #ede9f7;font-size:7.5pt}
+.tr-sub td:last-child{font-family:'IBM Plex Mono',monospace;text-align:right;font-weight:600;color:#6d28d9}
+.tr-add td{background:#f5f0ff;color:#64748b;font-size:7pt;border-top:1px solid #ede9f7}
+.tr-add td:last-child{font-family:'IBM Plex Mono',monospace;text-align:right}
+.tr-total td{background:linear-gradient(90deg,#0d0218,#1a0035);color:#9aa0be;font-weight:700;font-size:9pt;border-top:3px solid #9333ea;padding:9px 8px}
+.tr-total td:first-child{padding-left:14px;color:#e9d5ff;letter-spacing:.05em;text-transform:uppercase;font-size:7.5pt}
+.tr-total td:last-child{font-family:'IBM Plex Mono',monospace;font-size:12pt;text-align:right;color:#c084fc;padding-right:14px;font-weight:700}
+/* ── OBS ── */
+.obs{padding:9px 14px;border-top:1px solid #ede9f7;background:#faf7ff;border-left:3px solid #9333ea}
+.obs-lbl{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#7c3aed;margin-bottom:3px}
+.obs-txt{font-size:8pt;color:#374151;line-height:1.6}
+/* ── PERÍODOS compacto ── */
+.per-wrap{padding:7px 14px;background:#f5f0ff;border-bottom:1px solid #ede9f7;display:flex;align-items:flex-start;gap:10px}
+.per-lbl{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#7c3aed;white-space:nowrap;padding-top:3px}
+.per-tbl{flex:1;border-collapse:collapse;font-size:7pt}
+.per-tbl td{padding:2px 5px;border-bottom:1px solid #ede9f7;color:#4a5568}
+.per-tbl .p-num{color:#660099;font-weight:700;width:20px}
+.per-tbl .p-dt{font-family:'IBM Plex Mono',monospace}
+.per-tbl .p-h{font-family:'IBM Plex Mono',monospace;text-align:right;color:#6d28d9;font-weight:600;white-space:nowrap}
+.per-tbl .p-total td{font-weight:700;color:#4a0080;background:#ede9f7}
+/* ── RODAPÉ ── */
+.foot{padding:7px 14px;background:linear-gradient(135deg,#0d0218 0%,#1a0035 45%,#0d0014 100%);display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(147,51,234,.2);gap:12px}
+.foot-l{font-size:6pt;color:#7c5fa0;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.foot-dot{width:3px;height:3px;border-radius:50%;background:#9333ea;display:inline-block;opacity:.7}
+.foot-disc{font-size:5.5pt;color:#6b5480;font-style:italic}
+.foot-r{font-size:6pt;color:#6b5480;font-family:'IBM Plex Mono',monospace;letter-spacing:.04em;white-space:nowrap}
 @media print{body{background:#fff;padding:0}.page{box-shadow:none;max-width:100%}tbody tr:hover{background:inherit}@page{size:A4 portrait;margin:8mm 10mm}}
 </style>
 <script>
@@ -2920,39 +2868,22 @@ window.onload=function(){
     try{
       var W=img.naturalWidth,H=img.naturalHeight;
       if(W&&H){
-        var cvs=document.createElement('canvas');
-        cvs.width=W;cvs.height=H;
-        var ctx=cvs.getContext('2d');
-        ctx.drawImage(img,0,0);
+        var cvs=document.createElement('canvas');cvs.width=W;cvs.height=H;
+        var ctx=cvs.getContext('2d');ctx.drawImage(img,0,0);
         var d=ctx.getImageData(0,0,W,H),px=d.data;
         var cs=[[0,0],[W-1,0],[0,H-1],[W-1,H-1],[Math.floor(W/2),0],[Math.floor(W/2),H-1]];
         var bgR=0,bgG=0,bgB=0;
         for(var ci=0;ci<cs.length;ci++){var p4=(cs[ci][1]*W+cs[ci][0])*4;bgR+=px[p4];bgG+=px[p4+1];bgB+=px[p4+2];}
         bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
-        // Tinta 65% roxo Vivo (#9333ea = 147,51,234) nos pixels do mascote
         var HARD=80,SOFT=120;
         for(var i=0;i<px.length;i+=4){
           var r=px[i],g=px[i+1],b=px[i+2];
           var dr=r-bgR,dg=g-bgG,db=b-bgB,dSq=dr*dr+dg*dg+db*db;
-          if(dSq<HARD*HARD){
-            px[i+3]=0;
-          } else if(dSq<SOFT*SOFT){
-            var d2=Math.sqrt(dSq);
-            px[i+3]=Math.round(255*(d2-HARD)/(SOFT-HARD));
-            px[i]  =Math.round(r*0.35+147*0.65);
-            px[i+1]=Math.round(g*0.35+ 51*0.65);
-            px[i+2]=Math.round(b*0.35+234*0.65);
-          } else {
-            px[i+3]=255;
-            px[i]  =Math.round(r*0.35+147*0.65);
-            px[i+1]=Math.round(g*0.35+ 51*0.65);
-            px[i+2]=Math.round(b*0.35+234*0.65);
-          }
+          if(dSq<HARD*HARD){px[i+3]=0;}
+          else if(dSq<SOFT*SOFT){var d2=Math.sqrt(dSq);px[i+3]=Math.round(255*(d2-HARD)/(SOFT-HARD));px[i]=Math.round(r*0.35+147*0.65);px[i+1]=Math.round(g*0.35+51*0.65);px[i+2]=Math.round(b*0.35+234*0.65);}
+          else{px[i+3]=255;px[i]=Math.round(r*0.35+147*0.65);px[i+1]=Math.round(g*0.35+51*0.65);px[i+2]=Math.round(b*0.35+234*0.65);}
         }
-        ctx.putImageData(d,0,0);
-        // substitui a imagem exibida pela versão com tinta roxa
-        img.src=cvs.toDataURL('image/png');
-        // "pdf-vivo-text" permanece fixo em #9333ea — sem extração de cor dominante
+        ctx.putImageData(d,0,0);img.src=cvs.toDataURL('image/png');
       }
     }catch(e){}
     if(cb)cb();
@@ -2967,98 +2898,68 @@ window.onload=function(){
 </head><body>
 <div class="page">
 <div class="hdr">
-  <div class="hdr-logo">
-    <div class="hdr-brand-wrap">
-      <div class="hdr-brand-top">
-        <svg class="hdr-vivo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="68" height="32">
-          <text id="pdf-vivo-text" x="1" y="30" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="32" fill="#9333ea" letter-spacing="-1">vivo</text>
-        </svg>
-        <img id="pdf-mascote" class="hdr-mascote" src="${_origin}/mascote.png" height="44" alt="" onerror="this.style.display='none'">
-      </div>
-      <div class="hdr-brand-bottom">
-        <div class="hdr-name">FinOps Manager</div>
-        <div class="hdr-sub">Azure Cost Management</div>
-      </div>
-    </div>
+  <div class="hdr-vivo">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="52" height="24"><text id="pdf-vivo-text" x="1" y="28" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="28" fill="#9333ea" letter-spacing="-1">vivo</text></svg>
+    <img id="pdf-mascote" class="hdr-mascote" src="${_origin}/mascote.png" height="30" alt="" onerror="this.style.display='none'">
   </div>
-  <div class="hdr-mid"><div class="hdr-watermark">finops</div></div>
+  <div class="hdr-divider"></div>
+  <div class="hdr-meta">
+    <div class="hdr-title">FinOps Manager</div>
+    <div class="hdr-sub">Estimativa de Custos Azure</div>
+  </div>
   <div class="hdr-r">
-    <div class="hdr-tag">N&uacute;mero do Documento</div>
     <div class="hdr-num">${p.invoiceNum}</div>
     <div class="hdr-date">Emitido em ${p.dataFmt}</div>
   </div>
 </div>
 <div class="stripe"></div>
-<div class="title-wrap">
-  <div class="title-l">
-    <div class="title-cap"><span class="title-cap-dot"></span>Estimativa de Custos Azure</div>
-    <div class="title-main">${_esc(p.titulo)}</div>
+<div class="meta-bar">
+  <div class="mb">
+    <div class="mb-lbl">Projeto</div>
+    <div class="mb-val">${_esc((p.nomeProjeto || '').split('\xB7')[0].trim())}</div>
+    ${p.resp ? '<div class="mb-sub">Resp: <strong>' + _esc(p.resp) + '</strong></div>' : ''}
   </div>
-  <div class="title-r"><span class="status-badge">Estimativa</span></div>
-</div>
-<div class="meta">
-  <div class="mc">
-    <div class="mc-lbl">Projeto</div>
-    <div class="mc-val">${_esc((p.nomeProjeto || '').split('·')[0].trim())}</div>
-    ${p.resp ? '<div class="mc-sub">Respons&aacute;vel: <strong>' + _esc(p.resp) + '</strong></div>' : ''}
+  <div class="mb">
+    <div class="mb-lbl">T&iacute;tulo</div>
+    <div class="mb-val" style="font-size:8pt;">${_esc(p.titulo)}</div>
+    <div class="mb-sub">${itensDinamicos.length} recurso${itensDinamicos.length !== 1 ? 's' : ''}${itensFixos.length > 0 ? ' + ' + itensFixos.length + ' fixo' + (itensFixos.length !== 1 ? 's' : '') : ''}</div>
   </div>
-  <div class="mc">
-    <div class="mc-lbl">Validade do Documento</div>
-    <div class="mc-val">${p.dataFmt}</div>
-    <div class="mc-sub">V&aacute;lido at&eacute; ${p.dataValid}</div>
+  <div class="mb">
+    <div class="mb-lbl">V&aacute;lido at&eacute;</div>
+    <div class="mb-val">${p.dataValid}</div>
   </div>
-  <div class="mc mc-total">
-    <div class="mc-lbl">Total Estimado (BRL)</div>
-    <div class="mc-val">${_brl(totalFinal)}</div>
-    <div class="mc-sub">${itensDinamicos.length} recurso${itensDinamicos.length !== 1 ? 's' : ''} · ${itensFixos.length > 0 ? itensFixos.length + ' fixo' + (itensFixos.length !== 1 ? 's' : '') + ' separado' + (itensFixos.length !== 1 ? 's' : '') : 'sem custos fixos'}</div>
+  <div class="mb">
+    <div class="mb-lbl">Total Estimado BRL</div>
+    <div class="mb-val">${_brl(totalFinal)}</div>
   </div>
 </div>
+${catCards ? '<div class="cat-wrap"><div class="cat-title">Resumo por Categoria</div><div class="cat-grid">' + catCards + '</div></div>' : ''}
 ${periodosHtml}
-<div class="sec-hdr">
-  <svg viewBox="0 0 16 16" fill="none" width="12" height="12"><rect x="1" y="1" width="6" height="6" rx="1" fill="#0d0f14"/><rect x="9" y="1" width="6" height="6" rx="1" fill="#0d0f14" opacity=".7"/><rect x="1" y="9" width="6" height="6" rx="1" fill="#0d0f14" opacity=".7"/><rect x="9" y="9" width="6" height="6" rx="1" fill="#0d0f14" opacity=".4"/></svg>
-  <span>Estimativa por Horas</span>
-</div>
 <table>
-  <thead>
-    <tr>
-      <th>Recurso</th>
-      <th>Categoria</th>
-      <th style="text-align:right">Horas Estimadas</th>
-      <th style="text-align:right">Custo / Hora</th>
-      <th style="text-align:right">Estimativa BRL</th>
-    </tr>
-  </thead>
-  <tbody>${linhas}</tbody>
+  <thead><tr>
+    <th>Recurso</th>
+    <th style="width:90px">Horas / Tipo</th>
+    <th style="width:110px;text-align:right">Estimativa BRL</th>
+  </tr></thead>
+  <tbody>${linhas}${linhasFixo}</tbody>
   <tfoot>
-    <tr class="tr-sub"><td colspan="4">Subtotal Estimado</td><td>${_brl(p.total_brl || 0)}</td></tr>
-    ${(p.pct_imposto || 0) > 0 ? '<tr class="tr-add"><td colspan="4">+ Imposto (' + p.pct_imposto + '%)</td><td>' + _brl(p.vl_imposto || 0) + '</td></tr>' : ''}
-    ${(p.pct_cond || 0) > 0 ? '<tr class="tr-add"><td colspan="4">+ Condom&iacute;nio (' + p.pct_cond + '%)</td><td>' + _brl(p.vl_cond || 0) + '</td></tr>' : ''}
-    <tr class="tr-total"><td colspan="4">Total Estimado</td><td>${_brl(totalFinal)}</td></tr>
+    <tr class="tr-sub"><td colspan="2">Subtotal Estimado</td><td>${_brl(p.total_brl || 0)}</td></tr>
+    ${(p.pct_imposto || 0) > 0 ? '<tr class="tr-add"><td colspan="2">+ Imposto (' + p.pct_imposto + '%)</td><td>' + _brl(p.vl_imposto || 0) + '</td></tr>' : ''}
+    ${(p.pct_cond || 0) > 0 ? '<tr class="tr-add"><td colspan="2">+ Condom\xEDnio (' + p.pct_cond + '%)</td><td>' + _brl(p.vl_cond || 0) + '</td></tr>' : ''}
+    <tr class="tr-total"><td colspan="2">Total Estimado</td><td>${_brl(totalFinal)}</td></tr>
   </tfoot>
 </table>
-${secaoFixoHtml}
 ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div><div class="obs-txt">' + _esc(p.obs) + '</div></div>' : ''}
-<div class="disc">
-  <div class="disc-bar"></div>
-  <div class="disc-txt">
-    <strong>Documento de Estimativa &mdash; N&atilde;o constitui cobran&ccedil;a.</strong>
-    Este documento &eacute; uma estimativa de custos gerada com base nos dados hist&oacute;ricos do Azure Cost Management.
-    Os valores apresentados s&atilde;o aproximados e podem sofrer altera&ccedil;&otilde;es em fun&ccedil;&atilde;o de varia&ccedil;&otilde;es no consumo,
-    ajustes de pre&ccedil;os da Microsoft, oscila&ccedil;&otilde;es cambiais, tributa&ccedil;&otilde;es aplic&aacute;veis e demais fatores operacionais.
-    Esta estimativa n&atilde;o representa uma fatura, contrato ou compromisso financeiro formal.
-  </div>
-</div>
+${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;border-top:1px solid #fed7aa;font-size:6pt;color:#92400e;font-style:italic;">⚠ Os custos fixos mensais não estão incluídos no Total Estimado. São cobrados mensalmente pelo Azure independente das horas do projeto.</div>' : ''}
 <div class="foot">
   <div class="foot-l">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="36" height="16" style="opacity:.7">
-      <text x="1" y="28" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="28" fill="#9333ea" letter-spacing="-1">vivo</text>
-    </svg>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="24" height="11" style="opacity:.7"><text x="1" y="28" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="28" fill="#9333ea" letter-spacing="-1">vivo</text></svg>
     <span class="foot-dot"></span>
-    <span>FinOps Manager</span>
+    <span>FinOps Manager &middot; ${p.invoiceNum} &middot; ${new Date().toLocaleString('pt-BR')}</span>
     <span class="foot-dot"></span>
-    <span>Estimativa sujeita a altera&ccedil;&otilde;es</span>
+    <span class="foot-disc">Estimativa sujeita a altera&ccedil;&otilde;es &mdash; n&atilde;o constitui cobran&ccedil;a ou compromisso financeiro formal.</span>
   </div>
-  <div class="foot-r">${p.invoiceNum} &middot; ${new Date().toLocaleString('pt-BR')}</div>
+  <div class="foot-r">V&aacute;lido at&eacute; ${p.dataValid}</div>
 </div>
 </div></body></html>`;
   }
