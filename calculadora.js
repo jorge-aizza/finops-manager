@@ -2651,45 +2651,48 @@ const Calculadora = (() => {
         + '</div></div>';
     }
 
-    // ── Resumo de totais ──
-    html += '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
-      + '<span style="color:var(--text-muted);">Recursos selecionados</span><span>' + itens.length + '</span></div>'
-      + '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
-      + '<span style="color:var(--text-muted);">⚡ Hora / Dia (taxa real)</span>'
-      + '<span>' + itens.filter(r => r.isHora).length + '</span></div>'
-      + '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
-      + '<span style="color:var(--blue,#4da6ff);">🔒 Reservas (amortizado)</span>'
-      + '<span>' + itens.filter(r => r.tipo_custo === 'reserva').length + '</span></div>'
-      + '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
-      + '<span style="color:var(--orange,#ff8c42);">📦 Storage/Consumo (est.)</span>'
-      + '<span>' + itens.filter(r => r.tipo_custo === 'periodo').length + '</span></div>'
-      + (_estimativa.pct_imposto > 0
-        ? '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
-          + '<span style="color:var(--text-muted);">+ Imposto (' + _estimativa.pct_imposto + '%)</span>'
-          + '<span style="font-family:IBM Plex Mono,monospace;">' + _brl(_estimativa.vl_imposto) + '</span></div>' : '')
+    // ── Tabela agrupada por categoria ──
+    const _catPrev = new Map();
+    for (const r of itens) {
+      const cat = r.categoria || 'Outros';
+      if (!_catPrev.has(cat)) _catPrev.set(cat, { count: 0, horas: 0, total: 0, allPeriodo: true });
+      const c = _catPrev.get(cat);
+      c.count++;
+      c.total += parseFloat(r.estimado_brl || 0);
+      const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
+      if (tc !== 'periodo') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
+    }
+    html += '<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px;">'
+      + '<thead><tr style="border-bottom:1px solid rgba(147,51,234,.25);">'
+      + '<th style="text-align:left;padding:3px 0;color:var(--text-muted);font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;">Tipo</th>'
+      + '<th style="text-align:right;padding:3px 6px;color:var(--text-muted);font-size:10px;font-weight:600;">Qtd</th>'
+      + '<th style="text-align:right;padding:3px 6px;color:var(--text-muted);font-size:10px;font-weight:600;">Horas</th>'
+      + '<th style="text-align:right;padding:3px 0;color:var(--text-muted);font-size:10px;font-weight:600;">Valor</th>'
+      + '</tr></thead><tbody>';
+    for (const [cat, info] of _catPrev.entries()) {
+      const horasCell = info.allPeriodo ? '/mês' : info.horas.toLocaleString('pt-BR') + ' h';
+      html += '<tr style="border-bottom:1px solid rgba(147,51,234,.07);">'
+        + '<td style="padding:5px 0;color:var(--text);font-weight:500;">' + _esc(cat) + '</td>'
+        + '<td style="text-align:right;padding:5px 6px;color:var(--text-muted);">' + info.count + '</td>'
+        + '<td style="text-align:right;padding:5px 6px;color:var(--text-dim);font-family:IBM Plex Mono,monospace;font-size:10px;">' + horasCell + '</td>'
+        + '<td style="text-align:right;padding:5px 0;color:var(--accent);font-family:IBM Plex Mono,monospace;font-weight:600;">' + _brl(info.total) + '</td>'
+        + '</tr>';
+    }
+    html += '</tbody></table>';
+
+    // ── Totais ──
+    html += (_estimativa.pct_imposto > 0
+      ? '<div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:11px;">'
+        + '<span style="color:var(--text-muted);">+ Imposto (' + _estimativa.pct_imposto + '%)</span>'
+        + '<span style="font-family:IBM Plex Mono,monospace;">' + _brl(_estimativa.vl_imposto) + '</span></div>' : '')
       + (_estimativa.pct_cond > 0
-        ? '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">'
+        ? '<div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:11px;">'
           + '<span style="color:var(--text-muted);">+ Condomínio (' + _estimativa.pct_cond + '%)</span>'
           + '<span style="font-family:IBM Plex Mono,monospace;">' + _brl(_estimativa.vl_cond) + '</span></div>' : '')
-      + '<div style="border-top:1px solid var(--border);margin:8px 0;padding-top:8px;display:flex;justify-content:space-between;align-items:center;">'
+      + '<div style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px;display:flex;justify-content:space-between;align-items:center;">'
       + '<span style="font-weight:600;color:var(--text);">Total Final (BRL)</span>'
       + '<span style="font-size:1.1rem;font-weight:700;color:var(--accent);font-family:IBM Plex Mono,monospace;">' + _brl(_estimativa.total_final || _estimativa.total_brl) + '</span>'
       + '</div>';
-
-    // ── Lista de recursos ──
-    if (itens.length > 0) {
-      html += '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">'
-        + '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:6px;">Detalhamento por Recurso</div>'
-        + '<div style="max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;">';
-      itens.forEach(r => {
-        html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border-radius:4px;background:rgba(147,51,234,.05);border:1px solid rgba(147,51,234,.1);">'
-          + '<span style="font-size:10px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;margin-right:6px;" title="' + _esc(r.nome) + '">' + _esc(r.nome) + '</span>'
-          + '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;margin-right:8px;">' + r.horas + 'h</span>'
-          + '<span style="font-size:11px;font-family:IBM Plex Mono,monospace;color:var(--accent);white-space:nowrap;font-weight:600;">' + _brl(r.estimado_brl) + '</span>'
-          + '</div>';
-      });
-      html += '</div></div>';
-    }
 
     body.innerHTML = html;
   }
@@ -2707,20 +2710,33 @@ const Calculadora = (() => {
       ? parseFloat(p.total_fixo_mes)
       : itensFixos.reduce((s, r) => s + parseFloat(r.estimado_brl || r.custo_mes || 0), 0);
 
-    // Resumo por categoria
+    // Resumo por categoria — agrupa horas e total por tipo
     const catMap = new Map();
     for (const r of itensDinamicos) {
       const cat = r.categoria || 'Outros';
-      if (!catMap.has(cat)) catMap.set(cat, { count: 0, total: 0 });
+      if (!catMap.has(cat)) catMap.set(cat, { count: 0, horas: 0, total: 0, allPeriodo: true });
       const c = catMap.get(cat);
       c.count++;
       c.total += parseFloat(r.estimado_brl || 0);
+      const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
+      if (tc !== 'periodo') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
     }
-    const catCards = Array.from(catMap.entries()).map(([cat, info]) =>
-      '<div class="cat-card"><div class="cat-nm">' + _esc(cat) + '</div>'
-      + '<div class="cat-ct">' + info.count + ' recurso' + (info.count !== 1 ? 's' : '') + '</div>'
-      + '<div class="cat-vl">' + _brl(info.total) + '</div></div>'
-    ).join('');
+    const catRows = Array.from(catMap.entries()).map(([cat, info]) => {
+      const horasCell = info.allPeriodo ? '/m\xEAs' : info.horas.toLocaleString('pt-BR') + '\xA0h';
+      return '<tr><td class="td-nm">' + _esc(cat) + '</td>'
+        + '<td class="td-qty" style="text-align:center;">' + info.count + '</td>'
+        + '<td class="td-qty">' + horasCell + '</td>'
+        + '<td class="td-brl">' + _brl(info.total) + '</td>'
+        + '</tr>';
+    }).join('');
+    const fixoRow = itensFixos.length > 0
+      ? '<tr class="tr-sep-fix"><td colspan="4">🔒 Custos Fixos Mensais — cobrado independente das horas</td></tr>'
+        + '<tr><td class="td-nm" style="color:#c05621;">Infra Fixa</td>'
+        + '<td class="td-qty" style="text-align:center;color:#c05621;">' + itensFixos.length + '</td>'
+        + '<td class="td-qty" style="color:#c05621;">Fixo/m\xEAs</td>'
+        + '<td class="td-brl" style="color:#c05621;">' + _brl(totalFixoMes) + '</td>'
+        + '</tr>'
+      : '';
 
     // Linhas compactas — 3 colunas: Recurso | Horas/Tipo | Estimativa BRL
     const linhas = itensDinamicos.map(r => {
@@ -2937,22 +2953,22 @@ window.onload=function(){
     <div class="mb-val">${_brl(totalFinal)}</div>
   </div>
 </div>
-${catCards ? '<div class="cat-wrap"><div class="cat-title">Resumo por Categoria</div><div class="cat-grid">' + catCards + '</div></div>' : ''}
-${periodosHtml}
-<table>
+${catRows ? `<table>
   <thead><tr>
-    <th>Recurso</th>
-    <th style="width:90px">Horas / Tipo</th>
-    <th style="width:110px;text-align:right">Estimativa BRL</th>
+    <th style="width:45%">Tipo de Recurso</th>
+    <th style="width:8%;text-align:center">Qtd</th>
+    <th style="width:20%">Horas / Tipo</th>
+    <th style="width:27%;text-align:right">Estimativa BRL</th>
   </tr></thead>
-  <tbody>${linhas}${linhasFixo}</tbody>
+  <tbody>${catRows}${fixoRow}</tbody>
   <tfoot>
-    <tr class="tr-sub"><td colspan="2">Subtotal Estimado</td><td>${_brl(p.total_brl || 0)}</td></tr>
-    ${(p.pct_imposto || 0) > 0 ? '<tr class="tr-add"><td colspan="2">+ Imposto (' + p.pct_imposto + '%)</td><td>' + _brl(p.vl_imposto || 0) + '</td></tr>' : ''}
-    ${(p.pct_cond || 0) > 0 ? '<tr class="tr-add"><td colspan="2">+ Condom\xEDnio (' + p.pct_cond + '%)</td><td>' + _brl(p.vl_cond || 0) + '</td></tr>' : ''}
-    <tr class="tr-total"><td colspan="2">Total Estimado</td><td>${_brl(totalFinal)}</td></tr>
+    <tr class="tr-sub"><td colspan="3">Subtotal Estimado</td><td>${_brl(p.total_brl || 0)}</td></tr>
+    ${(p.pct_imposto || 0) > 0 ? `<tr class="tr-add"><td colspan="3">+ Imposto (` + p.pct_imposto + `%)</td><td>` + _brl(p.vl_imposto || 0) + `</td></tr>` : ``}
+    ${(p.pct_cond || 0) > 0 ? `<tr class="tr-add"><td colspan="3">+ Condom\xEDnio (` + p.pct_cond + `%)</td><td>` + _brl(p.vl_cond || 0) + `</td></tr>` : ``}
+    <tr class="tr-total"><td colspan="3">Total Estimado</td><td>${_brl(totalFinal)}</td></tr>
   </tfoot>
-</table>
+</table>` : ``}
+${periodosHtml}
 ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div><div class="obs-txt">' + _esc(p.obs) + '</div></div>' : ''}
 ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;border-top:1px solid #fed7aa;font-size:6pt;color:#92400e;font-style:italic;">⚠ Os custos fixos mensais não estão incluídos no Total Estimado. São cobrados mensalmente pelo Azure independente das horas do projeto.</div>' : ''}
 <div class="foot">
