@@ -3576,7 +3576,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
 app.get('/api/public/calculadora/projetos', _portalMiddleware, dbMiddleware, async (_req, res) => {
   try {
     const r = await pool.query(
-      `SELECT id, nome, descricao, responsavel, status
+      `SELECT id, nome, descricao, status
        FROM projetos WHERE status = 'Ativo' ORDER BY nome`
     );
     res.json(r.rows);
