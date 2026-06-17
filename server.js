@@ -313,6 +313,8 @@ async function initDB() {
       );
       ALTER TABLE projetos ADD COLUMN IF NOT EXISTS diretoria     VARCHAR(200);
       ALTER TABLE projetos ADD COLUMN IF NOT EXISTS atualizado_em TIMESTAMP DEFAULT NOW();
+      ALTER TABLE projetos ADD COLUMN IF NOT EXISTS status        VARCHAR(20) DEFAULT 'Ativo';
+      UPDATE projetos SET status = 'Ativo' WHERE status IS NULL;
     `);
 
     await c.query(`

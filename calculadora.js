@@ -549,14 +549,13 @@ const Calculadora = (() => {
           <input type="text" id="cinv-resp" class="ci" placeholder="Nome do responsável">
         </div>
         <div>
-          <label class="cl">Validade (dias)</label>
-          <input type="number" id="cinv-validade" class="ci" value="5" min="1" readonly
-                 style="opacity:.55;cursor:not-allowed;background:var(--bg);" title="Validade padrão: 5 dias">
-          <div style="margin-top:5px;font-size:11px;color:var(--text-muted);display:flex;align-items:flex-start;gap:5px;line-height:1.4;">
-            <span style="color:var(--orange);font-size:13px;flex-shrink:0;">⚠</span>
-            <span>Válida por 5 dias. Após o prazo, abra uma nova solicitação.</span>
-          </div>
+          <label class="cl">E-mail</label>
+          <input type="email" id="cinv-email" class="ci" placeholder="email@empresa.com">
         </div>
+      </div>
+      <div style="margin-bottom:12px;padding:8px 12px;border-radius:6px;background:var(--bg);border:1px solid var(--border);font-size:11px;color:var(--text-muted);display:flex;align-items:flex-start;gap:5px;line-height:1.4;">
+        <span style="color:var(--orange);font-size:13px;flex-shrink:0;">⚠</span>
+        <span>Válida por 5 dias. Após o prazo, abra uma nova solicitação.</span>
       </div>
       <div style="margin-bottom:16px;">
         <label class="cl">Motivo da Solicitação <span style="color:var(--danger);font-size:13px">*</span></label>
@@ -2577,13 +2576,14 @@ const Calculadora = (() => {
     const inp  = document.getElementById('cinv-data');
     if (inp && !inp.value) inp.value = hoje;
 
-    // Pré-preencher responsável com dados da identificação do portal
+    // Pré-preencher responsável e e-mail com dados da identificação do portal
     if (_modoPublico) {
       try {
         const ident = JSON.parse(sessionStorage.getItem('portal_ident') || 'null');
-        const respEl = document.getElementById('cinv-resp');
-        if (respEl && ident?.nome && !respEl.value)
-          respEl.value = ident.nome + (ident.email ? ' <' + ident.email + '>' : '');
+        const respEl  = document.getElementById('cinv-resp');
+        const emailEl = document.getElementById('cinv-email');
+        if (respEl  && ident?.nome  && !respEl.value)  respEl.value  = ident.nome;
+        if (emailEl && ident?.email && !emailEl.value) emailEl.value = ident.email;
       } catch {}
     }
 
@@ -2595,14 +2595,18 @@ const Calculadora = (() => {
     try {
       const projetosUrl = _modoPublico ? '/projetos' : '/api/projetos';
       const data = await _api('GET', projetosUrl);
-      if (!Array.isArray(data) || !data.length) {
-        sel.innerHTML = '<option value="">Nenhum projeto cadastrado</option>';
+      if (data && data.error) {
+        console.error('[Invoice] Projetos API erro:', data.error);
+        sel.innerHTML = `<option value="">Erro ao carregar projetos: ${_esc(data.error)}</option>`;
+      } else if (!Array.isArray(data) || !data.length) {
+        sel.innerHTML = '<option value="">Nenhum projeto ativo cadastrado</option>';
       } else {
         sel.innerHTML = '<option value="">— selecione o projeto —</option>' +
           data.map(p => `<option value="${p.id}" data-dir="${_esc(p.diretoria||'')}" data-desc="${_esc(p.descricao||'')}">${_esc(p.nome)}${p.diretoria ? ' · ' + p.diretoria : ''}</option>`).join('');
         sel.onchange = () => _atualizarInfoProjeto(data);
       }
     } catch (e) {
+      console.error('[Invoice] Projetos fetch erro:', e);
       sel.innerHTML = `<option value="">Erro: ${_esc(e.message)}</option>`;
     }
 
@@ -2917,7 +2921,7 @@ window.onload=function(){
   <div class="mb">
     <div class="mb-lbl">Projeto</div>
     <div class="mb-val">${_esc((p.nomeProjeto || '').split('\xB7')[0].trim())}</div>
-    ${p.resp ? '<div class="mb-sub">Resp: <strong>' + _esc(p.resp) + '</strong></div>' : ''}
+    ${p.resp ? '<div class="mb-sub">Resp: <strong>' + _esc(p.resp) + '</strong>' + (p.email ? ' &mdash; <span style="font-size:6pt;">' + _esc(p.email) + '</span>' : '') + '</div>' : ''}
   </div>
   <div class="mb">
     <div class="mb-lbl">T&iacute;tulo</div>
@@ -2972,7 +2976,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     const titulo  = document.getElementById('cinv-titulo')?.value?.trim()   || 'Estimativa de Custos Azure';
     const dataVal = document.getElementById('cinv-data')?.value             || new Date().toISOString().slice(0,10);
     const resp    = document.getElementById('cinv-resp')?.value?.trim()     || '';
-    const valDias = 5; // Validade fixa em 5 dias
+    const email   = document.getElementById('cinv-email')?.value?.trim()    || '';
+    const valDias = 5;
     const obs     = document.getElementById('cinv-obs')?.value?.trim()      || '';
 
     if (!sel?.value) { _toast('Selecione um projeto.', 'error'); return; }
@@ -3010,7 +3015,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     }).catch(() => {});
 
     const html = _buildPDFHtml({
-      invoiceNum, dataFmt, titulo, dataValid, nomeProjeto, resp, obs, itens,
+      invoiceNum, dataFmt, titulo, dataValid, nomeProjeto, resp, email, obs, itens,
       total_brl:      _estimativa.total_brl,
       total_fixo_mes: _estimativa.total_fixo_mes,
       total_final:    _estimativa.total_final,
@@ -3041,6 +3046,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       nomeProjeto:    e.projeto_nome || '',
       titulo:         e.titulo || 'Estimativa de Custos Azure',
       resp:           e.responsavel || '',
+      email:          e.email || '',
       obs:            e.observacoes || '',
       itens:          _recursos,
       total_brl:      parseFloat(e.total_brl || 0),
