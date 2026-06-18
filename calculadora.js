@@ -3489,15 +3489,17 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       if (tipo === 'reserva') {
         estimado = chora * horas;
       } else if (tipo === 'hora' || tipo === 'dia') {
-        // Prioridade: 1. Databricks cluster rate  2. Price List/h  3. billing/h
-        const _dbInf = _dbInfoParaRecurso(r);
-        if (_dbInf && _dbInf.valida) {
-          const billRec = parseFloat(r.total_billing || 0) * cr;
-          estimado = _dbInf.hDriver > 0 ? (billRec / _dbInf.hDriver) * horas : chora * horas;
-        } else if (retailH > 0) {
+        // Prioridade: 1. Price List/h  2. Databricks cluster rate  3. billing/h
+        if (retailH > 0) {
           estimado = retailH * horas;
         } else {
-          estimado = chora * horas;
+          const _dbInf = _dbInfoParaRecurso(r);
+          if (_dbInf && _dbInf.valida) {
+            const billRec = parseFloat(r.total_billing || 0) * cr;
+            estimado = _dbInf.hDriver > 0 ? (billRec / _dbInf.hDriver) * horas : chora * horas;
+          } else {
+            estimado = chora * horas;
+          }
         }
       } else {
         // periodo: PL/mês ÷ 720 × horas  (PL disponível)
@@ -3635,8 +3637,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         const taxaEf2   = _dbValida && _dbInf2.hDriver > 0 ? billRec2 / _dbInf2.hDriver : 0;
         const estimado = (tipo2 === 'periodo')
           ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
-          : _dbValida ? taxaEf2 * horas
-          : retailHr > 0 ? retailHr * horas : chora * horas;
+          : retailHr > 0 ? retailHr * horas
+          : _dbValida ? taxaEf2 * horas : chora * horas;
         const temPLR = retailHr > 0 || retailMesR > 0;
         return {
           resource_id:      rid,
@@ -3650,7 +3652,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           isHora,
           horas,
           custo_hora:       chora,
-          fonte_estimado:   !_dbValida && temPLR ? 'price_list' : 'billing',
+          fonte_estimado:   temPLR ? 'price_list' : 'billing',
           custo_mes:        custo_mes,
           dias_ativos:      parseInt(r.dias_ativos) || 0,
           total_cobrado:    bill,
