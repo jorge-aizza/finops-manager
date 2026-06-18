@@ -1938,6 +1938,8 @@ async function ensurePriceListTable() {
             AS retail_price_brl_norm
         FROM azure_price_list
         WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = ''
+          AND product_name IS NOT NULL AND product_name <> ''
+          AND COALESCE(NULLIF(retail_price,0), unit_price, 0) < 10000
         ORDER BY LOWER(meter_id), (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
     `).catch(() => {});
     await c.query(`
