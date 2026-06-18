@@ -1919,15 +1919,18 @@ async function ensurePriceListTable() {
     `).catch(() => {});
 
     // ── Materialized Views — substituem CTEs pesados na query de recursos ────
-    // Criadas apenas se não existirem; populadas após cada sync (_syncPriceList).
+    // Dropadas e recriadas a cada startup para garantir definição atualizada.
     // Se azure_price_list estiver vazia (pré-sync), as views ficam vazias também —
     // o LEFT JOIN retorna NULL e a calculadora opera sem PL (comportamento correto).
+    // retail_price_eff: usa unit_price como fallback quando retail_price = 0
+    // (Azure Retail Prices API retorna retail_price=0 para muitos meters regionais).
+    await c.query(`DROP MATERIALIZED VIEW IF EXISTS pl_best_mv CASCADE`).catch(() => {});
     await c.query(`
-      CREATE MATERIALIZED VIEW IF NOT EXISTS pl_best_mv AS
+      CREATE MATERIALIZED VIEW pl_best_mv AS
         SELECT DISTINCT ON (LOWER(meter_id))
           LOWER(meter_id) AS meter_id_lower,
           currency_code,
-          retail_price::numeric
+          COALESCE(NULLIF(retail_price,0), unit_price, 0)::numeric
             / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
             AS retail_price_norm,
           COALESCE(retail_price_brl,0)::numeric
@@ -1941,13 +1944,14 @@ async function ensurePriceListTable() {
       CREATE UNIQUE INDEX IF NOT EXISTS pl_best_mv_idx ON pl_best_mv (meter_id_lower);
     `).catch(() => {});
 
+    await c.query(`DROP MATERIALIZED VIEW IF EXISTS pl_sku_mv CASCADE`).catch(() => {});
     await c.query(`
-      CREATE MATERIALIZED VIEW IF NOT EXISTS pl_sku_mv AS
+      CREATE MATERIALIZED VIEW pl_sku_mv AS
         SELECT DISTINCT ON (LOWER(COALESCE(sku_name,'')), LOWER(COALESCE(service_name,'')))
           LOWER(COALESCE(sku_name,''))     AS sku_lower,
           LOWER(COALESCE(service_name,'')) AS svc_lower,
           currency_code,
-          retail_price::numeric
+          COALESCE(NULLIF(retail_price,0), unit_price, 0)::numeric
             / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
             AS retail_price_norm,
           COALESCE(retail_price_brl,0)::numeric
