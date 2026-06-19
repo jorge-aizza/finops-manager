@@ -2299,9 +2299,39 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
   const ARM_REGION_FALLBACK = 'global';
   const nome = (filename || csvPath).toLowerCase();
 
-  // ZIP/Parquet: carrega na memória (caso menos comum para Price List)
+  // ZIP: extrai cada entrada e processa com streaming para evitar OOM em arquivos grandes
+  if (nome.endsWith('.zip')) {
+    const AdmZip = require('adm-zip');
+    const fs     = require('fs');
+    const path   = require('path');
+    const os     = require('os');
+    const crypto = require('crypto');
+    let zip;
+    try { zip = new AdmZip(csvPath); } catch (e) { throw new Error(`ZIP inválido: ${e.message}`); }
+    const entries = zip.getEntries().filter(e => {
+      const n = e.entryName.toLowerCase();
+      return !n.includes('..') && (n.endsWith('.csv') || n.endsWith('.parquet'));
+    });
+    if (!entries.length) throw new Error('ZIP não contém arquivos .csv ou .parquet válidos');
+    let total = 0, inserted = 0, skipped = 0, errors = 0, isFirst = true;
+    for (const entry of entries) {
+      const tmpName = `zip_pl_${crypto.randomBytes(6).toString('hex')}_${path.basename(entry.entryName)}`;
+      const tmpPath = path.join(os.tmpdir(), tmpName);
+      try {
+        zip.extractEntryTo(entry, os.tmpdir(), false, true, false, tmpName);
+        const r = await _importPriceListFromCSV(tmpPath, entry.entryName, clearBefore && isFirst);
+        isFirst = false;
+        total += r.total; inserted += r.inserted; skipped += r.skipped; errors += r.errors;
+      } finally { try { fs.unlinkSync(tmpPath); } catch (_) {} }
+    }
+    const ts = new Date().toISOString();
+    await _gravaMeta('last_result_USD_global', { ok: true, total, pages: 1, currency: 'USD', region: ARM_REGION_FALLBACK, ts, source: 'csv', filename });
+    return { total, inserted, skipped, errors };
+  }
+
+  // Parquet: carrega na memória (geralmente < 100 MB)
   let nonCsvRows = null;
-  if (!nome.endsWith('.csv')) {
+  if (nome.endsWith('.parquet')) {
     nonCsvRows = await _lerArquivoRows(csvPath, filename || csvPath);
     if (!nonCsvRows.length) return { total: 0, inserted: 0, skipped: 0, errors: 0 };
   }
