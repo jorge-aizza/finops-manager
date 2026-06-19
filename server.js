@@ -2844,7 +2844,7 @@ async function _lerArquivoRows(filePath, filename) {
       try {
         zip.extractEntryTo(entry, os.tmpdir(), false, true, false, tmpName);
         const rows = await _lerArquivoRows(tmpPath, entry.entryName);
-        allRows.push(...rows);
+        for (const r of rows) allRows.push(r);
       } finally {
         try { fs.unlinkSync(tmpPath); } catch (_) {}
       }
