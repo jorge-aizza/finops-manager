@@ -12,6 +12,7 @@ const Calculadora = (() => {
   let _periodos       = [];   // [{inicio, fim, horas, horasTotal, horasLivres, label}]
   let _horasAplicadas = false; // true somente após Aplicar (HORAS) ou Incluir Período
   let _horasPeriodoValidas = false; // true quando datas/horas do período formam intervalo > 0
+  let _horasAdd = { ativo: false, hExtra: 4, dias: 10 }; // config do card Horas Adicionais
 
   // ── Horário Livre (janela sem cobrança) ──────────────────────────────────────
   let _horarioLivre = {
@@ -258,7 +259,7 @@ const Calculadora = (() => {
 <div id="cires" style="display:none"></div>
 
 <!-- FILTROS -->
-<div style="display:grid;grid-template-columns:1fr 1fr auto auto auto;gap:10px;align-items:end;padding:13px 24px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0;">
+<div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end;padding:13px 24px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0;">
 
   <!-- Multiselect Assinaturas -->
   <div class="cfg">
@@ -300,7 +301,17 @@ const Calculadora = (() => {
     </div>
   </div>
 
-  <div class="cfg"><button class="cbtn-go" onclick="Calculadora.buscarRecursos()" style="height:34px;padding:0 14px;">
+  <!-- Período de filtragem — pre-preenchido com range do banco ao confirmar assinatura -->
+  <div class="cfg">
+    <label class="cl">Período</label>
+    <div style="display:flex;align-items:center;gap:5px;">
+      <input type="date" id="cfiltro-ini" style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg);color:var(--text);font-size:12px;outline:none;min-width:128px;" title="Data início do filtro">
+      <span style="color:var(--text-muted);font-size:11px;flex-shrink:0;">→</span>
+      <input type="date" id="cfiltro-fim" style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg);color:var(--text);font-size:12px;outline:none;min-width:128px;" title="Data fim do filtro">
+    </div>
+  </div>
+
+  <div class="cfg"><button id="cbuscar-btn" class="cbtn-go" onclick="Calculadora.buscarRecursos()" style="height:34px;padding:0 14px;opacity:.4;cursor:not-allowed;" disabled title="Selecione pelo menos um Resource Group para buscar">
     <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
     Buscar
   </button></div>
@@ -419,6 +430,7 @@ const Calculadora = (() => {
             <th class="cth" style="text-align:right;">Consumed Quantity</th>
             <th class="cth" style="text-align:right;" title="Hora → taxa real (effective_price)&#10;Reserva → amortizado pelo term&#10;Período → custo mensal estimado">Custo/h · /mês</th>
             <th class="cth" style="text-align:right;">Total Cobrado (BRL)</th>
+            <th id="chad-th" class="cth" style="text-align:right;display:none;color:var(--orange,#ff8c42);white-space:nowrap;" title="Custo estimado das horas adicionais do projeto">⏱ Adicional</th>
           </tr>
         </thead>
         <tbody id="ctbody">
@@ -863,6 +875,39 @@ const Calculadora = (() => {
           </div>
         </div>
 
+        <!-- Card: Horas Adicionais — só visível no modo Período, após busca -->
+        <div id="chad-card" style="display:none;background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);">⏱ Horas Adicionais</div>
+            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;">
+              <input type="checkbox" id="chad-ativo" onchange="Calculadora._hadToggle(this.checked)"
+                style="width:14px;height:14px;accent-color:var(--accent);cursor:pointer;">
+              <span style="font-size:10px;color:var(--text-muted);">Ativar</span>
+            </label>
+          </div>
+          <div id="chad-baseline" style="font-size:10px;color:var(--text-muted);margin-bottom:8px;padding:5px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);min-height:22px;"></div>
+          <div id="chad-corpo" style="display:none;">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;margin-top:8px;">
+              <div>
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">H. extras / dia</div>
+                <input type="number" id="chad-h-extra" value="4" min="1" max="24" step="1"
+                  style="width:100%;height:32px;font-size:13px;padding:0 8px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',monospace;outline:none;box-sizing:border-box;"
+                  oninput="Calculadora._hadChange()">
+              </div>
+              <div>
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Dias do projeto</div>
+                <input type="number" id="chad-dias" value="10" min="1" max="365" step="1"
+                  style="width:100%;height:32px;font-size:13px;padding:0 8px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',monospace;outline:none;box-sizing:border-box;"
+                  oninput="Calculadora._hadChange()">
+              </div>
+            </div>
+            <div id="chad-res" style="font-size:11px;color:var(--text-muted);padding:6px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);line-height:1.6;min-height:28px;"></div>
+          </div>
+          <div id="chad-hint" style="font-size:10px;color:var(--text-muted);font-style:italic;margin-top:6px;">
+            Estima o custo de horas além do período billing. Ex: projeto que precisa rodar 4h/dia extras por 10 dias.
+          </div>
+        </div>
+
         <!-- Card: Taxas -->
         <div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
@@ -1252,8 +1297,16 @@ const Calculadora = (() => {
     document.getElementById('crg-label').textContent='— selecione —';
     document.getElementById('crg-label').style.color='var(--text-muted)';
     _recursos=[]; _selecionados={}; _renderRecursos(); _resetRes();
+    _atualizarBotaoBuscar(); // bloqueia Buscar pois RGs foram limpos
     if (!_subsSel.length) { document.getElementById('crg-trigger').classList.add('cms-disabled'); return; }
     document.getElementById('crg-trigger').classList.remove('cms-disabled');
+    // Pre-preenche campos de data com o range real do banco para as subs selecionadas
+    const _iniDB = _subsSel.map(id => (_dds.csub.data.find(s => s.value === id)||{}).periodo_ini||'').filter(Boolean).sort()[0]||'';
+    const _fimDB = _subsSel.map(id => (_dds.csub.data.find(s => s.value === id)||{}).periodo_fim||'').filter(Boolean).sort().pop()||'';
+    const _elIni = document.getElementById('cfiltro-ini');
+    const _elFim = document.getElementById('cfiltro-fim');
+    if (_elIni && _iniDB) _elIni.value = _iniDB;
+    if (_elFim && _fimDB) _elFim.value = _fimDB;
     document.getElementById('crg-options').innerHTML='<div style="padding:8px 12px;font-size:12px;color:var(--text-muted);">Carregando...</div>';
     try {
       const data = await _api('GET', `/calculadora/resource-groups?subscription_id=${_subsSel.map(encodeURIComponent).join(',')}`);
@@ -1276,6 +1329,7 @@ const Calculadora = (() => {
     document.getElementById('crg-dropdown').style.display='none';
     document.getElementById('crg-trigger').classList.remove('cms-active');
     _atualizarBadge('crg');
+    _atualizarBotaoBuscar();
   }
 
   async function _carregarSubscriptions() {
@@ -1288,7 +1342,7 @@ const Calculadora = (() => {
         _diagCache();
         return;
       }
-      _dds.csub.data = data.map(s => { const ini=(s.periodo_inicio||'').slice(0,10),fim=(s.periodo_fim||'').slice(0,10); const nome=s.subscription_name||s.subscription_id; return { value:s.subscription_id, label:nome, labelShort:nome, sub:'', periodo_fim:fim }; });
+      _dds.csub.data = data.map(s => { const ini=(s.periodo_inicio||'').slice(0,10),fim=(s.periodo_fim||'').slice(0,10); const nome=s.subscription_name||s.subscription_id; return { value:s.subscription_id, label:nome, labelShort:nome, sub:'', periodo_ini:ini, periodo_fim:fim }; });
       _renderOpcoes('csub');
     } catch(err) { opts.innerHTML=`<div style="padding:8px 12px;font-size:12px;color:#ff4d6a;">Erro: ${_esc(err.message)}</div>`; }
   }
@@ -1342,35 +1396,44 @@ const Calculadora = (() => {
   async function buscarRecursos() {
     if (!_subsSel.length) { _toast('Selecione assinaturas e clique OK ✓.', 'error'); return; }
     _horasAplicadas = false;
+    _setBuscarLoading(true);
 
     // Formata Date → 'YYYY-MM-DD' usando hora local (evita bug de fuso UTC)
     const _fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
-    // Usa a data mais recente do banco para as assinaturas selecionadas como âncora
-    // da janela. Garante que "últimos 30 dias" aponte para dados reais, não para hoje.
-    const maxFim = _subsSel
-      .map(id => (_dds.csub.data.find(s => s.value === id) || {}).periodo_fim || '')
-      .filter(Boolean).sort().pop() || '';
-
-    if (maxFim) {
-      const fim = new Date(maxFim + 'T12:00:00'); // T12 neutraliza deslocamento de fuso
-      const ini = new Date(fim); ini.setDate(ini.getDate() - 30);
-      _dataFim    = _fmt(fim);
-      _dataInicio = _fmt(ini);
+    // Usa datas dos inputs de filtro se preenchidas; caso contrário usa range do banco
+    const _filtIni = document.getElementById('cfiltro-ini')?.value;
+    const _filtFim = document.getElementById('cfiltro-fim')?.value;
+    if (_filtIni && _filtFim) {
+      _dataInicio = _filtIni;
+      _dataFim    = _filtFim;
     } else {
-      // Fallback: 30 dias corridos a partir de hoje (horário local)
-      const hoje = new Date();
-      const ini  = new Date(hoje); ini.setDate(ini.getDate() - 30);
-      _dataFim    = _fmt(hoje);
-      _dataInicio = _fmt(ini);
+      const maxFim = _subsSel
+        .map(id => (_dds.csub.data.find(s => s.value === id) || {}).periodo_fim || '')
+        .filter(Boolean).sort().pop() || '';
+      if (maxFim) {
+        const fim = new Date(maxFim + 'T12:00:00');
+        const ini = new Date(fim); ini.setDate(ini.getDate() - 30);
+        _dataFim    = _fmt(fim);
+        _dataInicio = _fmt(ini);
+      } else {
+        const hoje = new Date();
+        const ini  = new Date(hoje); ini.setDate(ini.getDate() - 30);
+        _dataFim    = _fmt(hoje);
+        _dataInicio = _fmt(ini);
+      }
     }
 
     _selecionados = {};
     _dadosDetalhe = [];
     _dadosServico = [];
-    await _carregarRecursos();
-    if (_modoVisao === 'detalhe') _buscarDetalhe();
-    if (_modoVisao === 'servico') _buscarServico();
+    try {
+      await _carregarRecursos();
+      if (_modoVisao === 'detalhe') _buscarDetalhe();
+      if (_modoVisao === 'servico') _buscarServico();
+    } finally {
+      _setBuscarLoading(false);
+    }
   }
 
   async function onFiltroChange() {
@@ -1380,7 +1443,9 @@ const Calculadora = (() => {
   function _tipoRecurso(r) {
     const svc = (r.consumed_service || '').toLowerCase();
     const cat = (r.meter_category   || '').toLowerCase();
-    if (svc.includes('databricks') || cat.includes('databricks')) return 'Databricks';
+    const rg  = (r.resource_group_name || '').toLowerCase();
+    // Databricks: software (consumed_service) OU VMs gerenciadas no databricks-rg-*
+    if (svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-')) return 'Databricks';
     if (svc.includes('containerservice') || cat.includes('kubernetes')) return 'AKS';
     if (cat.includes('virtual machine') || (svc.includes('compute') && cat.includes('compute'))) return 'VMs';
     if (cat.includes('managed disk') || cat.includes('disk')) return 'Discos';
@@ -1491,6 +1556,12 @@ const Calculadora = (() => {
       _dbComputeTaxas(); // RN-DB-001: computa taxas proporcionais por workspace Databricks
       _renderTiposBar();
       _renderRecursos();
+      // Mostra card de Horas Adicionais (só no modo Período) e atualiza baseline
+      const cardHAD = document.getElementById('chad-card');
+      if (cardHAD && document.getElementById('chl-card')?.style.display !== 'none') {
+        cardHAD.style.display = '';
+        _hadAtualizarBaseline();
+      }
       // Reconciliação em background (não bloqueia o render)
       _reconciliacao = null;
       _carregarReconciliacao(url.replace('/calculadora/recursos', '/calculadora/reconciliacao'));
@@ -1798,10 +1869,43 @@ const Calculadora = (() => {
     });
   }
 
+  function _atualizarBotaoBuscar() {
+    const btn = document.getElementById('cbuscar-btn');
+    if (!btn) return;
+    const habilitado = _rgsSel.length > 0;
+    btn.disabled = !habilitado;
+    btn.style.opacity  = habilitado ? '1'            : '.4';
+    btn.style.cursor   = habilitado ? 'pointer'      : 'not-allowed';
+    btn.title          = habilitado ? ''             : 'Selecione pelo menos um Resource Group para buscar';
+  }
+
+  function _setBuscarLoading(loading) {
+    const btn = document.getElementById('cbuscar-btn');
+    if (!btn) return;
+    if (loading) {
+      btn.disabled = true;
+      btn.style.opacity = '1';
+      btn.style.cursor  = 'default';
+      btn.innerHTML = '<span class="cspinner" style="width:13px;height:13px;border-width:2px;flex-shrink:0;"></span> Buscando...';
+    } else {
+      btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" width="13" height="13"><circle cx="6.5" cy="6.5" r="4" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> Buscar';
+      _atualizarBotaoBuscar(); // restaura estado correto conforme RGs selecionados
+    }
+  }
+
   function _renderLoading() {
     const t = document.getElementById('ctbody'); if (!t) return;
+    const ini = _dataInicio || '?'; const fim = _dataFim || '?';
+    const nSubs = _subsSel.length; const nRGs = _rgsSel.length;
+    const desc = `${nSubs} assinatura${nSubs !== 1 ? 's' : ''}${nRGs ? ` · ${nRGs} RG${nRGs !== 1 ? 's' : ''}` : ''} · ${ini} → ${fim}`;
     const _sk = w => `<td style="padding:10px;"><span class="cskel" style="width:${w};"></span></td>`;
-    t.innerHTML = Array(5).fill('').map(() => `<tr>
+    t.innerHTML = `<tr><td colspan="12" style="padding:16px 14px 10px;border-bottom:1px solid var(--border);">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="cspinner"></span>
+        <span style="font-size:12px;color:var(--text-muted);">Buscando recursos — <span style="color:var(--text-dim);">${_esc(desc)}</span></span>
+      </div>
+    </td></tr>`
+    + Array(6).fill('').map(() => `<tr>
       <td style="padding:10px 8px;"><span class="cskel" style="width:15px;height:15px;border-radius:3px;"></span></td>
       <td style="padding:10px;"><span class="cskel" style="width:75%;margin-bottom:5px;"></span><span class="cskel" style="width:50%;height:10px;"></span></td>
       ${_sk('80px')}${_sk('110px')}${_sk('70px')}${_sk('80px')}${_sk('80px')}${_sk('70px')}${_sk('70px')}${_sk('70px')}
@@ -1855,6 +1959,9 @@ const Calculadora = (() => {
           <td style="text-align:right;padding:8px 14px;">
             <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap;">${_brl(totBrl)}</div>
           </td>
+          ${_horasAdd.ativo ? `<td style="text-align:right;padding:8px 14px;">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--orange,#ff8c42);white-space:nowrap;">${_brl(_hadCustoRecurso(r,isBRL,_taxaBrl))}</div>
+          </td>` : ''}
         </tr>`;
   }
 
@@ -1879,7 +1986,8 @@ const Calculadora = (() => {
     const c = document.getElementById('ccnt');
 
     if (!lista.length) {
-      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">
+      const _emptyColspan = _horasAdd.ativo ? 10 : 9;
+      tbody.innerHTML = `<tr><td colspan="${_emptyColspan}" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">
         ${_recursos.length ? 'Nenhum recurso corresponde ao filtro.'
           : 'Nenhum recurso encontrado para os filtros selecionados.'}
       </td></tr>`;
@@ -1940,6 +2048,10 @@ const Calculadora = (() => {
             <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);">${_brl(totalGrupo)}</div>
             <div style="font-size:9px;color:var(--text-muted);">total grupo</div>
           </td>
+          ${_horasAdd.ativo ? `<td style="text-align:right;padding:8px 14px;">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--orange,#ff8c42);">${_brl(filhas.reduce((s,r)=>s+_hadCustoRecurso(r,isBRL,_taxaBrl),0))}</div>
+            <div style="font-size:9px;color:var(--orange,#ff8c42);">add. grupo</div>
+          </td>` : ''}
         </tr>`);
         if (!exp) return; // filhas não renderizadas; inseridas lazily por _toggleGrupo
       }
@@ -1949,6 +2061,26 @@ const Calculadora = (() => {
 
     tbody.innerHTML = rows.join('');
     document.querySelectorAll('.cck-grupo[data-indet="1"]').forEach(ck => { ck.indeterminate = true; });
+
+    // Coluna Adicional — mostra/esconde th e banner de resumo
+    const thAdd = document.getElementById('chad-th');
+    if (thAdd) thAdd.style.display = _horasAdd.ativo ? '' : 'none';
+    let bannerAdd = document.getElementById('chad-banner');
+    if (_horasAdd.ativo) {
+      const totalAdd = lista.reduce((s,r) => s + _hadCustoRecurso(r, isBRL, _taxaBrl), 0);
+      const hTotal = _horasAdd.hExtra * _horasAdd.dias;
+      if (!bannerAdd) {
+        bannerAdd = document.createElement('div');
+        bannerAdd.id = 'chad-banner';
+        tbody.parentElement?.parentElement?.insertBefore(bannerAdd, tbody.parentElement);
+      }
+      bannerAdd.style.cssText = 'margin-bottom:8px;padding:8px 14px;border-radius:8px;background:rgba(255,140,66,.08);border:1px solid rgba(255,140,66,.3);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
+      bannerAdd.innerHTML = `<span style="font-size:11px;color:var(--text-muted);">⏱ <strong style="color:var(--orange,#ff8c42);">${_horasAdd.hExtra}h/dia × ${_horasAdd.dias} dias</strong> = ${hTotal}h adicionais · ${lista.length} recursos</span>`
+        + `<span style="font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:700;color:var(--orange,#ff8c42);">+ ${_brl(totalAdd)}</span>`;
+    } else if (bannerAdd) {
+      bannerAdd.remove();
+    }
+
     _atualizarEstimativa();
     _atualizarCnt();
   }
@@ -2148,9 +2280,11 @@ const Calculadora = (() => {
     tabP.style.borderColor = isManual ? 'var(--border)' : 'var(--accent)';
     painH.style.display    = isManual ? '' : 'none';
     painP.style.display    = isManual ? 'none' : '';
-    // Card Horário Livre só aparece no modo Período
-    const cardHL = document.getElementById('chl-card');
-    if (cardHL) cardHL.style.display = isManual ? 'none' : '';
+    // Cards Horário Livre e Horas Adicionais só aparecem no modo Período
+    const cardHL  = document.getElementById('chl-card');
+    const cardHAD = document.getElementById('chad-card');
+    if (cardHL)  cardHL.style.display  = isManual ? 'none' : '';
+    if (cardHAD) cardHAD.style.display = isManual || !_recursos.length ? 'none' : '';
 
     if (isManual) {
       // Trocou para HORAS → limpa períodos e reseta flag para exigir novo Aplicar
@@ -2386,6 +2520,91 @@ const Calculadora = (() => {
     if (hint)  hint.style.display  = ativo ? 'none'  : 'block';
     _hlLerConfig();
     _hlAtualizarRes();
+  }
+
+  // ── Horas Adicionais ────────────────────────────────────────────────────────
+  function _hadToggle(ativo) {
+    _horasAdd.ativo = ativo;
+    const corpo = document.getElementById('chad-corpo');
+    const hint  = document.getElementById('chad-hint');
+    if (corpo) corpo.style.display = ativo ? 'block' : 'none';
+    if (hint)  hint.style.display  = ativo ? 'none'  : 'block';
+    if (ativo) _hadChange();
+    _renderRecursos();
+  }
+
+  function _hadChange() {
+    _horasAdd.hExtra = Math.max(1, parseInt(document.getElementById('chad-h-extra')?.value || '4') || 4);
+    _horasAdd.dias   = Math.max(1, parseInt(document.getElementById('chad-dias')?.value   || '10') || 10);
+    const hTotal = _horasAdd.hExtra * _horasAdd.dias;
+    const res = document.getElementById('chad-res');
+    if (res) {
+      res.innerHTML = `<strong style="color:var(--accent);">${_horasAdd.hExtra}h/dia × ${_horasAdd.dias} dias</strong>`
+        + ` = <strong style="color:var(--orange,#ff8c42);">${hTotal}h adicionais estimadas</strong>`;
+    }
+    if (_horasAdd.ativo) _renderRecursos();
+  }
+
+  function _hadCustoRecurso(r, isBRL, taxaBrl) {
+    if (!_horasAdd.ativo) return 0;
+    const hTotal = _horasAdd.hExtra * _horasAdd.dias;
+    const tipo   = r.tipo_custo || 'periodo';
+    if (tipo === 'reserva') return 0;
+    const convR     = !isBRL ? (parseFloat(r.taxa_cambio || 0) > 1 ? parseFloat(r.taxa_cambio) : taxaBrl) : 1;
+    const retailUnit = parseFloat(r.retail_price_unit || 0);
+
+    if (tipo === 'hora' || tipo === 'dia') {
+      // Prioridade 1: Price List (taxa fixa por meter_id, período-independente)
+      if (retailUnit > 0) {
+        const retailBrl = retailUnit * convR;
+        return retailBrl * hTotal;
+      }
+      // Prioridade 2: billing 30d quando período < 30 dias (taxa mais estável)
+      // Prioridade 3: billing do período selecionado (fallback)
+      // Prioridade 4: amortizado (effective_price) quando RI/SP coberto e billing=0 (RN-007)
+      const raw30d     = parseFloat(r.custo_hora_30d || 0);
+      const rawBilling = parseFloat(r.custo_hora_billing || 0);
+      const rawAmort   = r.usa_amortizado && rawBilling === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
+      const raw        = (r.usa_30d && raw30d > 0) ? raw30d : (rawBilling > 0 ? rawBilling : rawAmort);
+      return (isBRL ? raw : raw * convR) * hTotal;
+    }
+
+    // periodo: storage, disco, bandwidth
+    // Prioridade 1: Price List mensal (meter_id fixo)
+    if (retailUnit > 0) {
+      const retailMesBrl = retailUnit * convR;
+      return (retailMesBrl / 720) * hTotal;
+    }
+    // Prioridade 2: billing 30d quando período < 30 dias; senão billing do período
+    const diasC  = parseInt(r.dias_ativos || 1) || 1;
+    const raw30d = parseFloat(r.custo_hora_30d || 0);
+    const rawH   = (r.usa_30d && raw30d > 0)
+      ? raw30d
+      : (parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / diasC * 30)) / 720;
+    return (isBRL ? rawH : rawH * convR) * hTotal;
+  }
+
+  function _hadAtualizarBaseline() {
+    const el = document.getElementById('chad-baseline');
+    if (!el) return;
+    if (!_recursos.length) { el.textContent = ''; return; }
+    // Calcula horas totais dos recursos tipo hora/dia
+    const isBRL = (_recursos[0]?.moeda || 'BRL') === 'BRL';
+    const horasList = _recursos
+      .filter(r => (r.tipo_custo === 'hora' || r.tipo_custo === 'dia'))
+      .map(r => parseFloat(r.horas_reais || 0))
+      .filter(h => h > 0);
+    const hTotal = horasList.length ? Math.round(horasList.reduce((s,h) => s + h, 0) / horasList.length) : 0;
+    // Dias do período
+    const ini = _dataInicio ? new Date(_dataInicio + 'T12:00:00') : null;
+    const fim = _dataFim    ? new Date(_dataFim    + 'T12:00:00') : null;
+    const dias = ini && fim ? Math.max(1, Math.round((fim - ini) / 86400000) + 1) : 0;
+    const hDia = dias > 0 && hTotal > 0 ? (hTotal / dias).toFixed(1) : '—';
+    el.innerHTML = dias
+      ? `Período: <strong style="color:var(--text);">${dias} dias</strong> · `
+        + `Média: <strong style="color:var(--accent);">${hDia}h/dia</strong>`
+        + (hTotal > 0 ? ` · ${hTotal}h registradas` : '')
+      : 'Busque recursos para ver o baseline do período.';
   }
 
   // Chamado quando mudam inputs de hora ou dias
@@ -2670,7 +2889,8 @@ const Calculadora = (() => {
       + '<th style="text-align:right;padding:3px 0;color:var(--text-muted);font-size:10px;font-weight:600;">Valor</th>'
       + '</tr></thead><tbody>';
     for (const [cat, info] of _catPrev.entries()) {
-      const horasCell = info.allPeriodo ? '/mês' : info.horas.toLocaleString('pt-BR') + ' h';
+      // info.horas é a soma — divide por count para mostrar horas por recurso (slider global)
+      const horasCell = info.allPeriodo ? '/mês' : Math.round(info.horas / Math.max(info.count, 1)).toLocaleString('pt-BR') + ' h';
       html += '<tr style="border-bottom:1px solid rgba(147,51,234,.07);">'
         + '<td style="padding:5px 0;color:var(--text);font-weight:500;">' + _esc(cat) + '</td>'
         + '<td style="text-align:right;padding:5px 6px;color:var(--text-muted);">' + info.count + '</td>'
@@ -2767,8 +2987,10 @@ const Calculadora = (() => {
       const _plRef = parseFloat(r.retail_price_hora || 0);
       const _temPL = _plRef > 0;
       const _corEst = r.databricks_valida ? 'td-blue' : (r.fonte_estimado === 'price_list' || (_temPL && tc !== 'reserva')) ? 'td-green' : '';
+      const skuTag = r.sku ? '<div style="font-size:6.5pt;color:#888;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + _esc(r.sku) + '</div>' : '';
+      const uomTag = r.uom ? '<div style="font-size:6pt;color:#aaa;margin-top:1px;font-family:monospace;white-space:nowrap;">' + _esc(r.uom) + '</div>' : '';
       return '<tr>'
-        + '<td class="td-nm">' + _esc(r.nome) + '</td>'
+        + '<td class="td-nm">' + _esc(r.nome) + skuTag + uomTag + '</td>'
         + '<td class="td-qty">' + quantCell + '</td>'
         + '<td class="td-brl ' + _corEst + '">' + _brl(r.estimado_brl) + '</td>'
         + '</tr>';
@@ -2777,13 +2999,15 @@ const Calculadora = (() => {
     // Custos fixos mensais — linha separadora dentro da mesma tabela
     const linhasFixo = itensFixos.length > 0
       ? '<tr class="tr-sep-fix"><td colspan="3">🔒 Custos Fixos Mensais — cobrado independente das horas do projeto</td></tr>'
-        + itensFixos.map(r =>
-          '<tr>'
-          + '<td class="td-nm" style="color:#c05621;">' + _esc(r.nome) + '</td>'
-          + '<td class="td-qty" style="color:#c05621;">Fixo/m\xEAs</td>'
-          + '<td class="td-brl" style="color:#c05621;">' + _brl(r.estimado_brl || r.custo_mes || 0) + '</td>'
-          + '</tr>'
-        ).join('')
+        + itensFixos.map(r => {
+          const skuF = r.sku ? '<div style="font-size:6.5pt;color:#c05621;opacity:.7;margin-top:1px;">' + _esc(r.sku) + '</div>' : '';
+          const uomF = r.uom ? '<div style="font-size:6pt;color:#c05621;opacity:.5;margin-top:1px;font-family:monospace;white-space:nowrap;">' + _esc(r.uom) + '</div>' : '';
+          return '<tr>'
+            + '<td class="td-nm" style="color:#c05621;">' + _esc(r.nome) + skuF + uomF + '</td>'
+            + '<td class="td-qty" style="color:#c05621;">Fixo/m\xEAs</td>'
+            + '<td class="td-brl" style="color:#c05621;">' + _brl(r.estimado_brl || r.custo_mes || 0) + '</td>'
+            + '</tr>';
+        }).join('')
         + '<tr class="tr-sub-fix"><td colspan="2" style="color:#c05621;font-weight:700;">🔒 Total Infra Fixa / m\xEAs</td>'
         + '<td style="text-align:right;font-family:\'IBM Plex Mono\',monospace;font-weight:700;color:#c05621;">' + _brl(totalFixoMes) + '</td></tr>'
       : '';
@@ -3030,7 +3254,9 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     const itens       = _estimativa.resultados;
 
     // Salvar estimativa no banco (fire-and-forget)
-    _api('POST', '/estimativas', {
+    // Portal público: usa endpoint sem auth; autenticado: usa /api/estimativas absoluto
+    const _estimPath = _modoPublico ? (_apiBase + '/estimativas') : '/api/estimativas';
+    _api('POST', _estimPath, {
       projeto_id:      projetoId || null,
       projeto_nome:    nomeProjeto,
       numero:          invoiceNum,
@@ -3592,7 +3818,9 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         const isHora = tipo2 === 'hora' || tipo2 === 'dia';
         const horas  = _selecionados[rid] || 720;
         const choraRaw  = parseFloat(r.custo_hora_billing || 0);
-        const chora     = isBRL ? choraRaw : choraRaw * convR2;
+        // RN-007: fallback amortizado para RI/SP coberto (custo_hora_billing=0, effective_price>0)
+        const _amortRaw2 = r.usa_amortizado && choraRaw === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
+        const chora     = (choraRaw > 0 ? choraRaw : _amortRaw2) * convR2;
         const _diasP    = parseInt(r.dias_ativos || 1) || 1;
         const mesRaw    = parseFloat(r.custo_mes_billing) ||
                           (parseFloat(r.total_billing || 0) / _diasP * 30);
@@ -3606,6 +3834,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           return {
             resource_id:      rid,
             nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+            sku:              r.meter_categories || '',
             categoria:        r.categoria || '',
             consumed_service: r.consumed_service || '',
             resource_group:   r.resource_group_name || '',
@@ -3635,14 +3864,16 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         const _dbValida = _dbInf2 && _dbInf2.valida;
         const billRec2  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
         const taxaEf2   = _dbValida && _dbInf2.hDriver > 0 ? billRec2 / _dbInf2.hDriver : 0;
+        // RN-DB-001 tem prioridade sobre PL para hora: cluster rate captura custo real do workspace
         const estimado = (tipo2 === 'periodo')
           ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
-          : retailHr > 0 ? retailHr * horas
-          : _dbValida ? taxaEf2 * horas : chora * horas;
-        const temPLR = retailHr > 0 || retailMesR > 0;
+          : _dbValida ? taxaEf2 * horas
+          : retailHr > 0 ? retailHr * horas : chora * horas;
+        const temPLR = !_dbValida && (retailHr > 0 || retailMesR > 0);
         return {
           resource_id:      rid,
           nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+          sku:              r.meter_categories || '',
           categoria:        r.categoria || '',
           consumed_service: r.consumed_service || '',
           resource_group:   r.resource_group_name || '',
@@ -3784,7 +4015,12 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const convR    = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
       const horas    = _selecionados[rid] || 720;
       const choraRaw  = parseFloat(r.custo_hora_billing || 0);
-      const chora     = choraRaw * convR;
+      // RN-007: RI/SP coberto — custo_in_billing=0; usa taxa_hora_rate (effective_price amortizado)
+      const _taxaAmort = r.usa_amortizado && choraRaw === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
+      const chora     = (choraRaw > 0 ? choraRaw : _taxaAmort) * convR;
+      // RN-006: Cost ÷ Qty — taxa por unidade nativa do UoM (para exibição em periodo/mes)
+      const custo_uom_raw2 = parseFloat(r.custo_uom_billing || 0);
+      const custo_uom_brl2 = isBRL ? custo_uom_raw2 : custo_uom_raw2 * convR;
       const diasAtiv  = parseInt(r.dias_ativos || 1) || 1;
       const totalBill = parseFloat(r.total_billing || 0);
       // custo_mes_billing: campo do banco ou fallback total_billing / dias * 30
@@ -3862,6 +4098,10 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         // Price List disponível para disco/storage: mostra PL/mês como base
         col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
         col1Tip = ' title="Preço on-demand mensal do Azure Price List — base da estimativa"';
+      } else if (tipo === 'periodo' && (r.unidade||'').toLowerCase().includes('dbu')) {
+        // Databricks DBU software — label específico; custo_uom_brl2 já tem R$/DBU
+        col1Lbl = '⚡ DBU/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
+        col1Tip = ' title="Custo mensal proporcional dos DBUs Databricks (software licensing). Taxa unitária: ' + _brl(custo_uom_brl2) + '/DBU"';
       } else if (tipo === 'periodo') {
         // Sem PL: usa custo mensal do billing como base proporcional → /mês*
         col1Lbl = 'Custo/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
@@ -3872,6 +4112,10 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         col1Tip = ' title="Preço on-demand do Azure Price List — base da estimativa"';
       } else if (tipo === 'dia') {
         col1Lbl = 'Custo/h·dia'; col1Val = _brl(chora); col1Suf = '/h';
+      } else if (r.usa_amortizado && tipo === 'hora' && chora > 0) {
+        // RN-007: VM coberta por RI/SP — effective_price (amortizado) como base
+        col1Lbl = '⚡ Amort./h'; col1Val = _brl(chora); col1Suf = '/h';
+        col1Tip = ' title="Custo amortizado: VM coberta por Reserva ou Savings Plan — effective_price \xD7 qty \xF7 horas = taxa proporcional real"';
       } else {
         col1Lbl = 'Custo/h'; col1Val = _brl(chora); col1Suf = '/h';
       }
@@ -3908,6 +4152,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         + (svc ? '<span style="font-size:10px;background:var(--bg-card);color:var(--text-dim);border-radius:4px;padding:2px 7px;border:1px solid var(--border);">' + svc + '</span>' : '')
         + (usoParcial ? '<span style="font-size:10px;background:rgba(255,140,66,.15);color:var(--orange,#ff8c42);border-radius:4px;padding:2px 7px;" title="Recurso ficou ligado menos de 55% do m\xEAs no per\xEDodo importado">⚠ Uso parcial</span>' : '')
         + (_dbValidaOv ? '<span style="font-size:10px;background:rgba(77,166,255,.12);color:var(--blue,#4da6ff);border-radius:4px;padding:2px 7px;" title="Custo estimado pela taxa proporcional do workspace Databricks">⚡ Databricks</span>' : '')
+        + (!_dbValidaOv && (r.unidade||'').toLowerCase().includes('dbu') ? '<span style="font-size:10px;background:rgba(77,166,255,.12);color:var(--blue,#4da6ff);border-radius:4px;padding:2px 7px;" title="Databricks DBU — cobrança de software (licenciamento de runtime). Taxa: ' + _brl(custo_uom_brl2) + '/DBU">⚡ DBU</span>' : '')
         + '</div>'
 
         // Linha de metadados (unidade · qty · horas_reais · pricing_model)
@@ -3939,6 +4184,11 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         + (!_dbValidaOv && temPL && isHora  ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(chora) + '/h</div>' : '')
         + (!_dbValidaOv && temPL && !isHora ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(mesBrl) + '/mês</div>' : '')
         + (tipo === 'reserva' && retailHoraRsv > 0 ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;" title="Preço on-demand do Price List (sem reserva)">on-dem:\xA0📋\xA0' + _brl(retailHoraRsv) + '/h</div>' : '')
+        // RN-006: Cost ÷ Qty — taxa por unidade nativa (período/mês sem PL)
+        + (custo_uom_brl2 > 0 && (tipo === 'periodo' || tipo === 'mes') && !temPL
+           ? '<div style="font-size:8px;color:var(--orange,#ff8c42);opacity:.85;margin-top:3px;font-family:\'IBM Plex Mono\',monospace;white-space:nowrap;border-top:1px solid rgba(255,140,66,.12);padding-top:2px;" title="Cost \xF7 Qty = taxa real por unidade de medida — auditoria FinOps">'
+             + _brl(custo_uom_brl2) + '\xA0/\xA0' + _esc((r.unidade||'').replace(/^\d+\s+/,'').trim()||'un.') + '</div>'
+           : '')
         + '</div>'
 
         + '<div style="text-align:center;background:var(--bg-card);border-radius:6px;padding:6px 4px;">'
@@ -4263,6 +4513,12 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const uomFator   = Math.max(parseFloat((r.unidade || '').replace(/[^0-9]/g, '') || '1'), 1);
       const h          = horasR > 0 ? Math.round(horasR) : Math.round(totalQty * uomFator);
       const qLinha     = _qLinha(h, 'h consumidas');
+      // RN-007: RI/SP coberto — cost_in_billing=0; usa effective_price (amortizado)
+      const taxaAmortH = parseFloat(r.taxa_hora_rate || 0) * convR;
+      const precoEfet  = raw > 0 ? preco : (r.usa_amortizado && taxaAmortH > 0 ? taxaAmortH : preco);
+      const amortBadge = r.usa_amortizado && raw === 0 && taxaAmortH > 0
+        ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Custo amortizado: VM coberta por Reserva ou Savings Plan — effective_price × qty ÷ qty = taxa real proporcional">⚡\xA0amort./h</div>'
+        : '';
       // retail_price_unit já normalizado pelo SQL — só converte moeda
       const retailUnit = parseFloat(r.retail_price_unit || 0);
       const retailHora = retailUnit > 0 ? retailUnit * convR : 0;
@@ -4275,10 +4531,30 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const plLinha    = retailHora > 0
         ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(retailHora) + '/h</div>'
         : '';
-      return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;"' + moedaTip + '>' + _brl(preco) + '</div>'
-           + '<div style="font-size:9px;color:var(--text-muted);">/h cobrado</div>'
+      // Badge 📅 30d: quando não há PL e o período tem < 30 dias (taxa mais estável)
+      const _30dBadgeH = r.usa_30d && !retailHora
+        ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Média dos últimos 30 dias do billing — período selecionado tem menos de 30 dias">📅\xA030d</div>'
+        : '';
+      // RN-DB-001: contexto de cluster na tabela de billing (VMs em databricks-rg-*)
+      const _dbCtxH   = _dbInfoParaRecurso(r);
+      const _dbCtxVld = _dbCtxH && _dbCtxH.valida;
+      const _billBrlH = isBRL ? parseFloat(r.total_billing || 0) : parseFloat(r.total_billing || 0) * convR;
+      const _taxaClH  = _dbCtxVld ? _billBrlH / _dbCtxH.hDriver : 0;
+      const clusterLinha = _dbCtxVld
+        ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(77,166,255,.15);padding-top:2px;" title="Taxa proporcional do workspace: billing_vm \xF7 H_driver = contribui\xE7\xE3o desta VM ao custo/h do cluster">'
+          + '⚡\xA0cluster:\xA0' + _brl(_taxaClH) + '/h</div>'
+        : '';
+      // Label de sublinha: DBU-Hour mostra ⚡ /DBU·h; VM normal mostra /h cobrado
+      const horaSubLabel = uom.includes('dbu')
+        ? '<div style="font-size:9px;color:var(--blue,#4da6ff);">⚡\xA0/DBU\xB7h</div>'
+        : '<div style="font-size:9px;color:var(--text-muted);">/h cobrado</div>';
+      return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;"' + moedaTip + '>' + _brl(precoEfet) + '</div>'
+           + horaSubLabel
+           + amortBadge
            + dBadge
+           + _30dBadgeH
            + plLinha
+           + clusterLinha
            + qLinha;
     }
 
@@ -4295,10 +4571,26 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const plLinha    = retailHora > 0
         ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(retailHora) + '/h</div>'
         : '';
+      const _30dBadgeD = r.usa_30d && !retailHora
+        ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Média dos últimos 30 dias do billing — período selecionado tem menos de 30 dias">📅\xA030d</div>'
+        : '';
       return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;"' + moedaTip + '>' + _brl(preco) + '</div>'
            + '<div style="font-size:9px;color:var(--text-muted);" title="UoM diária ÷ 24">/h (dia)</div>'
            + dBadge
+           + _30dBadgeD
            + plLinha
+           + qLinha;
+    }
+
+    // Databricks DBU software — R$/DBU como taxa principal (Cost ÷ Qty)
+    // UoM "1 DBU": tipo='periodo'; R$/DBU é a taxa auditável (Cost÷Qty da RN-006)
+    if (uom.includes('dbu')) {
+      const custo_uom_raw = parseFloat(r.custo_uom_billing || 0);
+      const custo_uom_brl = isBRL ? custo_uom_raw : custo_uom_raw * convR;
+      const qLinha = _qLinha(totalQty, 'DBUs', 'var(--blue,#4da6ff)');
+      return '<div style="' + mono + 'font-size:11px;color:var(--blue,#4da6ff);white-space:nowrap;"' + moedaTip + '>'
+           + (custo_uom_brl > 0 ? _brl(custo_uom_brl) : '—') + '</div>'
+           + '<div style="font-size:9px;color:var(--blue,#4da6ff);">⚡\xA0/DBU cobrado</div>'
            + qLinha;
     }
 
@@ -4311,6 +4603,13 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     // Remove o prefixo "1 " do UoM para exibir só a unidade: "1 GB" → "GB", "1 Unit" → "Unit"
     const uomLabel = (r.unidade || '').replace(/^\d+\s+/, '').trim() || 'un.';
     const qLinha   = _qLinha(totalQty, _esc(uomLabel), 'var(--orange,#ff8c42)');
+    // RN-006: Cost ÷ Qty = taxa audível por unidade nativa (regra de negócio FinOps)
+    const custo_uom_raw = parseFloat(r.custo_uom_billing || 0);
+    const custo_uom_brl = isBRL ? custo_uom_raw : custo_uom_raw * convR;
+    const uomRateLinha  = custo_uom_brl > 0
+      ? '<div style="font-size:9px;color:var(--orange,#ff8c42);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,140,66,.15);padding-top:2px;" title="Cost \xF7 Qty: taxa real por unidade de medida — valor infalível para auditar a fatura">'
+        + _brl(custo_uom_brl) + '\xA0/\xA0' + _esc(uomLabel) + '</div>'
+      : '';
     // Price List para periodo (disco, storage…): retail_price_unit já em BRL
     // retail_price_unit já normalizado pelo SQL — só converte moeda
     const _plRetail = parseFloat(r.retail_price_unit || 0);
@@ -4325,10 +4624,15 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     const plMesLinha = _plMes > 0
       ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand mensal (Price List Azure)">📋\xA0' + _brl(_plMesDia) + '/dia</div>'
       : '';
+    const _30dBadgePer = r.usa_30d && !_plMes
+      ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Média dos últimos 30 dias do billing — período selecionado tem menos de 30 dias">📅\xA030d</div>'
+      : '';
     return '<div style="' + mono + 'font-size:11px;color:var(--orange,#ff8c42);white-space:nowrap;"' + moedaTip + '>' + _brl(custoDia) + '</div>'
          + '<div style="font-size:9px;color:var(--orange,#ff8c42);" title="Cobrado por consumo (GB, Req…) — custo di\xE1rio = custo mensal \xF7 30">/dia cobrado</div>'
          + dBadgePer
+         + _30dBadgePer
          + plMesLinha
+         + uomRateLinha
          + qLinha;
   }
 
@@ -4336,7 +4640,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
            selecionarTodos, deselecionarTodos, aplicarHorasGlobal, calcular,
            _check, _checkAll, _checkGrupo, _toggleGrupo, _horasChange, _setH, _onSlider, _onHorasInput,
            _toggleDropdown, _toggleOpcao, _filtrarDropdown,
-           _selecionarTodosDropdown, _limparDropdown, _confirmarSub, _confirmarRg,
+           _selecionarTodosDropdown, _limparDropdown, _confirmarSub, _confirmarRg, _atualizarBotaoBuscar,
            _onAdicionaisChange, _salvarTaxasPadrao, _resetarTaxas,
            _setModoHoras, _calcHorasPeriodo, _sincDataFim, _sincHoraFim, _incluirPeriodo, _removerPeriodo,
            abrirPurge, fecharPurge, executarPurge,
@@ -4344,6 +4648,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
            _diagCache, _forcarRefreshCache,
            _hlToggle, _hlChange, _hlSalvarPadrao, _hlLimparPadrao,
+           _hadToggle, _hadChange,
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,

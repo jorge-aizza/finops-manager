@@ -22,10 +22,11 @@ node encrypt-env.js run       # load .env.enc and start server
 ## File Map
 
 ```
-server.js          (~5 770 lines)  All API routes, auth, DB init, middleware, Excel export
-app.js             (~4 865 lines)  Setup wizard, login, projects/actions CRUD, reservas, session mgmt
-calculadora.js     (~3 727 lines)  Azure cost calculator — self-contained IIFE
-index.html         (~3 506 lines)  SPA shell — all views toggled by showView()
+server.js          (~6 500 lines)  All API routes, auth, DB init, middleware, Excel export
+app.js             (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
+calculadora.js     (~5 380 lines)  Azure cost calculator — self-contained IIFE
+index.html         (~3 650 lines)  SPA shell — all views toggled by showView()
+portal.html        (492 lines)     Portal público — calculadora sem autenticação (serve /portal.html)
 styles.css         (~1 430 lines)  Dark-mode CSS, Vivo purple theme
 encrypt-env.js     (139 lines)     AES-256-GCM .env encryption utility
 favicon.svg                        App icon (SVG)
@@ -58,7 +59,7 @@ Single-process Node.js + Express backend serving a vanilla-JS SPA. No build step
 4. `isConfigured()` — checks for `.finops_setup`; if absent, serves only the setup wizard
 5. `initDB()` — creates all core tables with `IF NOT EXISTS`
 6. `ensureAzureCostsTable()` — creates `azure_costs` + 11 indexes (incl. functional)
-7. `ensurePriceListTable()` — creates `azure_price_list` + indexes (incl. functional on `LOWER(meter_id)`)
+7. `ensurePriceListTable()` — creates `azure_price_list` + indexes + materialized views `pl_best_mv` / `pl_sku_mv` (DROP + CREATE a cada startup)
 8. `ensureAzureColetaTable()` — creates `azure_coleta_historico` + `azure_coleta_sps`
 9. `_refreshAzureCache()` — rebuilds `azure_subs_cache` + `azure_rg_cache` in background
 10. `_iniciarAgendador()` — starts automated Azure cost collection scheduler
@@ -92,6 +93,11 @@ Tables created by `initDB()` at startup with `IF NOT EXISTS`. No migration frame
 Schema changes go directly in `initDB()` — must be idempotent.
 
 **Core tables:** `perfis`, `permissoes`, `usuarios`, `sessoes`, `projetos`, `acoes_finops`
+- `projetos` has `status VARCHAR(20) DEFAULT 'Ativo'` — migration idempotent via `ADD COLUMN IF NOT EXISTS`
+
+**Portal tables:**
+- `portal_config` — chave/valor JSON: `key='config'`, `value=JSON`. Campos: `ativo`, `titulo`, `descricao`, `subscription_ids[]`, `resource_groups[]`, `dominios_aceitos[]`, `taxa_imposto`, `taxa_cond`, `horario_livre`, `solicitar_identificacao`
+- `portal_acessos` — log de acessos do portal público: `id`, `nome`, `email`, `ip`, `user_agent`, `acessado_em`
 
 **Reservas table:** `reservas_cloud`
 - Columns: `id`, `cloud`, `nome_reserva`, `tipo_escopo`, `subscription_id`, `resource_group_name`, `tipo_recurso`, `instancia`, `quantidade`, `prazo`, `opcao_pagamento`, `custo_total`, `custo_mensal`, `data_inicio`, `data_vencimento`, `status`, `observacoes`, `criado_por`, `criado_em`, `atualizado_em`
@@ -105,16 +111,23 @@ Schema changes go directly in `initDB()` — must be idempotent.
 - `azure_rg_cache` — pre-aggregated RG list (subscription_id + resource_group_name_upper PK)
 
 **Price List table:** `azure_price_list` — created by `ensurePriceListTable()`
-- Source: Azure Retail Prices API (`prices.azure.com/api/retail/prices`)
-- Sync: global USD only (`currencyCode eq 'USD'`); `arm_region_name = 'global'` sentinel
+- Source: Azure Retail Prices API (`prices.azure.com/api/retail/prices?currencyCode=USD`)
+- Sync: USD somente; `arm_region_name` armazena a região real do item (ex: `brazilsouth`, `eastus`)
+- Coluna `retail_price_brl NUMERIC(20,10)` — preço em BRL quando importado via CSV com essa coluna
 - UPSERT conflict key: `(meter_id, type, reservation_term, currency_code, arm_region_name)`
 - `reservation_term` is `NOT NULL DEFAULT ''` — JOIN must use `= ''` not `IS NULL`
-- Key indexes: `LOWER(meter_id)` functional index + partial index `idx_pricelist_join` (WHERE type IN Consumption/DevTest AND reservation_term='')
-- ON CONFLICT: `GREATEST(EXCLUDED.retail_price, current)` — nunca sobrescreve preço válido com 0
-- JOIN via CTE `pl_best` (DISTINCT ON LOWER(meter_id)) — hash join, executa uma vez por query
-- JOIN condition: `LOWER(pl.meter_id) = LOWER(base._meter_id) AND type IN ('Consumption','DevTestConsumption') AND reservation_term = ''`
+- ON CONFLICT: `GREATEST(EXCLUDED.retail_price, current)` — nunca sobrescreve preço válido com 0; `retail_price_brl` usa `COALESCE(EXCLUDED, current)` para preservar valor existente
+- `TRUNCATE TABLE azure_price_list` antes de cada sync (apaga **todas** as moedas — dados BRL importados via CSV são perdidos no próximo sync USD)
+- Key indexes: `LOWER(meter_id)` functional + partial `idx_pricelist_join` + partial `idx_pricelist_sku_svc` (sku+service)
 
-**Novos endpoints (v2.2):**
+**Materialized views (recriadas a cada startup):**
+- `pl_best_mv` — DISTINCT ON `LOWER(meter_id)`, prioriza `type='Consumption'` e `arm_region_name='brazilsouth'`. Colunas: `meter_id_lower`, `currency_code`, `retail_price_norm`, `retail_price_brl_norm` (÷ fator UoM já aplicado)
+- `pl_sku_mv` — DISTINCT ON `(LOWER(meter_name), LOWER(meter_category))`, mesmos campos. Fallback quando meter_id não casa
+- `REFRESH MATERIALIZED VIEW CONCURRENTLY` disparado após cada sync; fallback sem CONCURRENTLY se o índice único ainda não existir
+- JOIN primário: `pl_best_mv pl ON pl.meter_id_lower = LOWER(base._meter_id)`
+- JOIN fallback: `pl_sku_mv pls ON pl.meter_id_lower IS NULL AND pls.meter_name_lower = LOWER(base.meter_categories) AND pls.meter_cat_lower = LOWER(base.categoria)` — ativa quando meter_id exato não casa; usa `meter_name` + `meter_category` que são os mesmos namespaces do billing export
+
+**Endpoints de diagnóstico:**
 ```
 GET  /api/azure-costs/diag          — diagnóstico: contagens, colunas, amostra
 POST /api/azure-costs/refresh-cache — força rebuild cache de dropdowns
@@ -188,17 +201,21 @@ PATCH /api/azure-coleta/sps/:id/padrao — set SP as default
 
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
-- No `armRegionName` filter — global sync (filter caused API to return 0 items)
+- URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
+- `arm_region_name` armazena a região real do item da API (não mais o sentinel `'global'`)
+- Prioridade na MV: `brazilsouth` > outras regiões
 - Pagination via `NextPageLink` until exhausted; HTTP 400 "Skip value >= total" treated as end-of-data
-- Stores `arm_region_name = 'global'` as sentinel for all items
-- ON CONFLICT uses `GREATEST(EXCLUDED.retail_price, current)` — never overwrites valid price with 0
+- ON CONFLICT usa `GREATEST(EXCLUDED.retail_price, current)` — never overwrites valid price with 0
 - Skips items where `retailPrice = 0 AND unitPrice = 0` (free tier / regions without pricing)
-- `DELETE WHERE currency_code = 'USD'` before each sync — full replacement
+- `TRUNCATE TABLE azure_price_list` antes de inserir — apaga **todas** as moedas (incluindo BRL de CSV anterior)
+- Após COMMIT: `REFRESH MATERIALIZED VIEW CONCURRENTLY pl_best_mv` + `pl_sku_mv`
 
 `_importPriceListFromCSV(csvPath, filename, clearBefore)` — imports CSV/TSV/ZIP/Parquet.
 - `clearBefore=true` (upload manual): `TRUNCATE azure_price_list` before inserting
 - `clearBefore=false` (Storage blob): UPSERT incremental
-- Same GREATEST logic for retail_price conflicts
+- ZIP: extrai cada entrada com streaming (evita OOM em arquivos grandes); `clearBefore` aplicado só na primeira entrada
+- Suporta coluna `retail_price_brl` no CSV — armazenada na coluna homônima da tabela
+- ON CONFLICT: `GREATEST` para `retail_price`, `COALESCE(EXCLUDED, current)` para `retail_price_brl`
 
 **Price List coverage cache (`_plCobCache`):** computed in background every 5 min.
 - Counts billing meter_ids that have a match in `azure_price_list` (Consumption/DevTest)
@@ -220,8 +237,27 @@ POST /api/price-list/reset-cb      — reset circuit breaker
 
 ### Calculadora module
 `calculadora.js` — IIFE `const Calculadora = (() => { ... })()`.
-Exposes public API consumed by `onclick` in `index.html`. State is module-private.
-Entry point: `Calculadora.init()`.
+Exposes public API consumed by `onclick` in `index.html` and by `portal.html`. State is module-private.
+Entry point: `Calculadora.init(opts?)`.
+
+```javascript
+Calculadora.init({
+  apiBase:       '/api/public/calculadora', // troca base de API (portal público)
+  publico:       true,                      // desativa import/diagnóstico (features que requerem auth)
+  defaultConfig: { taxa_imposto, taxa_cond, horario_livre } // config vinda do servidor
+})
+```
+
+**State variables relevantes:**
+```javascript
+_apiBase     = '/api/calculadora'  // sobrescrito pelo portal público
+_modoPublico = false               // desativa UI de import quando true
+_horarioLivre = { ativo, inicio, fim, dias }  // janela de horas sem cobrança
+_dbTaxaMap   = new Map()   // rg_lower → { taxa, valida, totalBrl, hDriver, totalHoras, recursos }
+_managedRgMap = new Map()  // rg_upper → { managed_type:'databricks'|'aks', managed_label }
+_filtroTipos = new Set()   // tipos selecionados no chip-bar (vazio = todos)
+_rgTotalMap  = new Map()   // rg_upper → total billing do período
+```
 
 **Filter flow:**
 subscription dropdown → confirm OK → RG dropdown → confirm OK → date range → Buscar
@@ -232,8 +268,22 @@ subscription dropdown → confirm OK → RG dropdown → confirm OK → date ran
 reserva  → charge_type IN ('Purchase','RoundTrustBill') AND pricing_model = 'Reservation'
 hora     → unit_of_measure ILIKE '%hour%' OR '%hora%'
 dia      → unit_of_measure ILIKE '%day%'
+mes      → unit_of_measure ILIKE '%month%' (excl. GB/TiB — ex: serviços faturados por mês)
 periodo  → todos os demais (disco, storage, bandwidth, etc.)
 ```
+
+**Chip-bar de tipos** (`#ctipos-bar`): aparece quando há ≥ 2 tipos de recurso no resultado. `_tipoRecurso(r)` classifica em: `VMs`, `Discos`, `Storage`, `Databricks`, `AKS`, `SQL`, `App Service`, `Rede`, `Rede/CDN`, `Load Balancer`, `Key Vault`, `Monitoramento`, `Reservas`, `Outros`. `_filtroTipos` (Set) controla quais tipos estão ativos. Chip `Databricks` agrupa **ambos os streams**: VMs de infra em `databricks-rg-*` (`consumed_service = Microsoft.Compute`) E linhas de software DBU (`consumed_service = Microsoft.Databricks`) — a detecção é `svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-')`.
+
+**Grupos de recursos — lazy rendering:**
+- Grupos colapsados por padrão (`_expandidos[baseId] === true` para expandido; default = colapsado)
+- `_toggleGrupo(gIdx)` insere/remove filhas via DOM sem reconstruir a tabela inteira
+- `_gBases[]` mapeia índice numérico → baseId (reconstruído a cada `_renderRecursos`)
+- `_htmlFilhaRow(r, gIdx, ...)` — função compartilhada por render inicial e lazy expand
+
+**RG gerenciados — `_detectManagedRg(name)` (server.js):**
+- `DATABRICKS-RG-*` → `managed_type: 'databricks'`, `managed_label: workspace`
+- `MC_*` → `managed_type: 'aks'`, `managed_label: cluster`, `managed_region`
+- Retornado nos endpoints de resource-groups; armazenado em `_managedRgMap` no cliente
 
 **Custo/hora billing — 4 níveis de prioridade (SQL):**
 ```
@@ -250,6 +300,50 @@ taxa_hora         = custo_mes_billing ÷ 720      ← rateio proporcional ao uso
 estimado          = taxa_hora × horas_slider
 ```
 Usado para **chargeback de projeto**: aloca custo proporcional às horas selecionadas.
+
+**RN-006 — Cost ÷ Qty = taxa por unidade nativa (`custo_uom_billing`):**
+```sql
+custo_uom_billing = ROUND(SUM(cost_in_billing_currency) / NULLIF(SUM(quantity), 0), 8)
+```
+- Dá o preço real por unidade de medida nativa: R$/GB, R$/DBU, R$/10K tx, etc.
+- Valor infalível para auditar a fatura — independente de desconto, reserva ou período selecionado
+- Exibição na **tabela billing** (`_custoHora`):
+  - `hora`/`dia`: não exibido diretamente (custo/h já é o rate nativo)
+  - `periodo`/`mes` (storage, bandwidth): linha laranja secundária `R$/GB`, `R$/10K`, etc.
+  - `periodo` com UoM contendo `DBU`: exibido como **valor principal** em azul `⚡ /DBU cobrado`
+- Exibição nos **cards de estimativa**: linha secundária laranja em col1 para `periodo`/`mes` sem PL match
+
+**RN-007 — Amortizado para RI/SP (`usa_amortizado` + `taxa_hora_rate`):**
+```sql
+usa_amortizado = (SUM(cost_in_billing_currency) = 0 AND SUM(effective_price × qty) > 0)
+taxa_hora_rate = SUM(effective_price × qty × exchange_rate_pricing_to_billing)
+                 / NULLIF(SUM(qty) × fator_UoM, 0)
+```
+- VMs cobertas por Reserva ou Savings Plan têm `cost_in_billing_currency = 0` (custo já pago na compra da reserva)
+- `taxa_hora_rate` = custo amortizado real via `effective_price` — o Azure distribui o valor da reserva por hora
+- Fallback em **todos** os pontos de UI: quando `custo_hora_billing = 0` e `usa_amortizado = true`, usa `taxa_hora_rate`
+- Badge `⚡ amort./h` na tabela billing · `⚡ Amort./h` no col1 dos cards de estimativa
+- `_hadCustoRecurso` (Horas Adicionais) também usa o fallback amortizado
+
+**Databricks — dois streams de billing independentes:**
+```
+Stream 1 — Infraestrutura (VMs do cluster):
+  resource_group = databricks-rg-{workspace}   ← managed RG criado automaticamente
+  consumed_service = Microsoft.Compute
+  meter_category   = Virtual Machines
+  unit_of_measure  = "1 Hour"
+  → custo/h via RN-DB-001 (soma_h_driver) · chip-bar: Databricks
+
+Stream 2 — Software (DBUs — Databricks Units):
+  resource_group = workspace RG (user-defined)
+  consumed_service = Microsoft.Databricks
+  meter_category   = Azure Databricks
+  unit_of_measure  = "1 DBU" (tipo=periodo) | "DBU-Hour" (tipo=hora)
+  → custo/DBU via RN-006 (custo_uom_billing) · chip-bar: Databricks
+```
+Os dois streams estão em RGs **sem chave de join direta** no billing export. `taxa_cluster` (RN-DB-001) cobre apenas infra (Stream 1). Custo total real/h = `taxa_cluster + (total_DBU_cost / soma_h_driver)` — requer adição manual ou cross-RG join por workspace name (não implementado por fragilidade).
+
+⚠️ `estimado_DBU = custo_mes_billing / 720 × horas` usa hora de **calendário** (assume 24h/dia). Para all-purpose clusters (24/7) = exato; para job clusters subestima o custo/h real (divide por mais horas que o cluster realmente rodou).
 
 **RN-DB-001 — Databricks cluster rate (workspaces `databricks-rg-*`):**
 
@@ -287,11 +381,20 @@ Campos armazenados em `_dbTaxaMap` por RG:
 
 Endpoint de diagnóstico: `GET /api/calculadora/diag-databricks?data_inicio=&data_fim=` — compara abordagem atual vs diária por RG, retorna `delta_pct` para avaliar impacto.
 
-UI: col1 mostra label `⚡ Cluster/h` com tooltip exibindo `billing_vm ÷ H_driver` e a `taxa_cluster` do workspace como contexto.
+UI — cards de estimativa:
+- col1 mostra `⚡ Cluster/h` com tooltip `billing_vm ÷ H_driver` + `taxa_cluster` do workspace
+- Badge `⚡ Databricks` (azul) na chip-strip de cada VM do cluster
 
-**Price List integration (v2.2):**
-- `retail_price_unit` vem normalizado do SQL: `retail_price_PL ÷ fator_UoM_PL × taxa_câmbio`
-- JOIN via CTE `pl_best` (DISTINCT ON meter_id, executa UMA vez — hash join): prioridade Consumption > DevTest, global > regional
+UI — tabela de billing (`_custoHora`):
+- VMs em `databricks-rg-*` (tipo=hora): mostra `/h cobrado` + linha `⚡ cluster: R$/h` (contribuição proporcional ao uptime)
+- Linhas DBU (UoM contém "DBU", tipo=periodo): mostra `⚡ /DBU cobrado` como valor principal via `custo_uom_billing`
+- Linhas DBU-Hour (UoM "DBU-Hour", tipo=hora): mostra `⚡ /DBU·h` como sublabel em vez de `/h cobrado`
+- Badge `⚡ DBU` (azul) nos cards de estimativa para linhas de software Databricks (fora de `databricks-rg-*`)
+- Col1 dos cards para linhas DBU: `⚡ DBU/mês*` com tooltip informando taxa unitária `R$/DBU`
+
+**Price List integration (v2.3):**
+- `retail_price_unit` via `pl_best_mv` (1º) → `pl_sku_mv` (fallback) → 0
+- Prioridade por moeda: BRL (`retail_price_brl_norm`) > USD (`retail_price_norm × taxa_cambio`) > mesma moeda
 - `temPL = (isHora && retailHora > 0) || (!isHora && retailMes > 0)` — drives UI indicators
 - Col1 com PL: fundo verde + borda verde + label `📋 PL/h` ou `📋 PL/mês`
 - Col1 sem PL: tooltip com `_meter_id` para diagnóstico
@@ -313,6 +416,85 @@ assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Pri
 **Legenda colapsável** (`#cov-legenda`): botão 📖 na tela Configurar Estimativa abre grid 2 colunas explicando todos os indicadores (fonte, descontos, H.reais, Uso parcial, /mês*, cores do Estimado, reserva).
 
 **End-date calendar:** enabled — user can freely select the end date. `_sincDataFim()` only auto-fills fim if field is currently empty.
+
+**Horas Adicionais (`#chad-card`) — estimativa de custo incremental:**
+- Visível apenas no modo Período, após o primeiro Buscar (oculto no modo Horas)
+- `_horasAdd = { ativo, hExtra, dias }` — config em memória (sessão)
+- Inputs: `#chad-h-extra` (horas extras/dia), `#chad-dias` (dias do projeto)
+- Cálculo: `hTotal = hExtra × dias`; custo por recurso via `_hadCustoRecurso(r, isBRL, taxaBrl)`:
+  - `hora/dia` → `custo_hora_billing × hTotal`
+  - `periodo` → `(custo_mes_billing ÷ 720) × hTotal`
+  - `reserva` → R$ 0 (custo fixo, já pago)
+- Quando ativo: adiciona coluna `⏱ Adicional` (laranja) na tabela + banner de resumo acima da tabela
+- RG multi-meter: subtotal adicional exibido no header do grupo
+- `_hadAtualizarBaseline()` — mostra média h/dia do período billing no card (chamado após busca)
+- `_hadToggle(ativo)` / `_hadChange()` — controles expostos no public API
+
+**Horário Livre (`#chl-card`) — desconto de horas fora do expediente:**
+- Visível apenas no modo Período (oculto no modo Horas)
+- `_horarioLivre = { ativo, inicio, fim, dias[] }` — persiste durante a sessão; ★ Padrão salva em `localStorage`
+- `_calcHorasLivres(vIni, vFim)` — itera dia a dia, soma `janela` (hFim-hIni) para cada dia que bate em `dias[]`
+  - ⚠️ Conta dias parciais (início/fim do período) como dias completos — para períodos curtos pode subtrair mais horas do que o total; `Math.max(1, horas - livres)` impede resultado ≤ 0
+- `_periodos` armazena `{ inicio, fim, horas: horasCobradas, horasTotal, horasLivres }` após aplicar o desconto
+- Card exibe resumo: "Xh totais → −Yh livres → Zh cobradas"
+- UI: `_hlToggle(ativo)` mostra/esconde `#chl-corpo`; `_hlChange()` relê inputs e atualiza resumo; `_hlSalvarPadrao()` / `_hlLimparPadrao()` persistem em `localStorage 'hl_config'`
+
+### Portal Público
+`portal.html` — calculadora Azure pública, sem login. Serve `/portal.html` diretamente via `express.static`.
+
+**Ativação:** admin habilita via Configurações → Portal Público → toggle Ativar + Salvar. Config armazenada em `portal_config` (key=`'config'`).
+
+**Middleware `_portalMiddleware`:** lê `portal_config`, bloqueia com 403 se `ativo=false`. Injeta `req.portalCfg` para os handlers seguintes.
+
+**Identificação de usuário (opcional):**
+- `solicitar_identificacao=true` OU `dominios_aceitos` não vazio → exibe modal de nome+email antes da calculadora
+- `POST /api/public/calculadora/identificar` valida domínio e registra em `portal_acessos`
+- Sessão armazenada em `sessionStorage 'portal_ident'` — sem JWT, sem cookies
+- ⚠️ XSS: `verAcessosPortal()` em `app.js:2647` renderiza `r.nome` e `r.ip` sem escape em `innerHTML` — fix pendente
+
+**Filtragem de dados:**
+- `subscription_ids[]` — apenas essas subs são expostas no portal
+- `resource_groups[]` — filtro de RG existe na config mas **não é persistido via UI** (bug em `savePortalConfig` app.js:2568 — `rgs` calculado mas não incluído no body do POST); campo sempre retorna `[]`
+- Recursos: `GET /api/public/calculadora/recursos` valida `subscription_id` do request contra `allowedSubs` da config
+- Estimativa: `POST /api/public/calculadora/estimar` valida `resource_id` contra `azure_costs` + `allowedSubs`
+
+**Delegação interna para handler privado:**
+```javascript
+// Encontra o último handler da rota privada via app._router.stack
+const handler = app._router.stack
+  .filter(l => l.route?.path === '/api/calculadora/recursos')
+  .map(l => l.route.stack[l.route.stack.length - 1].handle)[0];
+await handler(req, res, () => {});
+// ⚠️ Se handler === undefined, nenhuma resposta é enviada (requisição fica presa)
+```
+
+**Endpoints públicos (sem auth):**
+```
+GET  /api/public/calculadora/config          — título, descrição, taxa_imposto, taxa_cond, horario_livre
+POST /api/public/calculadora/identificar     — registra acesso (nome, email, ip)
+GET  /api/public/calculadora/subscriptions   — subs permitidas pelo admin
+GET  /api/public/calculadora/resource-groups — RGs filtrados pela config
+GET  /api/public/calculadora/recursos        — delega para handler privado (auth bypassado)
+POST /api/public/calculadora/estimar         — estima custo (valida resource_ids)
+GET  /api/public/calculadora/projetos        — projetos com status='Ativo'
+```
+
+**Endpoints admin (authMiddleware):**
+```
+GET  /api/admin/portal-config   — lê config atual
+POST /api/admin/portal-config   — salva config (sem resource_groups — ver bug acima)
+GET  /api/admin/portal-acessos  — log de acessos (limit max 500)
+```
+
+**`Calculadora.init` no portal:**
+```javascript
+Calculadora.init({
+  apiBase: '/api/public/calculadora',
+  publico: true,
+  defaultConfig: { taxa_imposto, taxa_cond, horario_livre }  // vem de /api/public/calculadora/config
+});
+```
+`_modoPublico=true` desativa `_setupImport()` e esconde `#cvista-detalhe`, `#cvista-servico`, `#cimport-area` via CSS `.portal-mode`.
 
 ### Reservas module
 `_RSV_SCOPE_CONFIG` — per-cloud scope configuration object in `app.js`. Defines field labels, placeholders, and whether a field uses API-driven CMS dropdown (`api:true`) or manual text input.
@@ -618,3 +800,5 @@ nssm start FinOpsManager
 - [ ] `mascote.png` present in the app directory (not tracked by git — copy manually)
 - [ ] Windows Firewall: port 3000 open for inbound connections (if accessed from network)
 - [ ] PM2 or systemd configured for auto-restart on crash/reboot
+- [ ] Portal Público: se ativado, verificar que `subscription_ids` está configurado — sem isso, nenhum dado é exposto
+- [ ] Portal Público: `solicitar_identificacao=true` ou `dominios_aceitos` configurado para restringir acesso

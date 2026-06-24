@@ -1481,8 +1481,15 @@ app.delete('/api/acoes/:id', authMiddleware, dbMiddleware, async (req, res) => {
 // ─── ESTIMATIVAS ─────────────────────────────────────────────────────────────
 app.get('/api/estimativas', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
+    // recursos excluído propositalmente — pode ser MB de JSON por estimativa
+    // O detalhe completo (com recursos) só é carregado em GET /api/estimativas/:id
     const r = await pool.query(`
-      SELECT e.*, p.nome AS projeto_nome_atual
+      SELECT e.id, e.projeto_id, e.projeto_nome, e.numero, e.titulo, e.responsavel,
+             e.validade_dias, e.data_estimativa, e.horas,
+             e.pct_imposto, e.pct_cond, e.vl_imposto, e.vl_cond,
+             e.total_brl, e.total_final, e.observacoes, e.status,
+             e.criado_em, e.atualizado_em,
+             p.nome AS projeto_nome_atual
       FROM estimativas e
       LEFT JOIN projetos p ON p.id = e.projeto_id
       ORDER BY e.criado_em DESC
@@ -1882,8 +1889,10 @@ async function ensurePriceListTable() {
         unit_of_measure  VARCHAR(100),
         product_name     VARCHAR(500),
         sku_name         VARCHAR(500),
-        service_name     VARCHAR(200),
         service_family   VARCHAR(200),
+        meter_name         VARCHAR(500),
+        meter_category     VARCHAR(200),
+        meter_sub_category VARCHAR(200),
         type             VARCHAR(50),
         reservation_term VARCHAR(20) NOT NULL DEFAULT '',
         effective_start  DATE,
@@ -1892,7 +1901,7 @@ async function ensurePriceListTable() {
       );
       CREATE INDEX IF NOT EXISTS idx_pricelist_meter        ON azure_price_list (meter_id);
       CREATE INDEX IF NOT EXISTS idx_pricelist_meter_lower  ON azure_price_list (LOWER(meter_id));
-      CREATE INDEX IF NOT EXISTS idx_pricelist_service      ON azure_price_list (service_name);
+      CREATE INDEX IF NOT EXISTS idx_pricelist_service      ON azure_price_list (service_family);
       CREATE INDEX IF NOT EXISTS idx_pricelist_region       ON azure_price_list (arm_region_name);
       CREATE INDEX IF NOT EXISTS idx_pricelist_type         ON azure_price_list (type);
       CREATE TABLE IF NOT EXISTS azure_price_list_meta (
@@ -1904,6 +1913,10 @@ async function ensurePriceListTable() {
     // ── Índices funcionais (idempotentes) ────────────────────────────────────
     await c.query(`
       ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS retail_price_brl NUMERIC(20,10);
+      ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS meter_name VARCHAR(500);
+      ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS meter_category VARCHAR(200);
+      ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS meter_sub_category VARCHAR(200);
+      ALTER TABLE azure_price_list DROP COLUMN IF EXISTS service_name;
       CREATE INDEX IF NOT EXISTS idx_pricelist_meter_lower ON azure_price_list (LOWER(meter_id));
       CREATE INDEX IF NOT EXISTS idx_pricelist_type        ON azure_price_list (type);
 
@@ -1914,7 +1927,7 @@ async function ensurePriceListTable() {
 
       -- Partial index sku+service — cobre pl_sku (fallback por nome)
       CREATE INDEX IF NOT EXISTS idx_pricelist_sku_svc
-        ON azure_price_list (LOWER(sku_name), LOWER(service_name))
+        ON azure_price_list (LOWER(sku_name), LOWER(service_family))
         WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = '';
     `).catch(() => {});
 
@@ -1930,6 +1943,10 @@ async function ensurePriceListTable() {
         SELECT DISTINCT ON (LOWER(meter_id))
           LOWER(meter_id) AS meter_id_lower,
           currency_code,
+          meter_name,
+          meter_category,
+          meter_sub_category,
+          unit_of_measure   AS pl_unit_of_measure,
           COALESCE(NULLIF(retail_price,0), unit_price, 0)::numeric
             / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
             AS retail_price_norm,
@@ -1949,10 +1966,14 @@ async function ensurePriceListTable() {
     await c.query(`DROP MATERIALIZED VIEW IF EXISTS pl_sku_mv CASCADE`).catch(() => {});
     await c.query(`
       CREATE MATERIALIZED VIEW pl_sku_mv AS
-        SELECT DISTINCT ON (LOWER(COALESCE(sku_name,'')), LOWER(COALESCE(service_name,'')))
-          LOWER(COALESCE(sku_name,''))     AS sku_lower,
-          LOWER(COALESCE(service_name,'')) AS svc_lower,
+        SELECT DISTINCT ON (LOWER(COALESCE(meter_name,'')), LOWER(COALESCE(meter_category,'')))
+          LOWER(COALESCE(meter_name,''))     AS meter_name_lower,
+          LOWER(COALESCE(meter_category,'')) AS meter_cat_lower,
           currency_code,
+          meter_name,
+          meter_category,
+          meter_sub_category,
+          unit_of_measure AS pl_unit_of_measure,
           COALESCE(NULLIF(retail_price,0), unit_price, 0)::numeric
             / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
             AS retail_price_norm,
@@ -1961,12 +1982,12 @@ async function ensurePriceListTable() {
             AS retail_price_brl_norm
         FROM azure_price_list
         WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = ''
-          AND sku_name IS NOT NULL AND sku_name <> ''
-        ORDER BY LOWER(COALESCE(sku_name,'')), LOWER(COALESCE(service_name,'')),
+          AND meter_name IS NOT NULL AND meter_name <> ''
+        ORDER BY LOWER(COALESCE(meter_name,'')), LOWER(COALESCE(meter_category,'')),
                  (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
     `).catch(() => {});
     await c.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS pl_sku_mv_idx ON pl_sku_mv (sku_lower, svc_lower);
+      CREATE UNIQUE INDEX IF NOT EXISTS pl_sku_mv_idx ON pl_sku_mv (meter_name_lower, meter_cat_lower);
     `).catch(() => {});
 
     _priceListReady = true;
@@ -2133,7 +2154,7 @@ function _buildPriceListUrl(currency) {
   // Sem filtro de região — busca todos os meters disponíveis globalmente.
   // arm_region_name é salvo por item (campo armRegionName da API).
   // pl_best/pl_sku priorizam brazilsouth via ORDER BY.
-  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&currencyCode=${currency}`;
+  return `https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&currencyCode=${currency}&$filter=type eq 'Consumption'`;
 }
 
 async function _syncPriceList(requestedCurrency = 'USD') {
@@ -2181,29 +2202,36 @@ async function _syncPriceList(requestedCurrency = 'USD') {
           await c.query(`
             INSERT INTO azure_price_list
               (meter_id, currency_code, arm_region_name, retail_price, unit_price,
-               unit_of_measure, product_name, sku_name, service_name, service_family,
+               unit_of_measure, product_name, sku_name, service_family,
+               meter_name, meter_category, meter_sub_category,
                type, reservation_term, effective_start, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, NOW())
             ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
             DO UPDATE SET
-              retail_price    = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
-              unit_price      = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
-              product_name    = EXCLUDED.product_name,
-              sku_name        = EXCLUDED.sku_name,
-              effective_start = EXCLUDED.effective_start,
-              updated_at      = NOW()
+              retail_price       = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
+              unit_price         = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
+              product_name       = EXCLUDED.product_name,
+              sku_name           = EXCLUDED.sku_name,
+              service_family     = COALESCE(EXCLUDED.service_family, azure_price_list.service_family),
+              meter_name         = COALESCE(EXCLUDED.meter_name, azure_price_list.meter_name),
+              meter_category     = COALESCE(EXCLUDED.meter_category, azure_price_list.meter_category),
+              meter_sub_category = COALESCE(EXCLUDED.meter_sub_category, azure_price_list.meter_sub_category),
+              effective_start    = EXCLUDED.effective_start,
+              updated_at         = NOW()
           `, [
             item.meterId,
             currency, armRegion,
             retailP,
             unitP,
-            item.unitOfMeasure ?? null,
-            item.productName   ?? null,
-            item.skuName       ?? null,
-            item.serviceName   ?? null,
-            item.serviceFamily ?? null,
-            item.type          ?? 'Consumption',
-            item.reservationTerm ?? '',
+            item.unitOfMeasure      ?? null,
+            item.productName        ?? null,
+            item.skuName            ?? null,
+            item.serviceFamily      ?? null,
+            item.meterName          ?? null,
+            item.meterCategory      ?? null,
+            item.meterSubCategory   ?? null,
+            item.type               ?? 'Consumption',
+            item.reservationTerm    ?? '',
             item.effectiveStartDate ? item.effectiveStartDate.slice(0, 10) : null
           ]);
           total++;
@@ -2270,10 +2298,18 @@ async function _syncPriceList(requestedCurrency = 'USD') {
 // ── Price List import via CSV/ZIP ─────────────────────────────────────────────
 let _plImporting = false;
 let _plImportProgress = { total: 0, inserted: 0, skipped: 0, errors: 0, started: null, finished: null, error: null, filename: null };
+let _plImportLog = []; // últimas 200 linhas de log — expostas em /api/price-list/import-status
+function _plLog(msg) {
+  console.log(msg);
+  _plImportLog.push(`${new Date().toTimeString().slice(0,8)} ${msg}`);
+  if (_plImportLog.length > 200) _plImportLog.shift();
+}
 
 // Normaliza cabeçalho CSV → chave canônica da tabela azure_price_list
+// Suporta dois formatos: Azure Retail Prices API e Azure Price Sheet (billing export)
 function _mapPlCol(h) {
   const s = h.replace(/[_\s-]/g, '').toLowerCase();
+  // Azure Retail Prices API
   if (s === 'meterid')            return 'meter_id';
   if (s === 'currencycode')       return 'currency_code';
   if (s === 'armregionname')      return 'arm_region_name';
@@ -2283,17 +2319,28 @@ function _mapPlCol(h) {
   if (s === 'unitofmeasure')      return 'unit_of_measure';
   if (s === 'productname')        return 'product_name';
   if (s === 'skuname')            return 'sku_name';
-  if (s === 'servicename')        return 'service_name';
-  if (s === 'servicefamily')      return 'service_family';
+  if (s === 'servicefamily' || s === 'servicename') return 'service_family';
   if (s === 'type')               return 'type';
   if (s === 'reservationterm')    return 'reservation_term';
   if (s === 'effectivestartdate') return 'effective_start';
+  // Azure Price Sheet (exportação billing: BillingAccountId, PriceType, MarketPrice, ...)
+  if (s === 'pricetype')                           return 'type';
+  if (s === 'marketprice')                         return 'retail_price';
+  if (s === 'currency' || s === 'billingcurrency') return 'currency_code';
+  if (s === 'meterregion')                         return 'arm_region_name';
+  if (s === 'term')                                return 'reservation_term';
+  if (s === 'product')                             return 'product_name';
+  if (s === 'skuid')                               return 'sku_name';
+  if (s === 'metername')                           return 'meter_name';
+  if (s === 'metercategory' || s === 'metertype')  return 'meter_category';
+  if (s === 'metersubcategory')                    return 'meter_sub_category';
   return null;
 }
 
 // clearBefore=true: apaga todos os dados do PL antes de inserir (substituição completa)
 // clearBefore=false: upsert — mantém dados existentes não presentes no arquivo
-async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
+// regionFilter='brazil': importa apenas linhas cuja região contém "brazil"/"brasil" ou é global/vazia
+async function _importPriceListFromCSV(csvPath, filename, clearBefore = false, regionFilter = null) {
   await ensurePriceListTable();
 
   const ARM_REGION_FALLBACK = 'global';
@@ -2314,14 +2361,20 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
     });
     if (!entries.length) throw new Error('ZIP não contém arquivos .csv ou .parquet válidos');
     let total = 0, inserted = 0, skipped = 0, errors = 0, isFirst = true;
-    for (const entry of entries) {
+    for (let zi = 0; zi < entries.length; zi++) {
+      const entry   = entries[zi];
       const tmpName = `zip_pl_${crypto.randomBytes(6).toString('hex')}_${path.basename(entry.entryName)}`;
       const tmpPath = path.join(os.tmpdir(), tmpName);
+      // Atualiza progresso com nome do arquivo atual dentro do ZIP
+      if (_plImportProgress) _plImportProgress.filename = `[${zi+1}/${entries.length}] ${entry.entryName}`;
+      _plLog(`[${zi+1}/${entries.length}] Iniciando: ${entry.entryName}`);
       try {
         zip.extractEntryTo(entry, os.tmpdir(), false, true, false, tmpName);
-        const r = await _importPriceListFromCSV(tmpPath, entry.entryName, clearBefore && isFirst);
+        const r = await _importPriceListFromCSV(tmpPath, entry.entryName, clearBefore && isFirst, regionFilter);
         isFirst = false;
         total += r.total; inserted += r.inserted; skipped += r.skipped; errors += r.errors;
+        if (_plImportProgress) Object.assign(_plImportProgress, { total, inserted, skipped, errors });
+        _plLog(`[${zi+1}/${entries.length}] ✅ ${r.inserted.toLocaleString()} ins · ${r.skipped} skip · ${r.errors} err`);
       } finally { try { fs.unlinkSync(tmpPath); } catch (_) {} }
     }
     const ts = new Date().toISOString();
@@ -2354,36 +2407,56 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
         if (!meterId) { skipped++; return; }
         const currency      = (row[colMap['currency_code']]    || 'USD').trim() || 'USD';
         const armRegion     = (row[colMap['arm_region_name']]  || ARM_REGION_FALLBACK).trim() || ARM_REGION_FALLBACK;
+
+        // Filtro de região: lista de regiões permitidas separada por vírgula
+        if (regionFilter) {
+          const allowed = new Set(regionFilter.split(',').map(r => r.trim().toLowerCase()));
+          if (!allowed.has(armRegion.toLowerCase())) { skipped++; return; }
+        }
         const retailPrice   = parseFloat(row[colMap['retail_price']]     || 0) || 0;
         const retailPriceBrl= colMap['retail_price_brl'] ? (parseFloat(row[colMap['retail_price_brl']] || 0) || null) : null;
         const unitPrice     = parseFloat(row[colMap['unit_price']]     || 0) || 0;
         const unitOfMeasure = (row[colMap['unit_of_measure']]  || null)?.trim() || null;
         const productName   = (row[colMap['product_name']]     || null)?.trim() || null;
         const skuName       = (row[colMap['sku_name']]         || null)?.trim() || null;
-        const serviceName   = (row[colMap['service_name']]     || null)?.trim() || null;
         const serviceFamily = (row[colMap['service_family']]   || null)?.trim() || null;
-        const type          = (row[colMap['type']]             || 'Consumption').trim() || 'Consumption';
-        const rsvTerm       = (row[colMap['reservation_term']] || '').trim();
-        const effStart      = (row[colMap['effective_start']]  || '').trim().slice(0, 10) || null;
+        const meterName        = (row[colMap['meter_name']]          || null)?.trim().slice(0, 500) || null;
+        const meterCategory    = (row[colMap['meter_category']]      || null)?.trim().slice(0, 200) || null;
+        const meterSubCategory = (row[colMap['meter_sub_category']]  || null)?.trim().slice(0, 200) || null;
+        const type          = ((row[colMap['type']]             || 'Consumption').trim() || 'Consumption').slice(0, 50);
+        if (type !== 'Consumption') { skipped++; return; }
+        const rsvTerm       = (row[colMap['reservation_term']] || '').trim().slice(0, 20);
+        // Normaliza data: aceita YYYY-MM-DD e MM/DD/YYYY (Azure Price Sheet)
+        const _effRaw = (row[colMap['effective_start']] || '').trim();
+        const _effMdy = _effRaw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        const effStart = _effMdy
+          ? `${_effMdy[3]}-${_effMdy[1].padStart(2,'0')}-${_effMdy[2].padStart(2,'0')}`
+          : (_effRaw.slice(0, 10) || null);
 
         await c.query(`SAVEPOINT ${spn}`);
         const r = await c.query(`
           INSERT INTO azure_price_list
             (meter_id, currency_code, arm_region_name, retail_price, retail_price_brl, unit_price,
-             unit_of_measure, product_name, sku_name, service_name, service_family,
+             unit_of_measure, product_name, sku_name, service_family,
+             meter_name, meter_category, meter_sub_category,
              type, reservation_term, effective_start, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW())
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, NOW())
           ON CONFLICT (meter_id, currency_code, arm_region_name, type, reservation_term)
           DO UPDATE SET
-            retail_price     = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
-            retail_price_brl = COALESCE(EXCLUDED.retail_price_brl, azure_price_list.retail_price_brl),
-            unit_price       = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
-            product_name     = EXCLUDED.product_name,
-            sku_name         = EXCLUDED.sku_name,
-            effective_start  = EXCLUDED.effective_start,
-            updated_at       = NOW()
+            retail_price       = GREATEST(EXCLUDED.retail_price, azure_price_list.retail_price),
+            retail_price_brl   = COALESCE(EXCLUDED.retail_price_brl, azure_price_list.retail_price_brl),
+            unit_price         = GREATEST(EXCLUDED.unit_price, azure_price_list.unit_price),
+            product_name       = EXCLUDED.product_name,
+            sku_name           = EXCLUDED.sku_name,
+            service_family     = COALESCE(EXCLUDED.service_family, azure_price_list.service_family),
+            meter_name         = COALESCE(EXCLUDED.meter_name, azure_price_list.meter_name),
+            meter_category     = COALESCE(EXCLUDED.meter_category, azure_price_list.meter_category),
+            meter_sub_category = COALESCE(EXCLUDED.meter_sub_category, azure_price_list.meter_sub_category),
+            effective_start    = EXCLUDED.effective_start,
+            updated_at         = NOW()
         `, [meterId, currency, armRegion, retailPrice, retailPriceBrl, unitPrice,
-            unitOfMeasure, productName, skuName, serviceName, serviceFamily,
+            unitOfMeasure, productName, skuName, serviceFamily,
+            meterName, meterCategory, meterSubCategory,
             type, rsvTerm, effStart]);
         await c.query(`RELEASE SAVEPOINT ${spn}`);
         if (r.rowCount > 0) inserted++; else skipped++;
@@ -2391,6 +2464,7 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false) {
         await c.query(`ROLLBACK TO SAVEPOINT ${spn}`);
         await c.query(`RELEASE SAVEPOINT ${spn}`);
         errors++;
+        if (errors <= 3) console.warn('[PriceList Import] erro linha:', e.message, '| meterId=', row[colMap['meter_id']] || '?');
       }
     };
 
@@ -3266,7 +3340,8 @@ if (_multer) {
   });
 
   // Status do job de importação em andamento ou último concluído
-  app.get('/api/azure-costs/import-status', authMiddleware, (req, res) => {
+  // Sem authMiddleware: progresso não é sensível; evita 401 em imports longos.
+  app.get('/api/azure-costs/import-status', (req, res) => {
     res.json({ job: _importJob });
   });
 
@@ -3365,9 +3440,10 @@ app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res)
       pool.query(`
         SELECT COUNT(*)::int                  AS total,
                COUNT(DISTINCT meter_id)::int  AS meters,
-               MAX(updated_at)               AS last_updated
-        FROM azure_price_list WHERE currency_code = $1
-      `, [currency])
+               MAX(updated_at)               AS last_updated,
+               array_agg(DISTINCT currency_code ORDER BY currency_code) AS currencies
+        FROM azure_price_list
+      `)
     ]);
 
     let last_result = null;
@@ -3385,6 +3461,7 @@ app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res)
       total:          cnt.rows[0]?.total        || 0,
       meters:         cnt.rows[0]?.meters       || 0,
       last_updated:   cnt.rows[0]?.last_updated || null,
+      currencies:     cnt.rows[0]?.currencies   || [],
       syncing:        _syncingPriceList,
       progress:       _syncingPriceList ? _syncProgress : null,
       last_result,
@@ -3440,7 +3517,7 @@ app.get('/api/price-list/diag', authMiddleware, dbMiddleware, async (_req, res) 
         GROUP BY meter_id ORDER BY SUM(cost_in_billing_currency) DESC NULLS LAST LIMIT 3`),
       // Amostra de 3 meter_ids do Price List (Consumption)
       pool.query(`
-        SELECT meter_id, service_name, type, reservation_term, retail_price
+        SELECT meter_id, service_family, type, reservation_term, retail_price
         FROM azure_price_list WHERE type='Consumption' AND reservation_term=''
         LIMIT 3`),
     ]);
@@ -3497,8 +3574,10 @@ app.post('/api/price-list/reset-cb', authMiddleware, dbMiddleware, (_req, res) =
 });
 
 // ── GET /api/price-list/import-status ────────────────────────────────────────
-app.get('/api/price-list/import-status', authMiddleware, (_req, res) => {
-  res.json({ importing: _plImporting, ..._plImportProgress });
+// Sem authMiddleware: dados de progresso não são sensíveis; sem auth o polling
+// sobrevive à expiração do JWT em imports longos (ZIPs com muitas entradas).
+app.get('/api/price-list/import-status', (_req, res) => {
+  res.json({ importing: _plImporting, ..._plImportProgress, log: _plImportLog.slice(-50) });
 });
 
 // ── POST /api/price-list/import ───────────────────────────────────────────────
@@ -3534,17 +3613,21 @@ app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
     _plImporting = true;
     _plImportProgress = { total: 0, inserted: 0, skipped: 0, errors: 0, started: new Date().toISOString(), finished: null, error: null, filename: origname };
 
+    // clearBefore vem do frontend: true apenas para o primeiro arquivo de uma fila múltipla
+    const clearBefore    = req.body?.clearBefore !== 'false';
+    const regionFilter   = req.body?.regionFilter || null;
+    if (regionFilter) _plLog(`Filtro de região ativo: ${regionFilter}`);
+
     (async () => {
       try {
-        // clearBefore=true: substitui todos os dados existentes pelo novo arquivo
-        const result = await _importPriceListFromCSV(tmpDest, origname, true);
+        const result = await _importPriceListFromCSV(tmpDest, origname, clearBefore, regionFilter);
         _plImportProgress = { ...result, started: _plImportProgress.started, finished: new Date().toISOString(), error: null, filename: origname };
         _plCobTs = 0; // invalida cache de cobertura para recalcular na próxima visita
-        console.log(`[PriceList Import] ✅ ${origname} — ${result.inserted} inseridos, ${result.skipped} skip, ${result.errors} erros`);
+        _plLog(`✅ Concluído: ${result.inserted.toLocaleString()} ins · ${result.skipped} skip · ${result.errors} err`);
       } catch (e) {
         _plImportProgress.error    = e.message;
         _plImportProgress.finished = new Date().toISOString();
-        console.error('[PriceList Import] ❌', e.message);
+        _plLog(`❌ Erro: ${e.message}`);
       } finally {
         _plImporting = false;
         try { fs.unlinkSync(tmpDest); } catch (_) {}
@@ -3617,6 +3700,33 @@ app.get('/api/public/calculadora/projetos', _portalMiddleware, dbMiddleware, asy
     );
     res.json(r.rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/public/calculadora/estimativas ─────────────────────────────────
+// Salva estimativa gerada pelo portal público (sem auth JWT)
+app.post('/api/public/calculadora/estimativas', _portalMiddleware, dbMiddleware, async (req, res) => {
+  const {
+    projeto_id, projeto_nome, numero, titulo, responsavel, validade_dias,
+    data_estimativa, horas, pct_imposto, pct_cond, vl_imposto, vl_cond,
+    total_brl, total_final, observacoes, recursos
+  } = req.body;
+  try {
+    const r = await pool.query(`
+      INSERT INTO estimativas
+        (projeto_id, projeto_nome, numero, titulo, responsavel, validade_dias,
+         data_estimativa, horas, pct_imposto, pct_cond, vl_imposto, vl_cond,
+         total_brl, total_final, observacoes, recursos)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      RETURNING *
+    `, [
+      projeto_id || null, projeto_nome || null, numero, titulo, responsavel,
+      validade_dias || 30, data_estimativa || null, horas || null,
+      pct_imposto || 0, pct_cond || 0, vl_imposto || 0, vl_cond || 0,
+      total_brl, total_final, observacoes || null,
+      recursos ? JSON.stringify(recursos) : null
+    ]);
+    res.status(201).json(r.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── GET /api/public/calculadora/config ───────────────────────────────────────
@@ -3994,6 +4104,15 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
     const where    = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
     const andCond  = cond.length ? 'AND '   + cond.join(' AND ') : '';
 
+    // CTE base_30d: mesmas condições de sub/RG mas sempre os últimos 30 dias
+    // Usada como fallback de taxa quando não há match no Price List
+    const cond30d = cond.filter(c => !c.startsWith('cost_date'));
+    const p30dFimIdx = params.length + 1;
+    params.push(data_fim || null);
+    const _30dFimExpr = `COALESCE($${p30dFimIdx}::date, (SELECT MAX(cost_date) FROM azure_costs))`;
+    const where30d = (cond30d.length ? 'WHERE ' + cond30d.join(' AND ') + ' AND ' : 'WHERE ')
+      + `cost_date >= (${_30dFimExpr} - INTERVAL '29 days') AND cost_date <= ${_30dFimExpr}`;
+
     const _t0 = Date.now();
 
     const r = await pool.query(`
@@ -4155,8 +4274,20 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
           , 4) AS custo_mes_billing,
           NULL::numeric AS custo_dia_billing,
           NULL::numeric AS custo_dia_usd,
-          NULL::numeric AS custo_uom_billing,
-          NULL::numeric AS custo_uom_usd,
+          -- RN-006: Cost ÷ Qty = taxa real por unidade nativa (R$/GB, R$/10K tx, etc.)
+          -- Regra: divide custo total pela quantidade faturada → taxa audível e infalível
+          ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                / NULLIF(SUM(COALESCE(quantity,0)), 0), 8)   AS custo_uom_billing,
+          ROUND(SUM(COALESCE(cost_in_usd,0))::numeric
+                / NULLIF(SUM(COALESCE(quantity,0)), 0), 8)   AS custo_uom_usd,
+          -- RN-007: Flag RI/SP coberto — cost_in_billing=0 mas effective_price>0
+          -- VMs cobertas por Reserva ou Savings Plan: custo real está no effective_price (amortizado)
+          CASE
+            WHEN SUM(COALESCE(cost_in_billing_currency,0)) = 0
+                 AND SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0)
+                         * COALESCE(quantity,0)) > 0
+            THEN true ELSE false
+          END AS usa_amortizado,
           -- Chaves para o JOIN com price list
           MAX(meter_id)                          AS _meter_id,
           MAX(COALESCE(billing_currency, 'BRL')) AS _currency
@@ -4193,6 +4324,40 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         ) daily
         WHERE max_h IS NOT NULL AND max_h > 0
         GROUP BY UPPER(resource_group_name)
+      ),
+      -- ── CTE base_30d: taxa estável dos últimos 30 dias (fallback sem PL) ──────────
+      -- Usa as mesmas condições de sub/RG mas ignora o filtro de período do usuário.
+      -- Join por (resource_id, unit_of_measure) para preservar distinção entre meters.
+      base_30d AS (
+        SELECT
+          resource_id,
+          COALESCE(MAX(unit_of_measure), '') AS _uom,
+          COALESCE(
+            CASE
+              WHEN MAX(COALESCE(charge_type,'')) IN ('Purchase','RoundTrustBill')
+                   AND MAX(COALESCE(pricing_model,'')) = 'Reservation'
+              THEN ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                   / NULLIF(CASE WHEN MAX(term) ILIKE '3%' THEN 26280.0 ELSE 8760.0 END, 0), 8)
+            END,
+            CASE
+              WHEN (MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%')
+                   AND SUM(COALESCE(quantity,0)) > 0
+              THEN ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                   / NULLIF(SUM(COALESCE(quantity,0))
+                     * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(MAX(unit_of_measure),'[^0-9]','','g'),'')::numeric,1.0),1.0), 0), 8)
+            END,
+            CASE
+              WHEN MAX(unit_of_measure) ILIKE '%day%' AND SUM(COALESCE(quantity,0)) > 0
+              THEN ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                   / NULLIF(SUM(COALESCE(quantity,0)) * 24.0, 0), 8)
+            END,
+            ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
+                  / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24.0, 0), 8)
+          ) AS custo_hora_30d,
+          (MAX(cost_date) - MIN(cost_date) + 1) AS dias_30d
+        FROM azure_costs
+        ${where30d}
+        GROUP BY resource_id, COALESCE(unit_of_measure,'')
       )
       -- pl_best_mv e pl_sku_mv: materialized views pré-computadas (refresh após sync)
       SELECT
@@ -4233,8 +4398,15 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         base.custo_dia_usd,
         base.custo_uom_billing,
         base.custo_uom_usd,
+        base.usa_amortizado,
         -- RN-DB-001: soma dos MAX diários de horas por RG Databricks (abordagem diária)
         COALESCE(db.soma_h_driver, 0) AS soma_h_driver,
+        -- meter_name e categoria do Price Sheet (para exibição na UI)
+        COALESCE(pl.meter_name, pls.meter_name)           AS pl_meter_name,
+        COALESCE(pl.meter_category, pls.meter_category)   AS pl_meter_category,
+        COALESCE(pl.meter_sub_category, pls.meter_sub_category) AS pl_meter_sub_category,
+        COALESCE(pl.pl_unit_of_measure, pls.pl_unit_of_measure) AS pl_unit_of_measure,
+        COALESCE(pl.currency_code, pls.currency_code)     AS pl_currency,
         -- retail_price_unit: 1º meter_id (pl_best) → 2º sku+service (pl_sku) → 0
         COALESCE(
           -- Prioridade 1: match por meter_id
@@ -4259,6 +4431,20 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
           END,
           0
         )::numeric AS retail_price_unit,
+        -- custo_hora_30d: taxa dos últimos 30 dias (independente do período filtrado)
+        b30d.custo_hora_30d,
+        -- usa_30d: true quando sem PL e período < 30 dias
+        -- Exclui Databricks: eles têm taxa de cluster própria (soma_h_driver) que já é estável
+        CASE
+          WHEN COALESCE(
+            CASE WHEN base.moeda='BRL' AND COALESCE(pl.retail_price_brl_norm,0)>0 THEN 1
+                 WHEN COALESCE(pl.retail_price_norm,0)>0 THEN 1
+                 WHEN COALESCE(pls.retail_price_norm,0)>0 THEN 1 END, 0) = 0
+               AND b30d.custo_hora_30d IS NOT NULL
+               AND base.dias_ativos < 30
+               AND COALESCE(db.soma_h_driver, 0) = 0
+          THEN true ELSE false
+        END AS usa_30d,
         -- desconto_pct: usa o mesmo preço efetivo (meter_id → sku → sem desconto)
         CASE
           WHEN COALESCE(base.custo_hora_billing, 0) > 0
@@ -4283,12 +4469,15 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
       FROM base
       -- pl_best_mv: match por meter_id — O(1) via unique index (pré-computado)
       LEFT JOIN pl_best_mv pl  ON pl.meter_id_lower = LOWER(base._meter_id)
-      -- pl_sku_mv: fallback por sku+service — só ativa quando meter_id não casou
+      -- pl_sku_mv: fallback por meter_name+meter_category — ativa quando meter_id não casou
       LEFT JOIN pl_sku_mv  pls ON pl.meter_id_lower IS NULL
-        AND pls.sku_lower = LOWER(COALESCE(base.meter_categories,''))
-        AND pls.svc_lower = LOWER(COALESCE(base.categoria,''))
+        AND pls.meter_name_lower = LOWER(COALESCE(base.meter_categories,''))
+        AND pls.meter_cat_lower  = LOWER(COALESCE(base.categoria,''))
       -- RN-DB-001: soma_h_driver diário por RG Databricks
-      LEFT JOIN db_daily db ON db.rg = base.resource_group_name
+      LEFT JOIN db_daily  db   ON db.rg = base.resource_group_name
+      -- base_30d: taxa estável dos últimos 30 dias (fallback sem PL)
+      LEFT JOIN base_30d  b30d ON b30d.resource_id = base.resource_id
+        AND b30d._uom = COALESCE(base.unidade, '')
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 

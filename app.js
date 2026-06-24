@@ -1196,17 +1196,24 @@ async function viewEstimativa(id) {
     _currentEstimativaDetalhe = e;
     document.getElementById('modal-est-title').textContent = e.numero || 'Detalhes da Estimativa';
     const recursos = Array.isArray(e.recursos) ? e.recursos : [];
-    const linhas = recursos.map(r => {
+    const _MAX_ROWS = 150;
+    const linhas = recursos.slice(0, _MAX_ROWS).map(r => {
       const horas = r.isHora ? (r.horas + ' h') : '—';
       const chora = r.custo_hora != null ? formatCurrency(r.custo_hora) + '/h' : '—';
+      const skuLine = r.sku ? `<div style="font-size:10px;color:var(--text-muted)">${escHtml(r.sku)}</div>` : '';
+      const uomLine = r.uom ? `<div style="font-size:10px;color:var(--text-muted);opacity:.7;font-family:'IBM Plex Mono',monospace">${escHtml(r.uom)}</div>` : '';
       return `<tr>
-        <td>${escHtml(r.nome || '—')}</td>
+        <td>${escHtml(r.nome || '—')}${skuLine}${uomLine}</td>
         <td style="color:var(--text-muted)">${escHtml(r.categoria || '—')}</td>
         <td style="text-align:right;font-family:IBM Plex Mono,monospace">${horas}</td>
         <td style="text-align:right;font-family:IBM Plex Mono,monospace">${chora}</td>
         <td style="text-align:right;font-family:IBM Plex Mono,monospace;color:var(--accent)">${formatCurrency(r.estimado_brl)}</td>
       </tr>`;
     }).join('');
+    const _maisLinhas = recursos.length > _MAX_ROWS
+      ? `<tr><td colspan="5" style="text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">
+           + ${recursos.length - _MAX_ROWS} recurso(s) adicionais — ver PDF para lista completa
+         </td></tr>` : '';
 
     const impostoRow = e.pct_imposto > 0
       ? `<tr><td colspan="4" style="text-align:right;color:var(--text-muted)">+ Imposto (${e.pct_imposto}%)</td><td style="text-align:right;font-family:IBM Plex Mono,monospace">${formatCurrency(e.vl_imposto)}</td></tr>` : '';
@@ -1248,7 +1255,7 @@ async function viewEstimativa(id) {
       <div class="table-wrapper">
         <table class="data-table">
           <thead><tr><th>Recurso</th><th>Categoria</th><th style="text-align:right">Horas</th><th style="text-align:right">Custo/h</th><th style="text-align:right">Estimativa BRL</th></tr></thead>
-          <tbody>${linhas || '<tr><td colspan="5" class="empty-state">Sem recursos registrados</td></tr>'}</tbody>
+          <tbody>${linhas || '<tr><td colspan="5" class="empty-state">Sem recursos registrados</td></tr>'}${_maisLinhas}</tbody>
           <tfoot>
             <tr style="background:var(--bg-card)"><td colspan="4" style="text-align:right;color:var(--text-muted);font-size:11px">Subtotal</td><td style="text-align:right;font-family:IBM Plex Mono,monospace">${formatCurrency(e.total_brl)}</td></tr>
             ${impostoRow}${condRow}
@@ -1753,6 +1760,22 @@ async function _loadPriceListStatus() {
 
   try {
     const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+
+    // Reconectar ao import em andamento (caso o usuário tenha desconectado e voltado)
+    const _stRes = await fetch('/api/price-list/import-status', { headers: { Authorization: 'Bearer ' + token } });
+    if (_stRes.ok) {
+      const _st = await _stRes.json();
+      _plUpdateLog(_st);
+      if (_st.importing && !_plImportPollTimer) {
+        const prog    = document.getElementById('pl-import-progress');
+        const progMsg = document.getElementById('pl-import-progress-msg');
+        if (prog) prog.style.display = 'block';
+        if (progMsg) progMsg.textContent = `Import em andamento: ${_st.filename || '...'}`;
+        document.getElementById('pl-import-btn').disabled = true;
+        _plImportPollTimer = setTimeout(_reconnectImportPoll, 1500);
+      }
+    }
+
     const res = await fetch(`/api/price-list/status?currency=${currency}&region=${region}`, {
       headers: { Authorization: 'Bearer ' + token }
     });
@@ -2055,11 +2078,166 @@ function _onPlFileChange(input) {
       ? input.files[0].name
       : `${count} arquivos selecionados`;
     if (btn) btn.disabled = false;
+    _scanPlRegions(input.files);
   } else {
     if (label) label.textContent = 'Clique para selecionar .csv, .parquet ou .zip (múltiplos)';
     if (btn)   btn.disabled = true;
+    _hidePlRegionSelect();
   }
   document.getElementById('pl-import-msg').style.display = 'none';
+}
+
+function _hidePlRegionSelect() {
+  const wrap = document.getElementById('pl-region-checklist-wrap');
+  const msg  = document.getElementById('pl-region-scan-msg');
+  if (wrap) wrap.style.display = 'none';
+  if (msg)  msg.style.display  = 'none';
+}
+
+function _plRegionCheckAll(state) {
+  const list = document.getElementById('pl-region-checklist');
+  if (!list) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = state);
+}
+
+function _plRegionUpdateCounter() {
+  const wrap    = document.getElementById('pl-region-checklist-wrap');
+  const counter = document.getElementById('pl-region-counter');
+  if (!wrap || !counter) return;
+  const total   = wrap.querySelectorAll('input[type=checkbox]').length;
+  const checked = wrap.querySelectorAll('input[type=checkbox]:checked').length;
+  counter.textContent = checked === 0
+    ? `0 selecionadas (todas serão importadas)`
+    : checked === total
+      ? `${checked} selecionadas (todas)`
+      : `${checked} de ${total} selecionadas`;
+  counter.style.color = checked === 0 ? 'var(--text-muted)' : 'var(--accent)';
+}
+
+function _plRegionCheckAll(state) {
+  const wrap = document.getElementById('pl-region-checklist-wrap');
+  if (!wrap) return;
+  wrap.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    if (cb.closest('label').style.display !== 'none') cb.checked = state;
+  });
+  _plRegionUpdateCounter();
+}
+
+function _buildPlRegionChecklist(regions, preSelected) {
+  const wrap = document.getElementById('pl-region-checklist-wrap');
+  const list = document.getElementById('pl-region-checklist');
+  const hint = document.getElementById('pl-region-hint');
+  if (!wrap || !list) return;
+
+  // Campo de busca
+  const searchId = 'pl-region-search';
+  let search = document.getElementById(searchId);
+  if (!search) {
+    search = document.createElement('input');
+    search.id          = searchId;
+    search.type        = 'text';
+    search.placeholder = '🔍 Buscar região...';
+    search.style.cssText = 'width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border-light);border-radius:5px;color:var(--text);font-size:11px;padding:5px 8px;margin-bottom:5px;outline:none';
+    search.oninput = () => {
+      const q = search.value.toLowerCase();
+      list.querySelectorAll('label').forEach(lbl => {
+        lbl.style.display = (q && !lbl.textContent.toLowerCase().includes(q)) ? 'none' : 'flex';
+      });
+    };
+    wrap.insertBefore(search, list);
+  } else {
+    search.value = '';
+  }
+
+  // Contador
+  let counter = document.getElementById('pl-region-counter');
+  if (!counter) {
+    counter = document.createElement('div');
+    counter.id = 'pl-region-counter';
+    counter.style.cssText = 'font-size:11px;margin-top:4px;text-align:right';
+    wrap.appendChild(counter);
+  }
+
+  list.innerHTML = '';
+  regions.forEach(r => {
+    const isChecked = preSelected.has(r.toLowerCase());
+    const row = document.createElement('label');
+    row.style.cssText = 'display:flex;align-items:center;gap:7px;padding:3px 4px;cursor:pointer;border-radius:4px;font-size:12px;color:var(--text)';
+    row.onmouseenter = () => row.style.background = 'var(--bg-hover)';
+    row.onmouseleave = () => row.style.background = '';
+    const cb = document.createElement('input');
+    cb.type    = 'checkbox';
+    cb.value   = r;
+    cb.checked = isChecked;
+    cb.style.accentColor = 'var(--accent)';
+    cb.onchange = _plRegionUpdateCounter;
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(r));
+    list.appendChild(row);
+  });
+
+  if (hint) hint.textContent = `${regions.length} regiões encontradas — marque as que deseja importar`;
+  wrap.style.display = 'block';
+  _plRegionUpdateCounter();
+}
+
+async function _scanPlRegions(files) {
+  const msg = document.getElementById('pl-region-scan-msg');
+  const arrFiles  = Array.from(files);
+  const isZipOnly = arrFiles.every(f => f.name.toLowerCase().endsWith('.zip'));
+  const csvFile   = arrFiles.find(f => f.name.toLowerCase().endsWith('.csv'));
+
+  // ZIP sem CSV: mostra checklist com regiões BR padrão
+  if (isZipOnly && !csvFile) {
+    if (msg) msg.style.display = 'none';
+    const defaults = ['BR South', 'Brazil South', 'BR Southeast', 'Brazil Southeast', 'global'];
+    const preSelected = new Set(defaults.map(r => r.toLowerCase()));
+    _buildPlRegionChecklist(defaults, preSelected);
+    return;
+  }
+
+  if (!csvFile) { _hidePlRegionSelect(); return; }
+
+  if (msg) msg.style.display = 'block';
+  _hidePlRegionSelect();
+
+  try {
+    const chunk = csvFile.slice(0, 4 * 1024 * 1024);
+    const text  = await chunk.text();
+    const lines = text.split(/\r?\n/);
+    if (!lines.length) { if (msg) msg.style.display = 'none'; return; }
+
+    const header = lines[0].replace(/^﻿/, '');
+    const delim  = header.includes('\t') ? '\t' : (header.includes(';') ? ';' : ',');
+    const cols   = header.split(delim).map(h => h.trim().replace(/^"|"$/g, ''));
+
+    const regionIdx = cols.findIndex(c => {
+      const s = c.replace(/[_\s-]/g, '').toLowerCase();
+      return s === 'armregionname' || s === 'meterregion';
+    });
+    if (regionIdx === -1) { if (msg) msg.style.display = 'none'; return; }
+
+    const regions = new Set();
+    for (let i = 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      const vals = lines[i].split(delim);
+      const val  = (vals[regionIdx] || '').trim().replace(/^"|"$/g, '');
+      if (val) regions.add(val);
+    }
+
+    if (msg) msg.style.display = 'none';
+    if (!regions.size) return;
+
+    const sorted = [...regions].sort();
+    const preSelected = new Set(sorted.filter(r => {
+      const rl = r.toLowerCase();
+      return rl.includes('brazil') || rl.includes('brasil') || rl === 'global';
+    }).map(r => r.toLowerCase()));
+
+    _buildPlRegionChecklist(sorted, preSelected);
+  } catch (_) {
+    if (msg) msg.style.display = 'none';
+  }
 }
 
 async function importPriceListFile() {
@@ -2071,8 +2249,38 @@ async function importPriceListFile() {
 
   document.getElementById('pl-import-btn').disabled = true;
   document.getElementById('pl-import-msg').style.display = 'none';
+  const _logWrapInit = document.getElementById('pl-import-log-wrap');
+  const _logElInit   = document.getElementById('pl-import-log');
+  if (_logWrapInit) _logWrapInit.style.display = 'none';
+  if (_logElInit)   _logElInit.textContent = '';
+
+  // Renova o token agora para garantir sessão fresca durante todo o import
+  await _plRefreshTokenIfNeeded(true);
 
   await _processPlQueue();
+}
+
+// Renova o JWT antes de cada upload. force=true ignora a janela de 30 min (usado no início da fila).
+// Evita 401 em fila de muitos arquivos com imports longos.
+async function _plRefreshTokenIfNeeded(force = false) {
+  const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+  if (!token) return token;
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return token;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    if (!payload.exp) return token;
+    const msLeft = payload.exp * 1000 - Date.now();
+    if (!force && msLeft > 30 * 60 * 1000) return token; // mais de 30 min restantes — ok
+    const res = await fetch('/api/auth/refresh', { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
+    if (!res.ok) return token; // refresh falhou — usa token atual e deixa o 401 chegar
+    const { token: newToken } = await res.json();
+    if (sessionStorage.getItem('finops_token')) sessionStorage.setItem('finops_token', newToken);
+    if (localStorage.getItem('finops_token'))   localStorage.setItem('finops_token', newToken);
+    return newToken;
+  } catch (_) {
+    return token;
+  }
 }
 
 async function _processPlQueue() {
@@ -2094,7 +2302,8 @@ async function _processPlQueue() {
 
     const _esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     if (erros === total) {
-      _showPlImportMsg('error', `❌ Todos os ${total} arquivos falharam. Verifique o formato.`);
+      const _firstErr = _plImportResults[0]?.error || 'formato inválido';
+      _showPlImportMsg('error', `❌ Todos os ${total} arquivo(s) falharam: ${_esc(_firstErr)}`);
     } else {
       const detalhes = _plImportResults.map(r =>
         `<div style="margin-top:4px">${r.error
@@ -2118,10 +2327,31 @@ async function _processPlQueue() {
   if (progMsg) progMsg.textContent = `Enviando (${idx}/${total}): ${file.name}`;
 
   try {
-    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const token = await _plRefreshTokenIfNeeded();
     const form  = new FormData();
     form.append('file', file);
+    const _clearChk = document.getElementById('pl-clear-before');
+    const _regSel   = document.getElementById('pl-region-select');
+    const _regTxt   = document.getElementById('pl-region-text');
+    form.append('clearBefore', (idx === 1 && _clearChk && _clearChk.checked) ? 'true' : 'false');
+    // Coleta regiões marcadas no checklist
+    const _regWrap = document.getElementById('pl-region-checklist-wrap');
+    if (_regWrap && _regWrap.style.display !== 'none') {
+      const allCbs    = Array.from(_regWrap.querySelectorAll('input[type=checkbox]'));
+      const checkedVals = allCbs.filter(cb => cb.checked).map(cb => cb.value);
+      if (checkedVals.length > 0 && checkedVals.length < allCbs.length) {
+        form.append('regionFilter', checkedVals.join(','));
+      }
+    }
     const res  = await fetch('/api/price-list/import', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: form });
+    if (res.status === 401) {
+      _plImportQueue = [];
+      document.getElementById('pl-import-btn').disabled = false;
+      _showPlImportMsg('error',
+        `⏱️ Sessão expirada. Faça login novamente e reimporte os arquivos restantes (${idx-1}/${total} já processados).`
+      );
+      return;
+    }
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || 'Erro ao iniciar importação');
 
@@ -2133,16 +2363,77 @@ async function _processPlQueue() {
   }
 }
 
+// Polling de reconexão — chamado ao abrir a aba quando o import já estava rodando
+async function _reconnectImportPoll() {
+  try {
+    const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+    const res   = await fetch('/api/price-list/import-status', { headers: { Authorization: 'Bearer ' + token } });
+    if (res.status === 401) {
+      const logEl = document.getElementById('pl-import-log');
+      if (logEl) logEl.textContent += '\n⚠️  Sessão expirada — faça login para continuar acompanhando.';
+      return;
+    }
+    const d = await res.json();
+    _plUpdateLog(d);
+    if (!d.importing) {
+      // Concluído durante a desconexão
+      const prog = document.getElementById('pl-import-progress');
+      if (prog) prog.style.display = 'none';
+      document.getElementById('pl-import-btn').disabled = false;
+      if (d.error) {
+        _showPlImportMsg('error', `❌ Import falhou: ${d.error}`);
+      } else {
+        _showPlImportMsg('success',
+          `✅ Concluído: ${(d.inserted||0).toLocaleString('pt-BR')} ins · ${d.skipped||0} ignorados · ${d.errors||0} erros`);
+        _loadPriceListStatus();
+      }
+      return;
+    }
+    // Ainda importando — continua polling
+    const progMsg = document.getElementById('pl-import-progress-msg');
+    const pct = d.total > 0 ? ` (${((d.inserted||0)+(d.skipped||0)+(d.errors||0)).toLocaleString('pt-BR')}/${d.total.toLocaleString('pt-BR')})` : '';
+    if (progMsg) progMsg.textContent = `Importando${pct}: ${d.filename || '...'}`;
+    _plImportPollTimer = setTimeout(_reconnectImportPoll, 1500);
+  } catch (_) {
+    _plImportPollTimer = setTimeout(_reconnectImportPoll, 3000);
+  }
+}
+
+// Atualiza painel de log com as linhas vindas do servidor
+function _plUpdateLog(d) {
+  if (!d.log || !d.log.length) return;
+  const logWrap = document.getElementById('pl-import-log-wrap');
+  const logEl   = document.getElementById('pl-import-log');
+  if (!logWrap || !logEl) return;
+  logWrap.style.display = 'block';
+  logEl.textContent = d.log.join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
 async function _pollPlImport(filename, idx, total) {
   const progMsg = document.getElementById('pl-import-progress-msg');
   try {
     const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
     const res   = await fetch('/api/price-list/import-status', { headers: { Authorization: 'Bearer ' + token } });
-    const d     = await res.json();
+
+    // Sessão expirada — parar fila com mensagem clara
+    if (res.status === 401) {
+      _plImportQueue = [];
+      const prog = document.getElementById('pl-import-progress');
+      if (prog) prog.style.display = 'none';
+      document.getElementById('pl-import-btn').disabled = false;
+      _showPlImportMsg('error',
+        `⏱️ Sessão expirada durante o import. Faça login novamente e reimporte os arquivos restantes (${idx}/${total} processados).`
+      );
+      return;
+    }
+
+    const d = await res.json();
 
     if (d.importing) {
       const pct = d.total > 0 ? ` (${((d.inserted||0)+(d.skipped||0)+(d.errors||0)).toLocaleString('pt-BR')}/${d.total.toLocaleString('pt-BR')})` : '';
-      if (progMsg) progMsg.textContent = `Importando${pct} (${idx}/${total}): ${filename}`;
+      if (progMsg) progMsg.textContent = `Importando${pct} (${idx}/${total}): ${d.filename || filename}`;
+      _plUpdateLog(d);
       _plImportPollTimer = setTimeout(() => _pollPlImport(filename, idx, total), 1500);
       return;
     }

@@ -3229,6 +3229,36 @@
                 Importar
               </button>
             </div>
+            <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="pl-clear-before" checked style="accent-color:var(--accent)">
+                <span style="font-size:12px;color:var(--text-muted)">Limpar tabela antes do 1º arquivo <span style="color:var(--text-dim)">(desmarque para continuar import interrompido)</span></span>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:6px">
+                <span style="font-size:12px;color:var(--text-muted);padding-top:2px;white-space:nowrap">Filtrar regiões:</span>
+                <div style="flex:1">
+                  <div id="pl-region-scan-msg" style="font-size:11px;color:var(--text-dim);margin-bottom:4px;display:none">Detectando regiões...</div>
+                  <div id="pl-region-checklist-wrap" style="display:none">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                      <span id="pl-region-hint" style="font-size:11px;color:var(--text-dim)"></span>
+                      <div style="display:flex;gap:6px">
+                        <button type="button" onclick="_plRegionCheckAll(true)"
+                          style="font-size:10px;padding:2px 8px;background:var(--accent-dim);border:1px solid var(--border-light);border-radius:4px;color:var(--text);cursor:pointer">
+                          Marcar todos
+                        </button>
+                        <button type="button" onclick="_plRegionCheckAll(false)"
+                          style="font-size:10px;padding:2px 8px;background:transparent;border:1px solid var(--border-light);border-radius:4px;color:var(--text-muted);cursor:pointer">
+                          Desmarcar
+                        </button>
+                      </div>
+                    </div>
+                    <div id="pl-region-checklist"
+                      style="max-height:150px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:4px 6px">
+                    </div>
+                  </div>
+                </div>
+              </label>
+            </div>
             <div id="pl-import-progress" style="display:none;margin-top:10px;display:none">
               <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(147,51,234,.08);border:1px solid var(--border-light);border-radius:8px;">
                 <div style="width:12px;height:12px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0"></div>
@@ -3236,6 +3266,10 @@
               </div>
             </div>
             <div id="pl-import-msg" style="display:none;margin-top:8px;font-size:12px"></div>
+            <div id="pl-import-log-wrap" style="display:none;margin-top:8px">
+              <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">📋 Log de importação</div>
+              <div id="pl-import-log" style="font-family:monospace;font-size:11px;color:var(--text-muted);background:rgba(0,0,0,.25);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:160px;overflow-y:auto;white-space:pre-wrap;line-height:1.5"></div>
+            </div>
           </div>
 
           <!-- Botão + progresso -->
