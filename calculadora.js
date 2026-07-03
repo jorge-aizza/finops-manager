@@ -2550,18 +2550,9 @@ const Calculadora = (() => {
     const hTotal = _horasAdd.hExtra * _horasAdd.dias;
     const tipo   = r.tipo_custo || 'periodo';
     if (tipo === 'reserva') return 0;
-    const convR     = !isBRL ? (parseFloat(r.taxa_cambio || 0) > 1 ? parseFloat(r.taxa_cambio) : taxaBrl) : 1;
-    const retailUnit = parseFloat(r.retail_price_unit || 0);
+    const convR = !isBRL ? (parseFloat(r.taxa_cambio || 0) > 1 ? parseFloat(r.taxa_cambio) : taxaBrl) : 1;
 
     if (tipo === 'hora' || tipo === 'dia') {
-      // Prioridade 1: Price List (taxa fixa por meter_id, período-independente)
-      if (retailUnit > 0) {
-        const retailBrl = retailUnit * convR;
-        return retailBrl * hTotal;
-      }
-      // Prioridade 2: billing 30d quando período < 30 dias (taxa mais estável)
-      // Prioridade 3: billing do período selecionado (fallback)
-      // Prioridade 4: amortizado (effective_price) quando RI/SP coberto e billing=0 (RN-007)
       const raw30d     = parseFloat(r.custo_hora_30d || 0);
       const rawBilling = parseFloat(r.custo_hora_billing || 0);
       const rawAmort   = r.usa_amortizado && rawBilling === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
@@ -2569,13 +2560,7 @@ const Calculadora = (() => {
       return (isBRL ? raw : raw * convR) * hTotal;
     }
 
-    // periodo: storage, disco, bandwidth
-    // Prioridade 1: Price List mensal (meter_id fixo)
-    if (retailUnit > 0) {
-      const retailMesBrl = retailUnit * convR;
-      return (retailMesBrl / 720) * hTotal;
-    }
-    // Prioridade 2: billing 30d quando período < 30 dias; senão billing do período
+    // periodo/mes: storage, disco, bandwidth — sempre billing
     const diasC  = parseInt(r.dias_ativos || 1) || 1;
     const raw30d = parseFloat(r.custo_hora_30d || 0);
     const rawH   = (r.usa_30d && raw30d > 0)
@@ -3864,11 +3849,11 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         const _dbValida = _dbInf2 && _dbInf2.valida;
         const billRec2  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
         const taxaEf2   = _dbValida && _dbInf2.hDriver > 0 ? billRec2 / _dbInf2.hDriver : 0;
-        // RN-DB-001 tem prioridade sobre PL para hora: cluster rate captura custo real do workspace
+        // Estimado: sempre billing — sem Price List
         const estimado = (tipo2 === 'periodo')
-          ? (retailMesR > 0 ? retailMesR : _fallback2) / 720 * horas
+          ? _fallback2 / 720 * horas
           : _dbValida ? taxaEf2 * horas
-          : retailHr > 0 ? retailHr * horas : chora * horas;
+          : chora * horas;
         const temPLR = !_dbValida && (retailHr > 0 || retailMesR > 0);
         return {
           resource_id:      rid,
@@ -4043,39 +4028,19 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const horasReais = parseFloat(r.horas_reais || 0);
       // Uso parcial: recurso ficou ligado menos de 55% do mês (~400h de 720h)
       const usoParcial = isHora && horasReais > 0 && horasReais < 400;
-      // retail_price_unit já vem normalizado para 1 unidade pelo SQL (dividido pelo fator UoM do PL)
-      const retailUnit = parseFloat(r.retail_price_unit || 0);
-      // convR converte para BRL quando billing é USD; se billing já é BRL, convR = 1
-      const retailHora = isHora && retailUnit > 0 ? retailUnit * convR : 0;
-      const retailMes  = !isHora && (tipo === 'periodo' || tipo === 'mes') && retailUnit > 0 ? retailUnit * convR : 0;
-      // Desconto: SQL calcula só para hora/dia; para periodo/mes calculamos aqui
-      const dPctSQL  = parseFloat(r.desconto_pct || 0);
-      const dPctMes  = !isHora && retailMes > 0 && mesBrl > 0
-        ? Math.max(0, parseFloat(((1 - mesBrl / retailMes) * 100).toFixed(1)))
-        : 0;
-      const dPct = dPctSQL > 0 ? dPctSQL : dPctMes;
-      // Economia total no período selecionado
-      const economiaPeriodo = isHora && retailHora > 0
-        ? (retailHora - chora) * horas
-        : (!isHora && retailMes > 0 ? (retailMes - mesBrl) * (horas / 730) : 0);
-      const temPL    = (!isHora && retailMes > 0);
-      // Para reserva: on-demand do PL como referência informacional (estimado permanece amortizado)
-      const retailHoraRsv = tipo === 'reserva' && retailUnit > 0 ? retailUnit * convR : 0;
-      const dPctRsv = tipo === 'reserva' && retailHoraRsv > 0 && chora > 0
-        ? Math.max(0, parseFloat(((1 - chora / retailHoraRsv) * 100).toFixed(1))) : 0;
       // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
       const _dbInfOv    = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
       const _dbValidaOv = _dbInfOv && _dbInfOv.valida;
       const taxaEfOv    = _dbValidaOv && _dbInfOv.hDriver > 0 ? bill / _dbInfOv.hDriver : chora;
 
-      // Estimado: mes → custo mensal fixo | periodo → PL/mês ÷ 720 × horas | hora → taxa efetiva × horas
+      // Estimado: sempre billing — sem referência de Price List
       const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
       const _fallback3 = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
-      const estimadoMes  = retailMes > 0 ? retailMes : mesBrl;   // custo fixo/mês para tipo=mes
+      const estimadoMes  = mesBrl;   // custo mensal fixo do billing
       const estimado = (tipo === 'mes')
         ? estimadoMes
         : (tipo === 'periodo')
-          ? (retailMes > 0 ? retailMes : _fallback3) / 720 * horas
+          ? _fallback3 / 720 * horas
           : taxaEfOv * horas;
 
       // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
@@ -4088,28 +4053,16 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         col1Val = _brl(taxaEfOv);
         col1Suf = '/h';
         col1Tip = ' title="Custo proporcional: billing R$ ' + bill.toFixed(2) + ' \xF7 ' + _dbInfOv.hDriver + 'h (uptime cluster) = R$ ' + taxaEfOv.toFixed(4) + '/h | workspace: R$ ' + _dbInfOv.taxa.toFixed(4) + '/h (' + _dbInfOv.recursos + ' VMs)"';
-      } else if (tipo === 'mes' && temPL) {
-        col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
-        col1Tip = ' title="Preço on-demand mensal do Azure Price List"';
       } else if (tipo === 'mes') {
         col1Lbl = '🔒 Fixo/mês'; col1Val = _brl(mesBrl); col1Suf = '/mês';
         col1Tip = ' title="Custo mensal fixo baseado no billing histórico"';
-      } else if (tipo === 'periodo' && temPL) {
-        // Price List disponível para disco/storage: mostra PL/mês como base
-        col1Lbl = '📋 PL/mês'; col1Val = _brl(retailMes); col1Suf = '/mês';
-        col1Tip = ' title="Preço on-demand mensal do Azure Price List — base da estimativa"';
       } else if (tipo === 'periodo' && (r.unidade||'').toLowerCase().includes('dbu')) {
         // Databricks DBU software — label específico; custo_uom_brl2 já tem R$/DBU
         col1Lbl = '⚡ DBU/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
         col1Tip = ' title="Custo mensal proporcional dos DBUs Databricks (software licensing). Taxa unitária: ' + _brl(custo_uom_brl2) + '/DBU"';
       } else if (tipo === 'periodo') {
-        // Sem PL: usa custo mensal do billing como base proporcional → /mês*
         col1Lbl = 'Custo/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
-        col1Tip = ' title="Estimativa proporcional ao billing histórico — Price List não disponível para este meter"';
-      } else if (temPL) {
-        // Price List disponível para hora/dia: mostra PL/h como base da estimativa
-        col1Lbl = '📋 PL/h'; col1Val = _brl(retailHora); col1Suf = '/h';
-        col1Tip = ' title="Preço on-demand do Azure Price List — base da estimativa"';
+        col1Tip = ' title="Estimativa proporcional ao billing histórico (Cost \xF7 Qty)"';
       } else if (tipo === 'dia') {
         col1Lbl = 'Custo/h·dia'; col1Val = _brl(chora); col1Suf = '/h';
       } else if (r.usa_amortizado && tipo === 'hora' && chora > 0) {
@@ -4169,23 +4122,16 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
         +   (_dbValidaOv
               ? 'background:rgba(77,166,255,.08);border:1px solid rgba(77,166,255,.30);'
-              : temPL
-                ? 'background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);'
-                : 'background:var(--bg-card);border:1px solid transparent;')
-        + '"' + col1Tip
-        + (!temPL && !_dbValidaOv && tipo !== 'reserva' ? ' title="Sem dados no Price List para este meter.\nMeter ID: ' + _esc(r._meter_id || '—') + '"' : '')
-        + '>'
+              : 'background:var(--bg-card);border:1px solid transparent;')
+        + '"' + col1Tip + '>'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
-        +   (_dbValidaOv ? 'var(--blue,#4da6ff)' : temPL ? 'var(--green,#22c55e)' : tipo === 'reserva' ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
+        +   (_dbValidaOv ? 'var(--blue,#4da6ff)' : tipo === 'reserva' ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';margin-bottom:2px;">' + col1Lbl + '</div>'
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
         +   (_dbValidaOv ? 'var(--blue,#4da6ff)' : cor) + ';">' + col1Val + '<span style="font-size:9px;font-weight:400;">' + col1Suf + '</span></div>'
         + (_dbValidaOv ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">billing:\xA0' + _brl(chora) + '/h</div>' : '')
-        + (!_dbValidaOv && temPL && isHora  ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(chora) + '/h</div>' : '')
-        + (!_dbValidaOv && temPL && !isHora ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;">cobrado:\xA0' + _brl(mesBrl) + '/mês</div>' : '')
-        + (tipo === 'reserva' && retailHoraRsv > 0 ? '<div style="font-size:9px;color:var(--text-muted);margin-top:1px;" title="Preço on-demand do Price List (sem reserva)">on-dem:\xA0📋\xA0' + _brl(retailHoraRsv) + '/h</div>' : '')
-        // RN-006: Cost ÷ Qty — taxa por unidade nativa (período/mês sem PL)
-        + (custo_uom_brl2 > 0 && (tipo === 'periodo' || tipo === 'mes') && !temPL
+        // RN-006: Cost ÷ Qty — taxa por unidade nativa (periodo/mes)
+        + (custo_uom_brl2 > 0 && (tipo === 'periodo' || tipo === 'mes')
            ? '<div style="font-size:8px;color:var(--orange,#ff8c42);opacity:.85;margin-top:3px;font-family:\'IBM Plex Mono\',monospace;white-space:nowrap;border-top:1px solid rgba(255,140,66,.12);padding-top:2px;" title="Cost \xF7 Qty = taxa real por unidade de medida — auditoria FinOps">'
              + _brl(custo_uom_brl2) + '\xA0/\xA0' + _esc((r.unidade||'').replace(/^\d+\s+/,'').trim()||'un.') + '</div>'
            : '')
@@ -4206,47 +4152,21 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
               ? 'background:rgba(255,140,66,.10);border:2px solid rgba(255,140,66,.40);'
               : _dbValidaOv
                 ? 'background:rgba(77,166,255,.10);border:2px solid rgba(77,166,255,.40);'
-                : temPL
-                  ? 'background:rgba(34,197,94,.10);border:2px solid rgba(34,197,94,.45);'
-                  : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
+                : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
         + '">'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';margin-bottom:2px;">'
-        +   (tipo === 'mes' ? '🔒 Infra Fixa' : (_dbValidaOv ? '⚡ ' : temPL ? '📋 ' : '') + 'Estimado')
-        +   (!temPL && !_dbValidaOv && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
+        +   (tipo === 'mes' ? '🔒 Infra Fixa' : (_dbValidaOv ? '⚡ ' : '') + 'Estimado')
+        +   (!_dbValidaOv && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
         + '</div>'
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : temPL ? 'var(--green,#22c55e)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';">' + _brl(estimado) + (tipo === 'mes' ? '<span style="font-size:9px;font-weight:400;">/mês</span>' : '') + '</div>'
         + '</div>'
 
         + '</div>'
 
-        // ── Linha de economia vs on-demand (hora/dia/periodo com Price List) ────
-        + (dPct > 0
-          ? '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;padding:5px 8px;'
-            + 'background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;">'
-            + '<span style="font-size:10px;color:var(--green,#22c55e);font-weight:600;">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '% desc.</span>'
-            + '<span style="font-size:10px;color:var(--text-muted);flex:1;">vs on-demand'
-            + (isHora && retailHora > 0 ? ' (' + _brl(retailHora) + '/h)' : '')
-            + (!isHora && retailMes > 0 ? ' (' + _brl(retailMes) + '/mês)' : '') + '</span>'
-            + (economiaPeriodo > 0
-              ? '<span style="font-size:10px;color:var(--green,#22c55e);font-family:\'IBM Plex Mono\',monospace;font-weight:700;">'
-                + _brl(economiaPeriodo) + ' ec.</span>'
-              : '')
-            + '</div>'
-          : '')
-        // ── Barra de desconto da reserva vs on-demand ────────────────────────
-        + (tipo === 'reserva' && dPctRsv > 0
-          ? '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;padding:5px 8px;'
-            + 'background:rgba(77,166,255,.08);border:1px solid rgba(77,166,255,.2);border-radius:6px;">'
-            + '<span style="font-size:10px;color:var(--blue,#4da6ff);font-weight:600;">▼\xA0' + dPctRsv.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '% reserva</span>'
-            + '<span style="font-size:10px;color:var(--text-muted);flex:1;">vs on-demand (' + _brl(retailHoraRsv) + '/h)</span>'
-            + '<span style="font-size:10px;color:var(--blue,#4da6ff);font-family:\'IBM Plex Mono\',monospace;font-weight:700;">'
-              + _brl((retailHoraRsv - chora) * horas) + ' ec.</span>'
-            + '</div>'
-          : '')
 
         + '</div>';
     } // fim do for

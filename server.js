@@ -369,9 +369,11 @@ async function initDB() {
         observacoes     TEXT,
         recursos        JSONB,
         status          VARCHAR(20) DEFAULT 'Pendente',
-        criado_em       TIMESTAMP DEFAULT NOW()
+        criado_em       TIMESTAMP DEFAULT NOW(),
+        atualizado_em   TIMESTAMP DEFAULT NOW()
       );
       ALTER TABLE estimativas ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'Pendente';
+      ALTER TABLE estimativas ADD COLUMN IF NOT EXISTS atualizado_em TIMESTAMP DEFAULT NOW();
     `);
 
     await c.query(`
@@ -1537,7 +1539,7 @@ app.put('/api/estimativas/:id/status', authMiddleware, dbMiddleware, async (req,
   if (!allowed.includes(status)) return res.status(400).json({ error: 'Status inválido' });
   try {
     const r = await pool.query(
-      'UPDATE estimativas SET status = $1 WHERE id = $2 RETURNING *',
+      'UPDATE estimativas SET status = $1, atualizado_em = NOW() WHERE id = $2 RETURNING *',
       [status, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Não encontrada' });
