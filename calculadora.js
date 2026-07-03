@@ -1473,7 +1473,7 @@ const Calculadora = (() => {
     });
 
     const tipos = Object.entries(contagem).sort((a, b) => b[1] - a[1]);
-    if (tipos.length <= 1) { bar.style.display = 'none'; _filtroTipos.clear(); return; }
+    if (tipos.length < 1) { bar.style.display = 'none'; _filtroTipos.clear(); return; }
 
     bar.style.display = 'flex';
     bar.innerHTML = '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;flex-shrink:0;">Tipo:</span>'
