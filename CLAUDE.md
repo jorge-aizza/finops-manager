@@ -257,6 +257,9 @@ _dbTaxaMap   = new Map()   // rg_lower → { taxa, valida, totalBrl, hDriver, to
 _managedRgMap = new Map()  // rg_upper → { managed_type:'databricks'|'aks', managed_label }
 _filtroTipos = new Set()   // tipos selecionados no chip-bar (vazio = todos)
 _rgTotalMap  = new Map()   // rg_upper → total billing do período
+// v2.1 — pico de billing
+_usaPico        = false    // true quando custo_hora_pico > 0 e tipo ≠ reserva/mes e !_dbValidaOv
+_usaPicoCluster = false    // true quando custo_hora_pico_cluster > 0 e _dbValidaOv (Databricks)
 ```
 
 **Filter flow:**
@@ -272,7 +275,7 @@ mes      → unit_of_measure ILIKE '%month%' (excl. GB/TiB — ex: serviços fat
 periodo  → todos os demais (disco, storage, bandwidth, etc.)
 ```
 
-**Chip-bar de tipos** (`#ctipos-bar`): aparece quando há ≥ 2 tipos de recurso no resultado. `_tipoRecurso(r)` classifica em: `VMs`, `Discos`, `Storage`, `Databricks`, `AKS`, `SQL`, `App Service`, `Rede`, `Rede/CDN`, `Load Balancer`, `Key Vault`, `Monitoramento`, `Reservas`, `Outros`. `_filtroTipos` (Set) controla quais tipos estão ativos. Chip `Databricks` agrupa **ambos os streams**: VMs de infra em `databricks-rg-*` (`consumed_service = Microsoft.Compute`) E linhas de software DBU (`consumed_service = Microsoft.Databricks`) — a detecção é `svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-')`.
+**Chip-bar de tipos** (`#ctipos-bar`): **sempre visível** quando há ≥ 1 tipo de recurso (`tipos.length < 1` para ocultar — v2.1). `_tipoRecurso(r)` classifica em: `VMs`, `Discos`, `Storage`, `Databricks`, `AKS`, `SQL`, `App Service`, `Rede`, `Rede/CDN`, `Load Balancer`, `Key Vault`, `Monitoramento`, `Reservas`, `Outros`. `_filtroTipos` (Set) controla quais tipos estão ativos. Chip `Databricks` agrupa **ambos os streams**: VMs de infra em `databricks-rg-*` (`consumed_service = Microsoft.Compute`) E linhas de software DBU (`consumed_service = Microsoft.Databricks`) — a detecção é `svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-')`.
 
 **Grupos de recursos — lazy rendering:**
 - Grupos colapsados por padrão (`_expandidos[baseId] === true` para expandido; default = colapsado)
@@ -379,6 +382,8 @@ Campos armazenados em `_dbTaxaMap` por RG:
 // recursos   = nº de resource_ids distintos
 ```
 
+**Pico cluster (v2.1):** `pico_databricks` CTE retorna `custo_hora_pico_cluster` — taxa do pior dia do cluster inteiro. Quando disponível (`_usaPicoCluster = true`), substitui `taxaEfOv` no estimado. VMs Databricks **não** usam `pico_periodo` (pico por VM individual seria semanticamente incorreto para cluster paralelo). `_usaPico` exclui Databricks via `&& !_dbValidaOv`.
+
 Endpoint de diagnóstico: `GET /api/calculadora/diag-databricks?data_inicio=&data_fim=` — compara abordagem atual vs diária por RG, retorna `delta_pct` para avaliar impacto.
 
 UI — cards de estimativa:
@@ -392,17 +397,45 @@ UI — tabela de billing (`_custoHora`):
 - Badge `⚡ DBU` (azul) nos cards de estimativa para linhas de software Databricks (fora de `databricks-rg-*`)
 - Col1 dos cards para linhas DBU: `⚡ DBU/mês*` com tooltip informando taxa unitária `R$/DBU`
 
-**Price List integration (v2.3):**
-- `retail_price_unit` via `pl_best_mv` (1º) → `pl_sku_mv` (fallback) → 0
-- Prioridade por moeda: BRL (`retail_price_brl_norm`) > USD (`retail_price_norm × taxa_cambio`) > mesma moeda
-- `temPL = (isHora && retailHora > 0) || (!isHora && retailMes > 0)` — drives UI indicators
-- Col1 com PL: fundo verde + borda verde + label `📋 PL/h` ou `📋 PL/mês`
-- Col1 sem PL: tooltip com `_meter_id` para diagnóstico
-- Estimado com PL: fundo verde + borda verde 2px + ícone `📋` — valor verde
-- Estimado sem PL: fundo neutro + valor cinza (+ `/mês*` para periodo)
-- `fonte_estimado`: `'price_list'` (verde 📋) or `'billing'` (cinza)
-- Desconto verde `▼ X%`: vs on-demand + economia no período
-- Desconto azul `▼ X%`: reserva vs on-demand (amortizado vs tabela)
+**Price List integration:** SQL JOINs com `pl_best_mv` / `pl_sku_mv` ainda existem no banco (campos `retail_price_unit`, `desconto_pct` retornados pela query), mas **toda a UI foi removida na v2.1** — sem ícones `📋`, sem badges `▼%`, sem col1 verde. `fonte_estimado` é sempre `'billing'`. Estimado sempre cinza (billing) ou azul (Databricks) ou laranja (pico).
+
+**Pico de billing — Configurar Estimativa (v2.1):**
+
+Usado **apenas** nos cards de estimativa (`_ovRenderRecursos`). A tabela de billing (`_custoHora`) mantém a média histórica.
+
+`pico_periodo` CTE (server.js) — recursos normais:
+```sql
+-- Agrupa por resource_id + uom + cost_date dentro do ${where} (período selecionado)
+-- DISTINCT ON (resource_id, uom) ORDER BY custo_dia DESC → dia de maior billing
+-- hora/dia: custo_hora_pico = custo_dia ÷ horas_reais (qty × fator)
+-- periodo:  custo_hora_pico = custo_dia ÷ 24
+```
+
+`pico_databricks` CTE (server.js) — cluster Databricks:
+```sql
+-- Agrupa por UPPER(resource_group_name) + cost_date (SOMA todas as VMs do RG)
+-- WHERE UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' ${andCond}
+-- DISTINCT ON (rg) ORDER BY pico_custo_rg DESC → dia mais caro do cluster inteiro
+-- custo_hora_pico_cluster = pico_custo_rg ÷ pico_h_driver (driver hours naquele dia)
+-- Captura autoscale: dia com mais workers → maior custo/h do cluster
+```
+
+JS — lógica de ativação:
+```javascript
+_usaPico        = _picoBrl > 0 && tipo !== 'reserva' && tipo !== 'mes' && !_dbValidaOv
+_usaPicoCluster = _dbValidaOv && _picoClusterBrl > 0
+```
+
+Col1 priority order em `_ovRenderRecursos`:
+1. `reserva` → `Amort./h 🔒`
+2. `mes` → `🔒 Fixo/mês`
+3. `_usaPico` hora/dia → `⚠ Pico/h` (laranja) com tooltip: data, custo dia, horas
+4. `_usaPico` periodo → `⚠ Pico/mês*` (laranja)
+5. `_usaPicoCluster` → `⚠ Pico Cluster/h` (laranja) com tooltip: data, custo RG, h_driver
+6. `_dbValidaOv` → `⚡ Cluster/h` (azul — fallback sem pico)
+7. demais → `Custo/h` / `Custo/mês*`
+
+Col4 Estimado: laranja `⚠` para pico (ambos `_usaPico` e `_usaPicoCluster`); azul `⚡` para Databricks sem pico; cinza para billing normal.
 
 **CSV/TSV import fix:** `_lerCSV` e `_lerCSVBatched` detectam TAB antes de `;` e `,`.
 Azure Cost Management exporta `.csv` separado por TAB em exportações recentes (MCA).

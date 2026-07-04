@@ -4360,6 +4360,72 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         FROM azure_costs
         ${where30d}
         GROUP BY resource_id, COALESCE(unit_of_measure,'')
+      ),
+      -- ── CTE pico_periodo: maior custo diário ÷ horas reais naquele dia ──────────
+      -- Para recursos hora/dia usa horas reais (quantity × fator) em vez de 24h fixo.
+      -- DISTINCT ON pega o dia de maior custo; divisor é horas_dia quando disponível.
+      pico_periodo AS (
+        SELECT DISTINCT ON (resource_id, _uom)
+          resource_id,
+          _uom,
+          cost_date  AS pico_data,
+          custo_dia  AS pico_custo_dia,
+          horas_dia  AS pico_horas_dia,
+          CASE
+            WHEN (_uom ILIKE '%hour%' OR _uom ILIKE '%hora%' OR _uom ILIKE '%day%')
+                 AND horas_dia > 0
+            THEN ROUND(custo_dia::numeric / NULLIF(horas_dia, 0), 8)
+            ELSE ROUND(custo_dia::numeric / 24.0, 8)
+          END AS custo_hora_pico
+        FROM (
+          SELECT
+            resource_id,
+            COALESCE(unit_of_measure, '') AS _uom,
+            cost_date,
+            SUM(COALESCE(cost_in_billing_currency, 0)) AS custo_dia,
+            -- horas reais naquele dia: quantity × fator UoM (ex: "1 Hour" → 1, "10 Hours" → 10)
+            SUM(COALESCE(quantity, 0)
+              * GREATEST(COALESCE(NULLIF(
+                  REGEXP_REPLACE(COALESCE(unit_of_measure,''), '[^0-9]', '', 'g'),
+                ''), '1')::numeric, 1.0)
+              * CASE WHEN COALESCE(unit_of_measure,'') ILIKE '%day%' THEN 24.0 ELSE 1.0 END
+            ) AS horas_dia
+          FROM azure_costs
+          ${where}
+          GROUP BY resource_id, COALESCE(unit_of_measure, ''), cost_date
+        ) daily_p
+        ORDER BY resource_id, _uom, custo_dia DESC
+      ),
+      -- ── CTE pico_databricks: pico do cluster inteiro (RG) no período selecionado ──
+      -- Agrega todas as VMs do RG por dia → pega o dia com maior custo total do cluster
+      -- Divide pelo H_driver daquele dia (mesmo fator do RN-DB-001, mas só do dia pico)
+      pico_databricks AS (
+        SELECT DISTINCT ON (rg)
+          rg,
+          pico_data,
+          pico_custo_rg,
+          pico_h_driver,
+          ROUND(pico_custo_rg::numeric / NULLIF(pico_h_driver, 0), 8) AS custo_hora_pico_cluster
+        FROM (
+          SELECT
+            UPPER(resource_group_name) AS rg,
+            cost_date                  AS pico_data,
+            SUM(COALESCE(cost_in_billing_currency, 0)) AS pico_custo_rg,
+            MAX(
+              CASE
+                WHEN unit_of_measure ILIKE '%hour%' OR unit_of_measure ILIKE '%hora%'
+                THEN COALESCE(quantity, 0)
+                  * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1.0),1.0)
+                ELSE NULL
+              END
+            ) AS pico_h_driver
+          FROM azure_costs
+          WHERE UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%'
+            ${andCond}
+          GROUP BY UPPER(resource_group_name), cost_date
+        ) daily_db
+        WHERE pico_h_driver IS NOT NULL AND pico_h_driver > 0
+        ORDER BY rg, pico_custo_rg DESC
       )
       -- pl_best_mv e pl_sku_mv: materialized views pré-computadas (refresh após sync)
       SELECT
@@ -4402,7 +4468,12 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         base.custo_uom_usd,
         base.usa_amortizado,
         -- RN-DB-001: soma dos MAX diários de horas por RG Databricks (abordagem diária)
-        COALESCE(db.soma_h_driver, 0) AS soma_h_driver,
+        COALESCE(db.soma_h_driver, 0)              AS soma_h_driver,
+        -- pico_databricks: pior dia do cluster inteiro (para autoscale)
+        COALESCE(pdb.custo_hora_pico_cluster, 0)   AS custo_hora_pico_cluster,
+        pdb.pico_data                              AS pico_cluster_data,
+        pdb.pico_custo_rg                          AS pico_cluster_custo_rg,
+        pdb.pico_h_driver                          AS pico_cluster_horas_dia,
         -- meter_name e categoria do Price Sheet (para exibição na UI)
         COALESCE(pl.meter_name, pls.meter_name)           AS pl_meter_name,
         COALESCE(pl.meter_category, pls.meter_category)   AS pl_meter_category,
@@ -4435,6 +4506,10 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         )::numeric AS retail_price_unit,
         -- custo_hora_30d: taxa dos últimos 30 dias (independente do período filtrado)
         b30d.custo_hora_30d,
+        pp.custo_hora_pico,
+        pp.pico_data,
+        pp.pico_custo_dia,
+        pp.pico_horas_dia,
         -- usa_30d: true quando sem PL e período < 30 dias
         -- Exclui Databricks: eles têm taxa de cluster própria (soma_h_driver) que já é estável
         CASE
@@ -4478,8 +4553,11 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
       -- RN-DB-001: soma_h_driver diário por RG Databricks
       LEFT JOIN db_daily  db   ON db.rg = base.resource_group_name
       -- base_30d: taxa estável dos últimos 30 dias (fallback sem PL)
-      LEFT JOIN base_30d  b30d ON b30d.resource_id = base.resource_id
+      LEFT JOIN base_30d    b30d ON b30d.resource_id = base.resource_id
         AND b30d._uom = COALESCE(base.unidade, '')
+      LEFT JOIN pico_periodo   pp  ON pp.resource_id = base.resource_id
+        AND pp._uom = COALESCE(base.unidade, '')
+      LEFT JOIN pico_databricks pdb ON pdb.rg = base.resource_group_name
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
 

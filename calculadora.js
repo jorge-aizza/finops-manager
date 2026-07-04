@@ -669,35 +669,18 @@ const Calculadora = (() => {
         <!-- Legenda colapsável -->
         <div id="cov-legenda" style="display:none;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:14px;padding:12px;background:rgba(147,51,234,.05);border:1px solid var(--border);border-radius:10px;">
 
-          <!-- Coluna 1 — Fonte do Preço + Descontos -->
+          <!-- Coluna 1 — Fonte do Preço -->
           <div style="display:flex;flex-direction:column;gap:5px;">
             <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Fonte do Preço</div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
-              <span style="font-size:11px;flex-shrink:0;margin-top:1px;">📋</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--green,#22c55e);">📋 PL/h</strong> ou <strong style="color:var(--green,#22c55e);">📋 PL/mês</strong> — preço on-demand do Azure Price List. Estimativa mais precisa. Estimado fica <strong style="color:var(--green,#22c55e);">verde</strong>.</span>
-            </div>
-
-            <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:11px;flex-shrink:0;margin-top:1px;">💰</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">Custo/h</strong> ou <strong style="color:var(--text-muted);">Custo/mês*</strong> — média do billing histórico. Usado quando PL não disponível. Estimado fica <strong style="color:var(--text-muted);">cinza</strong>.</span>
+              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--accent);">Custo/h</strong> ou <strong style="color:var(--text-muted);">Custo/mês*</strong> — média do billing histórico. Estimado fica <strong style="color:var(--text-muted);">cinza</strong>.</span>
             </div>
 
             <div style="display:flex;align-items:flex-start;gap:6px;">
               <span style="font-size:11px;flex-shrink:0;margin-top:1px;">🔒</span>
               <span style="font-size:10px;color:var(--text-dim);line-height:1.3;"><strong style="color:var(--blue,#4da6ff);">Amort./h 🔒</strong> — custo amortizado da reserva (1 ou 3 anos). Estimado = amort./h × horas, permanece fixo.</span>
-            </div>
-
-            <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Descontos</div>
-
-            <div style="display:flex;align-items:flex-start;gap:6px;">
-              <span style="font-size:10px;color:var(--green,#22c55e);font-weight:700;flex-shrink:0;margin-top:1px;">▼%</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--green,#22c55e);">verde</strong> — desconto do seu contrato vs on-demand (PL). Mostra economia total no período.</span>
-            </div>
-
-            <div style="display:flex;align-items:flex-start;gap:6px;">
-              <span style="font-size:10px;color:var(--blue,#4da6ff);font-weight:700;flex-shrink:0;margin-top:1px;">▼%</span>
-              <span style="font-size:10px;color:var(--text-dim);line-height:1.3;">Barra <strong style="color:var(--blue,#4da6ff);">azul</strong> — desconto da reserva vs on-demand. Retorno do compromisso de 1 ou 3 anos.</span>
             </div>
           </div>
 
@@ -735,13 +718,8 @@ const Calculadora = (() => {
             <div style="margin-top:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:2px;">Coluna Estimado</div>
 
             <div style="display:flex;align-items:center;gap:6px;">
-              <span style="font-size:12px;">📋</span>
-              <span style="font-size:10px;color:var(--text-dim);"><strong style="color:var(--green,#22c55e);">Verde 📋</strong> — baseado no Price List on-demand</span>
-            </div>
-
-            <div style="display:flex;align-items:center;gap:6px;">
               <span style="width:10px;height:10px;background:var(--text-muted);border-radius:2px;flex-shrink:0;opacity:.5;"></span>
-              <span style="font-size:10px;color:var(--text-dim);"><strong style="color:var(--text-muted);">Cinza</strong> — baseado no billing histórico (PL indisponível)</span>
+              <span style="font-size:10px;color:var(--text-dim);"><strong style="color:var(--text-muted);">Cinza</strong> — baseado no billing histórico</span>
             </div>
 
             <div style="display:flex;align-items:center;gap:6px;">
@@ -2969,9 +2947,7 @@ const Calculadora = (() => {
       } else {
         quantCell = (r.horas || 0).toLocaleString('pt-BR') + ' h';
       }
-      const _plRef = parseFloat(r.retail_price_hora || 0);
-      const _temPL = _plRef > 0;
-      const _corEst = r.databricks_valida ? 'td-blue' : (r.fonte_estimado === 'price_list' || (_temPL && tc !== 'reserva')) ? 'td-green' : '';
+      const _corEst = r.databricks_valida ? 'td-blue' : '';
       const skuTag = r.sku ? '<div style="font-size:6.5pt;color:#888;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + _esc(r.sku) + '</div>' : '';
       const uomTag = r.uom ? '<div style="font-size:6pt;color:#aaa;margin-top:1px;font-family:monospace;white-space:nowrap;">' + _esc(r.uom) + '</div>' : '';
       return '<tr>'
@@ -3686,7 +3662,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const uom     = (r.unidade || '').toLowerCase();
       const tipo    = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
       const chora   = parseFloat(r.custo_hora_billing || 0) * cr;
-      const retailU = parseFloat(r.retail_price_unit || 0);
       const dias    = parseInt(r.dias_ativos || 1) || 1;
       const mesRaw  = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / dias * 30);
       const mesBrl  = mesRaw * cr;
@@ -3695,30 +3670,21 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         totalFixoMes += mesBrl;
         return;
       }
-      const retailH = (tipo === 'hora' || tipo === 'dia') && retailU > 0 ? retailU * convR : 0;
       let estimado  = 0;
       if (tipo === 'reserva') {
         estimado = chora * horas;
       } else if (tipo === 'hora' || tipo === 'dia') {
-        // Prioridade: 1. Price List/h  2. Databricks cluster rate  3. billing/h
-        if (retailH > 0) {
-          estimado = retailH * horas;
+        const _dbInf = _dbInfoParaRecurso(r);
+        if (_dbInf && _dbInf.valida) {
+          const billRec = parseFloat(r.total_billing || 0) * cr;
+          estimado = _dbInf.hDriver > 0 ? (billRec / _dbInf.hDriver) * horas : chora * horas;
         } else {
-          const _dbInf = _dbInfoParaRecurso(r);
-          if (_dbInf && _dbInf.valida) {
-            const billRec = parseFloat(r.total_billing || 0) * cr;
-            estimado = _dbInf.hDriver > 0 ? (billRec / _dbInf.hDriver) * horas : chora * horas;
-          } else {
-            estimado = chora * horas;
-          }
+          estimado = chora * horas;
         }
       } else {
-        // periodo: PL/mês ÷ 720 × horas  (PL disponível)
-        //          unit_price×qty / 720 × horas  (fallback — on-demand do export)
-        const retM     = tipo === 'periodo' && retailU > 0 ? retailU * convR : 0;
-        const upqBrl   = parseFloat(r.total_upq_brl || 0) * cr;  // effective_price×qty×taxa
+        const upqBrl   = parseFloat(r.total_upq_brl || 0) * cr;
         const fallback = upqBrl > 0 ? (upqBrl / dias * 30) : mesBrl;
-        estimado = (retM > 0 ? retM : fallback) / 720 * horas;
+        estimado = fallback / 720 * horas;
       }
       totalGeral += estimado;
     });
@@ -3810,10 +3776,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         const mesRaw    = parseFloat(r.custo_mes_billing) ||
                           (parseFloat(r.total_billing || 0) / _diasP * 30);
         const custo_mes = isBRL ? mesRaw : mesRaw * convR2;
-        // retail_price_unit já normalizado pelo SQL — só converte moeda se necessário
-        const _retailUr  = parseFloat(r.retail_price_unit || 0);
-        const retailHr   = isHora && _retailUr > 0 ? _retailUr * convR2 : 0;
-        const retailMesR = !isHora && (tipo2 === 'periodo' || tipo2 === 'mes') && _retailUr > 0 ? _retailUr * convR2 : 0;
         // mes: custo fixo mensal — estimado_brl = custo do mês (não proporcional às horas)
         if (tipo2 === 'mes') {
           return {
@@ -3829,16 +3791,15 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
             isHora:           false,
             horas:            0,
             custo_hora:       0,
-            retail_price_hora: retailMesR,
-            fonte_estimado:   retailMesR > 0 ? 'price_list' : 'billing',
+            fonte_estimado:   'billing',
             custo_mes:        custo_mes,
             dias_ativos:      _diasP,
             total_cobrado:    bill,
-            estimado_brl:     retailMesR > 0 ? retailMesR : custo_mes,
+            estimado_brl:     custo_mes,
             moeda:            r.moeda || 'BRL',
           };
         }
-        // Estimado: periodo → PL/mês ÷ 720 | fallback unit_price×qty ÷ 720 | hora → billing/h × horas
+        // Estimado: periodo → billing/mês ÷ 720 | hora → billing/h × horas
         const _diasP2    = _diasP;
         const _mesR2     = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / _diasP2 * 30);
         const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
@@ -3854,7 +3815,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           ? _fallback2 / 720 * horas
           : _dbValida ? taxaEf2 * horas
           : chora * horas;
-        const temPLR = !_dbValida && (retailHr > 0 || retailMesR > 0);
         return {
           resource_id:      rid,
           nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
@@ -3868,7 +3828,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           isHora,
           horas,
           custo_hora:       chora,
-          fonte_estimado:   temPLR ? 'price_list' : 'billing',
+          fonte_estimado:   'billing',
           custo_mes:        custo_mes,
           dias_ativos:      parseInt(r.dias_ativos) || 0,
           total_cobrado:    bill,
@@ -4033,29 +3993,63 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const _dbValidaOv = _dbInfOv && _dbInfOv.valida;
       const taxaEfOv    = _dbValidaOv && _dbInfOv.hDriver > 0 ? bill / _dbInfOv.hDriver : chora;
 
-      // Estimado: sempre billing — sem referência de Price List
-      const _upqBrl3   = parseFloat(r.total_upq_brl || 0) * convR;
-      const _fallback3 = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
-      const estimadoMes  = mesBrl;   // custo mensal fixo do billing
+      // Estimado: pico do período quando disponível; senão billing
+      const _upqBrl3         = parseFloat(r.total_upq_brl || 0) * convR;
+      const _fallback3       = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
+      const _picoRaw         = parseFloat(r.custo_hora_pico || 0);
+      const _picoBrl         = _picoRaw > 0 ? _picoRaw * convR : 0;
+      const _usaPico         = _picoBrl > 0 && tipo !== 'reserva' && tipo !== 'mes' && !_dbValidaOv;
+      // Pico do cluster Databricks: pior dia do RG inteiro (captura autoscale)
+      const _picoClusterRaw  = parseFloat(r.custo_hora_pico_cluster || 0);
+      const _picoClusterBrl  = _picoClusterRaw > 0 ? _picoClusterRaw * convR : 0;
+      const _usaPicoCluster  = _dbValidaOv && _picoClusterBrl > 0;
+      const estimadoMes = mesBrl;
       const estimado = (tipo === 'mes')
         ? estimadoMes
-        : (tipo === 'periodo')
-          ? _fallback3 / 720 * horas
-          : taxaEfOv * horas;
+        : _usaPicoCluster
+          ? _picoClusterBrl * horas                // pico cluster → taxa/h × horas
+          : _usaPico
+            ? _picoBrl * horas
+            : (tipo === 'periodo')
+              ? _fallback3 / 720 * horas
+              : taxaEfOv * horas;
 
-      // Coluna 1: preço base da estimativa (PL quando disponível, senão billing)
+      // Coluna 1: preço base da estimativa
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
       if (tipo === 'reserva') {
         col1Lbl = 'Amort./h 🔒'; col1Val = _brl(chora); col1Suf = '/h';
+      } else if (tipo === 'mes') {
+        col1Lbl = '🔒 Fixo/mês'; col1Val = _brl(mesBrl); col1Suf = '/mês';
+        col1Tip = ' title="Custo mensal fixo baseado no billing histórico"';
+      } else if (_usaPico && (tipo === 'hora' || tipo === 'dia')) {
+        const _picoData  = r.pico_data ? new Date(r.pico_data).toLocaleDateString('pt-BR') : '—';
+        const _picoDia   = parseFloat(r.pico_custo_dia || 0) * convR;
+        const _picoH     = parseFloat(r.pico_horas_dia || 0);
+        const _picoLabel = _dbValidaOv ? '⚠ Pico Cluster/h' : '⚠ Pico/h';
+        col1Lbl = _picoLabel; col1Val = _brl(_picoBrl); col1Suf = '/h';
+        col1Tip = ' title="Pico: ' + _picoData + ' — custo do dia: ' + _brl(_picoDia)
+                + (_picoH > 0 ? ' em ' + _picoH.toFixed(1) + 'h ligado' : '')
+                + ' → ' + _brl(_picoBrl) + '/h"';
+      } else if (_usaPico && tipo === 'periodo') {
+        const _picoData = r.pico_data ? new Date(r.pico_data).toLocaleDateString('pt-BR') : '—';
+        const _picoDia  = parseFloat(r.pico_custo_dia || 0) * convR;
+        col1Lbl = '⚠ Pico/m\xEAs*'; col1Val = _brl(_picoBrl * 720); col1Suf = '/m\xEAs';
+        col1Tip = ' title="Pico: ' + _picoData + ' — custo do dia: ' + _brl(_picoDia)
+                + ' \xD7 30 dias = ' + _brl(_picoBrl * 720) + '/m\xEAs"';
+      } else if (_usaPicoCluster) {
+        const _pcData  = r.pico_cluster_data ? new Date(r.pico_cluster_data).toLocaleDateString('pt-BR') : '—';
+        const _pcCusto = parseFloat(r.pico_cluster_custo_rg || 0) * convR;
+        const _pcHoras = parseFloat(r.pico_cluster_horas_dia || 0);
+        col1Lbl = '⚠ Pico Cluster/h'; col1Val = _brl(_picoClusterBrl); col1Suf = '/h';
+        col1Tip = ' title="Pico cluster: ' + _pcData + ' — custo total RG: ' + _brl(_pcCusto)
+                + (_pcHoras > 0 ? ' em ' + _pcHoras.toFixed(1) + 'h (driver)' : '')
+                + ' → ' + _brl(_picoClusterBrl) + '/h"';
       } else if (_dbValidaOv) {
-        // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
+        // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver (sem pico disponível)
         col1Lbl = '⚡ Cluster/h';
         col1Val = _brl(taxaEfOv);
         col1Suf = '/h';
         col1Tip = ' title="Custo proporcional: billing R$ ' + bill.toFixed(2) + ' \xF7 ' + _dbInfOv.hDriver + 'h (uptime cluster) = R$ ' + taxaEfOv.toFixed(4) + '/h | workspace: R$ ' + _dbInfOv.taxa.toFixed(4) + '/h (' + _dbInfOv.recursos + ' VMs)"';
-      } else if (tipo === 'mes') {
-        col1Lbl = '🔒 Fixo/mês'; col1Val = _brl(mesBrl); col1Suf = '/mês';
-        col1Tip = ' title="Custo mensal fixo baseado no billing histórico"';
       } else if (tipo === 'periodo' && (r.unidade||'').toLowerCase().includes('dbu')) {
         // Databricks DBU software — label específico; custo_uom_brl2 já tem R$/DBU
         col1Lbl = '⚡ DBU/mês*'; col1Val = _brl(mesBrl); col1Suf = '/mês';
@@ -4150,18 +4144,21 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
         +   (tipo === 'mes'
               ? 'background:rgba(255,140,66,.10);border:2px solid rgba(255,140,66,.40);'
-              : _dbValidaOv
-                ? 'background:rgba(77,166,255,.10);border:2px solid rgba(77,166,255,.40);'
-                : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
+              : _usaPicoCluster || _usaPico
+                ? 'background:rgba(255,140,66,.08);border:2px solid rgba(255,140,66,.35);'
+                : _dbValidaOv
+                  ? 'background:rgba(77,166,255,.10);border:2px solid rgba(77,166,255,.40);'
+                  : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
         + '">'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : (_usaPicoCluster || _usaPico) ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';margin-bottom:2px;">'
-        +   (tipo === 'mes' ? '🔒 Infra Fixa' : (_dbValidaOv ? '⚡ ' : '') + 'Estimado')
-        +   (!_dbValidaOv && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
+        +   (tipo === 'mes' ? '🔒 Infra Fixa' : ((_usaPicoCluster || _usaPico) ? '⚠ ' : _dbValidaOv ? '⚡ ' : '') + 'Estimado')
+        +   (!_dbValidaOv && !_usaPico && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
+        +   (_usaPico && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
         + '</div>'
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : (_usaPicoCluster || _usaPico) ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';">' + _brl(estimado) + (tipo === 'mes' ? '<span style="font-size:9px;font-weight:400;">/mês</span>' : '') + '</div>'
         + '</div>'
 
@@ -4410,21 +4407,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (tipo === 'reserva') {
       // RN-002: custo amortizado pelo prazo da reserva (1 ou 3 anos)
       const qLinha     = _qLinha(totalQty, _esc(r.unidade || 'un.'));
-      const _rvRetail  = parseFloat(r.retail_price_unit || 0);
-      const _rvOnDem   = _rvRetail > 0 ? _rvRetail * convR : 0;
-      // Desconto da reserva vs on-demand (quanto você economiza por ter comprado a reserva)
-      const _rvDPct    = _rvOnDem > 0 && preco > 0
-        ? Math.max(0, parseFloat(((1 - preco / _rvOnDem) * 100).toFixed(1))) : 0;
-      const dBadgeRsv  = _rvDPct > 0
-        ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto da reserva vs on-demand retail Azure">▼\xA0' + _rvDPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%\xA0rsv</div>'
-        : '';
-      const plLinhaRsv = _rvOnDem > 0
-        ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(_rvOnDem) + '/h od</div>'
-        : '';
       return '<div style="' + mono + 'font-size:11px;color:var(--blue,#4da6ff);white-space:nowrap;"' + moedaTip + '>' + _brl(preco) + '</div>'
            + '<div style="font-size:9px;color:var(--blue,#4da6ff);" title="Amortizado pelo term da reserva (1 ano=8.760h / 3 anos=26.280h)">🔒 amort./h</div>'
-           + dBadgeRsv
-           + plLinhaRsv
            + qLinha;
     }
 
@@ -4439,20 +4423,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const amortBadge = r.usa_amortizado && raw === 0 && taxaAmortH > 0
         ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Custo amortizado: VM coberta por Reserva ou Savings Plan — effective_price × qty ÷ qty = taxa real proporcional">⚡\xA0amort./h</div>'
         : '';
-      // retail_price_unit já normalizado pelo SQL — só converte moeda
-      const retailUnit = parseFloat(r.retail_price_unit || 0);
-      const retailHora = retailUnit > 0 ? retailUnit * convR : 0;
-      const dPct       = parseFloat(r.desconto_pct || 0);
-      // Linha de desconto (quando há dados do Price List)
-      const dBadge     = dPct > 0
-        ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
-        : '';
-      // Linha do preço retail do Price List
-      const plLinha    = retailHora > 0
-        ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(retailHora) + '/h</div>'
-        : '';
-      // Badge 📅 30d: quando não há PL e o período tem < 30 dias (taxa mais estável)
-      const _30dBadgeH = r.usa_30d && !retailHora
+      // Badge 📅 30d: quando o período tem < 30 dias (taxa mais estável)
+      const _30dBadgeH = r.usa_30d
         ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Média dos últimos 30 dias do billing — período selecionado tem menos de 30 dias">📅\xA030d</div>'
         : '';
       // RN-DB-001: contexto de cluster na tabela de billing (VMs em databricks-rg-*)
@@ -4471,9 +4443,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;"' + moedaTip + '>' + _brl(precoEfet) + '</div>'
            + horaSubLabel
            + amortBadge
-           + dBadge
            + _30dBadgeH
-           + plLinha
            + clusterLinha
            + qLinha;
     }
@@ -4481,24 +4451,12 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (tipo === 'dia') {
       // RN-003: UoM diária convertida para hora
       const qLinha     = _qLinha(totalQty, 'dias');
-      // retail_price_unit já normalizado pelo SQL — só converte moeda
-      const retailUnit = parseFloat(r.retail_price_unit || 0);
-      const retailHora = retailUnit > 0 ? retailUnit * convR : 0;
-      const dPct       = parseFloat(r.desconto_pct || 0);
-      const dBadge     = dPct > 0
-        ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + dPct.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
-        : '';
-      const plLinha    = retailHora > 0
-        ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand (Price List Azure)">📋\xA0' + _brl(retailHora) + '/h</div>'
-        : '';
-      const _30dBadgeD = r.usa_30d && !retailHora
+      const _30dBadgeD = r.usa_30d
         ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Média dos últimos 30 dias do billing — período selecionado tem menos de 30 dias">📅\xA030d</div>'
         : '';
       return '<div style="' + mono + 'font-size:11px;color:var(--accent);white-space:nowrap;"' + moedaTip + '>' + _brl(preco) + '</div>'
            + '<div style="font-size:9px;color:var(--text-muted);" title="UoM diária ÷ 24">/h (dia)</div>'
-           + dBadge
            + _30dBadgeD
-           + plLinha
            + qLinha;
     }
 
@@ -4530,28 +4488,12 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       ? '<div style="font-size:9px;color:var(--orange,#ff8c42);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,140,66,.15);padding-top:2px;" title="Cost \xF7 Qty: taxa real por unidade de medida — valor infalível para auditar a fatura">'
         + _brl(custo_uom_brl) + '\xA0/\xA0' + _esc(uomLabel) + '</div>'
       : '';
-    // Price List para periodo (disco, storage…): retail_price_unit já em BRL
-    // retail_price_unit já normalizado pelo SQL — só converte moeda
-    const _plRetail = parseFloat(r.retail_price_unit || 0);
-    const _plMes    = _plRetail > 0 ? _plRetail * convR : 0;
-    const _plMesDia = _plMes / 730;
-    const _dPctPer  = _plMes > 0 && mesBrl > 0
-      ? Math.max(0, parseFloat(((1 - mesBrl / _plMes) * 100).toFixed(1)))
-      : 0;
-    const dBadgePer = _dPctPer > 0
-      ? '<div style="font-size:9px;color:var(--green,#22c55e);margin-top:1px;white-space:nowrap;" title="Desconto vs on-demand retail Azure">▼\xA0' + _dPctPer.toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%</div>'
-      : '';
-    const plMesLinha = _plMes > 0
-      ? '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;white-space:nowrap;border-top:1px solid rgba(255,255,255,.06);padding-top:2px;" title="Preço on-demand mensal (Price List Azure)">📋\xA0' + _brl(_plMesDia) + '/dia</div>'
-      : '';
-    const _30dBadgePer = r.usa_30d && !_plMes
+    const _30dBadgePer = r.usa_30d
       ? '<div style="font-size:9px;color:var(--blue,#4da6ff);margin-top:1px;white-space:nowrap;" title="Média dos últimos 30 dias do billing — período selecionado tem menos de 30 dias">📅\xA030d</div>'
       : '';
     return '<div style="' + mono + 'font-size:11px;color:var(--orange,#ff8c42);white-space:nowrap;"' + moedaTip + '>' + _brl(custoDia) + '</div>'
          + '<div style="font-size:9px;color:var(--orange,#ff8c42);" title="Cobrado por consumo (GB, Req…) — custo di\xE1rio = custo mensal \xF7 30">/dia cobrado</div>'
-         + dBadgePer
          + _30dBadgePer
-         + plMesLinha
          + uomRateLinha
          + qLinha;
   }
