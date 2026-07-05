@@ -937,10 +937,10 @@ const Calculadora = (() => {
             <span style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-dim);font-weight:700;">Total Estimado</span>
             <span id="cov-total" style="font-family:'IBM Plex Mono',monospace;font-size:1.5rem;font-weight:700;color:var(--accent);">R$ 0,00</span>
           </div>
-          <div id="cov-row-fixo" style="display:none;flex-direction:column;gap:3px;border-radius:7px;background:rgba(255,140,66,.06);border:1px solid rgba(255,140,66,.25);padding:7px 10px;">
+          <div id="cov-row-fixo" style="display:none;flex-direction:column;gap:3px;border-radius:7px;background:rgba(77,166,255,.06);border:1px solid rgba(77,166,255,.25);padding:7px 10px;">
             <div style="display:flex;justify-content:space-between;align-items:center;">
-              <span style="font-size:10px;color:var(--orange,#ff8c42);font-weight:700;letter-spacing:.04em;">🔒 Infra Fixa/mês</span>
-              <span id="cov-vl-fixo" style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--orange,#ff8c42);">R$ 0,00</span>
+              <span style="font-size:10px;color:var(--blue,#4da6ff);font-weight:700;letter-spacing:.04em;">🔒 Infra Fixa/mês</span>
+              <span id="cov-vl-fixo" style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--blue,#4da6ff);">R$ 0,00</span>
             </div>
             <div style="font-size:9px;color:var(--text-muted);line-height:1.4;">Custo mensal fixo — não entra no Total Estimado. Cobrado independente das horas do projeto.</div>
           </div>
@@ -981,6 +981,11 @@ const Calculadora = (() => {
       view.innerHTML = _html();
       _iniciado = true;
       if (!_modoPublico) _setupImport();
+      if (_modoPublico) {
+        const _hide = id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; };
+        _hide('cvtab-det');
+        _hide('cvtab-svc');
+      }
       _setupDateListeners();
       _setupClickFora();
       _carregarTaxas();
@@ -1422,19 +1427,34 @@ const Calculadora = (() => {
     const svc = (r.consumed_service || '').toLowerCase();
     const cat = (r.meter_category   || '').toLowerCase();
     const rg  = (r.resource_group_name || '').toLowerCase();
-    // Databricks: software (consumed_service) OU VMs gerenciadas no databricks-rg-*
-    if (svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-')) return 'Databricks';
-    if (svc.includes('containerservice') || cat.includes('kubernetes')) return 'AKS';
-    if (cat.includes('virtual machine') || (svc.includes('compute') && cat.includes('compute'))) return 'VMs';
-    if (cat.includes('managed disk') || cat.includes('disk')) return 'Discos';
-    if (cat.includes('storage')) return 'Storage';
+    const nom = (r.nome_recurso || r.resource_id || '').toLowerCase();
+    // Databricks: software (consumed_service) OU VMs gerenciadas em RGs Databricks
+    if (svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-') || rg.startsWith('managed-rg-adbx-')) return 'Databricks';
+    // AKS: containerservice OU nós VMSS de AKS (nom começa com 'aks-' ou RG começa com 'mc_')
+    if (svc.includes('containerservice') || cat.includes('kubernetes') || (svc.includes('compute') && (nom.startsWith('aks-') || rg.startsWith('mc_')))) return 'AKS';
+    // Backup: snapshots/restore points do Azure Backup (nome começa com 'azurebackup_')
+    if (nom.startsWith('azurebackup_') || cat.includes('azure backup') || cat.includes('backup vault')) return 'Backup';
+    // meter_category explícito tem prioridade: Virtual Machines antes de checar nome
+    if (cat.includes('virtual machine')) return 'VMs';
+    // Discos: managed disk, nome contém 'disk' ou PVCs do Kubernetes (pvc-)
+    if (cat.includes('managed disk') || cat.includes('disk') || (svc.includes('compute') && (nom.includes('disk') || nom.startsWith('pvc-')))) return 'Discos';
+    if (svc.includes('compute')) return 'VMs';
+    if (cat.includes('storage') || svc.includes('storage')) return 'Storage';
     if (cat.includes('load balancer')) return 'Load Balancer';
-    if (cat.includes('bandwidth') || cat.includes('content delivery') || cat.includes('egress')) return 'Rede/CDN';
-    if (svc.includes('network') || cat.includes('ip address') || cat.includes('virtual network')) return 'Rede';
+    if (cat.includes('bandwidth') || cat.includes('content delivery') || cat.includes('egress') || cat.includes('cdn') || svc.includes('.cdn') || cat.includes('front door') || svc.includes('frontdoor')) return 'Rede/CDN';
+    if (svc.includes('network') || cat.includes('ip address') || cat.includes('virtual network') || cat.includes('dns') || cat.includes('traffic manager') || svc.includes('trafficmanager') || svc.includes('privatedns')) return 'Rede';
     if (svc.includes('sql') || cat.includes('sql')) return 'SQL';
-    if (svc.includes('web') || cat.includes('app service')) return 'App Service';
+    if (svc.includes('dbforpostgresql') || svc.includes('dbformysql') || svc.includes('dbformariadb') || svc.includes('documentdb') || cat.includes('cosmos db') || cat.includes('postgresql') || cat.includes('mysql') || cat.includes('mariadb') || cat.includes('azure database')) return 'Banco de Dados';
+    if (svc.includes('cache') || cat.includes('redis') || cat.includes('cache for redis')) return 'Cache';
+    if (svc.includes('eventhub') || svc.includes('servicebus') || svc.includes('eventgrid') || svc.includes('notificationhubs') || cat.includes('event hubs') || cat.includes('service bus') || cat.includes('event grid') || cat.includes('notification hubs')) return 'Mensageria';
+    if (svc.includes('containerregistry') || svc.includes('containerinstance') || cat.includes('container registry') || cat.includes('container instances')) return 'Containers';
+    if (svc.includes('cognitiveservices') || svc.includes('machinelearning') || svc.includes('openai') || cat.includes('cognitive') || cat.includes('machine learning') || cat.includes('openai') || cat.includes('azure ai')) return 'IA/ML';
+    if (svc.includes('synapse') || svc.includes('streamanalytics') || svc.includes('hdinsight') || svc.includes('powerbidedicated') || svc.includes('datafactory') || cat.includes('synapse') || cat.includes('stream analytics') || cat.includes('hdinsight') || cat.includes('power bi') || cat.includes('data factory')) return 'Analytics';
+    if (svc.includes('apimanagement') || svc.includes('logic') || svc.includes('automation') || cat.includes('api management') || cat.includes('logic apps') || cat.includes('automation') || cat.includes('integration')) return 'Integração';
+    if (svc.includes('web') || cat.includes('app service') || cat.includes('functions') || cat.includes('azure functions') || cat.includes('app configuration') || svc.includes('appconfiguration')) return 'App Service';
     if (svc.includes('keyvault') || cat.includes('key vault')) return 'Key Vault';
-    if (svc.includes('monitor') || cat.includes('monitor') || cat.includes('log analytics')) return 'Monitoramento';
+    if (svc.includes('recoveryservices') || cat.includes('backup') || cat.includes('recovery services') || cat.includes('site recovery')) return 'Backup';
+    if (svc.includes('monitor') || svc.includes('operationalinsights') || svc.includes('.insights') || cat.includes('monitor') || cat.includes('log analytics') || cat.includes('application insights')) return 'Monitoramento';
     if (r.charge_type === 'Purchase' || r.pricing_model === 'Reservation') return 'Reservas';
     return 'Outros';
   }
@@ -1457,12 +1477,15 @@ const Calculadora = (() => {
     bar.innerHTML = '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;flex-shrink:0;">Tipo:</span>'
       + tipos.map(([tipo, cnt]) => {
           const ativo = _filtroTipos.size === 0 || _filtroTipos.has(tipo);
-          const col   = tipo === 'VMs' ? 'var(--accent)' : tipo === 'Discos' || tipo === 'Storage' ? 'var(--orange,#ff8c42)' : tipo === 'Rede' || tipo === 'Rede/CDN' ? 'var(--blue,#4da6ff)' : tipo === 'Databricks' ? 'var(--accent)' : tipo === 'AKS' ? 'var(--orange,#ff8c42)' : 'var(--text-dim)';
+          const col   = tipo === 'VMs' ? 'var(--accent)' : tipo === 'Discos' || tipo === 'Storage' ? 'var(--orange,#ff8c42)' : tipo === 'Rede' || tipo === 'Rede/CDN' ? 'var(--blue,#4da6ff)' : tipo === 'Databricks' ? 'var(--accent)' : tipo === 'AKS' || tipo === 'Containers' ? 'var(--orange,#ff8c42)' : tipo === 'Backup' || tipo === 'Mensageria' ? 'var(--green,#22c55e)' : tipo === 'SQL' || tipo === 'Banco de Dados' || tipo === 'Cache' ? 'var(--blue,#4da6ff)' : tipo === 'IA/ML' || tipo === 'Analytics' ? 'var(--accent)' : 'var(--text-dim)';
           const bg    = ativo ? 'rgba(147,51,234,.15)' : 'rgba(255,255,255,.04)';
           const bord  = ativo ? 'var(--accent)' : 'var(--border)';
+          const diagBtn = tipo === 'Outros'
+            ? ` <button onclick="event.stopPropagation();Calculadora._diagOutros()" title="Ver detalhes dos recursos Outros" style="font-size:9px;padding:0 4px;border-radius:6px;border:1px solid var(--orange,#ff8c42);background:rgba(255,140,66,.12);color:var(--orange,#ff8c42);cursor:pointer;margin-left:2px;vertical-align:middle;">🔍</button>`
+            : '';
           return `<button onclick="Calculadora._toggleTipo('${tipo.replace(/'/g,"\\'")}',this)"
             style="font-size:10px;padding:2px 9px;border-radius:10px;border:1px solid ${bord};background:${bg};color:${ativo?col:'var(--text-muted)'};cursor:pointer;white-space:nowrap;transition:all .15s;"
-            title="${tipo}: ${cnt} recurso${cnt!==1?'s':''}">${tipo} <span style="opacity:.7;">${cnt}</span></button>`;
+            title="${tipo}: ${cnt} recurso${cnt!==1?'s':''}">${tipo} <span style="opacity:.7;">${cnt}</span></button>${diagBtn}`;
         }).join('');
   }
 
@@ -1475,6 +1498,58 @@ const Calculadora = (() => {
     }
     _renderTiposBar();
     _renderRecursos();
+  }
+
+  function _diagOutros() {
+    const outros = _recursos.filter(r => _tipoRecurso(r) === 'Outros');
+    if (!outros.length) { alert('Nenhum recurso classificado como Outros.'); return; }
+
+    // Agrupa por consumed_service + meter_category
+    const grupos = new Map();
+    outros.forEach(r => {
+      const svc = r.consumed_service || '(vazio)';
+      const cat = r.meter_category   || '(vazio)';
+      const chave = svc + '\n' + cat;
+      if (!grupos.has(chave)) grupos.set(chave, { svc, cat, recursos: [] });
+      grupos.get(chave).recursos.push(r.nome_recurso || r.resource_id || '?');
+    });
+
+    // Ordena pelo maior grupo
+    const linhas = [...grupos.values()].sort((a, b) => b.recursos.length - a.recursos.length);
+
+    let id = 'diag-outros-modal';
+    let m = document.getElementById(id);
+    if (!m) {
+      m = document.createElement('div');
+      m.id = id;
+      m.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65);';
+      m.onclick = e => { if (e.target === m) m.remove(); };
+      document.body.appendChild(m);
+    }
+    m.innerHTML = '<div style="background:rgba(18,2,32,.96);border:1px solid var(--border-light);border-radius:14px;padding:20px;max-width:680px;width:94%;max-height:80vh;display:flex;flex-direction:column;gap:12px;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;">'
+      + '<span style="font-size:13px;font-weight:700;color:var(--orange,#ff8c42);">🔍 Diagnóstico — Outros (' + outros.length + ' recursos)</span>'
+      + '<button onclick="document.getElementById(\'diag-outros-modal\').remove()" style="background:none;border:none;color:var(--text-muted);font-size:16px;cursor:pointer;">✕</button>'
+      + '</div>'
+      + '<div style="font-size:10px;color:var(--text-muted);">Grupos únicos de consumed_service + meter_category não mapeados:</div>'
+      + '<div style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:6px;">'
+      + linhas.map(g => '<div style="border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--border);padding:8px 10px;">'
+        + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">'
+        + '<div style="display:flex;flex-direction:column;gap:2px;">'
+        + '<span style="font-size:10px;color:var(--text-muted);">consumed_service</span>'
+        + '<span style="font-size:11px;font-weight:600;color:var(--orange,#ff8c42);">' + _esc(g.svc) + '</span>'
+        + '<span style="font-size:10px;color:var(--text-muted);margin-top:2px;">meter_category</span>'
+        + '<span style="font-size:11px;color:var(--text-dim);">' + _esc(g.cat) + '</span>'
+        + '</div>'
+        + '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;flex-shrink:0;">' + g.recursos.length + ' recurso' + (g.recursos.length !== 1 ? 's' : '') + '</span>'
+        + '</div>'
+        + '<div style="font-size:9px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + _esc(g.recursos.join(', ')) + '">'
+        + _esc(g.recursos.slice(0,4).join(', ') + (g.recursos.length > 4 ? ' …+' + (g.recursos.length-4) : ''))
+        + '</div>'
+        + '</div>').join('')
+      + '</div>'
+      + '</div>';
+    m.style.display = 'flex';
   }
 
   function onTaxaChange() {
@@ -2842,7 +2917,7 @@ const Calculadora = (() => {
       c.count++;
       c.total += parseFloat(r.estimado_brl || 0);
       const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
-      if (tc !== 'periodo') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
+      if (tc !== 'periodo' && tc !== 'mes') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
     }
     html += '<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px;">'
       + '<thead><tr style="border-bottom:1px solid rgba(147,51,234,.25);">'
@@ -2915,7 +2990,7 @@ const Calculadora = (() => {
       c.count++;
       c.total += parseFloat(r.estimado_brl || 0);
       const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
-      if (tc !== 'periodo') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
+      if (tc !== 'periodo' && tc !== 'mes') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
     }
     const catRows = Array.from(catMap.entries()).map(([cat, info]) => {
       const horasCell = info.allPeriodo ? '/m\xEAs' : info.horas.toLocaleString('pt-BR') + '\xA0h';
@@ -3645,6 +3720,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     let totalGeral   = 0;
     let totalCobrado = 0;
     let totalFixoMes = 0;
+    const _recursosMes = [];
 
     // rMap: O(1) por recurso — evita O(N²) com find() para cada selecionado
     const _rMapEst = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
@@ -3668,6 +3744,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       // RN-mes: custo mensal fixo (disco, licença por unidade/mês) — não entra no Total Estimado
       if (tipo === 'mes') {
         totalFixoMes += mesBrl;
+        _recursosMes.push({ nome: r.nome_recurso || rid.split('/').pop() || rid.slice(0,40), uom: r.unidade || '—', valor: mesBrl, tipo: _tipoRecurso(r), svc: r.consumed_service || '—', cat: r.meter_category || '—' });
         return;
       }
       let estimado  = 0;
@@ -3706,10 +3783,25 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:14px;font-weight:700;color:var(--accent);">' + _brl(totalGeral) + '</div>'
           + '</div>'
           + (totalFixoMes > 0
-            ? '<div style="border-radius:8px;background:rgba(255,140,66,.07);border:1px solid rgba(255,140,66,.28);padding:10px;">'
-              + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--orange,#ff8c42);margin-bottom:3px;">🔒 Infra Fixa/mês</div>'
-              + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:13px;font-weight:700;color:var(--orange,#ff8c42);">' + _brl(totalFixoMes) + '</div>'
+            ? '<div style="border-radius:8px;background:rgba(77,166,255,.07);border:1px solid rgba(77,166,255,.28);padding:10px;">'
+              + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--blue,#4da6ff);margin-bottom:3px;">🔒 Infra Fixa/mês</div>'
+              + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:13px;font-weight:700;color:var(--blue,#4da6ff);">' + _brl(totalFixoMes) + '</div>'
               + '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">não entra no Total Estimado</div>'
+              + '<details style="margin-top:6px;">'
+              + '<summary style="font-size:9px;color:var(--blue,#4da6ff);cursor:pointer;list-style:none;">▶ Ver ' + _recursosMes.length + ' recurso' + (_recursosMes.length !== 1 ? 's' : '') + ' classificados</summary>'
+              + '<div style="margin-top:6px;display:flex;flex-direction:column;gap:3px;">'
+              + _recursosMes.map(m => '<div style="display:flex;flex-direction:column;gap:1px;padding:4px 0;border-top:1px solid rgba(77,166,255,.10);">'
+                + '<div style="display:flex;justify-content:space-between;gap:6px;">'
+                + '<span style="color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:9px;" title="' + _esc(m.nome) + '">' + _esc(m.nome) + '</span>'
+                + '<span style="font-family:\'IBM Plex Mono\',monospace;color:var(--blue,#4da6ff);white-space:nowrap;flex-shrink:0;font-size:9px;">' + _brl(m.valor) + '</span>'
+                + '</div>'
+                + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+                + '<span style="font-size:8px;color:' + (m.tipo === 'Outros' ? 'var(--orange,#ff8c42)' : 'var(--accent)') + ';background:' + (m.tipo === 'Outros' ? 'rgba(255,140,66,.12)' : 'rgba(147,51,234,.12)') + ';border-radius:3px;padding:0 4px;" title="consumed_service: ' + _esc(m.svc) + '&#10;meter_category: ' + _esc(m.cat) + '">' + _esc(m.tipo) + '</span>'
+                + '<span style="font-size:8px;color:var(--text-muted);">' + _esc(m.uom) + '</span>'
+                + (m.tipo === 'Outros' ? '<span style="font-size:8px;color:var(--text-muted);font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;" title="' + _esc(m.svc) + ' / ' + _esc(m.cat) + '">' + _esc(m.cat || m.svc) + '</span>' : '')
+                + '</div>'
+                + '</div>').join('')
+              + '</div></details>'
               + '</div>'
             : '')
         : '<div style="text-align:center;font-size:11px;color:var(--text-muted);padding:8px 10px;border-radius:6px;background:var(--bg-hover);border:1px solid var(--border);">Configure as horas e clique Aplicar</div>'
@@ -3750,6 +3842,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       total_cobrado:  totalCobrado,
       total_brl:      totalGeral,
       total_fixo_mes: totalFixoMes,
+      recursos_mes:   _recursosMes,
       total_final:    totalFinal,
       pct_imposto:    pctImposto,
       vl_imposto:     vlImposto,
@@ -4143,7 +4236,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
 
         + '<div style="text-align:center;border-radius:6px;padding:6px 4px;'
         +   (tipo === 'mes'
-              ? 'background:rgba(255,140,66,.10);border:2px solid rgba(255,140,66,.40);'
+              ? 'background:rgba(77,166,255,.10);border:2px solid rgba(77,166,255,.40);'
               : _usaPicoCluster || _usaPico
                 ? 'background:rgba(255,140,66,.08);border:2px solid rgba(255,140,66,.35);'
                 : _dbValidaOv
@@ -4151,14 +4244,14 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
                   : 'background:var(--bg-card);border:1px solid var(--accent-glow);')
         + '">'
         + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : (_usaPicoCluster || _usaPico) ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--blue,#4da6ff)' : (_usaPicoCluster || _usaPico) ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';margin-bottom:2px;">'
         +   (tipo === 'mes' ? '🔒 Infra Fixa' : ((_usaPicoCluster || _usaPico) ? '⚠ ' : _dbValidaOv ? '⚡ ' : '') + 'Estimado')
         +   (!_dbValidaOv && !_usaPico && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
         +   (_usaPico && tipo === 'periodo' ? ' <span style="font-size:9px;">/mês*</span>' : '')
         + '</div>'
         + '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'
-        +   (tipo === 'mes' ? 'var(--orange,#ff8c42)' : (_usaPicoCluster || _usaPico) ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
+        +   (tipo === 'mes' ? 'var(--blue,#4da6ff)' : (_usaPicoCluster || _usaPico) ? 'var(--orange,#ff8c42)' : _dbValidaOv ? 'var(--blue,#4da6ff)' : 'var(--text-muted)')
         + ';">' + _brl(estimado) + (tipo === 'mes' ? '<span style="font-size:9px;font-weight:400;">/mês</span>' : '') + '</div>'
         + '</div>'
 
@@ -4204,9 +4297,34 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (lc)  lc.textContent    = '+ Condomínio (' + _estimativa.pct_cond + '%)';
     if (vc)  vc.textContent    = _brl(_estimativa.vl_cond);
     if (tot) tot.textContent   = _brl(_estimativa.total_final);
-    const fixo = _estimativa.total_fixo_mes || 0;
+    const fixo    = _estimativa.total_fixo_mes || 0;
+    const rMes    = _estimativa.recursos_mes   || [];
     if (rf)  rf.style.display  = fixo > 0 ? 'flex' : 'none';
     if (vf)  vf.textContent    = _brl(fixo);
+    if (rf && fixo > 0) {
+      const detId = 'cov-fixo-det';
+      if (!document.getElementById(detId)) {
+        const det = document.createElement('details');
+        det.id = detId;
+        det.style.cssText = 'margin-top:4px;';
+        rf.appendChild(det);
+      }
+      const det = document.getElementById(detId);
+      det.innerHTML = '<summary style="font-size:9px;color:var(--blue,#4da6ff);cursor:pointer;list-style:none;">▶ Ver ' + rMes.length + ' recurso' + (rMes.length !== 1 ? 's' : '') + ' classificados</summary>'
+        + '<div style="margin-top:5px;display:flex;flex-direction:column;gap:2px;">'
+        + rMes.map(m => '<div style="display:flex;flex-direction:column;gap:1px;padding:4px 0;border-top:1px solid rgba(77,166,255,.10);">'
+          + '<div style="display:flex;justify-content:space-between;gap:6px;">'
+          + '<span style="color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:9px;" title="' + _esc(m.nome) + '">' + _esc(m.nome) + '</span>'
+          + '<span style="font-family:\'IBM Plex Mono\',monospace;color:var(--blue,#4da6ff);white-space:nowrap;flex-shrink:0;font-size:9px;">' + _brl(m.valor) + '</span>'
+          + '</div>'
+          + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+          + '<span style="font-size:8px;color:' + (m.tipo === 'Outros' ? 'var(--orange,#ff8c42)' : 'var(--accent)') + ';background:' + (m.tipo === 'Outros' ? 'rgba(255,140,66,.12)' : 'rgba(147,51,234,.12)') + ';border-radius:3px;padding:0 4px;" title="consumed_service: ' + _esc(m.svc) + '&#10;meter_category: ' + _esc(m.cat) + '">' + _esc(m.tipo) + '</span>'
+          + '<span style="font-size:8px;color:var(--text-muted);">' + _esc(m.uom) + '</span>'
+          + (m.tipo === 'Outros' ? '<span style="font-size:8px;color:var(--text-muted);font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;" title="' + _esc(m.svc) + ' / ' + _esc(m.cat) + '">' + _esc(m.cat || m.svc) + '</span>' : '')
+          + '</div>'
+          + '</div>').join('')
+        + '</div>';
+    }
   }
 
   function _ovAplicarHoras() {
@@ -4515,5 +4633,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,
            _ovGerarEstimativa, _ovCarregarMais,
-           _switchVisao, _toggleDetalhe };
+           _switchVisao, _toggleDetalhe,
+           _toggleTipo, _diagOutros };
 })();

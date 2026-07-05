@@ -3956,6 +3956,13 @@ function _detectManagedRg(name) {
     const workspace = lastDash > 0 ? bare.slice(0, lastDash) : bare;
     return { managed_type: 'databricks', managed_label: workspace };
   }
+  if (upper.startsWith('MANAGED-RG-ADBX-')) {
+    // managed-rg-adbx-{workspace}-{suffix}
+    const bare = name.slice('managed-rg-adbx-'.length);
+    const lastDash = bare.lastIndexOf('-');
+    const workspace = lastDash > 0 ? bare.slice(0, lastDash) : bare;
+    return { managed_type: 'databricks', managed_label: workspace };
+  }
   if (upper.startsWith('MC_')) {
     // MC_{resourceGroup}_{clusterName}_{location}
     const inner = name.slice(3);
@@ -4320,7 +4327,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
               END
             ) AS max_h
           FROM azure_costs
-          WHERE UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%'
+          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-ADBX-%')
             ${andCond}
           GROUP BY UPPER(resource_group_name), cost_date
         ) daily
@@ -4420,7 +4427,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
               END
             ) AS pico_h_driver
           FROM azure_costs
-          WHERE UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%'
+          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-ADBX-%')
             ${andCond}
           GROUP BY UPPER(resource_group_name), cost_date
         ) daily_db
@@ -4931,7 +4938,7 @@ app.get('/api/calculadora/diag-databricks', authMiddleware, dbMiddleware, async 
         FROM azure_costs
         WHERE cost_date BETWEEN $1 AND $2
           ${subCond}
-          AND UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%'
+          AND (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-ADBX-%')
         GROUP BY UPPER(resource_group_name), resource_id, cost_date
       ),
       -- Abordagem A (atual): MAX acumulado por recurso no período inteiro
