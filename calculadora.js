@@ -2365,9 +2365,10 @@ const Calculadora = (() => {
     if (_modoVisao === 'recursos') {
       const sel = Object.keys(_selecionados);
       if (!sel.length || !_recursos.length) { bar.style.display = 'none'; return; }
+      const _rMapRod = new Map(_recursos.map(r => [r._key || r.resource_id, r]));
       let total = 0;
       for (const rid of sel) {
-        const r = _recursos.find(x => (x._key || x.resource_id) === rid);
+        const r = _rMapRod.get(rid);
         if (!r) continue;
         const isBRL = (r.moeda || 'BRL') === 'BRL';
         total += parseFloat(r.total_billing || 0) * (isBRL ? 1 : _taxaBrl);
@@ -3902,7 +3903,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       vl_gordura:     gordFator > 1 ? Math.round((totalGeral - totalGeral / gordFator) * 100) / 100 : 0,
       horas: parseInt(document.getElementById('chglobal')?.value) || 720,
       resultados: sel.map(rid => {
-        const r   = _recursos.find(x => (x._key||x.resource_id) === rid);
+        const r   = _rMapEst.get(rid);
         if (!r) return null;
         const isBRL  = (r.moeda || 'BRL') === 'BRL';
         // RN-005: taxa real do export quando disponível, senão _taxaBrl do usuário
@@ -3990,7 +3991,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   }
 
   // ── Config step overlay ──────────────────────────────────────────
-  async function _abrirConfigStep() {
+  function _abrirConfigStep() {
     const sel = Object.keys(_selecionados);
     if (!sel.length) { _toast('Selecione pelo menos um recurso para estimar.', 'error'); return; }
 
@@ -4003,16 +4004,16 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (cntEl) cntEl.textContent = sel.length + ' recurso' + (sel.length === 1 ? '' : 's') + ' selecionado' + (sel.length === 1 ? '' : 's');
 
     _hlCarregar();
-
-    // Lazy load pico: carrega apenas ao abrir a estimativa (Buscar não inclui pico por padrão)
-    if (!_picoCarregado && _recursos.length) {
-      const body = document.getElementById('cov-body');
-      if (body) body.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-muted)">Calculando estimativa...</div>';
-      await _carregarPico();
-    }
-
     _ovAtualizarTotal();
     setTimeout(() => _ovRenderRecursos(), 0);
+
+    // Lazy load pico em background — não bloqueia exibição dos cards
+    if (!_picoCarregado && _recursos.length) {
+      _carregarPico().then(() => {
+        const m = document.getElementById('covmodal');
+        if (m && m.style.display !== 'none') setTimeout(() => _ovRenderRecursos(), 0);
+      });
+    }
   }
 
   function _fecharConfigStep() {
@@ -4031,7 +4032,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   }
 
   // Estado de paginação do modal — persistido entre lotes
-  let _ovSel = [], _ovRMap = null, _ovIdx = 0;
+  let _ovSel = [], _ovRMap = null, _ovIdx = 0, _ovRgSelTotalMap = null;
   const _OV_LOTE = 100; // cards por lote
 
   function _ovRenderRecursos() {
@@ -4046,7 +4047,17 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       return ra < rb ? -1 : ra > rb ? 1 : 0;
     });
     _ovIdx  = 0;
-    _ovCurRg = null; // rastreia RG atual para emitir cabeçalhos de grupo
+    _ovCurRg = null;
+    // Pré-computa total selecionado por RG — evita O(N²) no loop de cards
+    _ovRgSelTotalMap = new Map();
+    for (const k of _ovSel) {
+      const rk = _ovRMap.get(k); if (!rk) continue;
+      const rgUp = (rk.resource_group_name || '').toUpperCase();
+      const isBRL = (rk.moeda || 'BRL') === 'BRL';
+      const tcDB  = parseFloat(rk.taxa_cambio || 0);
+      const val   = parseFloat(rk.total_billing || 0) * (isBRL ? 1 : (tcDB > 1 ? tcDB : _taxaBrl));
+      _ovRgSelTotalMap.set(rgUp, (_ovRgSelTotalMap.get(rgUp) || 0) + val);
+    }
     if (!_ovSel.length) return;
     _ovRenderLote(container);
   }
@@ -4082,14 +4093,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           ? `<span style="font-size:10px;padding:1px 7px;border-radius:8px;${_mt==='aks'?'background:rgba(255,140,66,.15);color:var(--orange)':'background:rgba(147,51,234,.15);color:var(--accent)'};">${_mt==='aks'?'AKS':'Databricks'} · ${_ml}</span>`
           : '';
         const _rgTotal  = _rgTotalMap.get(_rgUp) || 0;
-        // Total selecionado neste RG
-        const _selTotal = _ovSel.filter(k => {
-          const rk = _ovRMap.get(k); return rk && (rk.resource_group_name||'').toUpperCase() === _rgUp;
-        }).reduce((s, k) => {
-          const rk = _ovRMap.get(k); if (!rk) return s;
-          const isBRL = (rk.moeda||'BRL')==='BRL'; const tcDB=parseFloat(rk.taxa_cambio||0);
-          return s + parseFloat(rk.total_billing||0)*(isBRL?1:(tcDB>1?tcDB:_taxaBrl));
-        }, 0);
+        // Total selecionado neste RG — O(1) via mapa pré-computado em _ovRenderRecursos
+        const _selTotal = _ovRgSelTotalMap ? (_ovRgSelTotalMap.get(_rgUp) || 0) : 0;
         const _pct = _rgTotal > 0 ? Math.round(_selTotal / _rgTotal * 100) : 0;
         const _pctColor = _pct >= 80 ? 'var(--green,#22c55e)' : _pct >= 40 ? 'var(--orange,#ff8c42)' : 'var(--text-muted)';
         _html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 4px 4px;margin-top:${_oi===_ovIdx?'0':'14px'};">
