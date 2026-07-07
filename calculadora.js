@@ -12,14 +12,17 @@ const Calculadora = (() => {
   let _periodos       = [];   // [{inicio, fim, horas, horasTotal, horasLivres, label}]
   let _horasAplicadas = false; // true somente após Aplicar (HORAS) ou Incluir Período
   let _horasPeriodoValidas = false; // true quando datas/horas do período formam intervalo > 0
-  let _horasAdd = { ativo: false, hExtra: 4, dias: 10 }; // config do card Horas Adicionais
 
   // ── Horário Livre (janela sem cobrança) ──────────────────────────────────────
   let _horarioLivre = {
-    ativo:  false,
-    inicio: '09:00',
-    fim:    '18:00',
-    dias:   [1, 2, 3, 4, 5]   // 0=Dom 1=Seg … 6=Sab; padrão Seg–Sex
+    ativo:     false,
+    inicio:    '09:00',
+    fim:       '18:00',
+    dias:      [1, 2, 3, 4, 5],  // 0=Dom 1=Seg … 6=Sab; padrão Seg–Sex
+    inicio_sab:'09:00',
+    fim_sab:   '18:00',
+    inicio_dom:'09:00',
+    fim_dom:   '18:00',
   };
   let _subsSel      = [];   // subscription_ids selecionados
   let _rgsSel       = [];   // resource_group_names selecionados
@@ -37,9 +40,11 @@ const Calculadora = (() => {
   let _reconciliacao  = null;
   let _azureRefValue  = 0;
   let _iniciado      = false;
-  let _apiBase       = '/api/calculadora'; // sobrescrito por init({ apiBase }) no portal público
-  let _modoPublico   = false;              // true quando iniciado pelo portal sem login
-  let _defaultConfig = null;               // config do servidor aplicada no portal público (imposto, cond, hl)
+  let _apiBase             = '/api/calculadora'; // sobrescrito por init({ apiBase }) no portal público
+  let _modoPublico         = false;              // true quando iniciado pelo portal sem login
+  let _defaultConfig       = null;               // config do servidor aplicada no portal público (imposto, cond, hl)
+  let _picoCarregado       = false;              // lazy pico: true após _carregarPico() completar
+  let _ultimaUrlRecursos   = '';                 // path da última busca (para reuso no lazy pico)
 
   // ── API helper ───────────────────────────────────────────────────
   async function _api(method, path, body) {
@@ -387,8 +392,8 @@ const Calculadora = (() => {
         <input id="cbusca" type="text" class="ci" placeholder="Filtrar recursos..." style="padding-left:28px;" oninput="Calculadora.onBusca(this.value)">
       </div>
       <span id="ccnt" style="font-size:11px;color:var(--text-muted);white-space:nowrap;">0 recursos</span>
-      <button class="cbtn-sec" onclick="Calculadora.selecionarTodos()">Sel. todos</button>
-      <button class="cbtn-sec" onclick="Calculadora.deselecionarTodos()">Limpar</button>
+      <button id="cbtn-sel-todos" class="cbtn-sec" onclick="Calculadora.selecionarTodos()">Sel. todos</button>
+      <button id="cbtn-limpar" class="cbtn-sec" onclick="Calculadora.deselecionarTodos()">Limpar</button>
       <div style="flex:1;"></div>
       <!-- toggle visão -->
       <div style="display:flex;gap:2px;background:rgba(255,255,255,.06);border-radius:7px;padding:2px;flex-shrink:0;">
@@ -430,7 +435,6 @@ const Calculadora = (() => {
             <th class="cth" style="text-align:right;">Consumed Quantity</th>
             <th class="cth" style="text-align:right;" title="Hora → taxa real (effective_price)&#10;Reserva → amortizado pelo term&#10;Período → custo mensal estimado">Custo/h · /mês</th>
             <th class="cth" style="text-align:right;">Total Cobrado (BRL)</th>
-            <th id="chad-th" class="cth" style="text-align:right;display:none;color:var(--orange,#ff8c42);white-space:nowrap;" title="Custo estimado das horas adicionais do projeto">⏱ Adicional</th>
           </tr>
         </thead>
         <tbody id="ctbody">
@@ -822,7 +826,8 @@ const Calculadora = (() => {
               </label>
             </div>
           </div>
-          <div id="chl-corpo" style="display:none;display:none;">
+          <div id="chl-corpo" style="display:none;">
+            <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">Dias úteis (Seg–Sex)</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
               <div>
                 <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Início</div>
@@ -838,13 +843,49 @@ const Calculadora = (() => {
               </div>
             </div>
             <div style="font-size:10px;color:var(--text-muted);margin-bottom:5px;">Dias sem cobrança</div>
-            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;">
-              ${['Dom','Seg','Ter','Qua','Qui','Sex','Sab'].map((d,i) =>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">
+              ${['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'].map((d,i) =>
                 `<label style="display:flex;align-items:center;gap:2px;cursor:pointer;padding:3px 6px;border-radius:4px;border:1px solid var(--border);background:rgba(147,51,234,.06);font-size:10px;color:var(--text-muted);">
                   <input type="checkbox" data-dia="${i}" class="chl-dia" ${[1,2,3,4,5].includes(i)?'checked':''} onchange="Calculadora._hlChange()"
                     style="width:11px;height:11px;accent-color:var(--accent);cursor:pointer;"> ${d}
                 </label>`
               ).join('')}
+            </div>
+            <!-- Horário específico Sábado -->
+            <div id="chl-sab-row" style="display:none;background:rgba(147,51,234,.05);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;">
+              <div style="font-size:10px;color:var(--text-muted);margin-bottom:5px;">Sábado — horário específico</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <div>
+                  <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Início</div>
+                  <input type="time" id="chl-ini-sab" class="ci" value="09:00" step="3600"
+                    style="width:100%;height:32px;font-size:13px;padding:0 6px;"
+                    onchange="Calculadora._hlChange()">
+                </div>
+                <div>
+                  <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Fim</div>
+                  <input type="time" id="chl-fim-sab" class="ci" value="18:00" step="3600"
+                    style="width:100%;height:32px;font-size:13px;padding:0 6px;"
+                    onchange="Calculadora._hlChange()">
+                </div>
+              </div>
+            </div>
+            <!-- Horário específico Domingo -->
+            <div id="chl-dom-row" style="display:none;background:rgba(147,51,234,.05);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px;">
+              <div style="font-size:10px;color:var(--text-muted);margin-bottom:5px;">Domingo — horário específico</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <div>
+                  <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Início</div>
+                  <input type="time" id="chl-ini-dom" class="ci" value="09:00" step="3600"
+                    style="width:100%;height:32px;font-size:13px;padding:0 6px;"
+                    onchange="Calculadora._hlChange()">
+                </div>
+                <div>
+                  <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Fim</div>
+                  <input type="time" id="chl-fim-dom" class="ci" value="18:00" step="3600"
+                    style="width:100%;height:32px;font-size:13px;padding:0 6px;"
+                    onchange="Calculadora._hlChange()">
+                </div>
+              </div>
             </div>
             <div id="chl-res" style="font-size:11px;color:var(--text-muted);padding:6px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);line-height:1.6;min-height:30px;"></div>
           </div>
@@ -853,51 +894,18 @@ const Calculadora = (() => {
           </div>
         </div>
 
-        <!-- Card: Horas Adicionais — só visível no modo Período, após busca -->
-        <div id="chad-card" style="display:none;background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);">⏱ Horas Adicionais</div>
-            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;">
-              <input type="checkbox" id="chad-ativo" onchange="Calculadora._hadToggle(this.checked)"
-                style="width:14px;height:14px;accent-color:var(--accent);cursor:pointer;">
-              <span style="font-size:10px;color:var(--text-muted);">Ativar</span>
-            </label>
-          </div>
-          <div id="chad-baseline" style="font-size:10px;color:var(--text-muted);margin-bottom:8px;padding:5px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);min-height:22px;"></div>
-          <div id="chad-corpo" style="display:none;">
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;margin-top:8px;">
-              <div>
-                <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">H. extras / dia</div>
-                <input type="number" id="chad-h-extra" value="4" min="1" max="24" step="1"
-                  style="width:100%;height:32px;font-size:13px;padding:0 8px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',monospace;outline:none;box-sizing:border-box;"
-                  oninput="Calculadora._hadChange()">
-              </div>
-              <div>
-                <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;">Dias do projeto</div>
-                <input type="number" id="chad-dias" value="10" min="1" max="365" step="1"
-                  style="width:100%;height:32px;font-size:13px;padding:0 8px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',monospace;outline:none;box-sizing:border-box;"
-                  oninput="Calculadora._hadChange()">
-              </div>
-            </div>
-            <div id="chad-res" style="font-size:11px;color:var(--text-muted);padding:6px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);line-height:1.6;min-height:28px;"></div>
-          </div>
-          <div id="chad-hint" style="font-size:10px;color:var(--text-muted);font-style:italic;margin-top:6px;">
-            Estima o custo de horas além do período billing. Ex: projeto que precisa rodar 4h/dia extras por 10 dias.
-          </div>
-        </div>
-
         <!-- Card: Taxas -->
         <div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:16px;flex-shrink:0;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
             <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);">Taxas Adicionais</div>
-            <div style="display:flex;gap:4px;">
+            <div id="ctaxas-btns" style="display:flex;gap:4px;">
               <button onclick="Calculadora._salvarTaxasPadrao()" title="Salvar como padrão"
                 style="height:20px;padding:0 8px;border-radius:4px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--text-muted);font-size:9px;font-weight:700;cursor:pointer;">★ Padrão</button>
               <button onclick="Calculadora._resetarTaxas()" title="Restaurar padrão"
                 style="height:20px;padding:0 8px;border-radius:4px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--text-muted);font-size:9px;font-weight:600;cursor:pointer;">↺</button>
             </div>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div id="ctaxas-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
             <div>
               <div style="font-size:11px;color:var(--text-dim);font-weight:600;margin-bottom:5px;">Imposto</div>
               <div style="display:flex;align-items:center;gap:4px;">
@@ -911,6 +919,15 @@ const Calculadora = (() => {
               <div style="font-size:11px;color:var(--text-dim);font-weight:600;margin-bottom:5px;">Condomínio</div>
               <div style="display:flex;align-items:center;gap:4px;">
                 <input type="number" id="ccondominио" class="ci" value="0" min="0" max="100" step="0.01"
+                  style="width:100%;height:36px;font-size:16px;font-family:'IBM Plex Mono',monospace;text-align:right;font-weight:600;"
+                  oninput="Calculadora._onAdicionaisChange()">
+                <span style="font-size:13px;color:var(--text-muted);flex-shrink:0;">%</span>
+              </div>
+            </div>
+            <div id="cgordura-col">
+              <div style="font-size:11px;color:var(--text-dim);font-weight:600;margin-bottom:5px;">Gordura</div>
+              <div style="display:flex;align-items:center;gap:4px;">
+                <input type="number" id="cgordura" class="ci" value="0" min="0" max="200" step="0.5"
                   style="width:100%;height:36px;font-size:16px;font-family:'IBM Plex Mono',monospace;text-align:right;font-weight:600;"
                   oninput="Calculadora._onAdicionaisChange()">
                 <span style="font-size:13px;color:var(--text-muted);flex-shrink:0;">%</span>
@@ -932,6 +949,10 @@ const Calculadora = (() => {
           <div id="cov-row-cond" style="display:none;justify-content:space-between;font-size:12px;color:var(--text-muted);">
             <span id="cov-lbl-cond">+ Condomínio (0%)</span>
             <span id="cov-vl-cond" style="font-family:'IBM Plex Mono',monospace;">R$ 0,00</span>
+          </div>
+          <div id="cov-row-gord" style="display:none;justify-content:space-between;font-size:12px;color:var(--text-muted);">
+            <span id="cov-lbl-gord">+ Gordura (0%)</span>
+            <span id="cov-vl-gord" style="font-family:'IBM Plex Mono',monospace;">R$ 0,00</span>
           </div>
           <div style="border-top:1px solid var(--border-light);margin-top:2px;padding-top:10px;display:flex;justify-content:space-between;align-items:center;">
             <span style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-dim);font-weight:700;">Total Estimado</span>
@@ -985,6 +1006,11 @@ const Calculadora = (() => {
         const _hide = id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; };
         _hide('cvtab-det');
         _hide('cvtab-svc');
+        _hide('cgordura-col');
+        _hide('ctaxas-btns');
+        const _grid = document.getElementById('ctaxas-grid');
+        if (_grid) _grid.style.gridTemplateColumns = '1fr 1fr';
+        _aplicarRestricoesPortal();
       }
       _setupDateListeners();
       _setupClickFora();
@@ -995,6 +1021,34 @@ const Calculadora = (() => {
   }
 
   function _setupDateListeners() { /* removido — datas calculadas automaticamente em buscarRecursos() */ }
+
+  function _aplicarRestricoesPortal() {
+    const podePeriodo   = !!_defaultConfig?.permitir_selecao_periodo;
+    const podeRecursos  = !!_defaultConfig?.permitir_selecao_recursos;
+
+    // Trava campos de data se não permitido
+    const _lockDate = id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.disabled = !podePeriodo;
+      el.style.opacity = podePeriodo ? '' : '.45';
+      el.style.cursor  = podePeriodo ? '' : 'not-allowed';
+    };
+    _lockDate('cfiltro-ini');
+    _lockDate('cfiltro-fim');
+
+    // Desativa botões Sel.todos / Limpar e checkbox de cabeçalho se não permitido
+    const _lockBtn = id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.disabled = !podeRecursos;
+      el.style.opacity = podeRecursos ? '' : '.35';
+      el.style.cursor  = podeRecursos ? '' : 'not-allowed';
+    };
+    _lockBtn('cbtn-sel-todos');
+    _lockBtn('cbtn-limpar');
+    _lockBtn('cck-all');
+  }
 
   // ── Importação ───────────────────────────────────────────────────
   // ══════════════════════════════════════════════════════════════════
@@ -1226,19 +1280,48 @@ const Calculadora = (() => {
     }, true);
   }
 
+  // Reordena lista de RGs: filhos (RGs gerenciados) logo abaixo do pai visível
+  function _sortRgsComFilhos(lista) {
+    const inList = new Set(lista.map(d => (d.value || '').toUpperCase()));
+    const filhosMap = new Map(); // parent_upper → [items]
+    const raizes = [];
+    for (const d of lista) {
+      const pUp = (d.parent_rg || '').toUpperCase();
+      if (d.parent_rg && inList.has(pUp)) {
+        if (!filhosMap.has(pUp)) filhosMap.set(pUp, []);
+        filhosMap.get(pUp).push(d);
+      } else {
+        raizes.push(d);
+      }
+    }
+    const result = [];
+    for (const r of raizes) {
+      result.push(r);
+      const kids = filhosMap.get((r.value || '').toUpperCase()) || [];
+      result.push(...kids);
+    }
+    return result;
+  }
+
   function _renderOpcoes(id, filtro) {
     const state = _dds[id]; filtro = filtro || '';
     const opts  = document.getElementById(id+'-options'); if (!opts) return;
-    const lista = filtro ? state.data.filter(d => d.label.toLowerCase().includes(filtro.toLowerCase())) : state.data;
+    let lista = filtro ? state.data.filter(d => d.label.toLowerCase().includes(filtro.toLowerCase())) : state.data;
+    if (id === 'crg') lista = _sortRgsComFilhos(lista);
     state.filtered = lista;
     if (!lista.length) { opts.innerHTML = `<div style="padding:10px 12px;font-size:12px;color:var(--text-muted);">${state.data.length?'Nenhum resultado.':'Nenhum item.'}</div>`; return; }
+    const listUpper = new Set(lista.map(d => (d.value || '').toUpperCase()));
     opts.innerHTML = lista.map(d => {
       const subColor = d.managed_type === 'databricks'
         ? 'color:var(--accent);'
         : d.managed_type === 'aks'
         ? 'color:var(--orange,#ff8c42);'
         : '';
-      return `<label class="cms-option"><input type="checkbox" ${state.selected.has(d.value)?'checked':''} onchange="Calculadora._toggleOpcao('${id}','${_esc(d.value)}',this.checked)"><span class="cms-option-label" title="${_esc(d.label)}">${_esc(d.label)}</span>${d.sub?`<span class="cms-option-sub" style="${subColor}">${_esc(d.sub)}</span>`:''}</label>`;
+      const pUp = (d.parent_rg || '').toUpperCase();
+      const comPai = d.parent_rg && listUpper.has(pUp);
+      const indentStyle = comPai ? 'padding-left:20px;border-left:2px solid var(--border-light,#3d0060);margin-left:6px;' : '';
+      const prefix = comPai ? '<span style="color:var(--text-muted);margin-right:4px;font-size:10px;">↳</span>' : '';
+      return `<label class="cms-option" style="${indentStyle}"><input type="checkbox" ${state.selected.has(d.value)?'checked':''} onchange="Calculadora._toggleOpcao('${id}','${_esc(d.value)}',this.checked)">${prefix}<span class="cms-option-label" title="${_esc(d.label)}">${_esc(d.label)}</span>${d.sub?`<span class="cms-option-sub" style="${subColor}">${_esc(d.sub)}</span>`:''}</label>`;
     }).join('');
   }
 
@@ -1256,7 +1339,10 @@ const Calculadora = (() => {
 
   function _limparDropdown(id) {
     _dds[id].selected.clear();
-    _renderOpcoes(id, document.getElementById(id+'-search')?.value||''); _atualizarBadge(id);
+    const srch = document.getElementById(id + '-search');
+    if (srch) srch.value = '';
+    _renderOpcoes(id, '');
+    _atualizarBadge(id);
   }
 
   function _atualizarBadge(id) {
@@ -1301,7 +1387,7 @@ const Calculadora = (() => {
         if (mt) _managedRgMap.set((r.resource_group_name || '').toUpperCase(), { managed_type: mt, managed_label: ml });
         const icon = mt === 'databricks' ? '⚡' : mt === 'aks' ? '☸' : null;
         const sub  = icon ? icon + ' ' + (mt === 'databricks' ? 'Databricks — workspace: ' + ml : 'AKS — cluster: ' + ml) : '';
-        return { value: r.resource_group_name, label: r.resource_group_name, labelShort: r.resource_group_name, sub, managed_type: mt };
+        return { value: r.resource_group_name, label: r.resource_group_name, labelShort: r.resource_group_name, sub, managed_type: mt, parent_rg: r.parent_rg || null };
       });
       _renderOpcoes('crg');
     } catch(err) { document.getElementById('crg-options').innerHTML=`<div style="padding:8px 12px;font-size:12px;color:#ff4d6a;">Erro: ${_esc(err.message)}</div>`; }
@@ -1384,26 +1470,38 @@ const Calculadora = (() => {
     // Formata Date → 'YYYY-MM-DD' usando hora local (evita bug de fuso UTC)
     const _fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
-    // Usa datas dos inputs de filtro se preenchidas; caso contrário usa range do banco
-    const _filtIni = document.getElementById('cfiltro-ini')?.value;
-    const _filtFim = document.getElementById('cfiltro-fim')?.value;
-    if (_filtIni && _filtFim) {
-      _dataInicio = _filtIni;
-      _dataFim    = _filtFim;
+    // Portal público sem permissão de período: sempre últimos 30 dias
+    if (_modoPublico && !_defaultConfig?.permitir_selecao_periodo) {
+      const hoje = new Date();
+      const ini  = new Date(hoje); ini.setDate(ini.getDate() - 30);
+      _dataFim    = _fmt(hoje);
+      _dataInicio = _fmt(ini);
+      const _elIni = document.getElementById('cfiltro-ini');
+      const _elFim = document.getElementById('cfiltro-fim');
+      if (_elIni) { _elIni.value = _dataInicio; _elIni.disabled = true; }
+      if (_elFim) { _elFim.value = _dataFim;    _elFim.disabled = true; }
     } else {
-      const maxFim = _subsSel
-        .map(id => (_dds.csub.data.find(s => s.value === id) || {}).periodo_fim || '')
-        .filter(Boolean).sort().pop() || '';
-      if (maxFim) {
-        const fim = new Date(maxFim + 'T12:00:00');
-        const ini = new Date(fim); ini.setDate(ini.getDate() - 30);
-        _dataFim    = _fmt(fim);
-        _dataInicio = _fmt(ini);
+      // Usa datas dos inputs de filtro se preenchidas; caso contrário usa range do banco
+      const _filtIni = document.getElementById('cfiltro-ini')?.value;
+      const _filtFim = document.getElementById('cfiltro-fim')?.value;
+      if (_filtIni && _filtFim) {
+        _dataInicio = _filtIni;
+        _dataFim    = _filtFim;
       } else {
-        const hoje = new Date();
-        const ini  = new Date(hoje); ini.setDate(ini.getDate() - 30);
-        _dataFim    = _fmt(hoje);
-        _dataInicio = _fmt(ini);
+        const maxFim = _subsSel
+          .map(id => (_dds.csub.data.find(s => s.value === id) || {}).periodo_fim || '')
+          .filter(Boolean).sort().pop() || '';
+        if (maxFim) {
+          const fim = new Date(maxFim + 'T12:00:00');
+          const ini = new Date(fim); ini.setDate(ini.getDate() - 30);
+          _dataFim    = _fmt(fim);
+          _dataInicio = _fmt(ini);
+        } else {
+          const hoje = new Date();
+          const ini  = new Date(hoje); ini.setDate(ini.getDate() - 30);
+          _dataFim    = _fmt(hoje);
+          _dataInicio = _fmt(ini);
+        }
       }
     }
 
@@ -1581,6 +1679,9 @@ const Calculadora = (() => {
       if (_dataInicio) url += `&data_inicio=${_dataInicio}`;
       if (_dataFim)    url += `&data_fim=${_dataFim}`;
 
+      _ultimaUrlRecursos = url;
+      _picoCarregado = false;
+
       console.log('[Calculadora] Buscando recursos:', url);
       console.log('[Calculadora] Subs:', subs, '| RGs:', rgs);
 
@@ -1595,7 +1696,14 @@ const Calculadora = (() => {
         ...r,
         _key: (r.resource_id||'') + '||' + (r.categoria||'') + '||' + (r.meter_categories||'') + '||' + (r.unidade||'')
       }));
-      _selecionados = {};
+      // Portal público sem permissão de seleção: seleciona todos automaticamente
+      if (_modoPublico && !_defaultConfig?.permitir_selecao_recursos) {
+        _selecionados = {};
+        const _h = parseInt(document.getElementById('chglobal')?.value) || 720;
+        _recursos.forEach(r => { _selecionados[r._key || r.resource_id] = _h; });
+      } else {
+        _selecionados = {};
+      }
       _filtroTipos.clear();
       // Pré-computa total de billing por RG (usado no cabeçalho dos cards de estimativa)
       _rgTotalMap.clear();
@@ -1609,12 +1717,6 @@ const Calculadora = (() => {
       _dbComputeTaxas(); // RN-DB-001: computa taxas proporcionais por workspace Databricks
       _renderTiposBar();
       _renderRecursos();
-      // Mostra card de Horas Adicionais (só no modo Período) e atualiza baseline
-      const cardHAD = document.getElementById('chad-card');
-      if (cardHAD && document.getElementById('chl-card')?.style.display !== 'none') {
-        cardHAD.style.display = '';
-        _hadAtualizarBaseline();
-      }
       // Reconciliação em background (não bloqueia o render)
       _reconciliacao = null;
       _carregarReconciliacao(url.replace('/calculadora/recursos', '/calculadora/reconciliacao'));
@@ -1985,7 +2087,7 @@ const Calculadora = (() => {
     return `<tr data-gchild="${gIdx}" style="${sel?'background:rgba(147,51,234,.04);':''}${isMkt?'border-left:2px solid rgba(255,140,66,.4);':''}">
           <td style="text-align:center;padding:8px 4px;">
             <input type="checkbox" class="cck" data-rid="${_esc(rid)}" ${sel?'checked':''}
-              onchange="Calculadora._check('${_esc(rid)}',this.checked)">
+              ${(_modoPublico && !_defaultConfig?.permitir_selecao_recursos) ? 'disabled style="opacity:.4;cursor:not-allowed;"' : `onchange="Calculadora._check('${_esc(rid)}',this.checked)"`}>
           </td>
           <td style="max-width:200px;padding:8px 10px;${pad}">
             <div style="font-size:${temMultiplos?'11':'12'}px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${temMultiplos?'var(--text-dim)':'var(--text)'};"
@@ -2012,10 +2114,38 @@ const Calculadora = (() => {
           <td style="text-align:right;padding:8px 14px;">
             <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap;">${_brl(totBrl)}</div>
           </td>
-          ${_horasAdd.ativo ? `<td style="text-align:right;padding:8px 14px;">
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--orange,#ff8c42);white-space:nowrap;">${_brl(_hadCustoRecurso(r,isBRL,_taxaBrl))}</div>
-          </td>` : ''}
         </tr>`;
+  }
+
+  function _inserirChunked(tbody, rows, onDone) {
+    tbody.innerHTML = '';
+    if (!rows.length) { if (onDone) onDone(); return; }
+    let i = 0;
+    function next() {
+      tbody.insertAdjacentHTML('beforeend', rows.slice(i, i + 200).join(''));
+      i += 200;
+      if (i < rows.length) requestAnimationFrame(next);
+      else if (onDone) onDone();
+    }
+    requestAnimationFrame(next);
+  }
+
+  async function _carregarPico() {
+    if (!_ultimaUrlRecursos || !_recursos.length) { _picoCarregado = true; return; }
+    try {
+      const data = await _api('GET', _ultimaUrlRecursos + '&pico=1');
+      if (Array.isArray(data)) {
+        const picoMap = new Map(data.map(r => [r.resource_id + '|' + (r.unidade||''), r]));
+        _recursos = _recursos.map(r => {
+          const p = picoMap.get(r.resource_id + '|' + (r.unidade||''));
+          if (!p) return r;
+          return { ...r, custo_hora_pico: p.custo_hora_pico, pico_data: p.pico_data,
+            pico_custo_dia: p.pico_custo_dia, pico_horas_dia: p.pico_horas_dia,
+            custo_hora_pico_cluster: p.custo_hora_pico_cluster };
+        });
+      }
+    } catch(e) { console.warn('[Calculadora] Erro ao carregar pico:', e); }
+    _picoCarregado = true;
   }
 
   function _renderRecursos() {
@@ -2039,7 +2169,7 @@ const Calculadora = (() => {
     const c = document.getElementById('ccnt');
 
     if (!lista.length) {
-      const _emptyColspan = _horasAdd.ativo ? 10 : 9;
+      const _emptyColspan = 9;
       tbody.innerHTML = `<tr><td colspan="${_emptyColspan}" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">
         ${_recursos.length ? 'Nenhum recurso corresponde ao filtro.'
           : 'Nenhum recurso encontrado para os filtros selecionados.'}
@@ -2085,7 +2215,7 @@ const Calculadora = (() => {
           <td style="text-align:center;padding:8px 4px;" onclick="event.stopPropagation()">
             <input type="checkbox" class="cck-grupo" data-baseid="${_esc(baseId)}"
               ${todosSel?'checked':''} ${algumSel&&!todosSel?'data-indet="1"':''}
-              onchange="Calculadora._checkGrupo('${_esc(baseId)}',this.checked);event.stopPropagation()">
+              ${(_modoPublico && !_defaultConfig?.permitir_selecao_recursos) ? 'disabled style="opacity:.4;cursor:not-allowed;"' : `onchange="Calculadora._checkGrupo('${_esc(baseId)}',this.checked);event.stopPropagation()"`}>
           </td>
           <td colspan="5" style="padding:8px 10px;">
             <div style="display:flex;align-items:center;gap:7px;">
@@ -2101,10 +2231,6 @@ const Calculadora = (() => {
             <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);">${_brl(totalGrupo)}</div>
             <div style="font-size:9px;color:var(--text-muted);">total grupo</div>
           </td>
-          ${_horasAdd.ativo ? `<td style="text-align:right;padding:8px 14px;">
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:var(--orange,#ff8c42);">${_brl(filhas.reduce((s,r)=>s+_hadCustoRecurso(r,isBRL,_taxaBrl),0))}</div>
-            <div style="font-size:9px;color:var(--orange,#ff8c42);">add. grupo</div>
-          </td>` : ''}
         </tr>`);
         if (!exp) return; // filhas não renderizadas; inseridas lazily por _toggleGrupo
       }
@@ -2112,30 +2238,11 @@ const Calculadora = (() => {
       filhas.forEach(r => { rows.push(_htmlFilhaRow(r, gIdx, temMultiplos, rg, nome, isBRL)); });
     });
 
-    tbody.innerHTML = rows.join('');
-    document.querySelectorAll('.cck-grupo[data-indet="1"]').forEach(ck => { ck.indeterminate = true; });
-
-    // Coluna Adicional — mostra/esconde th e banner de resumo
-    const thAdd = document.getElementById('chad-th');
-    if (thAdd) thAdd.style.display = _horasAdd.ativo ? '' : 'none';
-    let bannerAdd = document.getElementById('chad-banner');
-    if (_horasAdd.ativo) {
-      const totalAdd = lista.reduce((s,r) => s + _hadCustoRecurso(r, isBRL, _taxaBrl), 0);
-      const hTotal = _horasAdd.hExtra * _horasAdd.dias;
-      if (!bannerAdd) {
-        bannerAdd = document.createElement('div');
-        bannerAdd.id = 'chad-banner';
-        tbody.parentElement?.parentElement?.insertBefore(bannerAdd, tbody.parentElement);
-      }
-      bannerAdd.style.cssText = 'margin-bottom:8px;padding:8px 14px;border-radius:8px;background:rgba(255,140,66,.08);border:1px solid rgba(255,140,66,.3);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
-      bannerAdd.innerHTML = `<span style="font-size:11px;color:var(--text-muted);">⏱ <strong style="color:var(--orange,#ff8c42);">${_horasAdd.hExtra}h/dia × ${_horasAdd.dias} dias</strong> = ${hTotal}h adicionais · ${lista.length} recursos</span>`
-        + `<span style="font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:700;color:var(--orange,#ff8c42);">+ ${_brl(totalAdd)}</span>`;
-    } else if (bannerAdd) {
-      bannerAdd.remove();
-    }
-
     _atualizarEstimativa();
     _atualizarCnt();
+    _inserirChunked(tbody, rows, () => {
+      document.querySelectorAll('.cck-grupo[data-indet="1"]').forEach(ck => { ck.indeterminate = true; });
+    });
   }
 
   function _toggleGrupo(gIdx) {
@@ -2279,16 +2386,10 @@ const Calculadora = (() => {
 
   function selecionarTodos() {
     const h = parseInt(document.getElementById('chglobal')?.value) || 720;
-    // 1. Atualiza estado em memória — puro JS, rápido
     _recursos.forEach(r => { _selecionados[r._key||r.resource_id] = h; });
-    // 2. Habilita botão Estimar ANTES de qualquer trabalho DOM pesado
     _atualizarCnt();
-    // 3. Atualiza visuais dos checkboxes e painel após o browser pintar o botão
     setTimeout(() => {
-      document.querySelectorAll('input.cck').forEach(ck => {
-        ck.checked = true;
-        const row = ck.closest('tr'); if (row) row.style.background = 'rgba(147,51,234,.04)';
-      });
+      // Filhos colapsados não estão no DOM — atualiza só grupos visíveis
       document.querySelectorAll('input.cck-grupo').forEach(ck => { ck.checked = true; ck.indeterminate = false; });
       _atualizarEstimativa();
     }, 0);
@@ -2298,10 +2399,7 @@ const Calculadora = (() => {
     _selecionados = {};
     _atualizarCnt();
     setTimeout(() => {
-      document.querySelectorAll('input.cck').forEach(ck => {
-        ck.checked = false;
-        const row = ck.closest('tr'); if (row) row.style.background = '';
-      });
+      document.querySelectorAll('input.cck-grupo').forEach(ck => { ck.checked = false; ck.indeterminate = false; });
       _atualizarEstimativa();
     }, 0);
   }
@@ -2333,11 +2431,9 @@ const Calculadora = (() => {
     tabP.style.borderColor = isManual ? 'var(--border)' : 'var(--accent)';
     painH.style.display    = isManual ? '' : 'none';
     painP.style.display    = isManual ? 'none' : '';
-    // Cards Horário Livre e Horas Adicionais só aparecem no modo Período
+    // Card Horário Livre só aparece no modo Período
     const cardHL  = document.getElementById('chl-card');
-    const cardHAD = document.getElementById('chad-card');
     if (cardHL)  cardHL.style.display  = isManual ? 'none' : '';
-    if (cardHAD) cardHAD.style.display = isManual || !_recursos.length ? 'none' : '';
 
     if (isManual) {
       // Trocou para HORAS → limpa períodos e reseta flag para exigir novo Aplicar
@@ -2517,19 +2613,21 @@ const Calculadora = (() => {
   // Calcula quantas horas do intervalo [vIni, vFim] caem na janela livre
   function _calcHorasLivres(vIni, vFim) {
     if (!_horarioLivre.ativo || !vIni || !vFim) return 0;
-    const hIni = parseInt(_horarioLivre.inicio.split(':')[0]);
-    const hFim = parseInt(_horarioLivre.fim.split(':')[0]);
-    const janela = Math.max(0, hFim - hIni);
-    if (!janela || !_horarioLivre.dias.length) return 0;
+    if (!_horarioLivre.dias.length) return 0;
+    const _j = (ini, f) => Math.max(0, parseInt((f||'18:00').split(':')[0]) - parseInt((ini||'09:00').split(':')[0]));
+    const jUtil = _j(_horarioLivre.inicio, _horarioLivre.fim);
+    const jSab  = _j(_horarioLivre.inicio_sab, _horarioLivre.fim_sab);
+    const jDom  = _j(_horarioLivre.inicio_dom, _horarioLivre.fim_dom);
 
     let livres = 0;
     const inicio = new Date(vIni);
     const fim    = new Date(vFim);
-    // Itera dia a dia; T12 evita problemas de DST
     const d = new Date(inicio.getFullYear(), inicio.getMonth(), inicio.getDate());
     const fimD = new Date(fim.getFullYear(), fim.getMonth(), fim.getDate());
     while (d <= fimD) {
-      if (_horarioLivre.dias.includes(d.getDay())) livres += janela;
+      const dow = d.getDay();
+      if (_horarioLivre.dias.includes(dow))
+        livres += dow === 6 ? jSab : dow === 0 ? jDom : jUtil;
       d.setDate(d.getDate() + 1);
     }
     return livres;
@@ -2537,10 +2635,24 @@ const Calculadora = (() => {
 
   // Atualiza _horarioLivre com os valores dos inputs
   function _hlLerConfig() {
-    _horarioLivre.inicio = document.getElementById('chl-ini')?.value || '09:00';
-    _horarioLivre.fim    = document.getElementById('chl-fim')?.value || '18:00';
-    _horarioLivre.dias   = Array.from(document.querySelectorAll('.chl-dia:checked'))
-                                .map(cb => parseInt(cb.dataset.dia));
+    _horarioLivre.inicio     = document.getElementById('chl-ini')?.value     || '09:00';
+    _horarioLivre.fim        = document.getElementById('chl-fim')?.value     || '18:00';
+    _horarioLivre.inicio_sab = document.getElementById('chl-ini-sab')?.value || '09:00';
+    _horarioLivre.fim_sab    = document.getElementById('chl-fim-sab')?.value || '18:00';
+    _horarioLivre.inicio_dom = document.getElementById('chl-ini-dom')?.value || '09:00';
+    _horarioLivre.fim_dom    = document.getElementById('chl-fim-dom')?.value || '18:00';
+    _horarioLivre.dias       = Array.from(document.querySelectorAll('.chl-dia:checked'))
+                                    .map(cb => parseInt(cb.dataset.dia));
+  }
+
+  // Mostra/esconde linhas de horário específico de Sab/Dom conforme checkboxes
+  function _hlAtualizarWeekend() {
+    const sabChecked = !!document.querySelector('.chl-dia[data-dia="6"]:checked');
+    const domChecked = !!document.querySelector('.chl-dia[data-dia="0"]:checked');
+    const rowSab = document.getElementById('chl-sab-row');
+    const rowDom = document.getElementById('chl-dom-row');
+    if (rowSab) rowSab.style.display = sabChecked ? '' : 'none';
+    if (rowDom) rowDom.style.display = domChecked ? '' : 'none';
   }
 
   // Calcula e exibe o resumo (horas totais / livres / cobradas) no card
@@ -2575,78 +2687,9 @@ const Calculadora = (() => {
     _hlAtualizarRes();
   }
 
-  // ── Horas Adicionais ────────────────────────────────────────────────────────
-  function _hadToggle(ativo) {
-    _horasAdd.ativo = ativo;
-    const corpo = document.getElementById('chad-corpo');
-    const hint  = document.getElementById('chad-hint');
-    if (corpo) corpo.style.display = ativo ? 'block' : 'none';
-    if (hint)  hint.style.display  = ativo ? 'none'  : 'block';
-    if (ativo) _hadChange();
-    _renderRecursos();
-  }
-
-  function _hadChange() {
-    _horasAdd.hExtra = Math.max(1, parseInt(document.getElementById('chad-h-extra')?.value || '4') || 4);
-    _horasAdd.dias   = Math.max(1, parseInt(document.getElementById('chad-dias')?.value   || '10') || 10);
-    const hTotal = _horasAdd.hExtra * _horasAdd.dias;
-    const res = document.getElementById('chad-res');
-    if (res) {
-      res.innerHTML = `<strong style="color:var(--accent);">${_horasAdd.hExtra}h/dia × ${_horasAdd.dias} dias</strong>`
-        + ` = <strong style="color:var(--orange,#ff8c42);">${hTotal}h adicionais estimadas</strong>`;
-    }
-    if (_horasAdd.ativo) _renderRecursos();
-  }
-
-  function _hadCustoRecurso(r, isBRL, taxaBrl) {
-    if (!_horasAdd.ativo) return 0;
-    const hTotal = _horasAdd.hExtra * _horasAdd.dias;
-    const tipo   = r.tipo_custo || 'periodo';
-    if (tipo === 'reserva') return 0;
-    const convR = !isBRL ? (parseFloat(r.taxa_cambio || 0) > 1 ? parseFloat(r.taxa_cambio) : taxaBrl) : 1;
-
-    if (tipo === 'hora' || tipo === 'dia') {
-      const raw30d     = parseFloat(r.custo_hora_30d || 0);
-      const rawBilling = parseFloat(r.custo_hora_billing || 0);
-      const rawAmort   = r.usa_amortizado && rawBilling === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
-      const raw        = (r.usa_30d && raw30d > 0) ? raw30d : (rawBilling > 0 ? rawBilling : rawAmort);
-      return (isBRL ? raw : raw * convR) * hTotal;
-    }
-
-    // periodo/mes: storage, disco, bandwidth — sempre billing
-    const diasC  = parseInt(r.dias_ativos || 1) || 1;
-    const raw30d = parseFloat(r.custo_hora_30d || 0);
-    const rawH   = (r.usa_30d && raw30d > 0)
-      ? raw30d
-      : (parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / diasC * 30)) / 720;
-    return (isBRL ? rawH : rawH * convR) * hTotal;
-  }
-
-  function _hadAtualizarBaseline() {
-    const el = document.getElementById('chad-baseline');
-    if (!el) return;
-    if (!_recursos.length) { el.textContent = ''; return; }
-    // Calcula horas totais dos recursos tipo hora/dia
-    const isBRL = (_recursos[0]?.moeda || 'BRL') === 'BRL';
-    const horasList = _recursos
-      .filter(r => (r.tipo_custo === 'hora' || r.tipo_custo === 'dia'))
-      .map(r => parseFloat(r.horas_reais || 0))
-      .filter(h => h > 0);
-    const hTotal = horasList.length ? Math.round(horasList.reduce((s,h) => s + h, 0) / horasList.length) : 0;
-    // Dias do período
-    const ini = _dataInicio ? new Date(_dataInicio + 'T12:00:00') : null;
-    const fim = _dataFim    ? new Date(_dataFim    + 'T12:00:00') : null;
-    const dias = ini && fim ? Math.max(1, Math.round((fim - ini) / 86400000) + 1) : 0;
-    const hDia = dias > 0 && hTotal > 0 ? (hTotal / dias).toFixed(1) : '—';
-    el.innerHTML = dias
-      ? `Período: <strong style="color:var(--text);">${dias} dias</strong> · `
-        + `Média: <strong style="color:var(--accent);">${hDia}h/dia</strong>`
-        + (hTotal > 0 ? ` · ${hTotal}h registradas` : '')
-      : 'Busque recursos para ver o baseline do período.';
-  }
-
   // Chamado quando mudam inputs de hora ou dias
   function _hlChange() {
+    _hlAtualizarWeekend();
     _hlLerConfig();
     _hlAtualizarRes();
   }
@@ -3810,6 +3853,13 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
 
     const pctImposto = parseFloat(document.getElementById('cimposto')?.value) || 0;
     const pctCond    = parseFloat(document.getElementById('ccondominио')?.value) || 0;
+    // Gordura embutida por tipo — multiplica cada valor individualmente para que a soma feche
+    const pctGordura = _modoPublico
+      ? parseFloat(_defaultConfig?.taxa_gordura || 0)
+      : parseFloat(document.getElementById('cgordura')?.value) || 0;
+    const gordFator  = 1 + pctGordura / 100;
+    totalGeral   *= gordFator;
+    totalFixoMes *= gordFator;
     const vlImposto  = totalGeral * pctImposto / 100;
     const vlCond     = totalGeral * pctCond    / 100;
     const totalFinal = totalGeral + vlImposto + vlCond;
@@ -3848,6 +3898,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       vl_imposto:     vlImposto,
       pct_cond:       pctCond,
       vl_cond:        vlCond,
+      pct_gordura:    pctGordura,
+      vl_gordura:     gordFator > 1 ? Math.round((totalGeral - totalGeral / gordFator) * 100) / 100 : 0,
       horas: parseInt(document.getElementById('chglobal')?.value) || 720,
       resultados: sel.map(rid => {
         const r   = _recursos.find(x => (x._key||x.resource_id) === rid);
@@ -3888,7 +3940,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
             custo_mes:        custo_mes,
             dias_ativos:      _diasP,
             total_cobrado:    bill,
-            estimado_brl:     custo_mes,
+            estimado_brl:     custo_mes * gordFator,
             moeda:            r.moeda || 'BRL',
           };
         }
@@ -3925,7 +3977,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           custo_mes:        custo_mes,
           dias_ativos:      parseInt(r.dias_ativos) || 0,
           total_cobrado:    bill,
-          estimado_brl:     estimado,
+          estimado_brl:     estimado * gordFator,
           moeda:            r.moeda || 'BRL',
           databricks_valida: _dbValida || false,
           databricks_taxa:   taxaEf2,
@@ -3938,25 +3990,29 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   }
 
   // ── Config step overlay ──────────────────────────────────────────
-  function _abrirConfigStep() {
+  async function _abrirConfigStep() {
     const sel = Object.keys(_selecionados);
     if (!sel.length) { _toast('Selecione pelo menos um recurso para estimar.', 'error'); return; }
 
-    // mostra o modal PRIMEIRO para que _ovAtualizarTotal possa encontrá-lo
     const modal = document.getElementById('covmodal');
     if (!modal) return;
     modal.style.display = 'flex';
     document.body.style.overflow = 'hidden';
 
-    // atualiza contagem no toolbar do overlay
     const cntEl = document.getElementById('cov-cnt');
     if (cntEl) cntEl.textContent = sel.length + ' recurso' + (sel.length === 1 ? '' : 's') + ' selecionado' + (sel.length === 1 ? '' : 's');
 
-    // Totais imediatos; cards carregam em chunks após o modal aparecer
+    _hlCarregar();
+
+    // Lazy load pico: carrega apenas ao abrir a estimativa (Buscar não inclui pico por padrão)
+    if (!_picoCarregado && _recursos.length) {
+      const body = document.getElementById('cov-body');
+      if (body) body.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-muted)">Calculando estimativa...</div>';
+      await _carregarPico();
+    }
+
     _ovAtualizarTotal();
     setTimeout(() => _ovRenderRecursos(), 0);
-    // Carrega configuração salva do horário livre
-    _hlCarregar();
   }
 
   function _fecharConfigStep() {
@@ -4004,6 +4060,10 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
 
   function _ovRenderLote(container) {
     const end = Math.min(_ovIdx + _OV_LOTE, _ovSel.length);
+    const _pctGord = _modoPublico
+      ? parseFloat(_defaultConfig?.taxa_gordura || 0)
+      : parseFloat(document.getElementById('cgordura')?.value) || 0;
+    const _gordFat = 1 + _pctGord / 100;
     let _html = '';
     for (let _oi = _ovIdx; _oi < end; _oi++) {
         const rid = _ovSel[_oi];
@@ -4097,7 +4157,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const _picoClusterBrl  = _picoClusterRaw > 0 ? _picoClusterRaw * convR : 0;
       const _usaPicoCluster  = _dbValidaOv && _picoClusterBrl > 0;
       const estimadoMes = mesBrl;
-      const estimado = (tipo === 'mes')
+      const estimado = ((tipo === 'mes')
         ? estimadoMes
         : _usaPicoCluster
           ? _picoClusterBrl * horas                // pico cluster → taxa/h × horas
@@ -4105,7 +4165,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
             ? _picoBrl * horas
             : (tipo === 'periodo')
               ? _fallback3 / 720 * horas
-              : taxaEfOv * horas;
+              : taxaEfOv * horas) * _gordFat;
 
       // Coluna 1: preço base da estimativa
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
@@ -4296,6 +4356,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (rc)  rc.style.display  = _estimativa.pct_cond > 0 ? 'flex' : 'none';
     if (lc)  lc.textContent    = '+ Condomínio (' + _estimativa.pct_cond + '%)';
     if (vc)  vc.textContent    = _brl(_estimativa.vl_cond);
+    const rg2 = document.getElementById('cov-row-gord');
+    if (rg2) rg2.style.display = 'none';
     if (tot) tot.textContent   = _brl(_estimativa.total_final);
     const fixo    = _estimativa.total_fixo_mes || 0;
     const rMes    = _estimativa.recursos_mes   || [];
@@ -4372,33 +4434,52 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         const chk  = document.getElementById('chl-ativo');
         const ini  = document.getElementById('chl-ini');
         const fim  = document.getElementById('chl-fim');
-        if (chk) chk.checked  = !!_horarioLivre.ativo;
-        if (ini) ini.value    = _horarioLivre.inicio || '09:00';
-        if (fim) fim.value    = _horarioLivre.fim    || '18:00';
+        const iniS = document.getElementById('chl-ini-sab');
+        const fimS = document.getElementById('chl-fim-sab');
+        const iniD = document.getElementById('chl-ini-dom');
+        const fimD = document.getElementById('chl-fim-dom');
+        if (chk)  chk.checked = !!_horarioLivre.ativo;
+        if (ini)  ini.value   = _horarioLivre.inicio     || '09:00';
+        if (fim)  fim.value   = _horarioLivre.fim        || '18:00';
+        if (iniS) iniS.value  = _horarioLivre.inicio_sab || '09:00';
+        if (fimS) fimS.value  = _horarioLivre.fim_sab    || '18:00';
+        if (iniD) iniD.value  = _horarioLivre.inicio_dom || '09:00';
+        if (fimD) fimD.value  = _horarioLivre.fim_dom    || '18:00';
         document.querySelectorAll('.chl-dia').forEach(cb => {
           cb.checked = _horarioLivre.dias.includes(parseInt(cb.dataset.dia));
         });
-        // Mostrar/ocultar corpo
+        // Mostrar/ocultar corpo e linhas de weekend
         const corpo = document.getElementById('chl-corpo');
         const hint  = document.getElementById('chl-hint');
         if (corpo) corpo.style.display = _horarioLivre.ativo ? 'block' : 'none';
         if (hint)  hint.style.display  = _horarioLivre.ativo ? 'none'  : 'block';
+        _hlAtualizarWeekend();
       }
     } catch (_) {}
   }
 
   function _hlLimparPadrao() {
     localStorage.removeItem(_LS_HL);
-    _horarioLivre = { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] };
-    const chk = document.getElementById('chl-ativo');
-    const ini = document.getElementById('chl-ini');
-    const fim = document.getElementById('chl-fim');
-    if (chk) chk.checked = false;
-    if (ini) ini.value   = '09:00';
-    if (fim) fim.value   = '18:00';
+    _horarioLivre = { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5],
+                      inicio_sab: '09:00', fim_sab: '18:00', inicio_dom: '09:00', fim_dom: '18:00' };
+    const chk  = document.getElementById('chl-ativo');
+    const ini  = document.getElementById('chl-ini');
+    const fim  = document.getElementById('chl-fim');
+    const iniS = document.getElementById('chl-ini-sab');
+    const fimS = document.getElementById('chl-fim-sab');
+    const iniD = document.getElementById('chl-ini-dom');
+    const fimD = document.getElementById('chl-fim-dom');
+    if (chk)  chk.checked = false;
+    if (ini)  ini.value   = '09:00';
+    if (fim)  fim.value   = '18:00';
+    if (iniS) iniS.value  = '09:00';
+    if (fimS) fimS.value  = '18:00';
+    if (iniD) iniD.value  = '09:00';
+    if (fimD) fimD.value  = '18:00';
     document.querySelectorAll('.chl-dia').forEach(cb => {
       cb.checked = [1,2,3,4,5].includes(parseInt(cb.dataset.dia));
     });
+    _hlAtualizarWeekend();
     _hlToggle(false);
     _toast('Horário livre redefinido para o padrão.', 'success');
   }
@@ -4406,56 +4487,73 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   // ── Taxas: constantes e localStorage ────────────────────────────
   const _TAXA_IMP_DEF  = 18.65;
   const _TAXA_COND_DEF = 13.00;
+  const _TAXA_GORD_DEF = 0;
   const _LS_IMP        = 'finops_taxa_imposto';
   const _LS_COND       = 'finops_taxa_cond';
+  const _LS_GORD       = 'finops_taxa_gordura';
   const _LS_IMP_PAD    = 'finops_taxa_imposto_padrao';
   const _LS_COND_PAD   = 'finops_taxa_cond_padrao';
+  const _LS_GORD_PAD   = 'finops_taxa_gordura_padrao';
 
   function _carregarTaxas() {
-    let vi, vc;
+    let vi, vc, vg;
     if (_modoPublico && _defaultConfig) {
       vi = parseFloat(_defaultConfig.taxa_imposto ?? _TAXA_IMP_DEF);
       vc = parseFloat(_defaultConfig.taxa_cond    ?? _TAXA_COND_DEF);
+      vg = 0; // gordura no portal público é aplicada internamente, não no input
     } else {
       const si = localStorage.getItem(_LS_IMP);
       const sc = localStorage.getItem(_LS_COND);
+      const sg = localStorage.getItem(_LS_GORD);
       vi = si !== null ? parseFloat(si) : _TAXA_IMP_DEF;
       vc = sc !== null ? parseFloat(sc) : _TAXA_COND_DEF;
+      vg = sg !== null ? parseFloat(sg) : _TAXA_GORD_DEF;
       if (si === null) localStorage.setItem(_LS_IMP,  vi);
       if (sc === null) localStorage.setItem(_LS_COND, vc);
+      if (sg === null) localStorage.setItem(_LS_GORD, vg);
       if (!localStorage.getItem(_LS_IMP_PAD))  localStorage.setItem(_LS_IMP_PAD,  vi);
       if (!localStorage.getItem(_LS_COND_PAD)) localStorage.setItem(_LS_COND_PAD, vc);
+      if (!localStorage.getItem(_LS_GORD_PAD)) localStorage.setItem(_LS_GORD_PAD, vg);
     }
     const ii = document.getElementById('cimposto');
     const ic = document.getElementById('ccondominио');
+    const ig = document.getElementById('cgordura');
     if (ii) ii.value = vi;
     if (ic) ic.value = vc;
+    if (ig) ig.value = vg;
     _atualizarBadgesTaxas();
   }
 
   function _salvarTaxasPadrao() {
     const vi = parseFloat(document.getElementById('cimposto')?.value)    || 0;
     const vc = parseFloat(document.getElementById('ccondominио')?.value) || 0;
-    localStorage.setItem(_LS_IMP,     vi);
-    localStorage.setItem(_LS_COND,    vc);
-    localStorage.setItem(_LS_IMP_PAD, vi);
-    localStorage.setItem(_LS_COND_PAD,vc);
+    const vg = parseFloat(document.getElementById('cgordura')?.value)    || 0;
+    localStorage.setItem(_LS_IMP,      vi);
+    localStorage.setItem(_LS_COND,     vc);
+    localStorage.setItem(_LS_GORD,     vg);
+    localStorage.setItem(_LS_IMP_PAD,  vi);
+    localStorage.setItem(_LS_COND_PAD, vc);
+    localStorage.setItem(_LS_GORD_PAD, vg);
     _atualizarBadgesTaxas();
-    _toast('Padrão salvo: Imposto ' + vi + '% · Condomínio ' + vc + '%', 'success');
+    _toast('Padrão salvo: Imposto ' + vi + '% · Condomínio ' + vc + '% · Gordura ' + vg + '%', 'success');
   }
 
   function _resetarTaxas() {
     const vi = parseFloat(localStorage.getItem(_LS_IMP_PAD)  ?? _TAXA_IMP_DEF);
     const vc = parseFloat(localStorage.getItem(_LS_COND_PAD) ?? _TAXA_COND_DEF);
+    const vg = parseFloat(localStorage.getItem(_LS_GORD_PAD) ?? _TAXA_GORD_DEF);
     const ii = document.getElementById('cimposto');
     const ic = document.getElementById('ccondominио');
+    const ig = document.getElementById('cgordura');
     if (ii) ii.value = vi;
     if (ic) ic.value = vc;
+    if (ig) ig.value = vg;
     localStorage.setItem(_LS_IMP,  vi);
     localStorage.setItem(_LS_COND, vc);
+    localStorage.setItem(_LS_GORD, vg);
     _atualizarBadgesTaxas();
     _onAdicionaisChange();
-    _toast('Restaurado: Imposto ' + vi + '% · Condomínio ' + vc + '%');
+    _toast('Restaurado: Imposto ' + vi + '% · Condomínio ' + vc + '% · Gordura ' + vg + '%');
   }
 
   // Atualiza badges — SEM mostrar linha de resumo
@@ -4468,7 +4566,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     const bc = document.getElementById('ccond-padrao-badge');
     if (bi) bi.style.display = Math.abs(vi - pi) < 0.001 ? 'inline' : 'none';
     if (bc) bc.style.display = Math.abs(vc - pc) < 0.001 ? 'inline' : 'none';
-    // ctaxas-info mantido oculto — linha de resumo removida
     const info = document.getElementById('ctaxas-info');
     if (info) info.style.display = 'none';
   }
@@ -4477,21 +4574,24 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   function _onAdicionaisChange() {
     const ii = document.getElementById('cimposto');
     const ic = document.getElementById('ccondominио');
+    const ig = document.getElementById('cgordura');
     if (ii) localStorage.setItem(_LS_IMP,  ii.value);
     if (ic) localStorage.setItem(_LS_COND, ic.value);
+    if (ig) localStorage.setItem(_LS_GORD, ig.value);
     _atualizarBadgesTaxas();
     _atualizarEstimativa();
     clearTimeout(_taxaToastTimer);
     _taxaToastTimer = setTimeout(() => {
       const vi = parseFloat(ii?.value) || 0;
       const vc = parseFloat(ic?.value) || 0;
+      const vg = parseFloat(ig?.value) || 0;
       const pi = parseFloat(localStorage.getItem(_LS_IMP_PAD)  ?? _TAXA_IMP_DEF);
       const pc = parseFloat(localStorage.getItem(_LS_COND_PAD) ?? _TAXA_COND_DEF);
-      const diffI = Math.abs(vi - pi) >= 0.01;
-      const diffC = Math.abs(vc - pc) >= 0.01;
-      let msg = 'Taxas atualizadas: Imposto ' + vi + '% · Condomínio ' + vc + '%';
-      if (diffI || diffC) msg += ' ⚠ Diferente do padrão salvo';
-      _toast(msg, diffI || diffC ? 'warn' : 'success');
+      const pg = parseFloat(localStorage.getItem(_LS_GORD_PAD) ?? _TAXA_GORD_DEF);
+      const diff = Math.abs(vi-pi) >= 0.01 || Math.abs(vc-pc) >= 0.01 || Math.abs(vg-pg) >= 0.01;
+      let msg = 'Taxas atualizadas: Imposto ' + vi + '% · Condomínio ' + vc + '% · Gordura ' + vg + '%';
+      if (diff) msg += ' ⚠ Diferente do padrão salvo';
+      _toast(msg, diff ? 'warn' : 'success');
     }, 700);
   }
 
@@ -4628,7 +4728,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
            _diagCache, _forcarRefreshCache,
            _hlToggle, _hlChange, _hlSalvarPadrao, _hlLimparPadrao,
-           _hadToggle, _hadChange,
            abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,

@@ -2551,7 +2551,11 @@ async function loadPortalConfig() {
     const subs   = document.getElementById('portal-cfg-subs');
     const rgs    = document.getElementById('portal-cfg-rgs');
     const dominios = document.getElementById('portal-cfg-dominios');
-    if (ativo)    ativo.checked    = !!d.ativo;
+    if (ativo) {
+      ativo.checked = !!d.ativo;
+      const body = document.getElementById('portal-cfg-body');
+      if (body) { body.style.display = d.ativo ? 'flex' : 'none'; body.style.flexDirection = 'column'; }
+    }
     if (titulo)   titulo.value     = d.titulo    || 'Portal de Serviço';
     if (desc)     desc.value       = d.descricao || '';
     if (subs)     subs.value       = (d.subscription_ids  || []).join('\n');
@@ -2565,15 +2569,30 @@ async function loadPortalConfig() {
     const solIdent   = document.getElementById('portal-cfg-solicitar-ident');
     if (imposto)  imposto.value    = d.taxa_imposto ?? 18.65;
     if (cond)     cond.value       = d.taxa_cond    ?? 13.00;
+    const gordura = document.getElementById('portal-cfg-gordura');
+    if (gordura)  gordura.value   = d.taxa_gordura  ?? 0;
+    const permPeriodo   = document.getElementById('portal-cfg-permitir-periodo');
+    const permRecursos  = document.getElementById('portal-cfg-permitir-recursos');
+    if (permPeriodo)  permPeriodo.checked  = !!d.permitir_selecao_periodo;
+    if (permRecursos) permRecursos.checked = !!d.permitir_selecao_recursos;
     if (solIdent) solIdent.checked = !!d.solicitar_identificacao;
     const hl = d.horario_livre || {};
     if (hlAtivo) { hlAtivo.checked = !!hl.ativo; togglePortalHL(!!hl.ativo); }
     if (hlIni)   hlIni.value = hl.inicio || '09:00';
     if (hlFim)   hlFim.value = hl.fim    || '18:00';
+    const _iniSab = document.getElementById('portal-cfg-hl-ini-sab');
+    const _fimSab = document.getElementById('portal-cfg-hl-fim-sab');
+    const _iniDom = document.getElementById('portal-cfg-hl-ini-dom');
+    const _fimDom = document.getElementById('portal-cfg-hl-fim-dom');
+    if (_iniSab) _iniSab.value = hl.inicio_sab || '09:00';
+    if (_fimSab) _fimSab.value = hl.fim_sab    || '18:00';
+    if (_iniDom) _iniDom.value = hl.inicio_dom || '09:00';
+    if (_fimDom) _fimDom.value = hl.fim_dom    || '18:00';
     const dias = hl.dias || [1,2,3,4,5];
     document.querySelectorAll('.portal-hl-dia').forEach(cb => {
       cb.checked = dias.includes(parseInt(cb.dataset.dia));
     });
+    togglePortalHLWeekend();
     _updatePortalLink(d);
     await _carregarSubsPortalList(d.subscription_ids || []);
   } catch (e) { console.warn('[Portal Config] loadPortalConfig:', e.message); }
@@ -2600,14 +2619,21 @@ async function savePortalConfig() {
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
       body: JSON.stringify({
         ativo, titulo, descricao: desc, subscription_ids: subs, dominios_aceitos: dominios,
-        taxa_imposto: parseFloat(document.getElementById('portal-cfg-imposto')?.value) || 18.65,
-        taxa_cond:    parseFloat(document.getElementById('portal-cfg-cond')?.value)    || 13.00,
-        solicitar_identificacao: document.getElementById('portal-cfg-solicitar-ident')?.checked || false,
+        taxa_imposto:              parseFloat(document.getElementById('portal-cfg-imposto')?.value)  || 18.65,
+        taxa_cond:                 parseFloat(document.getElementById('portal-cfg-cond')?.value)     || 13.00,
+        taxa_gordura:              parseFloat(document.getElementById('portal-cfg-gordura')?.value)  || 0,
+        permitir_selecao_periodo:  document.getElementById('portal-cfg-permitir-periodo')?.checked  || false,
+        permitir_selecao_recursos: document.getElementById('portal-cfg-permitir-recursos')?.checked || false,
+        solicitar_identificacao:   document.getElementById('portal-cfg-solicitar-ident')?.checked   || false,
         horario_livre: {
-          ativo:  document.getElementById('portal-cfg-hl-ativo')?.checked || false,
-          inicio: document.getElementById('portal-cfg-hl-ini')?.value  || '09:00',
-          fim:    document.getElementById('portal-cfg-hl-fim')?.value   || '18:00',
-          dias:   Array.from(document.querySelectorAll('.portal-hl-dia:checked')).map(c => parseInt(c.dataset.dia))
+          ativo:      document.getElementById('portal-cfg-hl-ativo')?.checked   || false,
+          inicio:     document.getElementById('portal-cfg-hl-ini')?.value       || '09:00',
+          fim:        document.getElementById('portal-cfg-hl-fim')?.value       || '18:00',
+          inicio_sab: document.getElementById('portal-cfg-hl-ini-sab')?.value  || '09:00',
+          fim_sab:    document.getElementById('portal-cfg-hl-fim-sab')?.value  || '18:00',
+          inicio_dom: document.getElementById('portal-cfg-hl-ini-dom')?.value  || '09:00',
+          fim_dom:    document.getElementById('portal-cfg-hl-fim-dom')?.value  || '18:00',
+          dias:       Array.from(document.querySelectorAll('.portal-hl-dia:checked')).map(c => parseInt(c.dataset.dia))
         }
       })
     });
@@ -2651,11 +2677,28 @@ async function _carregarSubsPortalList(selectedIds = []) {
   }
 }
 
+function togglePortalAtivo(ativo) {
+  const body = document.getElementById('portal-cfg-body');
+  if (!body) return;
+  body.style.display = ativo ? 'flex' : 'none';
+  body.style.flexDirection = 'column';
+  savePortalConfig();
+}
+
 function togglePortalHL(ativo) {
   const corpo = document.getElementById('portal-cfg-hl-corpo');
   if (!corpo) return;
   corpo.style.display = ativo ? 'flex' : 'none';
   corpo.style.flexDirection = 'column';
+}
+
+function togglePortalHLWeekend() {
+  const sabChecked = !!document.querySelector('.portal-hl-dia[data-dia="6"]:checked');
+  const domChecked = !!document.querySelector('.portal-hl-dia[data-dia="0"]:checked');
+  const rowSab = document.getElementById('portal-cfg-sab-row');
+  const rowDom = document.getElementById('portal-cfg-dom-row');
+  if (rowSab) rowSab.style.display = sabChecked ? '' : 'none';
+  if (rowDom) rowDom.style.display = domChecked ? '' : 'none';
 }
 
 async function recarregarSubsPortal() {

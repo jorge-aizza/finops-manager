@@ -219,6 +219,19 @@
     #portal-inactive .pi-icon { font-size: 48px; margin-bottom: 16px; }
     #portal-inactive h2 { color: var(--text); margin-bottom: 8px; font-size: 20px; }
     #portal-inactive p  { color: var(--text-muted); font-size: 14px; }
+
+    /* Toast */
+    .toast {
+      position: fixed; bottom: 24px; right: 24px;
+      padding: 12px 18px; border-radius: 10px;
+      font-size: 13px; font-weight: 500;
+      opacity: 0; transform: translateY(8px);
+      transition: all 0.2s ease; z-index: 10000; pointer-events: none;
+    }
+    .toast.show  { opacity: 1; transform: translateY(0); }
+    .toast.success { background: var(--accent); color: #fff; }
+    .toast.error   { background: #ff4d6a;        color: #fff; }
+    .toast.warn    { background: #ff8c42;         color: #fff; }
   </style>
 </head>
 <body class="portal-mode">
@@ -472,15 +485,29 @@ function _abrirCalculadora(calcWrap) {
     apiBase: '/api/public/calculadora',
     publico: true,
     defaultConfig: {
-      taxa_imposto:  _portalCfg.taxa_imposto  ?? 18.65,
-      taxa_cond:     _portalCfg.taxa_cond     ?? 13.00,
-      horario_livre: _portalCfg.horario_livre || { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] }
+      taxa_imposto:              _portalCfg.taxa_imposto              ?? 18.65,
+      taxa_cond:                 _portalCfg.taxa_cond                 ?? 13.00,
+      taxa_gordura:              _portalCfg.taxa_gordura              ?? 0,
+      horario_livre:             _portalCfg.horario_livre             || { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] },
+      permitir_selecao_periodo:  !!_portalCfg.permitir_selecao_periodo,
+      permitir_selecao_recursos: !!_portalCfg.permitir_selecao_recursos
     }
   });
   document.getElementById('view-calculadora')?.classList.add('active');
 }
 
 initPortal();
+
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.className = 'toast ' + (type || 'success');
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3500);
+}
 </script>
+
+<div id="toast" class="toast"></div>
 </body>
 </html>

@@ -3674,13 +3674,17 @@ app.get('/api/admin/portal-config', authMiddleware, dbMiddleware, async (_req, r
 app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { ativo, subscription_ids = [], dominios_aceitos = [], titulo = 'Portal de Serviço', descricao = '',
-            taxa_imposto, taxa_cond, horario_livre, solicitar_identificacao } = req.body;
+            taxa_imposto, taxa_cond, taxa_gordura, horario_livre, solicitar_identificacao,
+            permitir_selecao_periodo, permitir_selecao_recursos } = req.body;
     const cfg = {
       ativo: !!ativo, subscription_ids, dominios_aceitos, titulo, descricao,
       taxa_imposto:           taxa_imposto  != null ? parseFloat(taxa_imposto)  : 18.65,
       taxa_cond:              taxa_cond     != null ? parseFloat(taxa_cond)     : 13.00,
+      taxa_gordura:           taxa_gordura  != null ? parseFloat(taxa_gordura)  : 0,
       horario_livre:          horario_livre || { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] },
-      solicitar_identificacao: !!solicitar_identificacao,
+      solicitar_identificacao:    !!solicitar_identificacao,
+      permitir_selecao_periodo:   !!permitir_selecao_periodo,
+      permitir_selecao_recursos:  !!permitir_selecao_recursos,
       updated_at: new Date().toISOString()
     };
     await pool.query(`
@@ -3733,10 +3737,12 @@ app.post('/api/public/calculadora/estimativas', _portalMiddleware, dbMiddleware,
 
 // ── GET /api/public/calculadora/config ───────────────────────────────────────
 app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
-  const { titulo, descricao, dominios_aceitos = [], taxa_imposto = 18.65, taxa_cond = 13.00,
+  const { titulo, descricao, dominios_aceitos = [], taxa_imposto = 18.65, taxa_cond = 13.00, taxa_gordura = 0,
           horario_livre = { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] },
-          solicitar_identificacao = false } = req.portalCfg;
-  res.json({ titulo, descricao, dominios_aceitos, taxa_imposto, taxa_cond, horario_livre, solicitar_identificacao });
+          solicitar_identificacao = false,
+          permitir_selecao_periodo = true, permitir_selecao_recursos = true } = req.portalCfg;
+  res.json({ titulo, descricao, dominios_aceitos, taxa_imposto, taxa_cond, taxa_gordura, horario_livre,
+             solicitar_identificacao, permitir_selecao_periodo, permitir_selecao_recursos });
 });
 
 // ── POST /api/public/calculadora/identificar ──────────────────────────────────
@@ -3834,7 +3840,9 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
       ORDER BY resource_group_name
       LIMIT 500
     `, params);
-    res.json(r.rows.map(row => ({ ...row, ..._detectManagedRg(row.resource_group_name) })));
+    const withManaged = r.rows.map(row => ({ ...row, ..._detectManagedRg(row.resource_group_name) }));
+    const effSubs = subscription_ids.length ? subscription_ids : [];
+    res.json(await _resolveParentRgs(withManaged, effSubs));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -3974,6 +3982,108 @@ function _detectManagedRg(name) {
   return {};
 }
 
+// ── Helper: resolve parent_rg para RGs gerenciados (AKS e Databricks) ────────
+// rows: array já com managed_type/managed_label; subs: string[] de subscription_ids para filtrar query
+async function _resolveParentRgs(rows, subs) {
+  if (!rows.length) return rows;
+
+  // Conjunto de RGs não-gerenciados (uppercase) — base para matching AKS
+  const normalRgs = new Set(
+    rows.filter(r => !r.managed_type).map(r => (r.resource_group_name || '').toUpperCase())
+  );
+
+  // Mapa workspace_lower → parent_rg_upper para Databricks (via resource_id no billing)
+  const workspaceToParent = new Map();
+  if (rows.some(r => r.managed_type === 'databricks')) {
+    try {
+      const subParam = subs && subs.length ? subs : null;
+      // HAVING não pode referenciar resource_id (não está no GROUP BY) — condição vai no WHERE
+      const subCond = subParam ? 'AND subscription_id = ANY($1)' : '';
+      const wkRes = await pool.query(
+        `SELECT UPPER(resource_group_name) AS rg_upper,
+                SPLIT_PART(SPLIT_PART(LOWER(resource_id), '/workspaces/', 2), '/', 1) AS ws
+         FROM azure_costs
+         WHERE (LOWER(consumed_service) LIKE '%databricks%' OR LOWER(resource_id) LIKE '%/microsoft.databricks%')
+           AND LOWER(resource_id) LIKE '%/workspaces/%'
+           AND SPLIT_PART(LOWER(resource_id), '/workspaces/', 2) <> ''
+           ${subCond}
+         GROUP BY 1, 2`,
+        subParam ? [subParam] : []
+      );
+      for (const row of wkRes.rows) {
+        if (row.ws) workspaceToParent.set(row.ws, row.rg_upper);
+      }
+      console.log(`[ResolveParentRgs] Databricks workspaces: ${workspaceToParent.size}${workspaceToParent.size > 0 ? ' — ' + [...workspaceToParent.keys()].slice(0, 5).join(', ') : ' (0 — sem linhas /workspaces/ no billing?)'}`);
+    } catch (e) { console.warn('[ResolveParentRgs] Databricks lookup error:', e.message); }
+  }
+
+  return rows.map(r => {
+    if (!r.managed_type) return r;
+    const upper = (r.resource_group_name || '').toUpperCase();
+    let parent_rg = null;
+
+    if (r.managed_type === 'aks') {
+      // MC_{parent_rg}_{cluster}_{location} — encontra o maior RG conhecido que é prefixo do interior
+      const inner = upper.startsWith('MC_') ? upper.slice(3) : upper;
+      for (const rg of normalRgs) {
+        if (inner.startsWith(rg + '_') && (!parent_rg || rg.length > parent_rg.length)) {
+          parent_rg = rg;
+        }
+      }
+    } else if (r.managed_type === 'databricks') {
+      // Método 1: compara nome do managed RG contra padrão databricks-rg-{ws} / managed-rg-adbx-{ws}
+      // usando workspace names vindos da query no billing (resource_id com /workspaces/)
+      const rgLower = (r.resource_group_name || '').toLowerCase();
+      for (const [wsLower, parentRgUpper] of workspaceToParent) {
+        if (!wsLower) continue;
+        if (rgLower === 'databricks-rg-' + wsLower ||
+            rgLower.startsWith('databricks-rg-' + wsLower + '-') ||
+            rgLower === 'managed-rg-adbx-' + wsLower ||
+            rgLower.startsWith('managed-rg-adbx-' + wsLower + '-')) {
+          parent_rg = parentRgUpper;
+          break;
+        }
+      }
+      // Método 2 (fallback exact): managed_label bate exatamente com um RG não-gerenciado
+      if (!parent_rg) {
+        const labelUpper = (r.managed_label || '').toUpperCase();
+        if (labelUpper && normalRgs.has(labelUpper)) parent_rg = labelUpper;
+      }
+      // Método 3 (fallback prefix): managed_label é prefixo do nome do RG pai
+      // Ex: workspace 'RG-DBW-TPAZ-BRSOUTH' → pai 'RG-DBW-TPAZ-BRSOUTH-TEST'
+      if (!parent_rg) {
+        const labelUpper = (r.managed_label || '').toUpperCase();
+        if (labelUpper) {
+          let best = null;
+          for (const rg of normalRgs) {
+            if ((rg.startsWith(labelUpper + '-') || rg.startsWith(labelUpper + '_')) &&
+                (!best || rg.length < best.length)) {
+              best = rg;
+            }
+          }
+          if (best) parent_rg = best;
+        }
+      }
+      // Método 4 (substring): managed_label está contido no nome de algum RG normal
+      // Ex: workspace='VVIA-ENG-BRSOUTH-001' → pai='RG-DBW-VVIA-ENG-BRSOUTH-001'
+      if (!parent_rg) {
+        const labelUpper = (r.managed_label || '').toUpperCase();
+        if (labelUpper && labelUpper.length >= 6) {
+          let best = null, bestLen = Infinity;
+          for (const rg of normalRgs) {
+            if (rg.includes(labelUpper) && rg.length < bestLen) {
+              bestLen = rg.length; best = rg;
+            }
+          }
+          if (best) parent_rg = best;
+        }
+      }
+    }
+
+    return { ...r, parent_rg };
+  });
+}
+
 // ── GET /api/calculadora/resource-groups ─────────────────────────────────────
 app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async (req, res) => {
   try {
@@ -4008,7 +4118,9 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
       rows = fd.rows;
     }
     console.log(`[ResourceGroups] ${rows.length} grupos — ${Date.now()-_t0}ms`);
-    res.json(rows.map(r => ({ ...r, ..._detectManagedRg(r.resource_group_name) })));
+    const withManaged = rows.map(r => ({ ...r, ..._detectManagedRg(r.resource_group_name) }));
+    const subs = subscription_id ? subscription_id.split(',').map(s => s.trim()).filter(Boolean) : [];
+    res.json(await _resolveParentRgs(withManaged, subs));
   } catch (err) {
     console.error('[ResourceGroups]', err.message);
     res.status(500).json({ error: err.message });
@@ -4113,14 +4225,56 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
     const where    = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
     const andCond  = cond.length ? 'AND '   + cond.join(' AND ') : '';
 
-    // CTE base_30d: mesmas condições de sub/RG mas sempre os últimos 30 dias
-    // Usada como fallback de taxa quando não há match no Price List
-    const cond30d = cond.filter(c => !c.startsWith('cost_date'));
-    const p30dFimIdx = params.length + 1;
-    params.push(data_fim || null);
-    const _30dFimExpr = `COALESCE($${p30dFimIdx}::date, (SELECT MAX(cost_date) FROM azure_costs))`;
-    const where30d = (cond30d.length ? 'WHERE ' + cond30d.join(' AND ') + ' AND ' : 'WHERE ')
-      + `cost_date >= (${_30dFimExpr} - INTERVAL '29 days') AND cost_date <= ${_30dFimExpr}`;
+    // pico=1 opt-in: pico CTEs são pesados (2 table scans extras) — omitidos por padrão
+    // Cliente solicita &pico=1 apenas ao abrir Configurar Estimativa (lazy load)
+    const comPico = req.query.pico === '1';
+
+    const _picoCtes = comPico ? `
+      -- ── CTE pico_periodo: maior custo diário ÷ horas reais naquele dia ──────────
+      pico_periodo AS (
+        SELECT DISTINCT ON (resource_id, _uom)
+          resource_id, _uom, cost_date AS pico_data, custo_dia AS pico_custo_dia,
+          horas_dia AS pico_horas_dia,
+          CASE
+            WHEN (_uom ILIKE '%hour%' OR _uom ILIKE '%hora%' OR _uom ILIKE '%day%') AND horas_dia > 0
+            THEN ROUND(custo_dia::numeric / NULLIF(horas_dia, 0), 8)
+            ELSE ROUND(custo_dia::numeric / 24.0, 8)
+          END AS custo_hora_pico
+        FROM (
+          SELECT resource_id, COALESCE(unit_of_measure, '') AS _uom, cost_date,
+            SUM(COALESCE(cost_in_billing_currency, 0)) AS custo_dia,
+            SUM(COALESCE(quantity, 0)
+              * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(COALESCE(unit_of_measure,''), '[^0-9]', '', 'g'),'')::numeric, 1.0), 1.0)
+              * CASE WHEN COALESCE(unit_of_measure,'') ILIKE '%day%' THEN 24.0 ELSE 1.0 END
+            ) AS horas_dia
+          FROM azure_costs ${where}
+          GROUP BY resource_id, COALESCE(unit_of_measure, ''), cost_date
+        ) daily_p
+        ORDER BY resource_id, _uom, custo_dia DESC
+      ),
+      -- ── CTE pico_databricks: pico do cluster inteiro (RG) no período selecionado ──
+      pico_databricks AS (
+        SELECT DISTINCT ON (rg) rg, pico_data, pico_custo_rg, pico_h_driver,
+          ROUND(pico_custo_rg::numeric / NULLIF(pico_h_driver, 0), 8) AS custo_hora_pico_cluster
+        FROM (
+          SELECT UPPER(resource_group_name) AS rg, cost_date AS pico_data,
+            SUM(COALESCE(cost_in_billing_currency, 0)) AS pico_custo_rg,
+            MAX(CASE WHEN unit_of_measure ILIKE '%hour%' OR unit_of_measure ILIKE '%hora%'
+              THEN COALESCE(quantity, 0)
+                * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1.0),1.0)
+              ELSE NULL END) AS pico_h_driver
+          FROM azure_costs
+          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-ADBX-%')
+            ${andCond}
+          GROUP BY UPPER(resource_group_name), cost_date
+        ) daily_db
+        WHERE pico_h_driver IS NOT NULL AND pico_h_driver > 0
+        ORDER BY rg, pico_custo_rg DESC
+      )` : `
+      pico_periodo AS (SELECT NULL::text AS resource_id, NULL::text AS _uom, NULL::date AS pico_data,
+        NULL::numeric AS pico_custo_dia, NULL::numeric AS pico_horas_dia, NULL::numeric AS custo_hora_pico WHERE false),
+      pico_databricks AS (SELECT NULL::text AS rg, NULL::date AS pico_data,
+        NULL::numeric AS pico_custo_rg, NULL::numeric AS pico_h_driver, NULL::numeric AS custo_hora_pico_cluster WHERE false)`;
 
     const _t0 = Date.now();
 
@@ -4334,107 +4488,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         WHERE max_h IS NOT NULL AND max_h > 0
         GROUP BY UPPER(resource_group_name)
       ),
-      -- ── CTE base_30d: taxa estável dos últimos 30 dias (fallback sem PL) ──────────
-      -- Usa as mesmas condições de sub/RG mas ignora o filtro de período do usuário.
-      -- Join por (resource_id, unit_of_measure) para preservar distinção entre meters.
-      base_30d AS (
-        SELECT
-          resource_id,
-          COALESCE(MAX(unit_of_measure), '') AS _uom,
-          COALESCE(
-            CASE
-              WHEN MAX(COALESCE(charge_type,'')) IN ('Purchase','RoundTrustBill')
-                   AND MAX(COALESCE(pricing_model,'')) = 'Reservation'
-              THEN ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
-                   / NULLIF(CASE WHEN MAX(term) ILIKE '3%' THEN 26280.0 ELSE 8760.0 END, 0), 8)
-            END,
-            CASE
-              WHEN (MAX(unit_of_measure) ILIKE '%hour%' OR MAX(unit_of_measure) ILIKE '%hora%')
-                   AND SUM(COALESCE(quantity,0)) > 0
-              THEN ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
-                   / NULLIF(SUM(COALESCE(quantity,0))
-                     * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(MAX(unit_of_measure),'[^0-9]','','g'),'')::numeric,1.0),1.0), 0), 8)
-            END,
-            CASE
-              WHEN MAX(unit_of_measure) ILIKE '%day%' AND SUM(COALESCE(quantity,0)) > 0
-              THEN ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
-                   / NULLIF(SUM(COALESCE(quantity,0)) * 24.0, 0), 8)
-            END,
-            ROUND(SUM(COALESCE(cost_in_billing_currency,0))::numeric
-                  / NULLIF((MAX(cost_date)-MIN(cost_date)+1)*24.0, 0), 8)
-          ) AS custo_hora_30d,
-          (MAX(cost_date) - MIN(cost_date) + 1) AS dias_30d
-        FROM azure_costs
-        ${where30d}
-        GROUP BY resource_id, COALESCE(unit_of_measure,'')
-      ),
-      -- ── CTE pico_periodo: maior custo diário ÷ horas reais naquele dia ──────────
-      -- Para recursos hora/dia usa horas reais (quantity × fator) em vez de 24h fixo.
-      -- DISTINCT ON pega o dia de maior custo; divisor é horas_dia quando disponível.
-      pico_periodo AS (
-        SELECT DISTINCT ON (resource_id, _uom)
-          resource_id,
-          _uom,
-          cost_date  AS pico_data,
-          custo_dia  AS pico_custo_dia,
-          horas_dia  AS pico_horas_dia,
-          CASE
-            WHEN (_uom ILIKE '%hour%' OR _uom ILIKE '%hora%' OR _uom ILIKE '%day%')
-                 AND horas_dia > 0
-            THEN ROUND(custo_dia::numeric / NULLIF(horas_dia, 0), 8)
-            ELSE ROUND(custo_dia::numeric / 24.0, 8)
-          END AS custo_hora_pico
-        FROM (
-          SELECT
-            resource_id,
-            COALESCE(unit_of_measure, '') AS _uom,
-            cost_date,
-            SUM(COALESCE(cost_in_billing_currency, 0)) AS custo_dia,
-            -- horas reais naquele dia: quantity × fator UoM (ex: "1 Hour" → 1, "10 Hours" → 10)
-            SUM(COALESCE(quantity, 0)
-              * GREATEST(COALESCE(NULLIF(
-                  REGEXP_REPLACE(COALESCE(unit_of_measure,''), '[^0-9]', '', 'g'),
-                ''), '1')::numeric, 1.0)
-              * CASE WHEN COALESCE(unit_of_measure,'') ILIKE '%day%' THEN 24.0 ELSE 1.0 END
-            ) AS horas_dia
-          FROM azure_costs
-          ${where}
-          GROUP BY resource_id, COALESCE(unit_of_measure, ''), cost_date
-        ) daily_p
-        ORDER BY resource_id, _uom, custo_dia DESC
-      ),
-      -- ── CTE pico_databricks: pico do cluster inteiro (RG) no período selecionado ──
-      -- Agrega todas as VMs do RG por dia → pega o dia com maior custo total do cluster
-      -- Divide pelo H_driver daquele dia (mesmo fator do RN-DB-001, mas só do dia pico)
-      pico_databricks AS (
-        SELECT DISTINCT ON (rg)
-          rg,
-          pico_data,
-          pico_custo_rg,
-          pico_h_driver,
-          ROUND(pico_custo_rg::numeric / NULLIF(pico_h_driver, 0), 8) AS custo_hora_pico_cluster
-        FROM (
-          SELECT
-            UPPER(resource_group_name) AS rg,
-            cost_date                  AS pico_data,
-            SUM(COALESCE(cost_in_billing_currency, 0)) AS pico_custo_rg,
-            MAX(
-              CASE
-                WHEN unit_of_measure ILIKE '%hour%' OR unit_of_measure ILIKE '%hora%'
-                THEN COALESCE(quantity, 0)
-                  * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1.0),1.0)
-                ELSE NULL
-              END
-            ) AS pico_h_driver
-          FROM azure_costs
-          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-ADBX-%')
-            ${andCond}
-          GROUP BY UPPER(resource_group_name), cost_date
-        ) daily_db
-        WHERE pico_h_driver IS NOT NULL AND pico_h_driver > 0
-        ORDER BY rg, pico_custo_rg DESC
-      )
-      -- pl_best_mv e pl_sku_mv: materialized views pré-computadas (refresh após sync)
+      ${_picoCtes}
       SELECT
         base.resource_id,
         base._meter_id,
@@ -4481,88 +4535,17 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
         pdb.pico_data                              AS pico_cluster_data,
         pdb.pico_custo_rg                          AS pico_cluster_custo_rg,
         pdb.pico_h_driver                          AS pico_cluster_horas_dia,
-        -- meter_name e categoria do Price Sheet (para exibição na UI)
-        COALESCE(pl.meter_name, pls.meter_name)           AS pl_meter_name,
-        COALESCE(pl.meter_category, pls.meter_category)   AS pl_meter_category,
-        COALESCE(pl.meter_sub_category, pls.meter_sub_category) AS pl_meter_sub_category,
-        COALESCE(pl.pl_unit_of_measure, pls.pl_unit_of_measure) AS pl_unit_of_measure,
-        COALESCE(pl.currency_code, pls.currency_code)     AS pl_currency,
-        -- retail_price_unit: 1º meter_id (pl_best) → 2º sku+service (pl_sku) → 0
-        COALESCE(
-          -- Prioridade 1: match por meter_id
-          CASE
-            WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0
-            THEN pl.retail_price_brl_norm
-            WHEN pl.currency_code = 'USD' AND COALESCE(pl.retail_price_norm, 0) > 0
-            THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-            WHEN pl.currency_code = base.moeda AND COALESCE(pl.retail_price_norm, 0) > 0
-            THEN pl.retail_price_norm
-            ELSE NULL
-          END,
-          -- Prioridade 2: fallback por sku_name + service_name (ex: VMs sem meter_id match)
-          CASE
-            WHEN base.moeda = 'BRL' AND COALESCE(pls.retail_price_brl_norm, 0) > 0
-            THEN pls.retail_price_brl_norm
-            WHEN pls.currency_code = 'USD' AND COALESCE(pls.retail_price_norm, 0) > 0
-            THEN pls.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-            WHEN pls.currency_code = base.moeda AND COALESCE(pls.retail_price_norm, 0) > 0
-            THEN pls.retail_price_norm
-            ELSE NULL
-          END,
-          0
-        )::numeric AS retail_price_unit,
-        -- custo_hora_30d: taxa dos últimos 30 dias (independente do período filtrado)
-        b30d.custo_hora_30d,
         pp.custo_hora_pico,
         pp.pico_data,
         pp.pico_custo_dia,
         pp.pico_horas_dia,
-        -- usa_30d: true quando sem PL e período < 30 dias
-        -- Exclui Databricks: eles têm taxa de cluster própria (soma_h_driver) que já é estável
         CASE
-          WHEN COALESCE(
-            CASE WHEN base.moeda='BRL' AND COALESCE(pl.retail_price_brl_norm,0)>0 THEN 1
-                 WHEN COALESCE(pl.retail_price_norm,0)>0 THEN 1
-                 WHEN COALESCE(pls.retail_price_norm,0)>0 THEN 1 END, 0) = 0
-               AND b30d.custo_hora_30d IS NOT NULL
-               AND base.dias_ativos < 30
-               AND COALESCE(db.soma_h_driver, 0) = 0
+          WHEN base.dias_ativos < 30 AND COALESCE(db.soma_h_driver, 0) = 0
           THEN true ELSE false
-        END AS usa_30d,
-        -- desconto_pct: usa o mesmo preço efetivo (meter_id → sku → sem desconto)
-        CASE
-          WHEN COALESCE(base.custo_hora_billing, 0) > 0
-               AND base.tipo_custo IN ('hora', 'dia')
-          THEN ROUND(
-            (1 - base.custo_hora_billing::numeric / NULLIF(
-              COALESCE(
-                CASE
-                  WHEN base.moeda = 'BRL' AND COALESCE(pl.retail_price_brl_norm, 0) > 0 THEN pl.retail_price_brl_norm
-                  WHEN pl.currency_code = 'USD' AND COALESCE(pl.retail_price_norm, 0) > 0 THEN pl.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-                  ELSE NULL
-                END,
-                CASE
-                  WHEN base.moeda = 'BRL' AND COALESCE(pls.retail_price_brl_norm, 0) > 0 THEN pls.retail_price_brl_norm
-                  WHEN pls.currency_code = 'USD' AND COALESCE(pls.retail_price_norm, 0) > 0 THEN pls.retail_price_norm * COALESCE(NULLIF(base.taxa_cambio::numeric, 0), 1.0)
-                  ELSE NULL
-                END
-              )
-            , 0)) * 100, 1)
-          ELSE NULL
-        END AS desconto_pct
+        END AS usa_30d
       FROM base
-      -- pl_best_mv: match por meter_id — O(1) via unique index (pré-computado)
-      LEFT JOIN pl_best_mv pl  ON pl.meter_id_lower = LOWER(base._meter_id)
-      -- pl_sku_mv: fallback por meter_name+meter_category — ativa quando meter_id não casou
-      LEFT JOIN pl_sku_mv  pls ON pl.meter_id_lower IS NULL
-        AND pls.meter_name_lower = LOWER(COALESCE(base.meter_categories,''))
-        AND pls.meter_cat_lower  = LOWER(COALESCE(base.categoria,''))
-      -- RN-DB-001: soma_h_driver diário por RG Databricks
-      LEFT JOIN db_daily  db   ON db.rg = base.resource_group_name
-      -- base_30d: taxa estável dos últimos 30 dias (fallback sem PL)
-      LEFT JOIN base_30d    b30d ON b30d.resource_id = base.resource_id
-        AND b30d._uom = COALESCE(base.unidade, '')
-      LEFT JOIN pico_periodo   pp  ON pp.resource_id = base.resource_id
+      LEFT JOIN db_daily        db  ON db.rg  = base.resource_group_name
+      LEFT JOIN pico_periodo    pp  ON pp.resource_id = base.resource_id
         AND pp._uom = COALESCE(base.unidade, '')
       LEFT JOIN pico_databricks pdb ON pdb.rg = base.resource_group_name
       ORDER BY base.resource_group_name, base.total_billing DESC
