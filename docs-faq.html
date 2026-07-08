@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FinOps Manager — FAQ</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;color:#e8eaf0;background:radial-gradient(ellipse at 25% 45%,rgba(90,0,160,.55) 0%,transparent 60%),radial-gradient(ellipse at 75% 80%,rgba(60,0,100,.3) 0%,transparent 55%),linear-gradient(160deg,#1a0030 0%,#0c0014 50%,#04000c 100%);min-height:100vh;padding:24px}
+
+/* TOP BAR */
+.topbar{max-width:860px;margin:0 auto 24px;display:flex;align-items:center;justify-content:space-between}
+.topbar-brand{font-size:22pt;font-weight:900;font-family:'Arial Black',Arial,sans-serif;color:#9333ea;text-shadow:0 0 18px rgba(147,51,234,.5);letter-spacing:-.02em}
+.topbar-title{font-size:11pt;color:#a990cc;font-weight:600}
+.topbar-back{display:inline-flex;align-items:center;gap:6px;color:#9333ea;text-decoration:none;font-size:9pt;font-weight:600;padding:6px 14px;border:1px solid rgba(147,51,234,.3);border-radius:8px;transition:background .15s}
+.topbar-back:hover{background:rgba(147,51,234,.12)}
+
+/* SEARCH */
+.search-wrap{max-width:860px;margin:0 auto 20px;position:relative}
+.search-input{width:100%;background:rgba(22,4,38,.82);border:1px solid #280040;border-radius:10px;color:#e8eaf0;font-size:10pt;padding:12px 16px 12px 44px;outline:none;transition:border-color .2s}
+.search-input:focus{border-color:#9333ea;box-shadow:0 0 0 3px rgba(147,51,234,.15)}
+.search-input::placeholder{color:#7b6a9e}
+.search-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#7b6a9e;font-size:14pt}
+
+/* CATEGORIAS */
+.cats{max-width:860px;margin:0 auto 20px;display:flex;flex-wrap:wrap;gap:8px}
+.cat-btn{padding:6px 14px;border-radius:20px;font-size:8.5pt;font-weight:600;border:1px solid rgba(147,51,234,.3);color:#a990cc;background:transparent;cursor:pointer;transition:all .15s}
+.cat-btn:hover,.cat-btn.active{background:rgba(147,51,234,.18);border-color:#9333ea;color:#c084fc}
+
+/* FAQ CONTAINER */
+.faq-wrap{max-width:860px;margin:0 auto}
+
+/* FAQ ITEM */
+.faq-item{background:rgba(22,4,38,.82);border:1px solid #280040;border-radius:12px;margin-bottom:10px;overflow:hidden;transition:border-color .2s}
+.faq-item:hover{border-color:rgba(147,51,234,.4)}
+.faq-item.active{border-color:#9333ea}
+.faq-q{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px;cursor:pointer;user-select:none}
+.faq-q-text{font-size:10pt;font-weight:600;color:#e8eaf0;line-height:1.5;flex:1}
+.faq-cat-badge{font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.cat-calc{background:rgba(147,51,234,.15);color:#c084fc}
+.cat-import{background:rgba(59,130,246,.12);color:#93c5fd}
+.cat-admin{background:rgba(239,68,68,.1);color:#fca5a5}
+.cat-reservas{background:rgba(16,185,129,.1);color:#6ee7b7}
+.cat-portal{background:rgba(245,158,11,.1);color:#fcd34d}
+.cat-databricks{background:rgba(251,146,60,.12);color:#fdba74}
+.faq-chevron{color:#7b6a9e;font-size:14pt;transition:transform .2s;flex-shrink:0;margin-top:1px}
+.faq-item.active .faq-chevron{transform:rotate(180deg);color:#9333ea}
+.faq-a{display:none;padding:0 18px 16px;border-top:1px solid #280040}
+.faq-item.active .faq-a{display:block}
+.faq-a p{font-size:9.5pt;color:#a990cc;line-height:1.8;margin-top:12px;margin-bottom:8px}
+.faq-a ul,.faq-a ol{margin:6px 0 8px 20px}
+.faq-a li{font-size:9.5pt;color:#a990cc;line-height:1.8;margin-bottom:3px}
+.faq-a strong{color:#e8eaf0}
+.faq-a code{font-family:monospace;font-size:8.5pt;background:rgba(147,51,234,.15);color:#c084fc;padding:1px 6px;border-radius:4px}
+.faq-a .tip{background:rgba(34,197,94,.08);border-left:3px solid #22c55e;padding:10px 12px;border-radius:0 6px 6px 0;margin:10px 0}
+.faq-a .tip p{color:#86efac;margin:0;font-size:9pt}
+.faq-a .warn{background:rgba(249,115,22,.08);border-left:3px solid #f97316;padding:10px 12px;border-radius:0 6px 6px 0;margin:10px 0}
+.faq-a .warn p{color:#fdba74;margin:0;font-size:9pt}
+
+/* NENHUM RESULTADO */
+.no-results{text-align:center;padding:40px 20px;color:#7b6a9e;display:none}
+.no-results p{font-size:10pt}
+
+/* FOOTER */
+.faq-footer{max-width:860px;margin:32px auto 0;text-align:center;color:#4a3b66;font-size:8.5pt}
+.faq-footer a{color:#9333ea;text-decoration:none}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="topbar-brand">vivo</div>
+    <div class="topbar-title">FinOps Manager · FAQ</div>
+  </div>
+  <a href="javascript:history.back()" class="topbar-back">← Voltar ao sistema</a>
+</div>
+
+<div class="search-wrap">
+  <span class="search-icon">🔍</span>
+  <input type="text" class="search-input" placeholder="Buscar nas perguntas..." id="faq-search" oninput="filtrarFaq()">
+</div>
+
+<div class="cats" id="cats">
+  <button class="cat-btn active" onclick="filtrarCat('todos',this)">Todos</button>
+  <button class="cat-btn" onclick="filtrarCat('calc',this)">Calculadora</button>
+  <button class="cat-btn" onclick="filtrarCat('import',this)">Importação</button>
+  <button class="cat-btn" onclick="filtrarCat('admin',this)">Administração</button>
+  <button class="cat-btn" onclick="filtrarCat('reservas',this)">Reservas</button>
+  <button class="cat-btn" onclick="filtrarCat('portal',this)">Portal Público</button>
+  <button class="cat-btn" onclick="filtrarCat('databricks',this)">Databricks</button>
+</div>
+
+<div class="faq-wrap" id="faq-wrap">
+
+  <!-- CALCULADORA -->
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Por que o período pré-preenchido não é hoje?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O sistema pré-preenche automaticamente os <strong>últimos 30 dias de dados reais</strong> disponíveis no banco para a assinatura selecionada. Isso garante que você sempre visualize um período com dados importados — e não um período vazio.</p>
+      <p>Se a importação mais recente for de 30/06, o período padrão será 01/06 → 30/06. Importe dados mais recentes para que o período atualize.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">O que significa o badge ⚡ amort./h em uma VM?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Indica que a VM está coberta por uma <strong>Reserved Instance ou Savings Plan</strong>. Nesse caso, o custo de billing diário é R$ 0 (pois o valor foi pago antecipadamente na compra da reserva).</p>
+      <p>O valor exibido com o badge ⚡ é o <strong>custo amortizado</strong>, calculado via <code>effective_price × quantidade</code> — o Azure distribui o valor total da reserva proporcionalmente pelas horas de uso. Esse valor representa o custo real hora a hora da reserva.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Ao selecionar um RG pai de Databricks, o RG filho some do dropdown. É normal?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Sim, é o comportamento esperado. Ao selecionar um workspace Databricks (ex: <code>RG-WORKSPACE</code>), os RGs filhos gerenciados (<code>DATABRICKS-RG-*</code>) são <strong>marcados automaticamente</strong> e movidos para o topo da lista como selecionados.</p>
+      <p>Da mesma forma, selecionar um cluster AKS marca automaticamente seu RG de infraestrutura (<code>MC_*</code>). Ao desmarcar o pai, os filhos são desmarcados.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">O que é o indicador ⚠ Pico/h (laranja) na estimativa?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Indica que a estimativa está usando o custo do <strong>dia de maior billing</strong> do período, em vez da média histórica. É o cenário de "pior caso".</p>
+      <p>Útil para ambientes com autoscale (VMs que sobem e descem automaticamente): a média pode subestimar o custo real em dias de pico de uso.</p>
+      <div class="tip"><p>O pico é carregado em background ao abrir o painel de estimativa. Se ainda não carregou, os cards mostram a média — aguarde alguns segundos.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Por que alguns recursos aparecem com R$/GB em laranja?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Recursos de storage, bandwidth e discos são cobrados por volume consumido (tipo <strong>período</strong>), não por hora. A linha em laranja mostra o <strong>custo por unidade nativa</strong> (R$/GB, R$/10K transações, etc.).</p>
+      <p>Esse valor é calculado pela fórmula: <code>custo_total ÷ quantidade_total</code>, fornecendo o preço efetivo por GB no período — ideal para auditar se corresponde ao preço contratado.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Como funciona o Horário Livre?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O Horário Livre desconta automaticamente as horas fora do expediente do custo total do período. Útil para ambientes de desenvolvimento que ficam inativos à noite e nos finais de semana.</p>
+      <p><strong>Como configurar:</strong> ative o toggle no card Horário Livre → defina os horários de início e fim do período sem cobrança → marque os dias da semana aplicáveis.</p>
+      <p>O resumo mostra: "<em>Xh totais → −Yh livres → Zh cobradas</em>".</p>
+      <div class="tip"><p>Use <strong>★ Salvar como padrão</strong> para memorizar a configuração entre sessões.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">O que é o custo 🔒 Fixo/mês no painel de estimativa?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Serviços com cobrança mensal fixa (tipo <strong>mês</strong>) têm custo independente das horas de uso. O slider de horas não altera o valor estimado desses recursos.</p>
+      <p>Exemplos: alguns serviços de suporte Azure, licenças mensais, planos fixos.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">A tabela demora para aparecer com muitos recursos. É problema?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Não é problema. Com muitos recursos (ex: 30.000+), o sistema usa <strong>renderização em lotes</strong> para evitar travar o browser: os primeiros grupos aparecem em ~32ms e o restante carrega progressivamente em segundo plano via animação de frames.</p>
+      <p>O painel de estimativa usa carregamento automático por scroll (IntersectionObserver) — role para baixo para carregar mais cards automaticamente.</p>
+    </div>
+  </div>
+
+  <!-- IMPORTAÇÃO -->
+  <div class="faq-item" data-cat="import">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Posso importar o mesmo arquivo mais de uma vez?</span>
+      <span class="faq-cat-badge cat-import">Importação</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Sim. O sistema faz deduplicação automática usando uma chave composta de 6 campos do billing Azure. Importar o mesmo arquivo múltiplas vezes não gera dados duplicados no banco.</p>
+      <div class="tip"><p>A deduplicação depende de todos os campos-chave estarem preenchidos. Arquivos com campos em branco podem gerar duplicatas — use os arquivos originais exportados do Azure Cost Management.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="import">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Quais formatos de arquivo são suportados?</span>
+      <span class="faq-cat-badge cat-import">Importação</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O sistema aceita:</p>
+      <ul>
+        <li><strong>CSV</strong> — separador vírgula, ponto-e-vírgula ou TAB (detectado automaticamente)</li>
+        <li><strong>Parquet</strong> — formato binário comprimido do Azure Cost Management</li>
+        <li><strong>ZIP</strong> — contendo um ou mais arquivos CSV ou Parquet</li>
+      </ul>
+      <p>Tamanho máximo: 2 GB por arquivo.</p>
+      <div class="tip"><p>Exportações MCA recentes do Azure geram CSV com separador TAB. O sistema detecta automaticamente — não é necessário converter.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="import">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">A importação ficou parada. O que fazer?</span>
+      <span class="faq-cat-badge cat-import">Importação</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>A importação ocorre em background no servidor. Arquivos grandes (centenas de MB) podem levar vários minutos. A barra de progresso atualiza periodicamente.</p>
+      <p>Se a barra parou de atualizar por mais de 10 minutos:</p>
+      <ol>
+        <li>Verifique os logs do servidor (<code>pm2 logs finops-manager</code>)</li>
+        <li>Confirme que há espaço em disco suficiente no diretório <code>uploads_tmp/</code></li>
+        <li>Para arquivos muito grandes, considere usar a <strong>Coleta Automática</strong> via Azure Storage — mais eficiente para arquivos acima de 500 MB</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ADMINISTRAÇÃO -->
+  <div class="faq-item" data-cat="admin">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Como adicionar um novo usuário ao sistema?</span>
+      <span class="faq-cat-badge cat-admin">Administração</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Acesse <strong>Configurações → Usuários → + Novo Usuário</strong>. Preencha nome, e-mail, senha e perfil (Administrador, Analista ou Visualizador).</p>
+      <p>Se o sistema estiver integrado com Active Directory ou Microsoft Entra ID, os usuários podem fazer login com as credenciais corporativas sem precisar de cadastro manual — apenas o primeiro login cria o registro no banco.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="admin">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">O que acontece se o MASTER_KEY mudar?</span>
+      <span class="faq-cat-badge cat-admin">Administração</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <div class="warn"><p>O <strong>MASTER_KEY</strong> é usado para criptografar o arquivo <code>.finops_setup</code> e as credenciais dos Service Principals. Se a chave mudar após a configuração inicial, o arquivo de configuração ficará ilegível e o wizard de setup será exibido novamente.</p></div>
+      <p>Sempre guarde o MASTER_KEY em um cofre seguro (ex: Azure Key Vault, LastPass, Bitwarden corporativo). Nunca mude a chave em produção sem um plano de backup dos dados criptografados.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="admin">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Como configurar a Coleta Automática de custos?</span>
+      <span class="faq-cat-badge cat-admin">Administração</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>A Coleta Automática usa Service Principals do Azure para buscar dados de billing sem upload manual:</p>
+      <ol>
+        <li>No Azure, crie um App Registration e atribua as roles <strong>Reader</strong> + <strong>Storage Blob Data Reader</strong></li>
+        <li>No FinOps Manager: <strong>Configurações → Coleta Automática → + Adicionar SP</strong></li>
+        <li>Informe Tenant ID, Client ID e Client Secret</li>
+        <li>Clique em <strong>Testar credenciais</strong> para validar</li>
+        <li>Configure o agendador (horário e dias)</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="admin">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Como sincronizar a Price List do Azure?</span>
+      <span class="faq-cat-badge cat-admin">Administração</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Acesse <strong>Configurações → Price List → Sincronizar</strong>. O sistema busca automaticamente todos os preços de tabela da API pública do Azure Retail Prices (preços em USD).</p>
+      <div class="warn"><p>A sincronização apaga e recria todos os dados da Price List. Se você importou uma Price List em BRL via CSV, os dados BRL serão perdidos na próxima sincronização USD. Para manter BRL, reimporte o CSV após a sincronização.</p></div>
+    </div>
+  </div>
+
+  <!-- RESERVAS -->
+  <div class="faq-item" data-cat="reservas">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Como parar de receber alertas de uma reserva vencida?</span>
+      <span class="faq-cat-badge cat-reservas">Reservas</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O popup de alertas aparece automaticamente a cada login para reservas com vencimento nos próximos 90 dias. Para parar os alertas, atualize o status da reserva para <strong>Renovada</strong> ou <strong>Cancelada</strong> em <strong>Reservas Cloud → editar</strong>.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="reservas">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Posso registrar reservas de outras clouds além do Azure?</span>
+      <span class="faq-cat-badge cat-reservas">Reservas</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Sim. O módulo de reservas suporta: <strong>Azure, AWS, GCP, Oracle Cloud e Multicloud</strong>. Cada cloud tem campos específicos adaptados ao seu modelo de reserva (ex: AWS usa Account, GCP usa Project).</p>
+    </div>
+  </div>
+
+  <!-- PORTAL PÚBLICO -->
+  <div class="faq-item" data-cat="portal">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Como ativar o Portal Público?</span>
+      <span class="faq-cat-badge cat-portal">Portal Público</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Apenas administradores podem ativar o Portal Público:</p>
+      <ol>
+        <li>Acesse <strong>Configurações → Portal Público</strong></li>
+        <li>Ative o toggle <strong>Portal Ativo</strong></li>
+        <li>Selecione as <strong>Subscriptions permitidas</strong> — obrigatório; sem isso, nenhum dado é exposto</li>
+        <li>Configure opcionalmente: título, descrição, taxas padrão, horário livre e domínios aceitos</li>
+        <li>Clique em <strong>Salvar</strong></li>
+      </ol>
+      <p>O portal ficará disponível em <code>/portal.html</code> do mesmo domínio do sistema.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="portal">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Como restringir quem pode acessar o portal público?</span>
+      <span class="faq-cat-badge cat-portal">Portal Público</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Duas opções disponíveis nas configurações do portal:</p>
+      <ul>
+        <li><strong>Domínios aceitos</strong> — apenas e-mails do(s) domínio(s) configurado(s) podem acessar (ex: <code>vivo.com.br</code>). Um formulário de identificação é exibido antes de entrar.</li>
+        <li><strong>Solicitar identificação</strong> — sempre pede nome e e-mail, mas sem restrição de domínio. O acesso é registrado no log de acessos do portal.</li>
+      </ul>
+      <p>Se nenhuma das opções estiver configurada, o portal é de acesso livre (sem login).</p>
+    </div>
+  </div>
+
+  <!-- DATABRICKS -->
+  <div class="faq-item" data-cat="databricks">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">Por que o custo do Databricks aparece em dois RGs diferentes?</span>
+      <span class="faq-cat-badge cat-databricks">Databricks</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O Databricks gera <strong>dois streams de billing independentes</strong> por workspace:</p>
+      <ul>
+        <li><strong>Infraestrutura (VMs)</strong> — aparece no RG gerenciado <code>DATABRICKS-RG-*</code>, criado automaticamente pelo Azure. Serviço: Microsoft.Compute.</li>
+        <li><strong>Software (DBUs)</strong> — aparece no RG do workspace definido pelo usuário. Serviço: Microsoft.Databricks.</li>
+      </ul>
+      <p>O custo total real = custo de infraestrutura + custo de software DBU. Os dois devem ser somados para ter o custo completo do workspace.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="databricks">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">O que significa o ⚡ Cluster/h no card de estimativa do Databricks?</span>
+      <span class="faq-cat-badge cat-databricks">Databricks</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Um cluster Databricks tem múltiplas VMs rodando <strong>em paralelo</strong> (driver + N workers). O custo por hora real não é o de uma VM individual, mas a <strong>soma de todas as VMs ativas simultaneamente</strong>.</p>
+      <p><strong>⚡ Cluster/h</strong> = custo total do RG ÷ horas de uptime do driver. Representa o custo por hora do ambiente Databricks ativo, independente de quantas VMs estão no cluster.</p>
+      <div class="tip"><p>Para job clusters (VMs criadas a cada sessão), o sistema soma o uptime diário para capturar múltiplas execuções no mesmo dia — mais preciso que usar apenas a sessão mais longa.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="databricks">
+    <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">O que é DBU e como interpretar o custo /DBU?</span>
+      <span class="faq-cat-badge cat-databricks">Databricks</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p><strong>DBU (Databricks Unit)</strong> é a unidade de medida do software Databricks. Cada tipo de workload (All-Purpose, Jobs, Delta Live Tables, SQL Warehouse) consome DBUs a taxas diferentes.</p>
+      <p>O custo <strong>⚡ /DBU cobrado</strong> é calculado como: <code>custo_total_software ÷ total_DBUs_consumidos</code> no período. Permite verificar se a taxa por DBU corresponde ao contrato.</p>
+    </div>
+  </div>
+
+</div>
+
+<div class="no-results" id="no-results">
+  <p>Nenhuma pergunta encontrada para "<span id="no-results-term"></span>".</p>
+</div>
+
+<div class="faq-footer">
+  <p>FinOps Manager v2.4 · <a href="docs-usuario.html" target="_blank">Manual completo</a> · <a href="docs-implementacao.html" target="_blank">Guia de implementação</a></p>
+</div>
+
+<script>
+let _catAtiva = 'todos';
+
+function toggleFaq(el) {
+  const item = el.closest('.faq-item');
+  const isOpen = item.classList.contains('active');
+  document.querySelectorAll('.faq-item.active').forEach(i => i.classList.remove('active'));
+  if (!isOpen) item.classList.add('active');
+}
+
+function filtrarCat(cat, btn) {
+  _catAtiva = cat;
+  document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  filtrarFaq();
+}
+
+function filtrarFaq() {
+  const termo = document.getElementById('faq-search').value.toLowerCase().trim();
+  const items = document.querySelectorAll('.faq-item');
+  let visivel = 0;
+
+  items.forEach(item => {
+    const cat = item.dataset.cat;
+    const texto = item.textContent.toLowerCase();
+    const catOk = _catAtiva === 'todos' || cat === _catAtiva;
+    const textoOk = !termo || texto.includes(termo);
+    const show = catOk && textoOk;
+    item.style.display = show ? '' : 'none';
+    if (show) visivel++;
+  });
+
+  const noRes = document.getElementById('no-results');
+  noRes.style.display = visivel === 0 ? 'block' : 'none';
+  if (visivel === 0) document.getElementById('no-results-term').textContent = termo || _catAtiva;
+}
+</script>
+</body>
+</html>

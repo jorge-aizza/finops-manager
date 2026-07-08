@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FinOps Manager — Manual do Usuário</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;color:#1a202c;background:#0d0014;padding:24px}
+.page{background:#fff;max-width:980px;margin:0 auto;box-shadow:0 8px 48px rgba(0,0,0,.6)}
+
+/* CAPA */
+.cover{background:linear-gradient(145deg,#0d0218 0%,#1e0040 40%,#0a0020 100%);min-height:280px;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;padding:40px 44px 34px}
+.cover::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 15% 60%,rgba(147,51,234,.22) 0%,transparent 55%),radial-gradient(ellipse at 85% 30%,rgba(100,0,200,.14) 0%,transparent 50%)}
+.cover-watermark{position:absolute;right:-10px;top:50%;transform:translateY(-50%);font-size:120pt;font-weight:900;color:rgba(147,51,234,.05);font-family:'Arial Black',Arial,sans-serif;user-select:none;line-height:1}
+.cover-app-name{font-size:18pt;font-weight:700;color:#c084fc;letter-spacing:.02em}
+.cover-app-sub{font-size:7pt;color:#7c5fa0;letter-spacing:.18em;text-transform:uppercase;margin-top:4px}
+.cover-mid{position:relative;z-index:1;padding:24px 0 14px}
+.cover-doc-label{font-size:7pt;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:#6b5480;margin-bottom:10px}
+.cover-title{font-size:28pt;font-weight:700;color:#e9d5ff;line-height:1.15}
+.cover-title span{color:#9333ea}
+.cover-subtitle{font-size:11pt;color:#9b7cca;margin-top:8px}
+.cover-bottom{display:flex;justify-content:space-between;align-items:flex-end;position:relative;z-index:1}
+.cover-meta{font-size:8pt;color:#7c5fa0}
+.cover-meta strong{color:#a78bca}
+.cover-badge{display:inline-block;padding:5px 16px;border-radius:20px;font-size:7pt;font-weight:700;color:#c084fc;border:1px solid rgba(147,51,234,.4);letter-spacing:.1em;text-transform:uppercase}
+.stripe{height:4px;background:linear-gradient(90deg,#2d0060 0%,#660099 25%,#9333ea 50%,#660099 75%,#2d0060 100%)}
+
+/* ÍNDICE */
+.toc{padding:28px 44px 24px;border-bottom:1px solid #ede9f7;background:linear-gradient(180deg,#faf7ff 0%,#fff 100%)}
+.toc-title{font-size:7pt;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:#7c3aed;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.toc-title::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,rgba(147,51,234,.3),transparent)}
+.toc-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 32px}
+.toc-item{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dotted #ede9f7}
+.toc-num{font-size:8pt;font-weight:700;color:#9333ea;font-family:monospace;width:22px;flex-shrink:0}
+.toc-label{font-size:9pt;color:#374151;flex:1}
+
+/* SEÇÃO */
+.sec{padding:0 44px}
+.sec-hdr{display:flex;align-items:center;gap:10px;padding:18px 0 12px;border-bottom:2px solid #ede9f7;margin-bottom:18px;margin-top:32px}
+.sec-num{width:30px;height:30px;border-radius:6px;background:linear-gradient(135deg,#660099,#9333ea);display:flex;align-items:center;justify-content:center;font-size:10pt;font-weight:700;color:#fff;font-family:monospace;flex-shrink:0}
+.sec-ttl{font-size:14pt;font-weight:700;color:#0d0f14;letter-spacing:.01em}
+.subsec{margin:16px 0 8px;font-size:10pt;font-weight:700;color:#660099;display:flex;align-items:center;gap:6px}
+.subsec::before{content:'';width:3px;height:14px;background:#9333ea;border-radius:2px;display:inline-block;flex-shrink:0}
+p{font-size:9.5pt;color:#374151;line-height:1.8;margin-bottom:8px}
+ul,ol{margin:8px 0 8px 20px}
+li{font-size:9.5pt;color:#374151;line-height:1.8;margin-bottom:3px}
+
+/* NOTAS */
+.note{background:#faf7ff;border-left:3px solid #9333ea;padding:11px 14px;margin:10px 0;border-radius:0 6px 6px 0}
+.note-lbl{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#7c3aed;margin-bottom:4px}
+.note p,.note li{margin:0;font-size:9pt;color:#4a5568;line-height:1.7}
+.warn{background:#fff8f0;border-left:3px solid #f97316;padding:11px 14px;margin:10px 0;border-radius:0 6px 6px 0}
+.warn-lbl{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#ea580c;margin-bottom:4px}
+.warn p{margin:0;font-size:9pt;color:#4a5568;line-height:1.7}
+.tip{background:#f0fdf4;border-left:3px solid #22c55e;padding:11px 14px;margin:10px 0;border-radius:0 6px 6px 0}
+.tip-lbl{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#16a34a;margin-bottom:4px}
+.tip p{margin:0;font-size:9pt;color:#4a5568;line-height:1.7}
+
+/* TABELAS */
+.tbl-wrap{margin:10px 0;border-radius:8px;overflow:hidden;border:1px solid #ede9f7}
+table.doc{width:100%;border-collapse:collapse;font-size:9pt}
+table.doc thead tr{background:linear-gradient(90deg,#3d006b,#660099)}
+table.doc thead th{padding:9px 12px;font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#e9d5ff;text-align:left}
+table.doc tbody tr:nth-child(odd){background:#fff}
+table.doc tbody tr:nth-child(even){background:#faf7ff}
+table.doc tbody td{padding:8px 12px;color:#374151;border-bottom:1px solid #f0eef8;vertical-align:top}
+table.doc tbody td:first-child{font-weight:600;color:#374151}
+
+/* FLUXO */
+.flow{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:12px 0}
+.flow-step{background:#f3eeff;border:1px solid #ddd6fe;border-radius:6px;padding:6px 12px;font-size:8.5pt;font-weight:600;color:#5b21b6;white-space:nowrap}
+.flow-arr{color:#9333ea;font-size:12pt;font-weight:700}
+
+/* BADGE TIPO */
+.tipo{display:inline-block;font-size:7pt;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;margin:1px}
+.tipo-hora{background:rgba(59,130,246,.1);color:#1d4ed8}
+.tipo-dia{background:rgba(16,185,129,.1);color:#065f46}
+.tipo-mes{background:rgba(245,158,11,.1);color:#92400e}
+.tipo-periodo{background:rgba(239,68,68,.1);color:#991b1b}
+.tipo-reserva{background:rgba(147,51,234,.12);color:#5b21b6}
+
+/* COLOR INDICATOR */
+.cor{display:inline-flex;align-items:center;gap:6px;font-size:9pt;margin:2px 0}
+.cor-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+
+/* STEPS */
+.steps{margin:10px 0}
+.step{display:flex;gap:14px;margin-bottom:14px;align-items:flex-start}
+.step-num{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#660099,#9333ea);color:#fff;font-size:9pt;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.step-body{flex:1}
+.step-body p{margin:0 0 4px}
+
+/* RN CARDS */
+.rn-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+.rn-card{border:1px solid #ede9f7;border-radius:8px;overflow:hidden}
+.rn-card-hdr{padding:10px 14px;background:linear-gradient(90deg,#3d006b,#660099);color:#e9d5ff;font-size:9pt;font-weight:700}
+.rn-card-body{padding:12px 14px;font-size:8.5pt;color:#374151;line-height:1.7}
+.rn-card-body p{margin:0 0 6px;font-size:8.5pt}
+
+/* CODE */
+code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padding:1px 5px;border-radius:3px}
+
+/* FOOTER */
+.footer{background:#faf7ff;border-top:1px solid #ede9f7;padding:16px 44px;display:flex;justify-content:space-between;align-items:center;margin-top:32px}
+.footer p{font-size:8pt;color:#9aa0be;margin:0}
+.footer .ver{font-family:monospace;font-size:8pt;color:#9333ea;font-weight:700}
+
+@media print{
+  body{background:#fff;padding:0}
+  .page{box-shadow:none}
+  .sec{page-break-inside:avoid}
+  .sec-hdr{page-break-after:avoid}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- CAPA -->
+<div class="cover">
+  <div class="cover-watermark">vivo</div>
+  <div style="position:relative;z-index:1">
+    <div class="cover-app-name">FinOps Manager</div>
+    <div class="cover-app-sub">Vivo · Gestão de Custos Azure</div>
+  </div>
+  <div class="cover-mid">
+    <div class="cover-doc-label">Documentação de Usuário</div>
+    <div class="cover-title">Manual do <span>Usuário</span></div>
+    <div class="cover-subtitle">Regras de Negócio · Módulos · Fluxos de Uso</div>
+  </div>
+  <div class="cover-bottom">
+    <div class="cover-meta">Versão <strong>v2.4</strong> · Julho 2026</div>
+    <div class="cover-badge">Usuário Final</div>
+  </div>
+</div>
+<div class="stripe"></div>
+
+<!-- ÍNDICE -->
+<div class="toc">
+  <div class="toc-title">Índice</div>
+  <div class="toc-grid">
+    <div class="toc-item"><span class="toc-num">01</span><span class="toc-label">Visão Geral do Sistema</span></div>
+    <div class="toc-item"><span class="toc-num">07</span><span class="toc-label">Configurar Estimativa (Overlay)</span></div>
+    <div class="toc-item"><span class="toc-num">02</span><span class="toc-label">Login e Autenticação</span></div>
+    <div class="toc-item"><span class="toc-num">08</span><span class="toc-label">Horário Livre</span></div>
+    <div class="toc-item"><span class="toc-num">03</span><span class="toc-label">Dashboard e Projetos FinOps</span></div>
+    <div class="toc-item"><span class="toc-num">09</span><span class="toc-label">Reservas Cloud</span></div>
+    <div class="toc-item"><span class="toc-num">04</span><span class="toc-label">Importação de Custos Azure</span></div>
+    <div class="toc-item"><span class="toc-num">10</span><span class="toc-label">Coleta Automática</span></div>
+    <div class="toc-item"><span class="toc-num">05</span><span class="toc-label">Calculadora de Custos — Buscar</span></div>
+    <div class="toc-item"><span class="toc-num">11</span><span class="toc-label">Portal Público</span></div>
+    <div class="toc-item"><span class="toc-num">06</span><span class="toc-label">Tabela de Billing</span></div>
+    <div class="toc-item"><span class="toc-num">12</span><span class="toc-label">Regras de Negócio (Referência)</span></div>
+  </div>
+</div>
+
+<!-- S01 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">01</div><div class="sec-ttl">Visão Geral do Sistema</div></div>
+
+  <p>O <strong>FinOps Manager</strong> é uma plataforma de gestão de custos Azure desenvolvida para a Vivo. Permite importar dados de billing do Azure, calcular e estimar o custo por hora de cada recurso, e gerar relatórios de chargeback por projeto.</p>
+
+  <div class="subsec">Módulos principais</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Módulo</th><th>Finalidade</th><th>Quem usa</th></tr></thead>
+      <tbody>
+        <tr><td>Dashboard</td><td>Visão consolidada de projetos e ações FinOps com KPIs de economia</td><td>Todos os usuários</td></tr>
+        <tr><td>Projetos / Ações</td><td>Gerenciamento de iniciativas FinOps com acompanhamento de status e retorno</td><td>Analistas / Gestores</td></tr>
+        <tr><td>Calculadora de Custos</td><td>Análise de billing por recurso, cálculo de custo/hora e estimativa de chargeback</td><td>Analistas técnicos</td></tr>
+        <tr><td>Importação de Custos</td><td>Upload de extratos de billing Azure (CSV/Parquet) para o banco de dados</td><td>Administradores</td></tr>
+        <tr><td>Coleta Automática</td><td>Coleta periódica de custos via Azure API (sem upload manual)</td><td>Administradores</td></tr>
+        <tr><td>Price List</td><td>Sincronização de preços de tabela da Azure para comparação com billing real</td><td>Administradores</td></tr>
+        <tr><td>Reservas Cloud</td><td>Controle de instâncias reservadas com alertas de vencimento</td><td>Analistas / Gestores</td></tr>
+        <tr><td>Portal Público</td><td>Versão sem autenticação da calculadora para usuários externos</td><td>Usuários externos</td></tr>
+        <tr><td>Exportação Excel</td><td>Geração de relatório .xlsx com sumário executivo e breakdown mensal</td><td>Gestores</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="subsec">Perfis de usuário</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Perfil</th><th>Acesso</th></tr></thead>
+      <tbody>
+        <tr><td>Administrador</td><td>Acesso total: importação, coleta automática, gerenciamento de usuários, portal público, configurações do sistema</td></tr>
+        <tr><td>Analista</td><td>Acesso à calculadora, projetos, ações, reservas. Sem acesso a importação e configurações avançadas</td></tr>
+        <tr><td>Visualizador</td><td>Acesso somente leitura a projetos e dashboard</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- S02 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">02</div><div class="sec-ttl">Login e Autenticação</div></div>
+
+  <p>O sistema suporta três métodos de autenticação. Todos emitem o mesmo token JWT com validade de 8 horas (configurável).</p>
+
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Método</th><th>Como usar</th><th>Observação</th></tr></thead>
+      <tbody>
+        <tr><td>Login Local</td><td>E-mail e senha cadastrados no sistema</td><td>Padrão. Senha armazenada com bcrypt.</td></tr>
+        <tr><td>Active Directory (AD)</td><td>Clique em "Entrar com Active Directory". Usa credenciais do domínio corporativo.</td><td>Requer configuração LDAP pelo administrador.</td></tr>
+        <tr><td>Microsoft Entra ID</td><td>Clique em "Entrar com Microsoft". Redireciona para o login Microsoft.</td><td>Requer registro de aplicativo no Azure AD.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note"><div class="note-lbl">Sessão</div><p>O token de sessão é armazenado no browser (<code>sessionStorage</code> + <code>localStorage</code>). Ao fechar e reabrir o browser, o login é mantido até a expiração do token. Para encerrar manualmente, clique no botão de logout no menu lateral.</p></div>
+  <div class="warn"><div class="warn-lbl">Limite de tentativas</div><p>O sistema bloqueia automaticamente após 20 tentativas de login em 15 minutos. Se bloqueado, aguarde 15 minutos antes de tentar novamente ou contate o administrador.</p></div>
+</div>
+
+<!-- S03 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">03</div><div class="sec-ttl">Dashboard e Projetos FinOps</div></div>
+
+  <div class="subsec">Dashboard</div>
+  <p>A tela inicial exibe um resumo das iniciativas FinOps ativas: quantidade de projetos, ações por status, e o valor total de economia mensal esperada. Os cards de cloud mostram os custos consolidados por provedor.</p>
+
+  <div class="subsec">Projetos</div>
+  <p>Um <strong>Projeto FinOps</strong> é uma iniciativa de otimização de custo (ex: "Migração para Reserved Instances — VM-PROD-01"). Cada projeto contém:</p>
+  <ul>
+    <li><strong>Nome e descrição</strong> — identificação da iniciativa</li>
+    <li><strong>Status</strong> — Ativo, Concluído, Cancelado</li>
+    <li><strong>Ações</strong> — tarefas específicas dentro do projeto</li>
+  </ul>
+
+  <div class="subsec">Ações FinOps</div>
+  <p>Cada ação representa uma tarefa técnica mensurável (ex: "Dimensionar VM de D4s_v3 para D2s_v3"). Os campos principais são:</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Campo</th><th>Descrição</th></tr></thead>
+      <tbody>
+        <tr><td>Descrição</td><td>O que será feito</td></tr>
+        <tr><td>Status</td><td>Pendente / Em andamento / Concluída / Cancelada</td></tr>
+        <tr><td>Economia estimada (R$/mês)</td><td>Impacto financeiro esperado</td></tr>
+        <tr><td>Economia realizada (R$/mês)</td><td>Impacto real após execução</td></tr>
+        <tr><td>Responsável / Prazo</td><td>Quem executa e quando</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="subsec">Exportação Excel</div>
+  <p>Clique em <strong>Exportar Excel</strong> para gerar um arquivo <code>.xlsx</code> com três abas:</p>
+  <ol>
+    <li><strong>Sumário Executivo</strong> — visão por status e cloud com KPIs</li>
+    <li><strong>Ações Detalhadas</strong> — todas as ações com filtro automático</li>
+    <li><strong>Retorno Mensal</strong> — breakdown mês a mês da economia</li>
+  </ol>
+</div>
+
+<!-- S04 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">04</div><div class="sec-ttl">Importação de Custos Azure</div></div>
+
+  <p>O sistema aceita arquivos de billing exportados diretamente do Azure Cost Management. Formatos suportados: <strong>CSV</strong>, <strong>Parquet</strong>, <strong>ZIP</strong> contendo CSV/Parquet.</p>
+
+  <div class="subsec">Como exportar do Azure</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Acesse o <strong>Azure Cost Management + Billing</strong> no portal Azure.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Navegue para <strong>Análise de Custo → Exportar</strong>.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Selecione o escopo (subscription ou grupo de gerenciamento), período e formato <strong>CSV</strong> ou <strong>Parquet</strong>.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Clique em <strong>Exportar</strong> e aguarde o download.</p></div></div>
+  </div>
+
+  <div class="subsec">Como importar no FinOps Manager</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Navegue para <strong>Azure Costs → Importar</strong> no menu lateral.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Arraste o arquivo ou clique para selecionar. Arquivos até 2 GB são suportados.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Clique em <strong>Importar</strong>. O processamento ocorre em background — acompanhe o progresso na barra de status.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Ao concluir, o sistema atualiza automaticamente os dropdowns de assinatura e grupo de recursos.</p></div></div>
+  </div>
+
+  <div class="note"><div class="note-lbl">Deduplicação</div><p>O sistema detecta e ignora linhas duplicadas automaticamente. É seguro importar o mesmo arquivo mais de uma vez — não haverá dados duplicados no banco.</p></div>
+  <div class="note"><div class="note-lbl">CSV separado por TAB</div><p>Exportações MCA recentes do Azure geram CSV com separador TAB em vez de vírgula ou ponto-e-vírgula. O sistema detecta automaticamente o separador correto.</p></div>
+</div>
+
+<!-- S05 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">05</div><div class="sec-ttl">Calculadora de Custos — Buscar Recursos</div></div>
+
+  <p>A Calculadora é o módulo central do sistema. Ela lê os dados de billing importados e calcula o custo por hora de cada recurso para o período selecionado.</p>
+
+  <div class="subsec">Fluxo de uso</div>
+  <div class="flow">
+    <div class="flow-step">1. Selecionar Assinatura</div><div class="flow-arr">→</div>
+    <div class="flow-step">2. Confirmar (OK)</div><div class="flow-arr">→</div>
+    <div class="flow-step">3. Selecionar RGs</div><div class="flow-arr">→</div>
+    <div class="flow-step">4. Confirmar (OK)</div><div class="flow-arr">→</div>
+    <div class="flow-step">5. Definir período</div><div class="flow-arr">→</div>
+    <div class="flow-step">6. Buscar</div><div class="flow-arr">→</div>
+    <div class="flow-step">7. Analisar resultados</div>
+  </div>
+
+  <div class="subsec">Seleção de Assinatura e Período</div>
+  <p>Ao confirmar a assinatura, o sistema pré-preenche automaticamente um período de <strong>30 dias</strong> retroativos à data mais recente com dados importados para aquela subscription. Isso garante que você sempre visualize um período com dados reais.</p>
+
+  <div class="subsec">Seleção de Grupos de Recursos</div>
+  <p>O dropdown de RGs permite selecionar múltiplos grupos simultaneamente. Recursos gerenciados são selecionados automaticamente:</p>
+  <ul>
+    <li>Ao selecionar um <strong>Workspace Databricks</strong> (ex: <code>RG-WORKSPACE</code>), os RGs filhos gerenciados (<code>DATABRICKS-RG-*</code>) são marcados automaticamente.</li>
+    <li>Ao selecionar um <strong>cluster AKS</strong>, o RG da infraestrutura (<code>MC_*</code>) é marcado automaticamente.</li>
+    <li>Ao desmarcar o pai, os filhos são desmarcados.</li>
+  </ul>
+
+  <div class="subsec">Chip-bar de tipos de recurso</div>
+  <p>Após a busca, aparece uma barra com os tipos de recurso encontrados. Clique nos chips para filtrar a tabela:</p>
+  <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0">
+    <span class="tipo tipo-hora">VMs</span>
+    <span class="tipo tipo-dia">Discos</span>
+    <span class="tipo tipo-mes">Storage</span>
+    <span class="tipo tipo-periodo">Databricks</span>
+    <span class="tipo tipo-reserva">AKS</span>
+    <span class="tipo tipo-hora">SQL</span>
+    <span class="tipo tipo-dia">App Service</span>
+    <span class="tipo tipo-mes">Rede</span>
+    <span class="tipo tipo-periodo">Load Balancer</span>
+    <span class="tipo tipo-reserva">Key Vault</span>
+    <span class="tipo tipo-hora">Monitoramento</span>
+    <span class="tipo tipo-dia">Reservas</span>
+    <span class="tipo tipo-mes">Outros</span>
+  </div>
+  <p>Chip "Databricks" agrupa tanto as VMs de infraestrutura quanto as linhas de software (DBUs).</p>
+
+  <div class="subsec">Selecionar / Desmarcar Todos</div>
+  <p>Os botões <strong>Selecionar Todos</strong> e <strong>Desmarcar Todos</strong> operam sobre todos os recursos visíveis na tabela (respeitando o filtro de tipos ativo). Recursos em grupos colapsados são incluídos na seleção mesmo não estando visíveis.</p>
+
+  <div class="subsec">Modos de visualização</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Modo</th><th>Descrição</th></tr></thead>
+      <tbody>
+        <tr><td>Por Período</td><td>Exibe o custo total real de billing do período selecionado. Permite usar Horário Livre para descontar horas não utilizadas.</td></tr>
+        <tr><td>Por Horas</td><td>Calcula o custo estimado para um número específico de horas de uso.</td></tr>
+        <tr><td>Por Serviço</td><td>Agrupa os recursos por serviço Azure em vez de por grupo de recursos.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- S06 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">06</div><div class="sec-ttl">Tabela de Billing</div></div>
+
+  <p>A tabela principal exibe cada recurso com suas métricas de custo. Os grupos de recursos são exibidos colapsados por padrão — clique no nome do grupo para expandir.</p>
+
+  <div class="subsec">Tipos de custo</div>
+  <p>Cada recurso é classificado em um tipo de cobrança de acordo com a unidade de medida do Azure:</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Tipo</th><th>Unidade</th><th>Exemplos</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tipo tipo-hora">hora</span></td><td>Por hora de uso</td><td>VMs, App Service Plans, SQL Database vCores</td></tr>
+        <tr><td><span class="tipo tipo-dia">dia</span></td><td>Por dia de uso</td><td>Alguns serviços de suporte</td></tr>
+        <tr><td><span class="tipo tipo-mes">mês</span></td><td>Por mês</td><td>Serviços com cobrança mensal fixa</td></tr>
+        <tr><td><span class="tipo tipo-periodo">período</span></td><td>Por unidade consumida</td><td>Storage (GB), Bandwidth (GB), Databricks DBUs</td></tr>
+        <tr><td><span class="tipo tipo-reserva">reserva</span></td><td>Compra única amortizada</td><td>Reserved Instances, Savings Plans</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="subsec">Indicadores especiais na tabela</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Badge</th><th>Significado</th></tr></thead>
+      <tbody>
+        <tr><td>⚡ amort./h</td><td>VM coberta por Reserva ou Savings Plan. O custo de billing é R$0 (já pago na compra da reserva); o valor exibido é o custo amortizado real via effective_price.</td></tr>
+        <tr><td>⚡ Databricks</td><td>VM pertencente a um cluster Databricks. O custo/h exibido é a contribuição proporcional da VM no cluster.</td></tr>
+        <tr><td>⚡ /DBU cobrado</td><td>Linha de software Databricks (DBU). Exibe o custo por DBU (unidade de processamento Databricks).</td></tr>
+        <tr><td>R$/GB (laranja)</td><td>Custo por gigabyte para recursos de storage/bandwidth. Linha secundária abaixo do custo total.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="subsec">Custo por unidade nativa (RN-006)</div>
+  <p>Para todos os recursos, o sistema calcula o <strong>custo real por unidade de medida nativa</strong> (<code>custo_billing ÷ quantidade</code>). Isso fornece o preço efetivo por hora, por GB, por DBU, etc. — independente de descontos, reservas ou período. É o valor mais confiável para auditar a fatura Azure.</p>
+</div>
+
+<!-- S07 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">07</div><div class="sec-ttl">Configurar Estimativa (Overlay)</div></div>
+
+  <p>Clique em <strong>Configurar Estimativa</strong> após a busca para abrir o painel de estimativa de chargeback. Aqui você define quantas horas cada recurso será utilizado para calcular o custo proporcional.</p>
+
+  <div class="subsec">Como usar</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Selecione os recursos de interesse na tabela principal (checkboxes).</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Clique em <strong>Configurar Estimativa</strong>. O overlay abre com os recursos selecionados.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Use o slider de horas para definir as horas de uso por recurso.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>O estimado é calculado em tempo real na coluna <strong>Estimado (R$)</strong>.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Clique em <strong>Gerar Estimativa</strong> para exportar o resultado.</p></div></div>
+  </div>
+
+  <div class="subsec">Indicadores de custo estimado (Col1)</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Indicador</th><th>Cor</th><th>Significado</th></tr></thead>
+      <tbody>
+        <tr><td>Amort./h 🔒</td><td>Roxo</td><td>Reserva/Savings Plan — custo amortizado fixo. Não muda com horas.</td></tr>
+        <tr><td>🔒 Fixo/mês</td><td>Cinza</td><td>Serviço com cobrança mensal. Independe das horas selecionadas.</td></tr>
+        <tr><td>⚠ Pico/h</td><td>Laranja</td><td>Usando o custo do dia de pico (maior billing) em vez da média. Representa o pior cenário.</td></tr>
+        <tr><td>⚠ Pico Cluster/h</td><td>Laranja</td><td>Pico do cluster Databricks completo (todos os workers no pior dia).</td></tr>
+        <tr><td>⚡ Cluster/h</td><td>Azul</td><td>Custo por hora do cluster Databricks (média do período).</td></tr>
+        <tr><td>Custo/h</td><td>Cinza</td><td>Custo médio por hora do período selecionado (billing histórico).</td></tr>
+        <tr><td>Custo/mês*</td><td>Cinza</td><td>Custo médio proporcional por mês (storage, bandwidth). *O asterisco indica rateio.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="subsec">Coluna Estimado (Col4)</div>
+  <div style="margin:8px 0">
+    <div class="cor"><div class="cor-dot" style="background:#9333ea"></div>Roxo — reserva (custo amortizado fixo)</div>
+    <div class="cor"><div class="cor-dot" style="background:#f97316"></div>Laranja ⚠ — estimado baseado no pico de billing</div>
+    <div class="cor"><div class="cor-dot" style="background:#4da6ff"></div>Azul ⚡ — Databricks (custo do cluster)</div>
+    <div class="cor"><div class="cor-dot" style="background:#9aa0be"></div>Cinza — billing histórico médio (padrão)</div>
+  </div>
+
+  <div class="note"><div class="note-lbl">Carregamento do pico</div><p>Os dados de pico são carregados em background ao abrir o overlay. Durante o carregamento, os cards mostram a média histórica. Ao concluir, os indicadores ⚠ aparecem automaticamente.</p></div>
+</div>
+
+<!-- S08 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">08</div><div class="sec-ttl">Horário Livre</div></div>
+
+  <p>O <strong>Horário Livre</strong> permite descontar automaticamente as horas fora do expediente de trabalho do custo total do período. Útil para cobranças de ambiente de desenvolvimento/homologação que ficam inativos à noite e nos finais de semana.</p>
+
+  <div class="subsec">Como configurar</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>No modo <strong>Período</strong>, localize o card <strong>Horário Livre</strong> abaixo da tabela.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Clique no toggle para ativar.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Defina o horário de início e fim do período sem cobrança (ex: 18:00 às 08:00).</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Marque os dias da semana aplicáveis (normalmente sábado e domingo para fins de semana).</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>O resumo atualiza em tempo real: "Xh totais → −Yh livres → Zh cobradas".</p></div></div>
+  </div>
+
+  <div class="tip"><div class="tip-lbl">Salvar como padrão</div><p>Clique em <strong>★ Salvar como padrão</strong> para que as configurações de horário livre sejam lembradas automaticamente nas próximas sessões. Use <strong>↺ Limpar</strong> para remover o padrão salvo.</p></div>
+
+  <div class="note"><div class="note-lbl">Portal Público</div><p>No portal público, se o administrador tiver configurado um horário livre padrão, os campos aparecem preenchidos e bloqueados (somente leitura). O texto "⚙ Configurado pelo administrador" é exibido. Se o administrador não configurou, o usuário pode definir livremente.</p></div>
+</div>
+
+<!-- S09 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">09</div><div class="sec-ttl">Reservas Cloud</div></div>
+
+  <p>O módulo de Reservas controla instâncias reservadas (Reserved Instances) e compromissos de uso (Savings Plans) em múltiplas clouds, com alertas automáticos de vencimento.</p>
+
+  <div class="subsec">Cadastrar uma reserva</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Acesse <strong>Reservas Cloud</strong> no menu lateral e clique em <strong>+ Nova Reserva</strong>.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Selecione a <strong>Cloud</strong> (Azure, AWS, GCP, Oracle, Multicloud).</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Preencha: nome da reserva, tipo de escopo (Subscription/Resource Group), instância, prazo (1 ou 3 anos), custo total e data de início.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>A <strong>data de vencimento</strong> é calculada automaticamente com base na data de início e no prazo.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Clique em <strong>Salvar</strong>.</p></div></div>
+  </div>
+
+  <div class="subsec">Alertas de vencimento</div>
+  <p>A cada login, o sistema verifica automaticamente reservas ativas com vencimento nos próximos 90 dias e exibe um popup de alertas:</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Prazo</th><th>Severidade</th></tr></thead>
+      <tbody>
+        <tr><td>Expirada (vencida)</td><td>🔴 Expirada</td></tr>
+        <tr><td>0 a 30 dias</td><td>🟠 Crítico</td></tr>
+        <tr><td>31 a 60 dias</td><td>🟡 Atenção</td></tr>
+        <tr><td>61 a 90 dias</td><td>🔵 Aviso</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Para parar de receber alertas de uma reserva, atualize o status para <strong>Renovada</strong> ou <strong>Cancelada</strong>.</p>
+</div>
+
+<!-- S10 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">10</div><div class="sec-ttl">Coleta Automática</div></div>
+
+  <p>A Coleta Automática elimina a necessidade de exportar e importar arquivos CSV manualmente. O sistema busca os dados de billing diretamente da Azure Management API usando Service Principals configurados pelo administrador.</p>
+
+  <div class="subsec">Configurar um Service Principal</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>No Azure, crie um App Registration e anote o <strong>Tenant ID</strong>, <strong>Client ID</strong> e gere um <strong>Client Secret</strong>.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Atribua as roles <strong>Reader</strong> e <strong>Storage Blob Data Reader</strong> ao Service Principal nas subscriptions desejadas.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>No FinOps Manager, acesse <strong>Configurações → Coleta Automática → + Adicionar SP</strong>.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Informe Tenant ID, Client ID e Client Secret. As credenciais são encriptadas com AES-256 antes de serem salvas.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Clique em <strong>Testar credenciais</strong> para verificar a conexão.</p></div></div>
+    <div class="step"><div class="step-num">6</div><div class="step-body"><p>Configure o <strong>Agendador</strong>: horário e dias de execução automática.</p></div></div>
+  </div>
+
+  <div class="note"><div class="note-lbl">Circuit Breaker</div><p>O sistema possui proteção automática contra falhas consecutivas: após 3 erros seguidos, a coleta é pausada por 5 minutos antes de tentar novamente. Isso evita sobrecarga na Azure API em caso de problemas de conectividade.</p></div>
+</div>
+
+<!-- S11 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">11</div><div class="sec-ttl">Portal Público</div></div>
+
+  <p>O Portal Público é uma versão sem autenticação da Calculadora de Custos. Permite que usuários externos (sem conta no sistema) consultem custos Azure de subscriptions autorizadas pelo administrador.</p>
+
+  <div class="subsec">Ativação (apenas Administradores)</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Acesse <strong>Configurações → Portal Público</strong>.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Ative o toggle <strong>Portal Ativo</strong>.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Configure as <strong>Subscriptions permitidas</strong> — apenas essas serão visíveis no portal.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Defina opcionalmente: título, descrição, taxa de imposto, taxa de condomínio, horário livre e domínios aceitos para identificação.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Clique em <strong>Salvar</strong>. O portal estará disponível em <code>/portal.html</code>.</p></div></div>
+  </div>
+
+  <div class="subsec">Identificação de usuário no portal</div>
+  <p>Se o administrador ativou a solicitação de identificação ou configurou domínios aceitos, o usuário deverá informar nome e e-mail antes de acessar a calculadora. O sistema valida o domínio do e-mail.</p>
+
+  <div class="subsec">Configurações fixas no portal</div>
+  <p>Campos configurados pelo administrador (taxa de imposto, taxa de condomínio, horário livre) aparecem preenchidos e bloqueados no portal público — o usuário vê os valores mas não pode alterá-los. Campos não configurados pelo admin ficam editáveis pelo usuário.</p>
+</div>
+
+<!-- S12 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">12</div><div class="sec-ttl">Regras de Negócio — Referência</div></div>
+
+  <p>Esta seção detalha as regras de cálculo aplicadas pelo sistema. É útil para auditores, analistas técnicos e equipes de FinOps que precisam validar os valores calculados.</p>
+
+  <div class="subsec">Classificação de tipo de custo</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Tipo</th><th>Critério (billing export)</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tipo tipo-reserva">reserva</span></td><td>charge_type IN ('Purchase','RoundTrustBill') AND pricing_model = 'Reservation'</td></tr>
+        <tr><td><span class="tipo tipo-hora">hora</span></td><td>unit_of_measure contém 'hour' ou 'hora'</td></tr>
+        <tr><td><span class="tipo tipo-dia">dia</span></td><td>unit_of_measure contém 'day'</td></tr>
+        <tr><td><span class="tipo tipo-mes">mês</span></td><td>unit_of_measure contém 'month' (exceto GB/TiB)</td></tr>
+        <tr><td><span class="tipo tipo-periodo">período</span></td><td>Todos os demais (disco, storage, bandwidth, DBU, transações)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="rn-grid">
+    <div class="rn-card">
+      <div class="rn-card-hdr">RN-006 — Custo por unidade nativa</div>
+      <div class="rn-card-body">
+        <p>Fórmula: <code>custo_billing ÷ quantidade_total</code></p>
+        <p>Fornece o preço efetivo por hora (VMs), por GB (storage), por DBU (Databricks), por 10K transações, etc. É o valor ideal para auditar a fatura e verificar se corresponde ao preço negociado.</p>
+      </div>
+    </div>
+    <div class="rn-card">
+      <div class="rn-card-hdr">RN-007 — Amortizado (RI / Savings Plan)</div>
+      <div class="rn-card-body">
+        <p>VMs com Reserved Instance ou Savings Plan têm <code>cost_in_billing_currency = 0</code>. O sistema usa <code>effective_price × qty</code> para calcular o custo amortizado real (Azure distribui o valor da reserva hora a hora).</p>
+        <p>Badge: ⚡ amort./h na tabela.</p>
+      </div>
+    </div>
+    <div class="rn-card">
+      <div class="rn-card-hdr">RN-DB-001 — Taxa de cluster Databricks</div>
+      <div class="rn-card-body">
+        <p>Clusters Databricks têm múltiplas VMs rodando em paralelo. O custo por hora do cluster é: <code>C_total_rg ÷ H_driver</code>, onde H_driver = soma do uptime diário do driver (para capturar múltiplas sessões).</p>
+        <p>Válido quando: ≥ 24h de driver e ≥ 2 recursos distintos.</p>
+      </div>
+    </div>
+    <div class="rn-card">
+      <div class="rn-card-hdr">Estimativa de Pico (v2.1)</div>
+      <div class="rn-card-body">
+        <p>O sistema identifica o dia com maior billing no período selecionado e usa esse valor como base para a estimativa "pior caso". Útil para dimensionar custos em ambientes variáveis (autoscale).</p>
+        <p>Indicador: ⚠ laranja nos cards de estimativa.</p>
+      </div>
+    </div>
+    <div class="rn-card">
+      <div class="rn-card-hdr">Período padrão (30 dias)</div>
+      <div class="rn-card-body">
+        <p>Ao selecionar uma subscription, o sistema pré-preenche automaticamente os últimos 30 dias de dados reais disponíveis no banco (<code>data_mais_recente − 30 dias</code>). Garante sempre um período válido.</p>
+      </div>
+    </div>
+    <div class="rn-card">
+      <div class="rn-card-hdr">RGs Gerenciados (auto-seleção)</div>
+      <div class="rn-card-body">
+        <p>Ao selecionar um workspace Databricks, seus RGs filhos (<code>DATABRICKS-RG-*</code>) são marcados automaticamente. O mesmo vale para clusters AKS e seus RGs de infraestrutura (<code>MC_*</code>).</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="subsec">Dois streams de billing Databricks</div>
+  <p>Databricks gera duas linhas de custo independentes por workspace:</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Stream</th><th>Onde aparece</th><th>Serviço Azure</th><th>Indicador</th></tr></thead>
+      <tbody>
+        <tr><td>Infraestrutura (VMs)</td><td>RG gerenciado <code>DATABRICKS-RG-*</code></td><td>Microsoft.Compute (VMs)</td><td>⚡ Cluster/h (azul)</td></tr>
+        <tr><td>Software (DBUs)</td><td>RG do workspace (definido pelo usuário)</td><td>Microsoft.Databricks</td><td>⚡ /DBU cobrado (azul)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>O custo total real de um cluster = custo de infraestrutura + custo de software DBU. Os dois valores devem ser somados para obter o custo completo do workspace.</p>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <p>FinOps Manager — Manual do Usuário · Julho 2026</p>
+  <span class="ver">v2.4</span>
+</div>
+
+</div><!-- /page -->
+</body>
+</html>
