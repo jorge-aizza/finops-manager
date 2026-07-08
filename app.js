@@ -4079,15 +4079,20 @@ async function coletarAgendamentoAgora() {
     const fim  = new Date(); fim.setDate(fim.getDate() - 1);
     const ini  = new Date(fim); ini.setDate(ini.getDate() - (granDias - 1));
     let modo = sp.modo_coleta || 'billing_profile';
-    // Se está em billing_profile mas faltam os IDs, tenta subscription automaticamente
+    // Se billing_profile mas faltam os IDs → usa subscription
     if (modo === 'billing_profile' && (!sp.billing_account_id || !sp.billing_profile_id)) {
-      if (sp.subscription_ids) {
-        modo = 'subscription';
-      } else {
-        throw new Error('SP sem Billing Account/Profile IDs nem Subscription IDs configurados. Edite a SP antes de coletar.');
-      }
+      modo = 'subscription';
     }
-    const subIds = (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    let subIds = (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    // Se subscription sem IDs salvos → busca do Azure agora
+    if (modo === 'subscription' && subIds.length === 0) {
+      if (btn) btn.textContent = 'Buscando subs...';
+      try {
+        const data = await api('POST', `/azure-coleta/sps/${spId}/listar-subs`, {});
+        subIds = (data.subscriptions || []).map(s => s.subscriptionId).filter(Boolean);
+      } catch (_) {}
+      if (subIds.length === 0) throw new Error('Nenhuma assinatura encontrada para esta SP. Verifique as credenciais ou configure os Subscription IDs na SP.');
+    }
     const body = {
       modo, data_inicio: fmt(ini), data_fim: fmt(fim),
       subscription_ids: modo === 'subscription' ? subIds : [],
