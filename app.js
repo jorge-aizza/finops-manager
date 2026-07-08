@@ -4539,6 +4539,7 @@ function _wizardAbrir(spId, sp) {
 function _wizardSetScope(scope) {
   if (!_wizard) return;
   _wizard.scope = scope;
+  _wizard.modo  = scope === 'billing_profile' ? 'billing_profile' : 'subscription';
   const isBP = scope === 'billing_profile';
 
   // Estilo dos botões
@@ -4914,6 +4915,9 @@ async function wizardIniciarColeta() {
     }
 
     const isBP     = _wizard.modo === 'billing_profile';
+    if (isBP && (!_wizard.sp.billing_account_id || !_wizard.sp.billing_profile_id)) {
+      throw new Error('Esta SP está no modo Billing Profile mas não tem Billing Account ID e Billing Profile ID configurados. Edite a SP ou use o modo Subscription Direta.');
+    }
     const todosRGs = _wizard.rgs.length === 0 || _wizard.selectedRGs.size === _wizard.rgs.length;
     const metricEl = document.querySelector('input[name="wizard-metric"]:checked');
     const body = {

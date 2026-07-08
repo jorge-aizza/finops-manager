@@ -6008,6 +6008,23 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null)
 
 // ── Coleta via Azure Cost Management API ─────────────────────────────────────
 // modo: 'billing_profile' (padrão) ou 'subscription' (direto por subscription IDs)
+// Fatia um range em chunks de até 30 dias (limite Azure generateCostDetailsReport)
+function _splitDateRange(startDate, endDate) {
+  const chunks = [];
+  const fmt = d => d.toISOString().slice(0, 10);
+  let cur = new Date(startDate + 'T12:00:00');
+  const end = new Date(endDate + 'T12:00:00');
+  while (cur <= end) {
+    const chunkEnd = new Date(cur);
+    chunkEnd.setDate(chunkEnd.getDate() + 29); // 30 dias inclusive (0..29)
+    if (chunkEnd > end) chunkEnd.setTime(end.getTime());
+    chunks.push({ start: fmt(cur), end: fmt(chunkEnd) });
+    cur = new Date(chunkEnd);
+    cur.setDate(cur.getDate() + 1);
+  }
+  return chunks;
+}
+
 async function _executarColetaAPI(spId, billingAccountId, billingProfileId, startDate, endDate, modo = 'billing_profile', subscriptionIds = [], resourceGroups = [], metric = 'ActualCost') {
   if (_coletaEmExecucao) throw new Error('Coleta já em execução');
   if (!pool) throw new Error('Banco não conectado');
@@ -6062,9 +6079,15 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         _coletaProgresso.fase      = `[${i + 1}/${subscriptionIds.length}] ${subId}`;
         try {
           const subScope = `/subscriptions/${subId}`;
-          const arquivos = await _gerarRelatorioAPI(token, subScope, startDate, endDate, subId, metric);
-          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
-          totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+          const chunks = _splitDateRange(startDate, endDate);
+          if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+          for (const chunk of chunks) {
+            if (_coletaCancelada) break;
+            const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
+            const arquivos = await _gerarRelatorioAPI(token, subScope, chunk.start, chunk.end, label, metric);
+            const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
+            totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+          }
         } catch (e) {
           _logColeta(`Erro subscription ${subId}: ${e.message}`);
           totalErr++;
@@ -6102,9 +6125,15 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.fase      = `[${i + 1}/${subs.length}] ${sub.nome}`;
           try {
             const subScope = `/subscriptions/${sub.subscriptionId}`;
-            const arquivos = await _gerarRelatorioAPI(token, subScope, startDate, endDate, sub.nome, metric);
-            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
-            totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+            const chunks = _splitDateRange(startDate, endDate);
+            if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+            for (const chunk of chunks) {
+              if (_coletaCancelada) break;
+              const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
+              const arquivos = await _gerarRelatorioAPI(token, subScope, chunk.start, chunk.end, label, metric);
+              const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
+              totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+            }
           } catch (e) {
             _logColeta(`Erro subscription ${sub.nome}: ${e.message}`);
             totalErr++;
@@ -6118,9 +6147,14 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.fase      = 'Coletando impostos fiscais (Tax) do Billing Profile...';
           _logColeta('Passagem Billing Profile — Tax/Purchase/Refund...');
           try {
-            const arquivos = await _gerarRelatorioAPI(token, bpScope, startDate, endDate, 'Billing Profile', metric);
-            const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
-            totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+            const chunks = _splitDateRange(startDate, endDate);
+            for (const chunk of chunks) {
+              if (_coletaCancelada) break;
+              const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
+              const arquivos = await _gerarRelatorioAPI(token, bpScope, chunk.start, chunk.end, label, metric);
+              const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
+              totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+            }
           } catch (e) {
             _logColeta(`Aviso: passagem Billing Profile falhou — ${e.message}`);
           }
@@ -6130,9 +6164,14 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         _coletaProgresso.sub_total = 1;
         _coletaProgresso.sub_idx   = 1;
         _coletaProgresso.sub_atual = 'Billing Profile';
-        const arquivos = await _gerarRelatorioAPI(token, bpScope, startDate, endDate, 'Billing Profile', metric);
-        const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
-        totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+        const chunks = _splitDateRange(startDate, endDate);
+        for (const chunk of chunks) {
+          if (_coletaCancelada) break;
+          const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
+          const arquivos = await _gerarRelatorioAPI(token, bpScope, chunk.start, chunk.end, label, metric);
+          const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
+          totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+        }
       }
     }
 
