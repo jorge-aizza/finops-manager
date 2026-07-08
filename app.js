@@ -4459,7 +4459,7 @@ function spGranToggle() {
   if (isLivre) {
     const fmt = d => d.toISOString().slice(0, 10);
     const ate = new Date(); ate.setDate(ate.getDate() - 1);
-    const de  = new Date(ate); de.setDate(de.getDate() - 3);
+    const de  = new Date(ate); de.setDate(de.getDate() - 6);
     const deEl = document.getElementById('sp-gran-de');
     const ateEl = document.getElementById('sp-gran-ate');
     if (deEl && !deEl.value)  deEl.value  = fmt(de);
@@ -4502,8 +4502,8 @@ function _setGran(prefixo, valor) {
   const sel = document.getElementById(`${prefixo}-granularidade`);
   const inp = document.getElementById(`${prefixo}-granularidade-livre`);
   if (!sel) return;
-  const v = String(parseInt(valor) || 4);
-  if (['4','15','30'].includes(v)) {
+  const v = String(parseInt(valor) || 7);
+  if (['7','15','30'].includes(v)) {
     sel.value = v;
     if (inp) inp.style.display = 'none';
     const wrap = document.getElementById('sp-gran-livre-wrap');
@@ -4513,7 +4513,7 @@ function _setGran(prefixo, valor) {
     if (prefixo === 'sp') {
       const wrap = document.getElementById('sp-gran-livre-wrap');
       if (wrap) wrap.style.display = '';
-      const dias = parseInt(valor) || 4;
+      const dias = parseInt(valor) || 7;
       const fmt  = d => d.toISOString().slice(0, 10);
       const ate  = new Date(); ate.setDate(ate.getDate() - 1);
       const de   = new Date(ate); de.setDate(de.getDate() - (dias - 1));
