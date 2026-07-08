@@ -3935,211 +3935,45 @@ function switchColetaTab(tab) {
 }
 
 function _initColetaApiTab() {
-  const hoje = new Date();
-  const ini  = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
-  const fim  = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
-  const iniEl = document.getElementById('tab-api-inicio');
-  const fimEl = document.getElementById('tab-api-fim');
-  if (iniEl && !iniEl.value) iniEl.value = ini.toISOString().slice(0, 10);
-  if (fimEl && !fimEl.value) fimEl.value = fim.toISOString().slice(0, 10);
   _loadColetaApiSPSelect();
 }
 
 let _coletaApiSPCache = [];
-let _apiModoAtual = 'billing_profile';
 let _spSubSet  = new Set(); // IDs selecionados no picker do modal SP
 let _spSubsAll = [];        // assinaturas carregadas via listar-subs
 
-function _setTabApiPeriodo(tipo) {
-  // Highlight chip ativo
-  ['mc','ma','ont','7d','30d','cust'].forEach(k => {
-    const el = document.getElementById(`tab-preset-${k}`);
-    if (el) { el.style.borderColor = ''; el.style.color = ''; el.style.background = ''; }
-  });
-  const mapKey = { mes_atual:'mc', mes_anterior:'ma', ontem:'ont', '7dias':'7d', '30dias':'30d', custom:'cust' };
-  const active = document.getElementById(`tab-preset-${mapKey[tipo]}`);
-  if (active) { active.style.borderColor = 'var(--accent)'; active.style.color = 'var(--accent)'; active.style.background = 'rgba(147,51,234,.08)'; }
-
-  const hoje = new Date();
-  const fmt  = d => d.toISOString().slice(0, 10);
-  let ini, fim;
-  if (tipo === 'mes_atual') {
-    ini = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
-    fim = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
-  } else if (tipo === 'mes_anterior') {
-    ini = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
-    fim = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
-  } else if (tipo === 'ontem') {
-    const ontem = new Date(hoje); ontem.setDate(hoje.getDate() - 1);
-    ini = ontem; fim = ontem;
-  } else if (tipo === '7dias') {
-    ini = new Date(hoje); ini.setDate(hoje.getDate() - 6); fim = hoje;
-  } else if (tipo === '30dias') {
-    ini = new Date(hoje); ini.setDate(hoje.getDate() - 29); fim = hoje;
-  } else {
-    // custom — só abre os campos, não preenche
-    return;
-  }
-  const iniEl = document.getElementById('tab-api-inicio');
-  const fimEl = document.getElementById('tab-api-fim');
-  if (iniEl) iniEl.value = fmt(ini);
-  if (fimEl) fimEl.value = fmt(fim);
-  // aviso período longo
-  if (ini && fim) {
-    const dias = (fim - ini) / 86400000;
-    const av = document.getElementById('tab-api-aviso');
-    if (av) av.style.display = dias > 31 ? '' : 'none';
-  }
-}
-
-function _switchApiModo(modo) {
-  _apiModoAtual = modo;
-  const isBP = modo === 'billing_profile';
-  const bpFields  = document.getElementById('tab-api-bp-fields');
-  const schedWrap = document.getElementById('tab-api-agendamento-wrap');
-  if (bpFields)  bpFields.style.display  = isBP ? '' : 'none';
-  if (subFields) subFields.style.display = isBP ? 'none' : '';
-  if (schedWrap) schedWrap.style.display = isBP ? '' : 'none';
-  if (spLabel)   spLabel.textContent     = isBP ? 'Service Principal (com Billing IDs)' : 'Service Principal';
-  // Recarrega o select com o filtro correto
-  _loadColetaApiSPSelect();
-}
 
 async function _loadColetaApiSPSelect() {
-  const sel = document.getElementById('tab-api-sp-select');
-  if (!sel) return;
   try {
     const sps = await api('GET', '/azure-coleta/sps');
     _coletaApiSPCache = sps;
-
-    // Botões rápidos de wizard no topo da aba API
     const wrap = document.getElementById('api-wizard-sp-wrap');
-    if (wrap) {
-      const ativas = sps.filter(s => s.ativo);
-      if (ativas.length) {
-        wrap.innerHTML = `<div class="stat-card" style="padding:16px 20px">
-          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px">Coleta Guiada — selecione a SP e inicie o wizard</div>
-          <div style="display:flex;flex-direction:column;gap:6px">
-            ${ativas.map(s => `
-              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px">
-                <div>
-                  <span style="font-size:13px;font-weight:600;color:var(--text)">${s.nome}</span>
-                  <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${s.modo_coleta === 'subscription' ? 'Subscription Direta' : s.billing_account_id ? 'Billing Profile (MCA)' : ''}</span>
-                </div>
-                <button class="btn-primary" style="font-size:12px;padding:6px 16px;white-space:nowrap" onclick="abrirColetaAPI(${s.id})">
-                  ▶ Iniciar Coleta
-                </button>
-              </div>`).join('')}
-          </div>
-        </div>`;
-      } else {
-        wrap.innerHTML = '';
-      }
+    if (!wrap) return;
+    const ativas = sps.filter(s => s.ativo);
+    if (!ativas.length) {
+      wrap.innerHTML = `<div class="stat-card" style="padding:16px 20px;text-align:center;color:var(--text-muted);font-size:13px">
+        Nenhuma SP ativa. <button class="btn-ghost" style="font-size:12px;padding:4px 12px;margin-left:8px" onclick="openSPModal(null)">+ Cadastrar SP</button>
+      </div>`;
+      return;
     }
-    const isBP = _apiModoAtual === 'billing_profile';
-
-    if (isBP) {
-      const valid   = sps.filter(s => s.ativo && (
-        ((s.modo_coleta || 'billing_profile') === 'billing_profile' && s.billing_account_id && s.billing_profile_id) ||
-        (s.modo_coleta === 'subscription' && s.subscription_ids)
-      ));
-      const semBill = sps.filter(s => s.ativo && !valid.find(v => v.id === s.id));
-      if (!valid.length) {
-        sel.innerHTML = '<option value="">Nenhuma SP com Billing IDs configurados</option>';
-        const info = document.getElementById('tab-api-sp-info');
-        if (info) {
-          if (semBill.length) {
-            info.innerHTML = `<span style="color:var(--orange);font-weight:600">⚠ ${semBill.length} SP(s) ativa(s) sem Billing IDs:</span><br>` +
-              semBill.map(s =>
-                `<span style="color:var(--text-muted)">${s.nome}</span> ` +
-                `<button onclick="openSPModal(${s.id})" style="font-size:10px;padding:2px 8px;border-radius:5px;background:var(--accent);color:#fff;border:none;cursor:pointer;margin-left:4px">Completar</button>`
-              ).join('<br>') +
-              `<br><span style="color:var(--text-muted);font-size:10px">Preencha Billing Account ID e Billing Profile ID no cadastro da SP.</span>`;
-          } else {
-            info.innerHTML = '<span style="color:var(--orange)">Nenhuma SP ativa. Cadastre uma SP na aba "Via Storage" → Service Principals.</span>';
-          }
-        }
-        return;
-      }
-      sel.innerHTML = valid.map(s => `<option value="${s.id}">${s.nome}</option>`).join('');
-    } else {
-      // Subscription direta — qualquer SP ativa
-      const ativas = sps.filter(s => s.ativo);
-      if (!ativas.length) {
-        sel.innerHTML = '<option value="">Nenhuma SP ativa configurada</option>';
-        return;
-      }
-      sel.innerHTML = ativas.map(s => `<option value="${s.id}">${s.nome}</option>`).join('');
-    }
-    _updateTabApiSpInfo(parseInt(sel.value));
+    wrap.innerHTML = `<div class="stat-card" style="padding:16px 20px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px">Selecione a SP e inicie a coleta guiada</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${ativas.map(s => `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px">
+            <div>
+              <span style="font-size:13px;font-weight:600;color:var(--text)">${s.nome}</span>
+              <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${s.modo_coleta === 'subscription' ? 'Subscription Direta' : s.billing_account_id ? 'Billing Profile (MCA)' : ''}</span>
+            </div>
+            <button class="btn-primary" style="font-size:12px;padding:6px 16px;white-space:nowrap" onclick="abrirColetaAPI(${s.id})">
+              ▶ Iniciar Coleta
+            </button>
+          </div>`).join('')}
+      </div>
+    </div>`;
   } catch (e) {
-    sel.innerHTML = '<option value="">Erro ao carregar SPs</option>';
-  }
-}
-
-function _updateTabApiSpInfoEvt(selectEl) {
-  _updateTabApiSpInfo(parseInt(selectEl.value));
-}
-
-function _updateTabApiSpInfo(spId) {
-  const sp = _coletaApiSPCache.find(s => s.id === spId);
-  const el = document.getElementById('tab-api-sp-info');
-  if (!el) return;
-  if (!sp) { el.innerHTML = '—'; return; }
-  const _modoLabel = sp.modo_coleta === 'subscription' ? 'Subscription Direta' : 'Billing Profile (MCA)';
-  const _detalhe   = sp.modo_coleta === 'subscription'
-    ? `<span style="color:var(--text-muted)">Subs: ${(sp.subscription_ids||'').split(/[\n,]+/).filter(Boolean).length} configurada(s)</span>`
-    : `<span style="color:var(--text-muted)">BA: ${sp.billing_account_id || '—'}</span><br><span style="color:var(--text-muted)">BP: ${sp.billing_profile_id || '—'}</span>`;
-  el.innerHTML = `<span style="color:var(--accent);font-weight:600">${sp.nome}</span>
-    <span style="font-size:10px;color:var(--text-dim);margin-left:6px">${_modoLabel}</span><br>${_detalhe}`;
-
-  // Popula painel de agendamento com dados da SP selecionada
-  const temSched = sp.auto_coleta && sp.hora_execucao != null && sp.dias_semana;
-  document.getElementById('api-auto-ativo').checked = !!temSched;
-  document.getElementById('api-sched-body').style.display = temSched ? '' : 'none';
-  if (sp.hora_execucao != null) document.getElementById('api-hora-exec').value = sp.hora_execucao;
-  if (sp.granularidade_dias)   _setGran('api', sp.granularidade_dias);
-  _setDiasChecked('api-dia', sp.dias_semana || null);
-  document.getElementById('api-proxima-wrap').textContent = _proximaLabel(sp.proxima_coleta);
-}
-
-async function executarColetaAPITab() {
-  const sel    = document.getElementById('tab-api-sp-select');
-  const spId   = sel?.value;
-  const inicio = document.getElementById('tab-api-inicio').value;
-  const fim    = document.getElementById('tab-api-fim').value;
-  if (!spId)           { showToast('Selecione uma Service Principal', 'error'); return; }
-  if (!inicio || !fim) { showToast('Selecione um período antes de coletar', 'error'); return; }
-
-  const dias = (new Date(fim) - new Date(inicio)) / 86400000;
-  const av = document.getElementById('tab-api-aviso');
-  if (av) av.style.display = dias > 31 ? '' : 'none';
-
-  const btn = document.getElementById('tab-api-btn');
-  btn.disabled = true; btn.textContent = 'Iniciando...';
-
-  try {
-    const sp = _coletaApiSPCache.find(s => s.id === parseInt(spId));
-    if (!sp) throw new Error('SP não encontrada');
-    const _modoSp = sp.modo_coleta || 'billing_profile';
-    const body = {
-      modo:               _modoSp,
-      data_inicio:        inicio,
-      data_fim:           fim,
-      billing_account_id: _modoSp === 'billing_profile' ? sp.billing_account_id : undefined,
-      billing_profile_id: _modoSp === 'billing_profile' ? sp.billing_profile_id : undefined,
-      subscription_ids:   _modoSp === 'subscription'
-        ? (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
-        : undefined,
-    };
-    await api('POST', `/azure-coleta/sps/${spId}/coletar-api`, body);
-    showToast('Coleta via API iniciada — acompanhe o monitor abaixo', 'success');
-    setTimeout(() => { loadColetaStatus(); loadColetaHistorico(_coletaTabAtual); }, 500);
-  } catch (e) {
-    showToast('Erro: ' + e.message, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<svg viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:inline;margin-right:6px;vertical-align:-2px"><path d="M5 4l12 6-12 6V4z" fill="currentColor"/></svg>Coletar agora via API';
+    const wrap = document.getElementById('api-wizard-sp-wrap');
+    if (wrap) wrap.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:8px">Erro ao carregar SPs: ${e.message}</div>`;
   }
 }
 
@@ -4439,15 +4273,6 @@ function _spResetPicker() {
 }
 
 // ── Granularidade (4/15/30/Livre) ────────────────────────────────────────────
-
-// Wizard API tab: campo numérico livre
-function toggleGranLivre(prefixo) {
-  const sel = document.getElementById(`${prefixo}-granularidade`);
-  const inp = document.getElementById(`${prefixo}-granularidade-livre`);
-  if (!sel || !inp) return;
-  inp.style.display = sel.value === '0' ? '' : 'none';
-  if (sel.value === '0') { inp.value = ''; inp.focus(); }
-}
 
 // Modal SP: date picker livre
 function spGranToggle() {
@@ -5239,18 +5064,6 @@ function _updateStorageProxima() {
   document.getElementById('storage-proxima-wrap').textContent = _proximaLabel(p);
 }
 
-function _onApiAutoToggle(el) {
-  document.getElementById('api-sched-body').style.display = el.checked ? '' : 'none';
-  if (el.checked) _updateApiProxima();
-}
-
-function _updateApiProxima() {
-  const hora  = parseInt(document.getElementById('api-hora-exec').value);
-  const dias  = _getDiasChecked('api-dia');
-  const p     = _computeProximaJS(hora, dias);
-  document.getElementById('api-proxima-wrap').textContent = _proximaLabel(p);
-}
-
 // ── storage modal ─────────────────────────────────────────────────────────────
 function openStorageModal(id) {
   document.getElementById('modal-storage-titulo').textContent = id ? 'Editar Storage' : 'Novo Storage Account';
@@ -5348,34 +5161,6 @@ async function saveStorage() {
     showToast('Storage salvo', 'success');
     closeStorageModal();
     loadStorageList();
-  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
-}
-
-async function salvarAgendamentoAPI() {
-  const spId = parseInt(document.getElementById('tab-api-sp-select').value);
-  if (!spId) { showToast('Selecione uma Service Principal', 'error'); return; }
-  const autoAtivo = document.getElementById('api-auto-ativo').checked;
-  const body = {
-    auto_coleta:   autoAtivo,
-    hora_execucao: autoAtivo ? parseInt(document.getElementById('api-hora-exec').value) : null,
-    dias_semana:   autoAtivo ? (_getDiasChecked('api-dia').join(',') || null) : null
-  };
-  if (autoAtivo && !body.dias_semana) { showToast('Selecione ao menos um dia da semana', 'error'); return; }
-  // salva granularidade também
-  const gran = _getGran('api');
-
-  const _diasNm2    = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-  const spNome      = document.querySelector('#tab-api-sp-select option:checked')?.textContent || 'SP';
-  const confirmMsg2 = autoAtivo
-    ? `Confirma o agendamento para "${spNome}"?\n\nHorário: ${body.hora_execucao}h\nDias: ${body.dias_semana.split(',').map(d => _diasNm2[+d]).join(', ')}\nJanela: ${gran} dias`
-    : `Confirma a remoção do agendamento automático de "${spNome}"?`;
-  if (!confirm(confirmMsg2)) return;
-
-  try {
-    await api('PUT', `/azure-coleta/sps/${spId}/agendamento`, body);
-    await api('PUT', `/azure-coleta/sps/${spId}`, { granularidade_dias: gran });
-    showToast(autoAtivo ? 'Agendamento salvo' : 'Agendamento removido', 'success');
-    _updateApiProxima();
   } catch (e) { showToast('Erro: ' + e.message, 'error'); }
 }
 
