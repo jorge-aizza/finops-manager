@@ -4011,17 +4011,81 @@ async function excluirAgendamentoSP(spId, nome) {
   } catch (e) { showToast('Erro: ' + e.message, 'error'); }
 }
 
+let _agendSubSet  = new Set();
+let _agendSubsAll = [];
+
 function abrirEditarAgend(spId) {
   const sp = _coletaApiSPCache.find(s => s.id === spId);
   if (!sp) { showToast('SP não encontrada', 'error'); return; }
-  document.getElementById('agend-sp-id').value  = spId;
+  document.getElementById('agend-sp-id').value        = spId;
   document.getElementById('agend-sp-nome').textContent = sp.nome;
-  document.getElementById('agend-hora').value   = String(sp.hora_execucao ?? 3);
-  document.getElementById('agend-janela').value = String(sp.granularidade_dias || 7);
+  document.getElementById('agend-hora').value          = String(sp.hora_execucao ?? 3);
+  document.getElementById('agend-janela').value        = String(sp.granularidade_dias || 7);
   const diasSalvos = (sp.dias_semana || '').split(',').map(d => d.trim());
   document.querySelectorAll('.agend-dia').forEach(ck => { ck.checked = diasSalvos.includes(ck.value); });
   agendProxima();
+
+  // Reset picker de subs
+  _agendSubSet  = new Set((sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean));
+  _agendSubsAll = [];
+  const listArea = document.getElementById('agend-subs-list-area');
+  const emptyEl  = document.getElementById('agend-subs-empty');
+  if (listArea) listArea.style.display = 'none';
+  if (emptyEl) {
+    emptyEl.textContent = _agendSubSet.size
+      ? `${_agendSubSet.size} assinatura(s) salva(s) — clique em "Carregar do Azure" para ver e editar`
+      : 'Nenhuma assinatura salva — clique em "Carregar do Azure" para selecionar';
+  }
+
   document.getElementById('modal-editar-agend').classList.add('open');
+}
+
+async function agendBuscarSubs() {
+  const spId = parseInt(document.getElementById('agend-sp-id').value);
+  const btn  = document.getElementById('agend-subs-btn');
+  const emptyEl = document.getElementById('agend-subs-empty');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Carregando...'; }
+  if (emptyEl) emptyEl.textContent = '';
+  try {
+    const data = await api('POST', `/azure-coleta/sps/${spId}/listar-subs`, {});
+    _agendSubsAll = data.subscriptions || [];
+    _agendRenderSubs();
+    document.getElementById('agend-subs-list-area').style.display = 'flex';
+  } catch (e) {
+    if (emptyEl) emptyEl.textContent = `❌ Erro: ${e.message}`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 Recarregar'; }
+  }
+}
+
+function _agendRenderSubs(filtro) {
+  const items = document.getElementById('agend-subs-items');
+  const counter = document.getElementById('agend-subs-counter');
+  if (!items) return;
+  const q = (filtro || document.getElementById('agend-subs-search')?.value || '').toLowerCase();
+  const lista = q ? _agendSubsAll.filter(s => s.subscriptionId.toLowerCase().includes(q) || (s.nome||'').toLowerCase().includes(q)) : _agendSubsAll;
+  items.innerHTML = lista.map(s => `
+    <label style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;background:rgba(147,51,234,.04);border:1px solid var(--border)">
+      <input type="checkbox" ${_agendSubSet.has(s.subscriptionId) ? 'checked' : ''} onchange="agendToggleSub('${s.subscriptionId}',this.checked)" style="accent-color:var(--accent)">
+      <div style="min-width:0">
+        <div style="font-size:12px;color:var(--text);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.nome || s.subscriptionId}</div>
+        <div style="font-size:10px;color:var(--text-muted)">${s.subscriptionId}</div>
+      </div>
+    </label>`).join('');
+  if (counter) counter.textContent = `${_agendSubSet.size} selecionada(s) de ${_agendSubsAll.length}`;
+}
+
+function agendToggleSub(id, checked) {
+  checked ? _agendSubSet.add(id) : _agendSubSet.delete(id);
+  const counter = document.getElementById('agend-subs-counter');
+  if (counter) counter.textContent = `${_agendSubSet.size} selecionada(s) de ${_agendSubsAll.length}`;
+}
+
+function agendFiltrarSubs() { _agendRenderSubs(); }
+
+function agendSelTodasSubs(sel) {
+  _agendSubsAll.forEach(s => sel ? _agendSubSet.add(s.subscriptionId) : _agendSubSet.delete(s.subscriptionId));
+  _agendRenderSubs();
 }
 
 function fecharEditarAgend() {
@@ -4046,7 +4110,9 @@ async function salvarEditarAgend() {
     await api('PUT', `/azure-coleta/sps/${spId}/agendamento`, {
       auto_coleta: true, hora_execucao: hora, dias_semana: diasSel.join(',')
     });
-    await api('PUT', `/azure-coleta/sps/${spId}`, { granularidade_dias: janela });
+    const patch = { granularidade_dias: janela };
+    if (_agendSubSet.size > 0) patch.subscription_ids = [..._agendSubSet].join('\n');
+    await api('PATCH', `/azure-coleta/sps/${spId}`, patch);
     showToast('Agendamento salvo', 'success');
     fecharEditarAgend();
     _loadColetaApiSPSelect();
@@ -4083,15 +4149,18 @@ async function coletarAgendamentoAgora() {
     if (modo === 'billing_profile' && (!sp.billing_account_id || !sp.billing_profile_id)) {
       modo = 'subscription';
     }
-    let subIds = (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-    // Se subscription sem IDs salvos → busca do Azure agora
+    // Usa subs do picker do modal se disponíveis, senão usa as salvas na SP
+    let subIds = _agendSubSet.size > 0
+      ? [..._agendSubSet]
+      : (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    // Se ainda vazio → busca do Azure automaticamente
     if (modo === 'subscription' && subIds.length === 0) {
       if (btn) btn.textContent = 'Buscando subs...';
       try {
         const data = await api('POST', `/azure-coleta/sps/${spId}/listar-subs`, {});
         subIds = (data.subscriptions || []).map(s => s.subscriptionId).filter(Boolean);
       } catch (_) {}
-      if (subIds.length === 0) throw new Error('Nenhuma assinatura encontrada para esta SP. Verifique as credenciais ou configure os Subscription IDs na SP.');
+      if (subIds.length === 0) throw new Error('Nenhuma assinatura encontrada. Use "Carregar do Azure" para selecionar as assinaturas antes de coletar.');
     }
     const body = {
       modo, data_inicio: fmt(ini), data_fim: fmt(fim),
@@ -5146,7 +5215,10 @@ async function wizardIniciarColeta() {
             hora_execucao: hora,
             dias_semana:   diasSel.join(','),
           });
-          await api('PUT', `/azure-coleta/sps/${_wizard.spId}`, { granularidade_dias: janela });
+          const patchBody = { granularidade_dias: janela };
+          if (_wizard.modo === 'subscription' && _wizard.selectedSubs.size > 0)
+            patchBody.subscription_ids = [..._wizard.selectedSubs].join('\n');
+          await api('PATCH', `/azure-coleta/sps/${_wizard.spId}`, patchBody);
         } catch (_) {}
       }
     }

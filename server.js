@@ -5646,6 +5646,21 @@ app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, r
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Atualização parcial segura — só altera os campos explicitamente enviados
+app.patch('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const allowed = { subscription_ids: v => v?.trim() || null, granularidade_dias: v => v != null ? Math.max(1, parseInt(v) || 7) : null, modo_coleta: v => ['billing_profile','subscription'].includes(v) ? v : null };
+    const sets = []; const vals = [];
+    for (const [k, fn] of Object.entries(allowed)) {
+      if (k in req.body) { const v = fn(req.body[k]); if (v !== null || k === 'subscription_ids') { sets.push(`${k}=$${vals.length+1}`); vals.push(v); } }
+    }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(req.params.id);
+    await pool.query(`UPDATE azure_coleta_config SET ${sets.join(',')},atualizado_em=NOW() WHERE id=$${vals.length}`, vals);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/azure-coleta/sps/:id/coletar-api', authMiddleware, dbMiddleware, async (req, res) => {
   if (_coletaEmExecucao) return res.status(409).json({ error: 'Coleta já em execução' });
   const { billing_account_id, billing_profile_id, data_inicio, data_fim, modo, subscription_ids, resource_groups, metric } = req.body;
