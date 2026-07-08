@@ -2117,19 +2117,6 @@ const Calculadora = (() => {
         </tr>`;
   }
 
-  function _inserirChunked(tbody, rows, onDone) {
-    tbody.innerHTML = '';
-    if (!rows.length) { if (onDone) onDone(); return; }
-    let i = 0;
-    function next() {
-      tbody.insertAdjacentHTML('beforeend', rows.slice(i, i + 200).join(''));
-      i += 200;
-      if (i < rows.length) requestAnimationFrame(next);
-      else if (onDone) onDone();
-    }
-    requestAnimationFrame(next);
-  }
-
   async function _carregarPico() {
     if (!_ultimaUrlRecursos || !_recursos.length) { _picoCarregado = true; return; }
     try {
@@ -2169,8 +2156,7 @@ const Calculadora = (() => {
     const c = document.getElementById('ccnt');
 
     if (!lista.length) {
-      const _emptyColspan = 9;
-      tbody.innerHTML = `<tr><td colspan="${_emptyColspan}" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-muted);font-size:12px;">
         ${_recursos.length ? 'Nenhum recurso corresponde ao filtro.'
           : 'Nenhum recurso encontrado para os filtros selecionados.'}
       </td></tr>`;
@@ -2182,7 +2168,6 @@ const Calculadora = (() => {
 
     const isBRL = (lista[0]?.moeda || 'BRL') === 'BRL';
 
-    // Agrupar por resource_id
     const grupos = {};
     const ordemGrupos = [];
     lista.forEach(r => {
@@ -2194,24 +2179,31 @@ const Calculadora = (() => {
     const total_recursos = ordemGrupos.length;
     if (c) c.textContent = `${total_recursos} recurso${total_recursos!==1?'s':''}${lista.length > total_recursos ? ' · '+lista.length+' linhas' : ''}`;
 
-    const rows = [];
     _gBases = [];
+    tbody.innerHTML = ''; // limpa imediatamente — feedback visual antes de construir rows
+    _atualizarEstimativa();
+    _atualizarCnt();
 
-    ordemGrupos.forEach(baseId => {
-      const gIdx  = _gBases.length;
-      _gBases.push(baseId);
-      const filhas = grupos[baseId];
-      const temMultiplos = filhas.length > 1;
-      // colapsado por padrão — expande só quando o usuário clica
-      const exp  = _expandidos[baseId] === true;
-      const nome = filhas[0].nome_recurso || baseId.split('/').filter(Boolean).pop() || baseId.slice(0,60);
-      const rg   = filhas[0].resource_group_name || '—';
-      const totalGrupo = filhas.reduce((s,r) => s + (isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0)*_taxaBrl), 0);
-      const algumSel = filhas.some(r => !!_selecionados[r._key||r.resource_id]);
-      const todosSel = filhas.every(r => !!_selecionados[r._key||r.resource_id]);
+    // Constrói + insere em lotes de 200 grupos por frame — sem bloquear o browser
+    let gi = 0;
+    function nextChunk() {
+      const rows = [];
+      const end = Math.min(gi + 200, ordemGrupos.length);
+      for (; gi < end; gi++) {
+        const baseId = ordemGrupos[gi];
+        const gIdx   = _gBases.length;
+        _gBases.push(baseId);
+        const filhas = grupos[baseId];
+        const temMultiplos = filhas.length > 1;
+        const exp    = _expandidos[baseId] === true;
+        const nome   = filhas[0].nome_recurso || baseId.split('/').filter(Boolean).pop() || baseId.slice(0,60);
+        const rg     = filhas[0].resource_group_name || '—';
+        const totalGrupo = filhas.reduce((s,r) => s + (isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0)*_taxaBrl), 0);
+        const algumSel = filhas.some(r => !!_selecionados[r._key||r.resource_id]);
+        const todosSel = filhas.every(r => !!_selecionados[r._key||r.resource_id]);
 
-      if (temMultiplos) {
-        rows.push(`<tr data-ghdr="${gIdx}" style="background:var(--bg-hover);cursor:pointer;" onclick="Calculadora._toggleGrupo(${gIdx})">
+        if (temMultiplos) {
+          rows.push(`<tr data-ghdr="${gIdx}" style="background:var(--bg-hover);cursor:pointer;" onclick="Calculadora._toggleGrupo(${gIdx})">
           <td style="text-align:center;padding:8px 4px;" onclick="event.stopPropagation()">
             <input type="checkbox" class="cck-grupo" data-baseid="${_esc(baseId)}"
               ${todosSel?'checked':''} ${algumSel&&!todosSel?'data-indet="1"':''}
@@ -2232,17 +2224,19 @@ const Calculadora = (() => {
             <div style="font-size:9px;color:var(--text-muted);">total grupo</div>
           </td>
         </tr>`);
-        if (!exp) return; // filhas não renderizadas; inseridas lazily por _toggleGrupo
+          if (!exp) continue; // filhas não renderizadas — lazy via _toggleGrupo
+        }
+
+        filhas.forEach(r => { rows.push(_htmlFilhaRow(r, gIdx, temMultiplos, rg, nome, isBRL)); });
       }
-
-      filhas.forEach(r => { rows.push(_htmlFilhaRow(r, gIdx, temMultiplos, rg, nome, isBRL)); });
-    });
-
-    _atualizarEstimativa();
-    _atualizarCnt();
-    _inserirChunked(tbody, rows, () => {
-      document.querySelectorAll('.cck-grupo[data-indet="1"]').forEach(ck => { ck.indeterminate = true; });
-    });
+      if (rows.length) tbody.insertAdjacentHTML('beforeend', rows.join(''));
+      if (gi < ordemGrupos.length) {
+        requestAnimationFrame(nextChunk);
+      } else {
+        document.querySelectorAll('.cck-grupo[data-indet="1"]').forEach(ck => { ck.indeterminate = true; });
+      }
+    }
+    requestAnimationFrame(nextChunk);
   }
 
   function _toggleGrupo(gIdx) {
@@ -2390,8 +2384,10 @@ const Calculadora = (() => {
     _recursos.forEach(r => { _selecionados[r._key||r.resource_id] = h; });
     _atualizarCnt();
     setTimeout(() => {
-      // Filhos colapsados não estão no DOM — atualiza só grupos visíveis
+      // .cck-grupo = headers de grupos multi-meter; .cck = recursos single-meter e filhos expandidos
+      // filhos de grupos colapsados não estão no DOM — renderizados com estado correto ao expandir
       document.querySelectorAll('input.cck-grupo').forEach(ck => { ck.checked = true; ck.indeterminate = false; });
+      document.querySelectorAll('input.cck').forEach(ck => { ck.checked = true; });
       _atualizarEstimativa();
     }, 0);
   }
@@ -2401,6 +2397,7 @@ const Calculadora = (() => {
     _atualizarCnt();
     setTimeout(() => {
       document.querySelectorAll('input.cck-grupo').forEach(ck => { ck.checked = false; ck.indeterminate = false; });
+      document.querySelectorAll('input.cck').forEach(ck => { ck.checked = false; });
       _atualizarEstimativa();
     }, 0);
   }
@@ -4032,20 +4029,23 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   }
 
   // Estado de paginação do modal — persistido entre lotes
-  let _ovSel = [], _ovRMap = null, _ovIdx = 0, _ovRgSelTotalMap = null;
+  let _ovSel = [], _ovRMap = null, _ovRMapSrc = null, _ovIdx = 0, _ovRgSelTotalMap = null;
   const _OV_LOTE = 100; // cards por lote
 
   function _ovRenderRecursos() {
     const container = document.getElementById('cov-recursos');
     if (!container) return;
     container.innerHTML = '';
-    _ovRMap = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
-    // Ordena selecionados por RG para agrupar no render
-    _ovSel = Object.keys(_selecionados).sort((a, b) => {
-      const ra = (_ovRMap.get(a)?.resource_group_name || '').toUpperCase();
-      const rb = (_ovRMap.get(b)?.resource_group_name || '').toUpperCase();
-      return ra < rb ? -1 : ra > rb ? 1 : 0;
-    });
+    // Cache do mapa — só rebuilda quando _recursos muda de referência (ex: após _carregarPico)
+    if (_ovRMapSrc !== _recursos) {
+      _ovRMapSrc = _recursos;
+      _ovRMap = new Map(_recursos.map(r => [r._key||r.resource_id, r]));
+    }
+    // Schwartzian transform: extrai RG uma vez (32k lookups) em vez de 2 por comparação (960k)
+    _ovSel = Object.keys(_selecionados)
+      .map(k => [k, (_ovRMap.get(k)?.resource_group_name || '').toUpperCase()])
+      .sort((a, b) => a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)
+      .map(x => x[0]);
     _ovIdx  = 0;
     _ovCurRg = null;
     // Pré-computa total selecionado por RG — evita O(N²) no loop de cards
@@ -4328,15 +4328,13 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (_html) container.insertAdjacentHTML('beforeend', _html);
     _ovIdx = end;
     if (_ovIdx < _ovSel.length) {
-      const rest = _ovSel.length - _ovIdx;
-      container.insertAdjacentHTML('beforeend',
-        `<div id="cov-mais" style="text-align:center;padding:16px 0 8px;">
-          <button class="cbtn-sec" onclick="Calculadora._ovCarregarMais()"
-            style="font-size:12px;padding:8px 20px;border-radius:8px;">
-            Mostrar mais ${rest.toLocaleString('pt-BR')} recursos ▼
-          </button>
-        </div>`
-      );
+      container.insertAdjacentHTML('beforeend', '<div id="cov-sentinel" style="height:1px;"></div>');
+      new IntersectionObserver((entries, obs) => {
+        if (!entries[0].isIntersecting) return;
+        obs.disconnect();
+        document.getElementById('cov-sentinel')?.remove();
+        _ovCarregarMais();
+      }, { rootMargin: '200px' }).observe(document.getElementById('cov-sentinel'));
     }
   }
 
