@@ -22,18 +22,30 @@ node encrypt-env.js run       # load .env.enc and start server
 ## File Map
 
 ```
-server.js          (~6 500 lines)  All API routes, auth, DB init, middleware, Excel export
-app.js             (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
-calculadora.js     (~5 600 lines)  Azure cost calculator — self-contained IIFE
-index.html         (~3 650 lines)  SPA shell — all views toggled by showView()
-portal.html        (~510 lines)    Portal público — calculadora sem autenticação (serve /portal.html)
-styles.css         (~1 550 lines)  Dark-mode CSS, Vivo purple theme
-encrypt-env.js     (139 lines)     AES-256-GCM .env encryption utility
-favicon.svg                        App icon (SVG)
-mascote.png                        Vivo mascot used in login screen (not tracked by git — keep locally)
-.finops_setup                      AES-256-CBC encrypted setup config — do not delete
-uploads_tmp/                       Multer temp dir — CSVs deleted automatically after import
+server.js               (~6 500 lines)  All API routes, auth, DB init, middleware, Excel export
+app.js                  (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
+calculadora.js          (~5 600 lines)  Azure cost calculator — self-contained IIFE
+index.html              (~3 650 lines)  SPA shell — all views toggled by showView()
+portal.html             (~515 lines)    Portal público — calculadora sem autenticação (serve /portal.html)
+styles.css              (~1 550 lines)  Dark-mode CSS, Vivo purple theme
+encrypt-env.js          (139 lines)     AES-256-GCM .env encryption utility
+favicon.svg                             App icon (SVG)
+mascote.png                             Vivo mascot used in login screen (not tracked by git — keep locally)
+.finops_setup                           AES-256-CBC encrypted setup config — do not delete
+uploads_tmp/                            Multer temp dir — CSVs deleted automatically after import
 ```
+
+**Documentação (v2.4):**
+```
+docs-implementacao.html   Guia técnico: On-Premises (Linux/Windows), Docker, IaaS VM, PaaS (Railway/Render/Azure App Service), variáveis de ambiente, checklist produção
+docs-usuario.html         Manual do usuário: todos os módulos + regras de negócio (RN-006, RN-007, RN-DB-001, pico, Databricks, Reservas, Portal Público) — versão para impressão
+docs-faq.html             FAQ interativo para usuários autenticados — busca + filtro por categoria (Calculadora, Importação, Administração, Reservas, Portal Público, Databricks)
+docs-portal-faq.html      FAQ simplificado para usuários do portal público — linguagem simples, busca por texto
+```
+
+**Integração dos FAQs no sistema:**
+- `index.html` top-bar: botão `?` abre `docs-faq.html` em nova aba; "← Voltar ao sistema" aponta para `/`
+- `portal.html` header: botão `Ajuda` abre `docs-portal-faq.html` em nova aba; "← Voltar à calculadora" chama `window.close()` (preserva sessão do portal)
 
 **SQL reference** (manual maintenance — schema managed by server.js at startup):
 ```
