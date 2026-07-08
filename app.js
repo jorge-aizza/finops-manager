@@ -3947,6 +3947,8 @@ function _initColetaApiTab() {
 
 let _coletaApiSPCache = [];
 let _apiModoAtual = 'billing_profile';
+let _spSubSet  = new Set(); // IDs selecionados no picker do modal SP
+let _spSubsAll = [];        // assinaturas carregadas via listar-subs
 
 function _setTabApiPeriodo(tipo) {
   // Highlight chip ativo
@@ -4379,9 +4381,8 @@ function openSPModal(id) {
   document.getElementById('sp-expiracao').value        = '';
   document.getElementById('sp-billing-account').value  = '';
   document.getElementById('sp-billing-profile').value  = '';
-  document.getElementById('sp-subscription-ids').value = '';
   document.getElementById('sp-modo-coleta').value      = 'billing_profile';
-  spToggleModo('billing_profile');
+  spToggleModo('billing_profile'); // reseta picker via _spResetPicker
   document.getElementById('sp-ativo').checked          = true;
   // Reseta destaque da seção de Billing
   const _bSec = document.getElementById('sp-billing-section');
@@ -4399,9 +4400,14 @@ function openSPModal(id) {
       document.getElementById('sp-billing-account').value = sp.billing_account_id || '';
       document.getElementById('sp-billing-profile').value = sp.billing_profile_id || '';
       const modo = sp.modo_coleta || 'billing_profile';
-      document.getElementById('sp-modo-coleta').value      = modo;
-      document.getElementById('sp-subscription-ids').value = sp.subscription_ids || '';
-      spToggleModo(modo);
+      document.getElementById('sp-modo-coleta').value = modo;
+      spToggleModo(modo); // reseta picker
+      if (modo === 'subscription') {
+        // pré-seleciona IDs salvos e busca lista do tenant
+        const savedIds = (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+        _spSubSet = new Set(savedIds);
+        spBuscarSubs();
+      }
       document.getElementById('sp-ativo').checked         = sp.ativo;
       if (sp.dia_execucao)       document.getElementById('sp-dia').value           = sp.dia_execucao;
       if (sp.granularidade_dias) document.getElementById('sp-granularidade').value = sp.granularidade_dias;
@@ -4418,6 +4424,113 @@ function spToggleModo(modo) {
   if (!pBill || !pSubs) return;
   pBill.style.display = modo === 'billing_profile' ? '' : 'none';
   pSubs.style.display = modo === 'subscription'    ? '' : 'none';
+  if (modo === 'subscription') _spResetPicker();
+}
+
+function _spResetPicker() {
+  _spSubSet.clear();
+  _spSubsAll = [];
+  const ids = ['sp-subs-loading','sp-subs-list-area','sp-subs-new-note','sp-subs-error','sp-subs-manual'];
+  ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+  const empty = document.getElementById('sp-subs-empty');
+  if (empty) empty.style.display = '';
+  const search = document.getElementById('sp-subs-search');
+  if (search) search.value = '';
+}
+
+// ── SP Picker de Assinaturas ──────────────────────────────────────────────────
+
+async function spBuscarSubs() {
+  const id = document.getElementById('sp-edit-id').value;
+  if (!id) {
+    document.getElementById('sp-subs-new-note').style.display = '';
+    return;
+  }
+  document.getElementById('sp-subs-empty').style.display     = 'none';
+  document.getElementById('sp-subs-list-area').style.display = 'none';
+  document.getElementById('sp-subs-loading').style.display   = '';
+  document.getElementById('sp-subs-error').style.display     = 'none';
+  try {
+    const data = await api('POST', `/azure-coleta/sps/${id}/listar-subs`, {});
+    _spSubsAll = data.subs || [];
+    _spRenderSubs(data.fonte);
+  } catch (e) {
+    document.getElementById('sp-subs-loading').style.display = 'none';
+    document.getElementById('sp-subs-empty').style.display   = '';
+    const errEl = document.getElementById('sp-subs-error');
+    errEl.textContent = '❌ ' + e.message;
+    errEl.style.display = '';
+  }
+}
+
+function _spRenderSubs(fonte) {
+  document.getElementById('sp-subs-loading').style.display = 'none';
+  document.getElementById('sp-subs-empty').style.display   = 'none';
+  const subs = _spSubsAll;
+  if (!subs.length) {
+    document.getElementById('sp-subs-empty').style.display = '';
+    const errEl = document.getElementById('sp-subs-error');
+    errEl.textContent = 'Nenhuma assinatura encontrada. Verifique as permissões da SP.';
+    errEl.style.display = '';
+    return;
+  }
+  const fonteColor = fonte === 'cache' ? 'var(--orange)' : 'var(--green)';
+  const fonteLabel = { tenant: 'do tenant Azure', billing_profile: 'do Billing Profile', cache: 'do banco local' }[fonte] || '';
+  document.getElementById('sp-subs-fonte').innerHTML = `<span style="color:${fonteColor}">●</span> ${subs.length} assinatura(s) ${fonteLabel}`;
+  let html = '';
+  for (const s of subs) {
+    const sid     = s.subscriptionId.replace(/'/g, '');
+    const checked = _spSubSet.has(sid) ? 'checked' : '';
+    const nome    = (s.nome || sid).replace(/</g,'&lt;');
+    html += `<label data-nome="${nome.toLowerCase()}" data-id="${sid.toLowerCase()}"
+      style="display:flex;align-items:flex-start;gap:8px;padding:7px 8px;border-radius:6px;cursor:pointer;background:var(--bg-hover);transition:background .1s"
+      onmouseover="this.style.background='var(--accent-dim)'" onmouseout="this.style.background='var(--bg-hover)'">
+      <input type="checkbox" ${checked} onchange="spToggleSubItem('${sid}',this.checked)" style="margin-top:2px;accent-color:var(--accent);flex-shrink:0">
+      <div>
+        <div style="font-size:12px;font-weight:500;color:var(--text)">${nome}</div>
+        <div style="font-size:10px;color:var(--text-muted);font-family:monospace">${sid}</div>
+      </div>
+    </label>`;
+  }
+  document.getElementById('sp-subs-items').innerHTML = html;
+  document.getElementById('sp-subs-counter').textContent = `${_spSubSet.size} selecionada(s)`;
+  document.getElementById('sp-subs-list-area').style.display = '';
+  setTimeout(() => document.getElementById('sp-subs-search')?.focus(), 100);
+}
+
+function spToggleSubItem(id, checked) {
+  if (checked) _spSubSet.add(id); else _spSubSet.delete(id);
+  const c = document.getElementById('sp-subs-counter');
+  if (c) c.textContent = `${_spSubSet.size} selecionada(s)`;
+}
+
+function spSelTodasSubs(sel) {
+  _spSubSet.clear();
+  if (sel) _spSubsAll.forEach(s => _spSubSet.add(s.subscriptionId));
+  document.querySelectorAll('#sp-subs-items input[type=checkbox]').forEach(cb => { cb.checked = sel; });
+  const c = document.getElementById('sp-subs-counter');
+  if (c) c.textContent = `${_spSubSet.size} selecionada(s)`;
+}
+
+function spFiltrarSubs() {
+  const termo = (document.getElementById('sp-subs-search')?.value || '').toLowerCase().trim();
+  document.querySelectorAll('#sp-subs-items label').forEach(lbl => {
+    const ok = !termo || lbl.dataset.nome.includes(termo) || lbl.dataset.id.includes(termo);
+    lbl.style.display = ok ? '' : 'none';
+  });
+}
+
+function spMostrarManual() {
+  const m = document.getElementById('sp-subs-manual');
+  if (m) { m.style.display = ''; document.getElementById('sp-subscription-ids')?.focus(); }
+}
+
+function _spGetSubscriptionIds() {
+  const listArea = document.getElementById('sp-subs-list-area');
+  if (listArea && listArea.style.display !== 'none') {
+    return [..._spSubSet].join('\n') || null;
+  }
+  return (document.getElementById('sp-subscription-ids')?.value || '').trim() || null;
 }
 
 async function saveSP() {
@@ -4432,14 +4545,14 @@ async function saveSP() {
     modo_coleta:        modo,
     billing_account_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-account').value.trim() || null) : null,
     billing_profile_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-profile').value.trim() || null) : null,
-    subscription_ids:   modo === 'subscription'    ? (document.getElementById('sp-subscription-ids').value.trim() || null) : null,
+    subscription_ids:   modo === 'subscription'    ? _spGetSubscriptionIds() : null,
     ativo:              document.getElementById('sp-ativo').checked,
     dia_execucao:       parseInt(document.getElementById('sp-dia').value) || 5,
     granularidade_dias: parseInt(document.getElementById('sp-granularidade').value) || 7,
   };
   if (!body.nome || !body.tenant_id || !body.client_id) { showToast('Preencha Nome, Tenant ID e Client ID', 'error'); return; }
   if (modo === 'billing_profile' && (!body.billing_account_id || !body.billing_profile_id)) { showToast('Preencha Billing Account ID e Billing Profile ID', 'error'); return; }
-  if (modo === 'subscription' && !body.subscription_ids) { showToast('Informe pelo menos uma Subscription ID', 'error'); return; }
+  if (modo === 'subscription' && !body.subscription_ids) { showToast('Selecione ao menos uma assinatura ou cole os IDs manualmente', 'error'); return; }
   try {
     if (id) await api('PUT', `/azure-coleta/sps/${id}`, body);
     else    await api('POST', '/azure-coleta/sps', body);

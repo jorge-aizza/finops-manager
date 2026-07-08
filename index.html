@@ -2124,11 +2124,41 @@
           </div>
           <!-- Painel Subscription Direta -->
           <div id="sp-painel-subscription" style="display:none">
-            <div>
-              <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Subscription IDs <span style="color:var(--text-dim)">(uma por linha ou separadas por vírgula)</span></label>
-              <textarea id="sp-subscription-ids" class="filter-input" rows="4" style="width:100%;box-sizing:border-box;resize:vertical;font-family:monospace;font-size:11px" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx&#10;yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"></textarea>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:6px">Selecione as assinaturas que deseja coletar:</label>
+            <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+              <!-- Estado: carregando -->
+              <div id="sp-subs-loading" style="display:none;padding:20px;text-align:center;font-size:12px;color:var(--text-muted)">
+                🔍 Buscando assinaturas do tenant...
+              </div>
+              <!-- Estado: lista com picker -->
+              <div id="sp-subs-list-area" style="display:none;padding:10px">
+                <input type="text" id="sp-subs-search" placeholder="🔍 Pesquisar assinatura..."
+                  oninput="spFiltrarSubs()"
+                  style="width:100%;box-sizing:border-box;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-hover);color:var(--text);font-size:13px;margin-bottom:8px;outline:none">
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+                  <button class="btn-ghost" style="font-size:11px;padding:2px 10px" onclick="spSelTodasSubs(true)">Todas</button>
+                  <button class="btn-ghost" style="font-size:11px;padding:2px 10px" onclick="spSelTodasSubs(false)">Limpar</button>
+                  <span id="sp-subs-fonte" style="margin-left:auto;font-size:11px;color:var(--text-muted)"></span>
+                </div>
+                <div id="sp-subs-counter" style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:6px">0 selecionada(s)</div>
+                <div id="sp-subs-items" style="display:flex;flex-direction:column;gap:3px;max-height:190px;overflow-y:auto"></div>
+              </div>
+              <!-- Estado: inicial / erro -->
+              <div id="sp-subs-empty" style="padding:16px;display:flex;flex-direction:column;align-items:center;gap:8px">
+                <button class="btn-ghost" style="font-size:12px" onclick="spBuscarSubs()">🔍 Buscar assinaturas do tenant</button>
+                <div id="sp-subs-new-note" style="display:none;font-size:11px;color:var(--text-muted);text-align:center;line-height:1.5">
+                  Salve a SP primeiro para carregar do Azure<br>
+                  <a href="javascript:void(0)" style="color:var(--accent)" onclick="spMostrarManual()">ou cole os IDs manualmente</a>
+                </div>
+                <div id="sp-subs-error" style="display:none;font-size:11px;color:var(--danger);text-align:center"></div>
+              </div>
+              <!-- Fallback: textarea manual (nova SP ou erro de conexão) -->
+              <div id="sp-subs-manual" style="display:none;padding:10px;border-top:1px solid var(--border)">
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Subscription IDs <span style="color:var(--text-dim)">(uma por linha)</span></label>
+                <textarea id="sp-subscription-ids" class="filter-input" rows="3" style="width:100%;box-sizing:border-box;resize:vertical;font-family:monospace;font-size:11px" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx&#10;yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"></textarea>
+              </div>
             </div>
-            <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">A SP precisa ter a role <strong style="color:var(--text)">Reader</strong> em cada subscription listada.</div>
+            <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">A SP precisa ter a role <strong style="color:var(--text)">Reader</strong> em cada subscription selecionada.</div>
           </div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:end">
