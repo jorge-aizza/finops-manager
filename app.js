@@ -4866,6 +4866,69 @@ function wizardNext3() {
       <span style="color:var(--text);font-size:13px;font-weight:500">${inicio} → ${fim}</span>
     </div>`;
   _wizardShowStep(4);
+  _wizardPreencherAgendamento();
+}
+
+function _wizardPreencherAgendamento() {
+  const sp     = _wizard?.sp;
+  const banner = document.getElementById('wizard-sched-atual');
+  if (!banner || !sp) return;
+
+  const temSched = sp.auto_coleta && sp.hora_execucao != null && sp.dias_semana;
+  if (!temSched) {
+    banner.style.display = 'none';
+    return;
+  }
+
+  // Pré-preenche o formulário com valores salvos
+  const toggleEl = document.getElementById('wizard-sched-ativo');
+  const body     = document.getElementById('wizard-sched-body');
+  if (toggleEl) toggleEl.checked = true;
+  if (body)     body.style.display = 'flex';
+
+  const horaEl = document.getElementById('wizard-sched-hora');
+  if (horaEl) horaEl.value = String(sp.hora_execucao);
+
+  const diasSalvos = (sp.dias_semana || '').split(',').map(d => d.trim());
+  document.querySelectorAll('.wiz-dia').forEach(ck => { ck.checked = diasSalvos.includes(ck.value); });
+
+  const janelaEl = document.getElementById('wizard-sched-janela');
+  if (janelaEl && sp.granularidade_dias) janelaEl.value = String(sp.granularidade_dias);
+
+  _wizardSchedProxima();
+
+  // Monta texto do banner
+  const _nd = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const diasNomes = diasSalvos.map(d => _nd[+d]).filter(Boolean).join(', ');
+  const infoEl = document.getElementById('wizard-sched-atual-info');
+  if (infoEl) infoEl.textContent = `${diasNomes} · ${sp.hora_execucao}:00h · Janela ${sp.granularidade_dias || 7} dia(s)`;
+  const proxEl = document.getElementById('wizard-sched-proxima-atual');
+  if (proxEl) proxEl.textContent = _proximaLabel(sp.proxima_coleta);
+
+  banner.style.display = 'flex';
+}
+
+function _wizardSchedEditar() {
+  const banner = document.getElementById('wizard-sched-atual');
+  if (banner) banner.style.display = 'none';
+}
+
+async function wizardExcluirAgendamento() {
+  if (!_wizard?.spId) return;
+  if (!confirm(`Excluir o agendamento automático de "${_wizard.sp?.nome || 'SP'}"?`)) return;
+  try {
+    await api('PUT', `/azure-coleta/sps/${_wizard.spId}/agendamento`, {
+      auto_coleta: false, hora_execucao: null, dias_semana: null
+    });
+    if (_wizard.sp) _wizard.sp.auto_coleta = false;
+    const banner   = document.getElementById('wizard-sched-atual');
+    const toggleEl = document.getElementById('wizard-sched-ativo');
+    const body     = document.getElementById('wizard-sched-body');
+    if (banner)   banner.style.display = 'none';
+    if (toggleEl) toggleEl.checked = false;
+    if (body)     body.style.display = 'none';
+    showToast('Agendamento excluído', 'success');
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
 }
 
 function _wizardSchedToggle(el) {
