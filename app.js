@@ -4459,8 +4459,8 @@ function _setGran(prefixo, valor) {
   const sel = document.getElementById(`${prefixo}-granularidade`);
   const inp = document.getElementById(`${prefixo}-granularidade-livre`);
   if (!sel) return;
-  const v = String(parseInt(valor) || 7);
-  if (['7','15','30'].includes(v)) {
+  const v = String(parseInt(valor) || 4);
+  if (['4','15','30'].includes(v)) {
     sel.value = v;
     if (inp) inp.style.display = 'none';
   } else {
