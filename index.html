@@ -1836,10 +1836,11 @@
                     </div>
                     <div>
                       <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Janela (dias)</label>
-                      <select id="api-granularidade" class="filter-input" style="width:100%;box-sizing:border-box">
-                        <option value="1">1 dia</option><option value="3">3 dias</option>
+                      <select id="api-granularidade" class="filter-input" style="width:100%;box-sizing:border-box" onchange="toggleGranLivre('api')">
                         <option value="7" selected>7 dias</option><option value="15">15 dias</option><option value="30">30 dias</option>
+                        <option value="0">Livre...</option>
                       </select>
+                      <input id="api-granularidade-livre" type="number" min="1" max="365" class="filter-input" style="width:100%;box-sizing:border-box;margin-top:4px;display:none" placeholder="Número de dias">
                     </div>
                     <div id="api-proxima-wrap" style="font-size:11px;color:var(--text-muted);line-height:1.5;padding-bottom:4px"></div>
                   </div>
@@ -2051,12 +2052,12 @@
             <div class="table-wrapper" style="max-height:360px;overflow-y:auto">
               <table class="data-table">
                 <thead id="coleta-hist-thead"><tr>
-                  <th>Início</th><th>Status</th>
+                  <th>Início</th><th>SP</th><th>Status</th>
                   <th style="text-align:right">Inseridos</th>
                   <th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th>
                   <th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th>
                 </tr></thead>
-                <tbody id="coleta-hist-tbody"><tr><td colspan="8" class="empty-state">Carregando...</td></tr></tbody>
+                <tbody id="coleta-hist-tbody"><tr><td colspan="9" class="empty-state">Carregando...</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -2168,11 +2169,13 @@
           </div>
           <div>
             <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Granularidade</label>
-            <select id="sp-granularidade" class="filter-select" style="width:100%;box-sizing:border-box">
-              <option value="7">7 dias (rec.)</option>
-              <option value="14">14 dias</option>
-              <option value="28">28 dias</option>
+            <select id="sp-granularidade" class="filter-select" style="width:100%;box-sizing:border-box" onchange="toggleGranLivre('sp')">
+              <option value="7">7 dias</option>
+              <option value="15">15 dias</option>
+              <option value="30">30 dias</option>
+              <option value="0">Livre...</option>
             </select>
+            <input id="sp-granularidade-livre" type="number" min="1" max="365" class="filter-input" style="width:100%;box-sizing:border-box;margin-top:4px;display:none" placeholder="Número de dias">
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
             <label style="font-size:11px;color:var(--text-muted)">Ativo</label>

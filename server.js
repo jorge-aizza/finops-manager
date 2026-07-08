@@ -5301,6 +5301,7 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS is_padrao           BOOLEAN DEFAULT false`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS modo_coleta         VARCHAR(30) DEFAULT 'billing_profile'`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS subscription_ids    TEXT`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS sp_id            INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL`);
 
   // ── azure_storage_config ──────────────────────────────────────────────────
   await pool.query(`
@@ -5567,9 +5568,10 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req,
   try {
     await ensureAzureColetaTable();
     const tipo = req.query.tipo;
+    const baseSelect = `SELECT h.id,h.tipo,h.iniciado_em,h.concluido_em,h.status,h.linhas_inseridas,h.linhas_atualizadas,h.linhas_erro,h.mensagem,h.detalhes,c.nome AS sp_nome FROM azure_coleta_historico h LEFT JOIN azure_coleta_config c ON c.id = h.sp_id`;
     const { rows } = tipo
-      ? await pool.query(`SELECT id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem,detalhes FROM azure_coleta_historico WHERE tipo=$1 ORDER BY iniciado_em DESC LIMIT 50`, [tipo])
-      : await pool.query(`SELECT id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem,detalhes FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 50`);
+      ? await pool.query(`${baseSelect} WHERE h.tipo=$1 ORDER BY h.iniciado_em DESC LIMIT 50`, [tipo])
+      : await pool.query(`${baseSelect} ORDER BY h.iniciado_em DESC LIMIT 50`);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -6021,7 +6023,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
 
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo) VALUES ('executando','api') RETURNING id`);
+    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,sp_id) VALUES ('executando','api',$1) RETURNING id`, [spId || null]);
     histId = r.rows[0].id;
 
     // 1) Credenciais e token

@@ -4098,7 +4098,7 @@ function _updateTabApiSpInfo(spId) {
   document.getElementById('api-auto-ativo').checked = !!temSched;
   document.getElementById('api-sched-body').style.display = temSched ? '' : 'none';
   if (sp.hora_execucao != null) document.getElementById('api-hora-exec').value = sp.hora_execucao;
-  if (sp.granularidade_dias)   document.getElementById('api-granularidade').value = sp.granularidade_dias;
+  if (sp.granularidade_dias)   _setGran('api', sp.granularidade_dias);
   _setDiasChecked('api-dia', sp.dias_semana || null);
   document.getElementById('api-proxima-wrap').textContent = _proximaLabel(sp.proxima_coleta);
 }
@@ -4408,9 +4408,9 @@ function openSPModal(id) {
         _spSubSet = new Set(savedIds);
         spBuscarSubs();
       }
-      document.getElementById('sp-ativo').checked         = sp.ativo;
-      if (sp.dia_execucao)       document.getElementById('sp-dia').value           = sp.dia_execucao;
-      if (sp.granularidade_dias) document.getElementById('sp-granularidade').value = sp.granularidade_dias;
+      document.getElementById('sp-ativo').checked = sp.ativo;
+      if (sp.dia_execucao)       document.getElementById('sp-dia').value = sp.dia_execucao;
+      if (sp.granularidade_dias) _setGran('sp', sp.granularidade_dias);
     }).catch(() => {});
   }
   modal.classList.add('open');
@@ -4436,6 +4436,37 @@ function _spResetPicker() {
   if (empty) empty.style.display = '';
   const search = document.getElementById('sp-subs-search');
   if (search) search.value = '';
+}
+
+// ── Granularidade (7/15/30/Livre) ────────────────────────────────────────────
+
+function toggleGranLivre(prefixo) {
+  const sel = document.getElementById(`${prefixo}-granularidade`);
+  const inp = document.getElementById(`${prefixo}-granularidade-livre`);
+  if (!sel || !inp) return;
+  inp.style.display = sel.value === '0' ? '' : 'none';
+  if (sel.value === '0') { inp.value = ''; inp.focus(); }
+}
+
+function _getGran(prefixo) {
+  const sel = document.getElementById(`${prefixo}-granularidade`);
+  if (!sel) return 7;
+  if (sel.value !== '0') return parseInt(sel.value) || 7;
+  return Math.max(1, parseInt(document.getElementById(`${prefixo}-granularidade-livre`)?.value) || 7);
+}
+
+function _setGran(prefixo, valor) {
+  const sel = document.getElementById(`${prefixo}-granularidade`);
+  const inp = document.getElementById(`${prefixo}-granularidade-livre`);
+  if (!sel) return;
+  const v = String(parseInt(valor) || 7);
+  if (['7','15','30'].includes(v)) {
+    sel.value = v;
+    if (inp) inp.style.display = 'none';
+  } else {
+    sel.value = '0';
+    if (inp) { inp.value = valor; inp.style.display = ''; }
+  }
 }
 
 // ── SP Picker de Assinaturas ──────────────────────────────────────────────────
@@ -4548,7 +4579,7 @@ async function saveSP() {
     subscription_ids:   modo === 'subscription'    ? _spGetSubscriptionIds() : null,
     ativo:              document.getElementById('sp-ativo').checked,
     dia_execucao:       parseInt(document.getElementById('sp-dia').value) || 5,
-    granularidade_dias: parseInt(document.getElementById('sp-granularidade').value) || 7,
+    granularidade_dias: _getGran('sp'),
   };
   if (!body.nome || !body.tenant_id || !body.client_id) { showToast('Preencha Nome, Tenant ID e Client ID', 'error'); return; }
   if (modo === 'billing_profile' && (!body.billing_account_id || !body.billing_profile_id)) { showToast('Preencha Billing Account ID e Billing Profile ID', 'error'); return; }
@@ -5272,7 +5303,7 @@ async function salvarAgendamentoAPI() {
   };
   if (autoAtivo && !body.dias_semana) { showToast('Selecione ao menos um dia da semana', 'error'); return; }
   // salva granularidade também
-  const gran = parseInt(document.getElementById('api-granularidade').value);
+  const gran = _getGran('api');
 
   const _diasNm2    = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
   const spNome      = document.querySelector('#tab-api-sp-select option:checked')?.textContent || 'SP';
@@ -5388,12 +5419,12 @@ async function loadColetaHistorico(tipo) {
   }
 
   // API ou Storage
-  if (thead) thead.innerHTML = '<tr><th>Início</th><th>Status</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>';
+  if (thead) thead.innerHTML = '<tr><th>Início</th><th>SP</th><th>Status</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>';
   try {
     const rows = await api('GET', `/azure-coleta/historico?tipo=${tab}`);
     _historicoCache = rows || [];
     if (!rows || !rows.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Nenhuma execução registrada</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Nenhuma execução registrada</td></tr>';
       return;
     }
     const statusColors = {
@@ -5415,12 +5446,14 @@ async function loadColetaHistorico(tipo) {
       const upd  = (r.linhas_atualizadas  ?? 0).toLocaleString('pt-BR');
       const err  = (r.linhas_erro         ?? 0).toLocaleString('pt-BR');
       const msg  = r.mensagem || '—';
+      const spNomeHist = r.sp_nome || '—';
       const temLog = r.detalhes && (typeof r.detalhes === 'object' ? r.detalhes.log : false);
       const logBtn = temLog
         ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--accent);color:var(--accent)" onclick="verDetalhesColeta(${idx})" title="Ver log passo a passo">📋 Log</button>`
         : `<span style="font-size:10px;color:var(--text-muted)">—</span>`;
       return `<tr>
         <td style="font-size:11px;white-space:nowrap">${inicio}</td>
+        <td style="font-size:11px;color:var(--accent);max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${spNomeHist}">${spNomeHist}</td>
         <td><span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:${sc.bg};color:${sc.color}">${sc.label}</span></td>
         <td style="text-align:right;font-size:12px;color:var(--green)">${ins}</td>
         <td style="text-align:right;font-size:12px;color:var(--accent)">${upd}</td>
