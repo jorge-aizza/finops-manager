@@ -4438,8 +4438,9 @@ function _spResetPicker() {
   if (search) search.value = '';
 }
 
-// ── Granularidade (7/15/30/Livre) ────────────────────────────────────────────
+// ── Granularidade (4/15/30/Livre) ────────────────────────────────────────────
 
+// Wizard API tab: campo numérico livre
 function toggleGranLivre(prefixo) {
   const sel = document.getElementById(`${prefixo}-granularidade`);
   const inp = document.getElementById(`${prefixo}-granularidade-livre`);
@@ -4448,11 +4449,53 @@ function toggleGranLivre(prefixo) {
   if (sel.value === '0') { inp.value = ''; inp.focus(); }
 }
 
+// Modal SP: date picker livre
+function spGranToggle() {
+  const sel  = document.getElementById('sp-granularidade');
+  const wrap = document.getElementById('sp-gran-livre-wrap');
+  if (!wrap) return;
+  const isLivre = sel?.value === '0';
+  wrap.style.display = isLivre ? '' : 'none';
+  if (isLivre) {
+    const fmt = d => d.toISOString().slice(0, 10);
+    const ate = new Date(); ate.setDate(ate.getDate() - 1);
+    const de  = new Date(ate); de.setDate(de.getDate() - 3);
+    const deEl = document.getElementById('sp-gran-de');
+    const ateEl = document.getElementById('sp-gran-ate');
+    if (deEl && !deEl.value)  deEl.value  = fmt(de);
+    if (ateEl && !ateEl.value) ateEl.value = fmt(ate);
+    spGranCalcDias();
+    setTimeout(() => deEl?.focus(), 50);
+  }
+}
+
+function spGranCalcDias() {
+  const de  = document.getElementById('sp-gran-de')?.value;
+  const ate = document.getElementById('sp-gran-ate')?.value;
+  const lbl = document.getElementById('sp-gran-dias-label');
+  if (!lbl) return;
+  if (!de || !ate) { lbl.textContent = ''; return; }
+  const diff = Math.round((new Date(ate) - new Date(de)) / 86400000) + 1;
+  if (diff < 1) {
+    lbl.textContent = '⚠ Data fim deve ser após data início';
+    lbl.style.color = 'var(--danger)';
+  } else {
+    lbl.textContent = `${diff} dia${diff !== 1 ? 's' : ''} selecionado${diff !== 1 ? 's' : ''}`;
+    lbl.style.color = 'var(--accent)';
+  }
+}
+
 function _getGran(prefixo) {
   const sel = document.getElementById(`${prefixo}-granularidade`);
-  if (!sel) return 7;
-  if (sel.value !== '0') return parseInt(sel.value) || 7;
-  return Math.max(1, parseInt(document.getElementById(`${prefixo}-granularidade-livre`)?.value) || 7);
+  if (!sel) return 4;
+  if (sel.value !== '0') return parseInt(sel.value) || 4;
+  if (prefixo === 'sp') {
+    const de  = document.getElementById('sp-gran-de')?.value;
+    const ate = document.getElementById('sp-gran-ate')?.value;
+    if (de && ate) return Math.max(1, Math.round((new Date(ate) - new Date(de)) / 86400000) + 1);
+    return 4;
+  }
+  return Math.max(1, parseInt(document.getElementById(`${prefixo}-granularidade-livre`)?.value) || 4);
 }
 
 function _setGran(prefixo, valor) {
@@ -4463,9 +4506,25 @@ function _setGran(prefixo, valor) {
   if (['4','15','30'].includes(v)) {
     sel.value = v;
     if (inp) inp.style.display = 'none';
+    const wrap = document.getElementById('sp-gran-livre-wrap');
+    if (wrap) wrap.style.display = 'none';
   } else {
     sel.value = '0';
-    if (inp) { inp.value = valor; inp.style.display = ''; }
+    if (prefixo === 'sp') {
+      const wrap = document.getElementById('sp-gran-livre-wrap');
+      if (wrap) wrap.style.display = '';
+      const dias = parseInt(valor) || 4;
+      const fmt  = d => d.toISOString().slice(0, 10);
+      const ate  = new Date(); ate.setDate(ate.getDate() - 1);
+      const de   = new Date(ate); de.setDate(de.getDate() - (dias - 1));
+      const deEl = document.getElementById('sp-gran-de');
+      const ateEl = document.getElementById('sp-gran-ate');
+      if (deEl)  deEl.value  = fmt(de);
+      if (ateEl) ateEl.value = fmt(ate);
+      spGranCalcDias();
+    } else {
+      if (inp) { inp.value = valor; inp.style.display = ''; }
+    }
   }
 }
 

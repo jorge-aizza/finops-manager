@@ -2165,13 +2165,25 @@
         <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end">
           <div>
             <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Granularidade <span style="color:var(--text-dim);font-weight:400">— janela de dados por coleta</span></label>
-            <select id="sp-granularidade" class="filter-select" style="width:100%;box-sizing:border-box" onchange="toggleGranLivre('sp')">
+            <select id="sp-granularidade" class="filter-select" style="width:100%;box-sizing:border-box" onchange="spGranToggle()">
               <option value="4">4 dias</option>
               <option value="15">15 dias</option>
               <option value="30">30 dias</option>
               <option value="0">Livre…</option>
             </select>
-            <input id="sp-granularidade-livre" type="number" min="1" max="365" class="filter-input" placeholder="nº de dias" style="display:none;width:100%;box-sizing:border-box;margin-top:6px">
+            <div id="sp-gran-livre-wrap" style="display:none;margin-top:8px">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+                <div>
+                  <label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">De</label>
+                  <input id="sp-gran-de" type="date" class="filter-input" style="width:100%;box-sizing:border-box" oninput="spGranCalcDias()">
+                </div>
+                <div>
+                  <label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">Até</label>
+                  <input id="sp-gran-ate" type="date" class="filter-input" style="width:100%;box-sizing:border-box" oninput="spGranCalcDias()">
+                </div>
+              </div>
+              <div id="sp-gran-dias-label" style="font-size:11px;color:var(--accent);font-weight:600;margin-top:5px"></div>
+            </div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding-bottom:2px">
             <label style="font-size:11px;color:var(--text-muted)">Ativo</label>
