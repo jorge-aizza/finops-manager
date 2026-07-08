@@ -3973,7 +3973,7 @@ async function _loadColetaApiSPSelect() {
                 <span style="font-size:11px;color:var(--text-dim);margin-left:6px">${proxLabel}</span>
               </div>
               <div style="display:flex;gap:5px;flex-shrink:0">
-                <button class="btn-ghost" style="font-size:11px;padding:2px 9px;border-color:var(--accent);color:var(--accent)" onclick="abrirColetaAPI(${s.id})">✏ Editar</button>
+                <button class="btn-ghost" style="font-size:11px;padding:2px 9px;border-color:var(--accent);color:var(--accent)" onclick="abrirEditarAgend(${s.id})">✏ Editar</button>
                 <button class="btn-ghost" style="font-size:11px;padding:2px 9px;border-color:var(--danger);color:var(--danger)" onclick="excluirAgendamentoSP(${s.id},'${(s.nome||'').replace(/'/g,"\\'")}')" >✕ Excluir</button>
               </div>
             </div>`;
@@ -4007,6 +4007,48 @@ async function excluirAgendamentoSP(spId, nome) {
       auto_coleta: false, hora_execucao: null, dias_semana: null
     });
     showToast('Agendamento excluído', 'success');
+    _loadColetaApiSPSelect();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+function abrirEditarAgend(spId) {
+  const sp = _coletaApiSPCache.find(s => s.id === spId);
+  if (!sp) { showToast('SP não encontrada', 'error'); return; }
+  document.getElementById('agend-sp-id').value  = spId;
+  document.getElementById('agend-sp-nome').textContent = sp.nome;
+  document.getElementById('agend-hora').value   = String(sp.hora_execucao ?? 3);
+  document.getElementById('agend-janela').value = String(sp.granularidade_dias || 7);
+  const diasSalvos = (sp.dias_semana || '').split(',').map(d => d.trim());
+  document.querySelectorAll('.agend-dia').forEach(ck => { ck.checked = diasSalvos.includes(ck.value); });
+  agendProxima();
+  document.getElementById('modal-editar-agend').classList.add('open');
+}
+
+function fecharEditarAgend() {
+  document.getElementById('modal-editar-agend').classList.remove('open');
+}
+
+function agendProxima() {
+  const hora = parseInt(document.getElementById('agend-hora').value);
+  const dias = [...document.querySelectorAll('.agend-dia:checked')].map(c => parseInt(c.value));
+  const p    = _computeProximaJS(hora, dias);
+  const el   = document.getElementById('agend-proxima');
+  if (el) el.textContent = dias.length ? _proximaLabel(p) : '';
+}
+
+async function salvarEditarAgend() {
+  const spId    = parseInt(document.getElementById('agend-sp-id').value);
+  const hora    = parseInt(document.getElementById('agend-hora').value);
+  const janela  = parseInt(document.getElementById('agend-janela').value);
+  const diasSel = [...document.querySelectorAll('.agend-dia:checked')].map(c => c.value);
+  if (!diasSel.length) { showToast('Selecione ao menos um dia da semana', 'error'); return; }
+  try {
+    await api('PUT', `/azure-coleta/sps/${spId}/agendamento`, {
+      auto_coleta: true, hora_execucao: hora, dias_semana: diasSel.join(',')
+    });
+    await api('PUT', `/azure-coleta/sps/${spId}`, { granularidade_dias: janela });
+    showToast('Agendamento salvo', 'success');
+    fecharEditarAgend();
     _loadColetaApiSPSelect();
   } catch (e) { showToast('Erro: ' + e.message, 'error'); }
 }

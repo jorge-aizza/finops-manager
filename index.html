@@ -2101,6 +2101,59 @@
     </div>
   </div>
 
+  <!-- Modal: Editar Agendamento de SP -->
+  <div id="modal-editar-agend" class="modal-overlay" onclick="if(event.target===this)fecharEditarAgend()">
+    <div class="modal" style="max-width:420px">
+      <div class="modal-header">
+        <h3 class="modal-title">⏰ Agendamento Automático</h3>
+        <button class="modal-close" onclick="fecharEditarAgend()">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:13px;color:var(--text-muted)">SP: <span id="agend-sp-nome" style="color:var(--text);font-weight:600"></span></div>
+        <input type="hidden" id="agend-sp-id">
+        <div>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Dias da semana</label>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="agend-dia" value="0"><span style="font-size:10px;color:var(--text-muted)">Dom</span></label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="agend-dia" value="1"><span style="font-size:10px;color:var(--text-muted)">Seg</span></label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="agend-dia" value="2"><span style="font-size:10px;color:var(--text-muted)">Ter</span></label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="agend-dia" value="3"><span style="font-size:10px;color:var(--text-muted)">Qua</span></label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="agend-dia" value="4"><span style="font-size:10px;color:var(--text-muted)">Qui</span></label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="agend-dia" value="5"><span style="font-size:10px;color:var(--text-muted)">Sex</span></label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" class="agend-dia" value="6"><span style="font-size:10px;color:var(--text-muted)">Sáb</span></label>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Horário</label>
+            <select id="agend-hora" class="filter-input" style="width:100%;box-sizing:border-box" onchange="agendProxima()">
+              <option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option>
+              <option value="3" selected>03:00</option><option value="4">04:00</option><option value="5">05:00</option>
+              <option value="6">06:00</option><option value="7">07:00</option><option value="8">08:00</option>
+              <option value="9">09:00</option><option value="10">10:00</option><option value="11">11:00</option>
+              <option value="12">12:00</option><option value="13">13:00</option><option value="14">14:00</option>
+              <option value="15">15:00</option><option value="16">16:00</option><option value="17">17:00</option>
+              <option value="18">18:00</option><option value="19">19:00</option><option value="20">20:00</option>
+              <option value="21">21:00</option><option value="22">22:00</option><option value="23">23:00</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Janela (dias atrás)</label>
+            <select id="agend-janela" class="filter-input" style="width:100%;box-sizing:border-box">
+              <option value="1">1 dia</option><option value="3">3 dias</option>
+              <option value="7" selected>7 dias</option><option value="15">15 dias</option><option value="30">30 dias</option>
+            </select>
+          </div>
+        </div>
+        <div id="agend-proxima" style="font-size:11px;color:var(--text-muted);text-align:right;min-height:14px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-ghost" onclick="fecharEditarAgend()">Cancelar</button>
+        <button class="btn-primary" onclick="salvarEditarAgend()">💾 Salvar Agendamento</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: Wizard de Coleta via API (4 passos) -->
   <div id="modal-wizard-coleta" class="modal-overlay" onclick="if(event.target===this)fecharWizardColeta()">
     <div class="modal modal-wide" style="max-width:620px">
