@@ -4053,6 +4053,53 @@ async function salvarEditarAgend() {
   } catch (e) { showToast('Erro: ' + e.message, 'error'); }
 }
 
+async function deletarAgendamentoModal() {
+  const spId = parseInt(document.getElementById('agend-sp-id').value);
+  const nome = document.getElementById('agend-sp-nome').textContent;
+  if (!confirm(`Excluir o agendamento automático de "${nome}"?`)) return;
+  try {
+    await api('PUT', `/azure-coleta/sps/${spId}/agendamento`, {
+      auto_coleta: false, hora_execucao: null, dias_semana: null
+    });
+    showToast('Agendamento excluído', 'success');
+    fecharEditarAgend();
+    _loadColetaApiSPSelect();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function coletarAgendamentoAgora() {
+  const spId  = parseInt(document.getElementById('agend-sp-id').value);
+  const sp    = _coletaApiSPCache.find(s => s.id === spId);
+  if (!sp) return;
+  const btn   = document.getElementById('agend-btn-coletar');
+  if (btn) { btn.disabled = true; btn.textContent = 'Iniciando...'; }
+  try {
+    const granDias = parseInt(document.getElementById('agend-janela').value) || sp.granularidade_dias || 7;
+    const fmt  = d => d.toISOString().slice(0, 10);
+    const fim  = new Date(); fim.setDate(fim.getDate() - 1);
+    const ini  = new Date(fim); ini.setDate(ini.getDate() - (granDias - 1));
+    const modo = sp.modo_coleta || 'billing_profile';
+    const body = {
+      modo, data_inicio: fmt(ini), data_fim: fmt(fim),
+      subscription_ids: modo === 'subscription'
+        ? (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
+        : [],
+      billing_account_id: modo === 'billing_profile' ? sp.billing_account_id : undefined,
+      billing_profile_id: modo === 'billing_profile' ? sp.billing_profile_id : undefined,
+    };
+    await api('POST', `/azure-coleta/sps/${spId}/coletar-api`, body, 15000);
+    showToast(`Coleta iniciada — ${fmt(ini)} → ${fmt(fim)}`, 'success');
+    fecharEditarAgend();
+    showView('coleta');
+    switchColetaTab('api');
+    setTimeout(() => { loadColetaStatus(); loadColetaHistorico(_coletaTabAtual); }, 600);
+  } catch (e) {
+    showToast('Erro: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Coletar agora'; }
+  }
+}
+
 async function loadColetaStatus() {
   try {
     const s = await api('GET', '/azure-coleta/status');

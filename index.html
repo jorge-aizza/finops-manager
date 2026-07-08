@@ -2147,9 +2147,12 @@
         </div>
         <div id="agend-proxima" style="font-size:11px;color:var(--text-muted);text-align:right;min-height:14px"></div>
       </div>
-      <div class="modal-footer">
-        <button class="btn-ghost" onclick="fecharEditarAgend()">Cancelar</button>
-        <button class="btn-primary" onclick="salvarEditarAgend()">💾 Salvar Agendamento</button>
+      <div class="modal-footer" style="display:flex;justify-content:space-between;gap:8px">
+        <button class="btn-ghost" style="border-color:var(--danger);color:var(--danger)" onclick="deletarAgendamentoModal()">🗑 Deletar</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn-ghost" style="border-color:var(--green);color:var(--green)" id="agend-btn-coletar" onclick="coletarAgendamentoAgora()">▶ Coletar agora</button>
+          <button class="btn-primary" onclick="salvarEditarAgend()">💾 Salvar</button>
+        </div>
       </div>
     </div>
   </div>
