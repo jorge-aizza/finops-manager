@@ -1327,6 +1327,17 @@ const Calculadora = (() => {
 
   function _toggleOpcao(id, value, checked) {
     if (checked) _dds[id].selected.add(value); else _dds[id].selected.delete(value);
+    // RG: propaga seleção para filhos gerenciados (Databricks, AKS)
+    if (id === 'crg') {
+      const vUp = value.toUpperCase();
+      _dds.crg.data.forEach(d => {
+        if ((d.parent_rg || '').toUpperCase() === vUp) {
+          if (checked) _dds.crg.selected.add(d.value);
+          else         _dds.crg.selected.delete(d.value);
+        }
+      });
+      _renderOpcoes('crg', document.getElementById('crg-search')?.value || '');
+    }
     _atualizarBadge(id);
   }
 
@@ -1369,13 +1380,17 @@ const Calculadora = (() => {
     _atualizarBotaoBuscar(); // bloqueia Buscar pois RGs foram limpos
     if (!_subsSel.length) { document.getElementById('crg-trigger').classList.add('cms-disabled'); return; }
     document.getElementById('crg-trigger').classList.remove('cms-disabled');
-    // Pre-preenche campos de data com o range real do banco para as subs selecionadas
-    const _iniDB = _subsSel.map(id => (_dds.csub.data.find(s => s.value === id)||{}).periodo_ini||'').filter(Boolean).sort()[0]||'';
+    // Pre-preenche campos de data com os últimos 30 dias de dados disponíveis
     const _fimDB = _subsSel.map(id => (_dds.csub.data.find(s => s.value === id)||{}).periodo_fim||'').filter(Boolean).sort().pop()||'';
     const _elIni = document.getElementById('cfiltro-ini');
     const _elFim = document.getElementById('cfiltro-fim');
-    if (_elIni && _iniDB) _elIni.value = _iniDB;
-    if (_elFim && _fimDB) _elFim.value = _fimDB;
+    if (_fimDB) {
+      const _fim30 = new Date(_fimDB + 'T12:00:00');
+      const _ini30 = new Date(_fim30); _ini30.setDate(_ini30.getDate() - 30);
+      const _fmt30 = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      if (_elIni) _elIni.value = _fmt30(_ini30);
+      if (_elFim) _elFim.value = _fmt30(_fim30);
+    }
     document.getElementById('crg-options').innerHTML='<div style="padding:8px 12px;font-size:12px;color:var(--text-muted);">Carregando...</div>';
     try {
       const data = await _api('GET', `/calculadora/resource-groups?subscription_id=${_subsSel.map(encodeURIComponent).join(',')}`);
@@ -1470,12 +1485,15 @@ const Calculadora = (() => {
     // Formata Date → 'YYYY-MM-DD' usando hora local (evita bug de fuso UTC)
     const _fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
-    // Portal público sem permissão de período: sempre últimos 30 dias
+    // Portal público sem permissão de período: últimos 30 dias com dados (igual ao autenticado)
     if (_modoPublico && !_defaultConfig?.permitir_selecao_periodo) {
-      const hoje = new Date();
-      const ini  = new Date(hoje); ini.setDate(ini.getDate() - 30);
-      _dataFim    = _fmt(hoje);
-      _dataInicio = _fmt(ini);
+      const fimPub = _subsSel
+        .map(id => (_dds.csub.data.find(s => s.value === id) || {}).periodo_fim || '')
+        .filter(Boolean).sort().pop() || '';
+      const fimBase = fimPub ? new Date(fimPub + 'T12:00:00') : new Date();
+      const iniBase = new Date(fimBase); iniBase.setDate(iniBase.getDate() - 30);
+      _dataFim    = _fmt(fimBase);
+      _dataInicio = _fmt(iniBase);
       const _elIni = document.getElementById('cfiltro-ini');
       const _elFim = document.getElementById('cfiltro-fim');
       if (_elIni) { _elIni.value = _dataInicio; _elIni.disabled = true; }
@@ -4424,7 +4442,8 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   function _hlCarregar() {
     try {
       let cfg;
-      if (_modoPublico && _defaultConfig?.horario_livre) {
+      const _adminHL = _modoPublico && _defaultConfig?.horario_livre;
+      if (_adminHL) {
         cfg = _defaultConfig.horario_livre;
       } else {
         const raw = localStorage.getItem(_LS_HL);
@@ -4433,7 +4452,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       }
       if (cfg && typeof cfg === 'object') {
         _horarioLivre = { ..._horarioLivre, ...cfg };
-        // Aplicar nos inputs
         const chk  = document.getElementById('chl-ativo');
         const ini  = document.getElementById('chl-ini');
         const fim  = document.getElementById('chl-fim');
@@ -4451,12 +4469,37 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
         document.querySelectorAll('.chl-dia').forEach(cb => {
           cb.checked = _horarioLivre.dias.includes(parseInt(cb.dataset.dia));
         });
-        // Mostrar/ocultar corpo e linhas de weekend
         const corpo = document.getElementById('chl-corpo');
         const hint  = document.getElementById('chl-hint');
         if (corpo) corpo.style.display = _horarioLivre.ativo ? 'block' : 'none';
         if (hint)  hint.style.display  = _horarioLivre.ativo ? 'none'  : 'block';
         _hlAtualizarWeekend();
+
+        // Portal público com config do admin: somente informativo — bloqueia tudo
+        if (_adminHL) {
+          const card = document.getElementById('chl-card');
+          if (card) {
+            // Checkboxes: verdes quando marcados, esmaecidos quando desmarcados
+            card.querySelectorAll('input[type="checkbox"]').forEach(el => {
+              el.disabled = true;
+              el.style.cursor = 'not-allowed';
+              if (el.checked) {
+                el.style.accentColor = '#22c55e';
+                el.style.opacity = '1';
+              } else {
+                el.style.opacity = '0.35';
+              }
+            });
+            // Inputs de horário: legíveis mas não editáveis
+            card.querySelectorAll('input[type="time"]').forEach(el => {
+              el.disabled = true;
+              el.style.cursor = 'not-allowed';
+              el.style.opacity = '0.75';
+            });
+            card.querySelectorAll('button').forEach(el => el.style.display = 'none');
+          }
+          if (hint) { hint.style.display = 'block'; hint.textContent = '⚙ Configurado pelo administrador.'; hint.style.color = 'var(--text-muted)'; }
+        }
       }
     } catch (_) {}
   }
@@ -4500,10 +4543,12 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
 
   function _carregarTaxas() {
     let vi, vc, vg;
+    const _adminImp  = _modoPublico && _defaultConfig && _defaultConfig.taxa_imposto != null;
+    const _adminCond = _modoPublico && _defaultConfig && _defaultConfig.taxa_cond    != null;
     if (_modoPublico && _defaultConfig) {
-      vi = parseFloat(_defaultConfig.taxa_imposto ?? _TAXA_IMP_DEF);
-      vc = parseFloat(_defaultConfig.taxa_cond    ?? _TAXA_COND_DEF);
-      vg = 0; // gordura no portal público é aplicada internamente, não no input
+      vi = _adminImp  ? parseFloat(_defaultConfig.taxa_imposto) : _TAXA_IMP_DEF;
+      vc = _adminCond ? parseFloat(_defaultConfig.taxa_cond)    : _TAXA_COND_DEF;
+      vg = 0;
     } else {
       const si = localStorage.getItem(_LS_IMP);
       const sc = localStorage.getItem(_LS_COND);
@@ -4524,6 +4569,23 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (ii) ii.value = vi;
     if (ic) ic.value = vc;
     if (ig) ig.value = vg;
+    // Portal público: bloqueia campos configurados pelo admin
+    if (_modoPublico) {
+      const _lock = (el) => {
+        if (!el) return;
+        el.disabled = true;
+        el.style.cursor  = 'not-allowed';
+        el.style.opacity = '0.75';
+        el.title = 'Configurado pelo administrador';
+      };
+      if (_adminImp)  _lock(ii);
+      if (_adminCond) _lock(ic);
+      // Gordura e botões: sempre ocultos no portal público
+      const gordCol  = document.getElementById('cgordura-col');
+      const taxaBtns = document.getElementById('ctaxas-btns');
+      if (gordCol)  gordCol.style.display  = 'none';
+      if (taxaBtns) taxaBtns.style.display = 'none';
+    }
     _atualizarBadgesTaxas();
   }
 

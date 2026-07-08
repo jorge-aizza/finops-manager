@@ -1529,4 +1529,12 @@ select option { background: var(--bg-card); }
 }
 .btn-theme:hover { color: var(--accent); background: var(--accent-dim); }
 
+/* ── Inputs de data e hora: ícone do calendário na cor do texto ── */
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(93%) sepia(8%) saturate(200%) hue-rotate(200deg) brightness(105%);
+  opacity: 0.85;
+  cursor: pointer;
+}
+
 

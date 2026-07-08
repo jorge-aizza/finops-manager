@@ -24,10 +24,10 @@ node encrypt-env.js run       # load .env.enc and start server
 ```
 server.js          (~6 500 lines)  All API routes, auth, DB init, middleware, Excel export
 app.js             (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
-calculadora.js     (~5 380 lines)  Azure cost calculator — self-contained IIFE
+calculadora.js     (~5 600 lines)  Azure cost calculator — self-contained IIFE
 index.html         (~3 650 lines)  SPA shell — all views toggled by showView()
-portal.html        (492 lines)     Portal público — calculadora sem autenticação (serve /portal.html)
-styles.css         (~1 430 lines)  Dark-mode CSS, Vivo purple theme
+portal.html        (~510 lines)    Portal público — calculadora sem autenticação (serve /portal.html)
+styles.css         (~1 550 lines)  Dark-mode CSS, Vivo purple theme
 encrypt-env.js     (139 lines)     AES-256-GCM .env encryption utility
 favicon.svg                        App icon (SVG)
 mascote.png                        Vivo mascot used in login screen (not tracked by git — keep locally)
@@ -260,6 +260,11 @@ _rgTotalMap  = new Map()   // rg_upper → total billing do período
 // v2.1 — pico de billing
 _usaPico        = false    // true quando custo_hora_pico > 0 e tipo ≠ reserva/mes e !_dbValidaOv
 _usaPicoCluster = false    // true quando custo_hora_pico_cluster > 0 e _dbValidaOv (Databricks)
+// perf — lazy pico + cache overlay
+_picoCarregado     = false  // flag: pico já carregado para a busca atual
+_ultimaUrlRecursos = ''     // URL da última busca — reutilizada por _carregarPico com &pico=1
+_ovRMapSrc         = null   // referência de _recursos no momento do último _ovRMap build (cache)
+_ovRgSelTotalMap   = null   // Map rg_upper → total BRL dos selecionados (pré-computado em _ovRenderRecursos)
 ```
 
 **Filter flow:**
@@ -277,11 +282,20 @@ periodo  → todos os demais (disco, storage, bandwidth, etc.)
 
 **Chip-bar de tipos** (`#ctipos-bar`): **sempre visível** quando há ≥ 1 tipo de recurso (`tipos.length < 1` para ocultar — v2.1). `_tipoRecurso(r)` classifica em: `VMs`, `Discos`, `Storage`, `Databricks`, `AKS`, `SQL`, `App Service`, `Rede`, `Rede/CDN`, `Load Balancer`, `Key Vault`, `Monitoramento`, `Reservas`, `Outros`. `_filtroTipos` (Set) controla quais tipos estão ativos. Chip `Databricks` agrupa **ambos os streams**: VMs de infra em `databricks-rg-*` (`consumed_service = Microsoft.Compute`) E linhas de software DBU (`consumed_service = Microsoft.Databricks`) — a detecção é `svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-')`.
 
-**Grupos de recursos — lazy rendering:**
+**Grupos de recursos — lazy rendering + chunked interleaved:**
 - Grupos colapsados por padrão (`_expandidos[baseId] === true` para expandido; default = colapsado)
 - `_toggleGrupo(gIdx)` insere/remove filhas via DOM sem reconstruir a tabela inteira
 - `_gBases[]` mapeia índice numérico → baseId (reconstruído a cada `_renderRecursos`)
 - `_htmlFilhaRow(r, gIdx, ...)` — função compartilhada por render inicial e lazy expand
+- `_renderRecursos` usa **interleaved build+insert**: `tbody.innerHTML=''` imediato → `nextChunk()` constrói e insere 200 grupos por `requestAnimationFrame` → primeiras linhas visíveis em ~32ms sem bloquear o browser
+- `selecionarTodos`/`deselecionarTodos` atualiza **`.cck-grupo`** (headers multi-meter) **e `.cck`** (single-meter) — filhos de grupos colapsados não estão no DOM mas `_htmlFilhaRow` lê `_selecionados` ao expandir
+
+**RG dropdown — auto-seleção de filhos gerenciados:**
+- `_toggleOpcao('crg', value, checked)` propaga seleção para todos os RGs filhos do pai selecionado
+- Detecção: `_dds.crg.data` items com `parent_rg.toUpperCase() === value.toUpperCase()`
+- Ao marcar `RG-WORKSPACE` → `DATABRICKS-RG-*` e `MC_*` filhos marcados automaticamente
+- Ao desmarcar pai → filhos também desmarcados
+- Funciona em ambos os portais (autenticado e público)
 
 **RG gerenciados — `_detectManagedRg(name)` (server.js):**
 - `DATABRICKS-RG-*` → `managed_type: 'databricks'`, `managed_label: workspace`
@@ -471,6 +485,23 @@ assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Pri
 - `_periodos` armazena `{ inicio, fim, horas: horasCobradas, horasTotal, horasLivres }` após aplicar o desconto
 - Card exibe resumo: "Xh totais → −Yh livres → Zh cobradas"
 - UI: `_hlToggle(ativo)` mostra/esconde `#chl-corpo`; `_hlChange()` relê inputs e atualiza resumo; `_hlSalvarPadrao()` / `_hlLimparPadrao()` persistem em `localStorage 'hl_config'`
+- **Portal público:** se `_defaultConfig.horario_livre` existe → `_hlCarregar` bloqueia todos os inputs (`disabled`), oculta botões ★/↺, exibe "⚙ Configurado pelo administrador"; dias marcados em verde (`accentColor:#22c55e`), desmarcados esmaecidos. Se admin não configurou → usuário edita livremente
+
+**Taxas Adicionais — portal público:**
+- `_carregarTaxas()`: se `_defaultConfig.taxa_imposto != null` → campo Imposto bloqueado (`disabled`, tooltip "Configurado pelo administrador"); idem para `taxa_cond`
+- Se admin não configurou o campo (null/undefined) → usuário pode editar livremente
+- Campo Gordura (`cgordura-col`) e botões ★/↺ (`ctaxas-btns`) sempre ocultos no portal público
+
+**Período padrão — ambos os portais:**
+- Ao confirmar assinatura (`_confirmarSub` — autenticado) ou ao buscar (`_carregarRecursos` — portal público com período bloqueado): usa `periodo_fim − 30 dias → periodo_fim` da assinatura selecionada
+- Garante que o período pré-preenchido sempre aponta para dados reais importados
+- Fallback: se `periodo_fim` não disponível, usa hoje como referência
+
+**Configurar Estimativa overlay — performance:**
+- `_ovRenderRecursos`: Schwartzian transform no sort (`O(S)` extrações + `O(S log S)` sort de strings puras vs `O(2S log S)` Map lookups inline)
+- `_ovRMap` cacheado por referência de `_recursos` (`_ovRMapSrc`) — evita rebuild O(N) em aberturas consecutivas sem nova busca
+- IntersectionObserver (`rootMargin: 200px`) no final de cada lote — substitui botão "Carregar mais"; próximos 100 cards carregam automaticamente ao rolar
+- `_carregarPico()`: lazy — busca `?pico=1` em background ao abrir overlay; quando resolve, re-renderiza se modal ainda estiver aberto
 
 ### Portal Público
 `portal.html` — calculadora Azure pública, sem login. Serve `/portal.html` diretamente via `express.static`.
@@ -619,6 +650,10 @@ linear-gradient(160deg, #1a0030 → #0c0014 → #04000c)
 - `--base` → `#0c0014`
 - `--surface-alt` → `rgba(12,0,20,.90)`
 - `--text-primary` → `#e8eaf0`
+
+**Date/time input styling (styles.css):**
+- `::-webkit-calendar-picker-indicator` com `filter: invert(93%) sepia(8%) saturate(200%) hue-rotate(200deg) brightness(105%)` — torna o ícone do calendário/relógio da mesma cor do texto `#e8eaf0` em todos os inputs `type="date"` e `type="time"` do sistema
+- Aplicado globalmente em `styles.css` — cobre app autenticado, portal público e qualquer tela
 
 **Known latent issue — do not touch:**
 - `calculadora.js` element ID `ccondominио` contains Cyrillic chars (и, о). It works because HTML and JS use the identical string. Do not refactor this ID without replacing all 6+ occurrences atomically.
