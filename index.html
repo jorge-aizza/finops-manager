@@ -2100,18 +2100,36 @@
           <input id="sp-client-secret" type="password" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="••••••••••••••••">
         </div>
         <div id="sp-billing-section" style="border-top:1px solid var(--border);padding-top:12px;margin-top:2px;border-radius:8px;padding:12px;transition:background .2s,border-color .2s">
-          <div id="sp-billing-section-lbl" style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);margin-bottom:10px;">Coleta via API — MCA Billing Profile</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-            <div>
-              <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Billing Account ID</label>
-              <input id="sp-billing-account" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx:xxxxxxxx_xxxx-xx-xx">
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Billing Profile ID</label>
-              <input id="sp-billing-profile" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="XXXX-XXXX-XXX-XXX">
-            </div>
+          <div id="sp-billing-section-lbl" style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);margin-bottom:10px;">Coleta via API — Modo de Autenticação</div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Modo de coleta</label>
+            <select id="sp-modo-coleta" class="filter-input" style="width:100%;box-sizing:border-box" onchange="spToggleModo(this.value)">
+              <option value="billing_profile">Billing Profile (MCA — Microsoft Customer Agreement)</option>
+              <option value="subscription">Subscription Direta (EA / Pay-as-you-go / sem Billing ID)</option>
+            </select>
           </div>
-          <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">A SP precisa ter a role <strong style="color:var(--text)">Billing Reader</strong> no Billing Account para usar a coleta via API.</div>
+          <!-- Painel Billing Profile -->
+          <div id="sp-painel-billing">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Billing Account ID</label>
+                <input id="sp-billing-account" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="xxxxxxxx:xxxxxxxx_xxxx-xx-xx">
+              </div>
+              <div>
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Billing Profile ID</label>
+                <input id="sp-billing-profile" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="XXXX-XXXX-XXX-XXX">
+              </div>
+            </div>
+            <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">A SP precisa ter a role <strong style="color:var(--text)">Billing Reader</strong> no Billing Account.</div>
+          </div>
+          <!-- Painel Subscription Direta -->
+          <div id="sp-painel-subscription" style="display:none">
+            <div>
+              <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Subscription IDs <span style="color:var(--text-dim)">(uma por linha ou separadas por vírgula)</span></label>
+              <textarea id="sp-subscription-ids" class="filter-input" rows="4" style="width:100%;box-sizing:border-box;resize:vertical;font-family:monospace;font-size:11px" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx&#10;yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"></textarea>
+            </div>
+            <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">A SP precisa ter a role <strong style="color:var(--text)">Reader</strong> em cada subscription listada.</div>
+          </div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:end">
           <div>

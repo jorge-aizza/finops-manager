@@ -4022,7 +4022,7 @@ async function _loadColetaApiSPSelect() {
               <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px">
                 <div>
                   <span style="font-size:13px;font-weight:600;color:var(--text)">${s.nome}</span>
-                  <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${s.billing_account_id ? 'Billing Profile (MCA)' : ''}</span>
+                  <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${s.modo_coleta === 'subscription' ? 'Subscription Direta' : s.billing_account_id ? 'Billing Profile (MCA)' : ''}</span>
                 </div>
                 <button class="btn-primary" style="font-size:12px;padding:6px 16px;white-space:nowrap" onclick="abrirColetaAPI(${s.id})">
                   ▶ Iniciar Coleta
@@ -4037,8 +4037,11 @@ async function _loadColetaApiSPSelect() {
     const isBP = _apiModoAtual === 'billing_profile';
 
     if (isBP) {
-      const valid   = sps.filter(s => s.billing_account_id && s.billing_profile_id && s.ativo);
-      const semBill = sps.filter(s => s.ativo && (!s.billing_account_id || !s.billing_profile_id));
+      const valid   = sps.filter(s => s.ativo && (
+        ((s.modo_coleta || 'billing_profile') === 'billing_profile' && s.billing_account_id && s.billing_profile_id) ||
+        (s.modo_coleta === 'subscription' && s.subscription_ids)
+      ));
+      const semBill = sps.filter(s => s.ativo && !valid.find(v => v.id === s.id));
       if (!valid.length) {
         sel.innerHTML = '<option value="">Nenhuma SP com Billing IDs configurados</option>';
         const info = document.getElementById('tab-api-sp-info');
@@ -4081,9 +4084,12 @@ function _updateTabApiSpInfo(spId) {
   const el = document.getElementById('tab-api-sp-info');
   if (!el) return;
   if (!sp) { el.innerHTML = '—'; return; }
-  el.innerHTML = `<span style="color:var(--accent);font-weight:600">${sp.nome}</span><br>
-    <span style="color:var(--text-muted)">BA: ${sp.billing_account_id || '—'}</span><br>
-    <span style="color:var(--text-muted)">BP: ${sp.billing_profile_id || '—'}</span>`;
+  const _modoLabel = sp.modo_coleta === 'subscription' ? 'Subscription Direta' : 'Billing Profile (MCA)';
+  const _detalhe   = sp.modo_coleta === 'subscription'
+    ? `<span style="color:var(--text-muted)">Subs: ${(sp.subscription_ids||'').split(/[\n,]+/).filter(Boolean).length} configurada(s)</span>`
+    : `<span style="color:var(--text-muted)">BA: ${sp.billing_account_id || '—'}</span><br><span style="color:var(--text-muted)">BP: ${sp.billing_profile_id || '—'}</span>`;
+  el.innerHTML = `<span style="color:var(--accent);font-weight:600">${sp.nome}</span>
+    <span style="font-size:10px;color:var(--text-dim);margin-left:6px">${_modoLabel}</span><br>${_detalhe}`;
 
   // Popula painel de agendamento com dados da SP selecionada
   const temSched = sp.auto_coleta && sp.hora_execucao != null && sp.dias_semana;
@@ -4113,12 +4119,16 @@ async function executarColetaAPITab() {
   try {
     const sp = _coletaApiSPCache.find(s => s.id === parseInt(spId));
     if (!sp) throw new Error('SP não encontrada');
+    const _modoSp = sp.modo_coleta || 'billing_profile';
     const body = {
-      modo:               'billing_profile',
+      modo:               _modoSp,
       data_inicio:        inicio,
       data_fim:           fim,
-      billing_account_id: sp.billing_account_id,
-      billing_profile_id: sp.billing_profile_id,
+      billing_account_id: _modoSp === 'billing_profile' ? sp.billing_account_id : undefined,
+      billing_profile_id: _modoSp === 'billing_profile' ? sp.billing_profile_id : undefined,
+      subscription_ids:   _modoSp === 'subscription'
+        ? (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
+        : undefined,
     };
     await api('POST', `/azure-coleta/sps/${spId}/coletar-api`, body);
     showToast('Coleta via API iniciada — acompanhe o monitor abaixo', 'success');
@@ -4369,6 +4379,9 @@ function openSPModal(id) {
   document.getElementById('sp-expiracao').value        = '';
   document.getElementById('sp-billing-account').value  = '';
   document.getElementById('sp-billing-profile').value  = '';
+  document.getElementById('sp-subscription-ids').value = '';
+  document.getElementById('sp-modo-coleta').value      = 'billing_profile';
+  spToggleModo('billing_profile');
   document.getElementById('sp-ativo').checked          = true;
   // Reseta destaque da seção de Billing
   const _bSec = document.getElementById('sp-billing-section');
@@ -4385,18 +4398,13 @@ function openSPModal(id) {
       document.getElementById('sp-expiracao').value       = sp.expiracao_secret ? sp.expiracao_secret.slice(0,10) : '';
       document.getElementById('sp-billing-account').value = sp.billing_account_id || '';
       document.getElementById('sp-billing-profile').value = sp.billing_profile_id || '';
+      const modo = sp.modo_coleta || 'billing_profile';
+      document.getElementById('sp-modo-coleta').value      = modo;
+      document.getElementById('sp-subscription-ids').value = sp.subscription_ids || '';
+      spToggleModo(modo);
       document.getElementById('sp-ativo').checked         = sp.ativo;
       if (sp.dia_execucao)       document.getElementById('sp-dia').value           = sp.dia_execucao;
       if (sp.granularidade_dias) document.getElementById('sp-granularidade').value = sp.granularidade_dias;
-      // Destaca seção de Billing se os campos estiverem vazios
-      const billSec = document.getElementById('sp-billing-section');
-      if (billSec) {
-        const faltaBilling = !sp.billing_account_id || !sp.billing_profile_id;
-        billSec.style.borderColor = faltaBilling ? 'rgba(255,140,66,.6)' : '';
-        billSec.style.background  = faltaBilling ? 'rgba(255,140,66,.05)' : '';
-        const lbl = document.getElementById('sp-billing-section-lbl');
-        if (lbl) lbl.style.color = faltaBilling ? 'var(--orange)' : 'var(--accent)';
-      }
     }).catch(() => {});
   }
   modal.classList.add('open');
@@ -4404,21 +4412,34 @@ function openSPModal(id) {
 
 function closeSPModal() { document.getElementById('modal-sp').classList.remove('open'); }
 
+function spToggleModo(modo) {
+  const pBill = document.getElementById('sp-painel-billing');
+  const pSubs = document.getElementById('sp-painel-subscription');
+  if (!pBill || !pSubs) return;
+  pBill.style.display = modo === 'billing_profile' ? '' : 'none';
+  pSubs.style.display = modo === 'subscription'    ? '' : 'none';
+}
+
 async function saveSP() {
-  const id     = document.getElementById('sp-edit-id').value;
-  const body   = {
+  const id   = document.getElementById('sp-edit-id').value;
+  const modo = document.getElementById('sp-modo-coleta').value;
+  const body = {
     nome:               document.getElementById('sp-nome').value.trim(),
     tenant_id:          document.getElementById('sp-tenant-id').value.trim(),
     client_id:          document.getElementById('sp-client-id').value.trim(),
     client_secret:      document.getElementById('sp-client-secret').value,
     expiracao_secret:   document.getElementById('sp-expiracao').value || null,
-    billing_account_id: document.getElementById('sp-billing-account').value.trim() || null,
-    billing_profile_id: document.getElementById('sp-billing-profile').value.trim() || null,
+    modo_coleta:        modo,
+    billing_account_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-account').value.trim() || null) : null,
+    billing_profile_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-profile').value.trim() || null) : null,
+    subscription_ids:   modo === 'subscription'    ? (document.getElementById('sp-subscription-ids').value.trim() || null) : null,
     ativo:              document.getElementById('sp-ativo').checked,
     dia_execucao:       parseInt(document.getElementById('sp-dia').value) || 5,
     granularidade_dias: parseInt(document.getElementById('sp-granularidade').value) || 7,
   };
   if (!body.nome || !body.tenant_id || !body.client_id) { showToast('Preencha Nome, Tenant ID e Client ID', 'error'); return; }
+  if (modo === 'billing_profile' && (!body.billing_account_id || !body.billing_profile_id)) { showToast('Preencha Billing Account ID e Billing Profile ID', 'error'); return; }
+  if (modo === 'subscription' && !body.subscription_ids) { showToast('Informe pelo menos uma Subscription ID', 'error'); return; }
   try {
     if (id) await api('PUT', `/azure-coleta/sps/${id}`, body);
     else    await api('POST', '/azure-coleta/sps', body);
@@ -4465,7 +4486,7 @@ async function abrirColetaAPI(spId) {
 let _wizard = null;
 
 function _wizardAbrir(spId, sp) {
-  const isBP = !!(sp.billing_account_id && sp.billing_profile_id);
+  const isBP = (sp.modo_coleta || 'billing_profile') === 'billing_profile';
   _wizard = {
     spId,
     sp,

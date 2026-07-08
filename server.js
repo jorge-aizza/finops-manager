@@ -5299,6 +5299,8 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS auto_coleta         BOOLEAN DEFAULT false`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS proxima_coleta      TIMESTAMP`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS is_padrao           BOOLEAN DEFAULT false`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS modo_coleta         VARCHAR(30) DEFAULT 'billing_profile'`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS subscription_ids    TEXT`);
 
   // ── azure_storage_config ──────────────────────────────────────────────────
   await pool.query(`
@@ -5442,22 +5444,27 @@ function _iniciarAgendador() {
         return; // só uma coleta por ciclo
       }
 
-      // API: agendamento por hora+dia
+      // API: agendamento por hora+dia (suporta modo billing_profile e subscription)
       const rApi = await pool.query(`
-        SELECT id, nome, billing_account_id, billing_profile_id, granularidade_dias, hora_execucao, dias_semana
+        SELECT id, nome, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, granularidade_dias, hora_execucao, dias_semana
         FROM azure_coleta_config
         WHERE ativo = true
           AND auto_coleta = true
           AND hora_execucao IS NOT NULL
           AND dias_semana IS NOT NULL
           AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
+          AND (
+            (COALESCE(modo_coleta,'billing_profile') = 'billing_profile' AND billing_account_id IS NOT NULL AND billing_profile_id IS NOT NULL)
+            OR
+            (modo_coleta = 'subscription' AND subscription_ids IS NOT NULL AND subscription_ids <> '')
+          )
         ORDER BY proxima_coleta ASC NULLS FIRST
         LIMIT 1
       `);
       if (rApi.rows.length) {
         const sp = rApi.rows[0];
-        if (!sp.billing_account_id || !sp.billing_profile_id) return;
-        console.log(`[Agendador] Disparando coleta API SP #${sp.id} (${sp.nome})`);
+        const modoSp = sp.modo_coleta || 'billing_profile';
+        console.log(`[Agendador] Disparando coleta API SP #${sp.id} (${sp.nome}) modo=${modoSp}`);
         const proxima = _computeProximaColeta(sp.hora_execucao, sp.dias_semana);
         await pool.query(
           `UPDATE azure_coleta_config SET proxima_coleta=$1 WHERE id=$2`,
@@ -5467,11 +5474,16 @@ function _iniciarAgendador() {
         const fim    = new Date(); fim.setDate(fim.getDate() - 1);
         const inicio = new Date(fim); inicio.setDate(inicio.getDate() - (granDias - 1));
         const fmt = d => d.toISOString().slice(0, 10);
+        const subIds = modoSp === 'subscription'
+          ? (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
+          : [];
         _executarColetaAPI(
           sp.id,
-          _decryptSecret(sp.billing_account_id),
-          _decryptSecret(sp.billing_profile_id),
-          fmt(inicio), fmt(fim)
+          modoSp === 'billing_profile' ? _decryptSecret(sp.billing_account_id) : '',
+          modoSp === 'billing_profile' ? _decryptSecret(sp.billing_profile_id) : '',
+          fmt(inicio), fmt(fim),
+          modoSp,
+          subIds
         ).catch(e => console.error(`[Agendador] Erro coleta API #${sp.id}:`, e.message));
       }
 
@@ -5577,7 +5589,7 @@ app.delete('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_
 app.get('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`SELECT id,nome,tenant_id,client_id,ativo,is_padrao,expiracao_secret,billing_account_id,billing_profile_id,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM azure_coleta_config ORDER BY is_padrao DESC, id ASC`);
+    const r = await pool.query(`SELECT id,nome,tenant_id,client_id,ativo,is_padrao,expiracao_secret,billing_account_id,billing_profile_id,modo_coleta,subscription_ids,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM azure_coleta_config ORDER BY is_padrao DESC, id ASC`);
     res.json(r.rows.map(row => ({
       ...row,
       tenant_id:          _safeDecrypt(row.tenant_id),
@@ -5590,7 +5602,7 @@ app.get('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (_req, res)
 
 app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, dia_execucao, granularidade_dias } = req.body;
+    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, dia_execucao, granularidade_dias } = req.body;
     await ensureAzureColetaTable();
     const tE   = tenant_id?.trim()         ? _encryptSecret(tenant_id.trim())         : '';
     const cE   = client_id?.trim()          ? _encryptSecret(client_id.trim())          : '';
@@ -5599,9 +5611,11 @@ app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res)
     const bpE  = billing_profile_id?.trim() ? _encryptSecret(billing_profile_id.trim()) : null;
     const diaE = dia_execucao       != null ? Math.max(1, Math.min(28, parseInt(dia_execucao) || 5))  : 5;
     const granE= granularidade_dias != null ? Math.max(1, parseInt(granularidade_dias) || 7)           : 7;
+    const modoE = ['billing_profile','subscription'].includes(modo_coleta) ? modo_coleta : 'billing_profile';
+    const subsE = subscription_ids?.trim() || null;
     await pool.query(
-      `INSERT INTO azure_coleta_config(nome,tenant_id,client_id,client_secret,ativo,expiracao_secret,billing_account_id,billing_profile_id,dia_execucao,granularidade_dias) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [nome || 'Nova SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, diaE, granE]
+      `INSERT INTO azure_coleta_config(nome,tenant_id,client_id,client_secret,ativo,expiracao_secret,billing_account_id,billing_profile_id,modo_coleta,subscription_ids,dia_execucao,granularidade_dias) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [nome || 'Nova SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -5609,7 +5623,7 @@ app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res)
 
 app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, dia_execucao, granularidade_dias } = req.body;
+    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, dia_execucao, granularidade_dias } = req.body;
     const ex = await pool.query(`SELECT client_secret FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
     if (!ex.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
     let sE = ex.rows[0].client_secret || '';
@@ -5620,9 +5634,11 @@ app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, r
     const bpE = billing_profile_id?.trim() ? _encryptSecret(billing_profile_id.trim()) : null;
     const diaE  = dia_execucao        != null ? Math.max(1, Math.min(28, parseInt(dia_execucao) || 5))   : 5;
     const granE = granularidade_dias  != null ? Math.max(1, parseInt(granularidade_dias) || 7)            : 7;
+    const modoE = ['billing_profile','subscription'].includes(modo_coleta) ? modo_coleta : 'billing_profile';
+    const subsE = subscription_ids?.trim() || null;
     await pool.query(
-      `UPDATE azure_coleta_config SET nome=$1,tenant_id=$2,client_id=$3,client_secret=$4,ativo=$5,expiracao_secret=$6,billing_account_id=$7,billing_profile_id=$8,dia_execucao=$9,granularidade_dias=$10,atualizado_em=NOW() WHERE id=$11`,
-      [nome || 'SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, diaE, granE, req.params.id]
+      `UPDATE azure_coleta_config SET nome=$1,tenant_id=$2,client_id=$3,client_secret=$4,ativo=$5,expiracao_secret=$6,billing_account_id=$7,billing_profile_id=$8,modo_coleta=$9,subscription_ids=$10,dia_execucao=$11,granularidade_dias=$12,atualizado_em=NOW() WHERE id=$13`,
+      [nome || 'SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
