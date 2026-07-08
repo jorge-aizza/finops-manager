@@ -4078,12 +4078,19 @@ async function coletarAgendamentoAgora() {
     const fmt  = d => d.toISOString().slice(0, 10);
     const fim  = new Date(); fim.setDate(fim.getDate() - 1);
     const ini  = new Date(fim); ini.setDate(ini.getDate() - (granDias - 1));
-    const modo = sp.modo_coleta || 'billing_profile';
+    let modo = sp.modo_coleta || 'billing_profile';
+    // Se está em billing_profile mas faltam os IDs, tenta subscription automaticamente
+    if (modo === 'billing_profile' && (!sp.billing_account_id || !sp.billing_profile_id)) {
+      if (sp.subscription_ids) {
+        modo = 'subscription';
+      } else {
+        throw new Error('SP sem Billing Account/Profile IDs nem Subscription IDs configurados. Edite a SP antes de coletar.');
+      }
+    }
+    const subIds = (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
     const body = {
       modo, data_inicio: fmt(ini), data_fim: fmt(fim),
-      subscription_ids: modo === 'subscription'
-        ? (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
-        : [],
+      subscription_ids: modo === 'subscription' ? subIds : [],
       billing_account_id: modo === 'billing_profile' ? sp.billing_account_id : undefined,
       billing_profile_id: modo === 'billing_profile' ? sp.billing_profile_id : undefined,
     };
