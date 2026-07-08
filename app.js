@@ -3956,25 +3956,59 @@ async function _loadColetaApiSPSelect() {
       </div>`;
       return;
     }
+    const _nd = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
     wrap.innerHTML = `<div class="stat-card" style="padding:16px 20px">
       <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px">Selecione a SP e inicie a coleta guiada</div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-        ${ativas.map(s => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px">
-            <div>
-              <span style="font-size:13px;font-weight:600;color:var(--text)">${s.nome}</span>
-              <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${s.modo_coleta === 'subscription' ? 'Subscription Direta' : s.billing_account_id ? 'Billing Profile (MCA)' : ''}</span>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${ativas.map(s => {
+          const temSched = s.auto_coleta && s.hora_execucao != null && s.dias_semana;
+          const modoLabel = s.modo_coleta === 'subscription' ? 'Subscription Direta' : (s.billing_account_id ? 'Billing Profile (MCA)' : '');
+          const schedBanner = temSched ? (() => {
+            const diasNomes = (s.dias_semana || '').split(',').map(d => _nd[+d]).filter(Boolean).join(', ');
+            const proxLabel = _proximaLabel(s.proxima_coleta);
+            return `<div style="margin-top:6px;padding:7px 10px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);border-radius:7px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+              <div>
+                <span style="font-size:11px;font-weight:700;color:var(--green)">⏰ Agendado</span>
+                <span style="font-size:11px;color:var(--text-muted);margin-left:6px">${diasNomes} · ${s.hora_execucao}:00h · Janela ${s.granularidade_dias || 7}d</span>
+                <span style="font-size:11px;color:var(--text-dim);margin-left:6px">${proxLabel}</span>
+              </div>
+              <div style="display:flex;gap:5px;flex-shrink:0">
+                <button class="btn-ghost" style="font-size:11px;padding:2px 9px;border-color:var(--accent);color:var(--accent)" onclick="abrirColetaAPI(${s.id})">✏ Editar</button>
+                <button class="btn-ghost" style="font-size:11px;padding:2px 9px;border-color:var(--danger);color:var(--danger)" onclick="excluirAgendamentoSP(${s.id},'${(s.nome||'').replace(/'/g,"\\'")}')" >✕ Excluir</button>
+              </div>
+            </div>`;
+          })() : '';
+          return `
+          <div style="padding:10px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <div>
+                <span style="font-size:13px;font-weight:600;color:var(--text)">${s.nome}</span>
+                <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${modoLabel}</span>
+              </div>
+              <button class="btn-primary" style="font-size:12px;padding:6px 16px;white-space:nowrap" onclick="abrirColetaAPI(${s.id})">
+                ▶ Iniciar Coleta
+              </button>
             </div>
-            <button class="btn-primary" style="font-size:12px;padding:6px 16px;white-space:nowrap" onclick="abrirColetaAPI(${s.id})">
-              ▶ Iniciar Coleta
-            </button>
-          </div>`).join('')}
+            ${schedBanner}
+          </div>`;
+        }).join('')}
       </div>
     </div>`;
   } catch (e) {
     const wrap = document.getElementById('api-wizard-sp-wrap');
     if (wrap) wrap.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:8px">Erro ao carregar SPs: ${e.message}</div>`;
   }
+}
+
+async function excluirAgendamentoSP(spId, nome) {
+  if (!confirm(`Excluir o agendamento automático de "${nome}"?`)) return;
+  try {
+    await api('PUT', `/azure-coleta/sps/${spId}/agendamento`, {
+      auto_coleta: false, hora_execucao: null, dias_semana: null
+    });
+    showToast('Agendamento excluído', 'success');
+    _loadColetaApiSPSelect();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
 }
 
 async function loadColetaStatus() {
