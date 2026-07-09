@@ -4048,7 +4048,7 @@ async function agendBuscarSubs() {
   if (emptyEl) emptyEl.textContent = '';
   try {
     const data = await api('POST', `/azure-coleta/sps/${spId}/listar-subs`, {});
-    _agendSubsAll = data.subscriptions || [];
+    _agendSubsAll = data.subs || [];
     _agendRenderSubs();
     document.getElementById('agend-subs-list-area').style.display = 'flex';
   } catch (e) {
@@ -4161,7 +4161,7 @@ async function coletarAgendamentoAgora() {
       if (btn) btn.textContent = 'Buscando subs...';
       try {
         const data = await api('POST', `/azure-coleta/sps/${spId}/listar-subs`, {});
-        subIds = (data.subscriptions || []).map(s => s.subscriptionId).filter(Boolean);
+        subIds = (data.subs || []).map(s => s.subscriptionId).filter(Boolean);
       } catch (_) {}
       if (subIds.length === 0) throw new Error('Nenhuma assinatura encontrada. Use "Carregar do Azure" para selecionar as assinaturas antes de coletar.');
     }
