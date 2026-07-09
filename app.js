@@ -4052,7 +4052,10 @@ async function agendBuscarSubs() {
     _agendRenderSubs();
     document.getElementById('agend-subs-list-area').style.display = 'flex';
   } catch (e) {
-    if (emptyEl) emptyEl.textContent = `❌ Erro: ${e.message}`;
+    const hint = e.message.includes('404') || e.message.includes('Token')
+      ? ' — verifique se Tenant ID e Client ID estão corretos na SP'
+      : '';
+    if (emptyEl) emptyEl.innerHTML = `❌ Erro ao buscar assinaturas${hint}.<br><span style="font-size:11px;color:var(--text-dim)">Abra a SP, reinsira as credenciais (Tenant ID, Client ID, Client Secret) e salve.</span>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '🔄 Recarregar'; }
   }
