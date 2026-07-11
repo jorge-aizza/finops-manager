@@ -3934,6 +3934,12 @@ function switchColetaTab(tab) {
       btn.style.borderBottomColor = active ? 'var(--accent)' : 'transparent';
     }
   });
+  // Atualiza badge do título do histórico
+  const histBadge = document.getElementById('coleta-hist-tipo-badge');
+  if (histBadge) {
+    const labels = { api: 'API Oficial', storage: 'Via Storage', manual: 'Import Manual' };
+    histBadge.textContent = labels[tab] || tab;
+  }
   if (tab === 'api') _initColetaApiTab();
   loadColetaHistorico(tab);
 }
@@ -4221,13 +4227,43 @@ async function coletarAgendamentoAgora() {
   }
 }
 
+// Preenche o card de última execução de um tipo específico
+function _atualizarUltimaExec(tipo, hist) {
+  const sfx = tipo === 'api' ? '-api' : '-storage';
+  const statusColors = {
+    concluido:  { bg: 'rgba(34,197,94,.12)',  color: 'var(--green)',  label: 'Concluído' },
+    cancelado:  { bg: 'rgba(255,140,66,.12)', color: 'var(--orange)', label: 'Cancelado' },
+    executando: { bg: 'rgba(255,140,66,.12)', color: 'var(--orange)', label: 'Executando' },
+    erro:       { bg: 'rgba(255,77,106,.12)', color: 'var(--danger)', label: 'Erro' },
+  };
+  const badge  = document.getElementById('coleta-status-badge'  + sfx);
+  const exec   = document.getElementById('coleta-ultima-exec'   + sfx);
+  const linhas = document.getElementById('coleta-ultima-linhas' + sfx);
+  const msg    = document.getElementById('coleta-ultima-msg'    + sfx);
+  if (!hist) {
+    if (badge)  { badge.textContent = 'Nunca executado'; badge.style.background = 'rgba(147,51,234,.12)'; badge.style.color = 'var(--text-muted)'; }
+    if (exec)   exec.textContent   = '—';
+    if (linhas) linhas.textContent = '—';
+    if (msg)    msg.textContent    = '—';
+    return;
+  }
+  const sc = statusColors[hist.status] || { bg: 'rgba(147,51,234,.12)', color: 'var(--accent)', label: hist.status };
+  if (badge)  { badge.textContent = sc.label; badge.style.background = sc.bg; badge.style.color = sc.color; }
+  if (exec)   exec.textContent   = hist.iniciado_em ? new Date(hist.iniciado_em).toLocaleString('pt-BR') : '—';
+  if (linhas) linhas.textContent = ((hist.linhas_inseridas ?? 0) + (hist.linhas_atualizadas ?? 0)).toLocaleString('pt-BR') + ' registros';
+  if (msg)    msg.textContent    = hist.mensagem || '—';
+}
+
 async function loadColetaStatus() {
   try {
     const s = await api('GET', '/azure-coleta/status');
-    const badge     = document.getElementById('coleta-status-badge');
     const execBtn   = document.getElementById('coleta-exec-btn');
     const cancelBtn = document.getElementById('coleta-cancel-btn');
     const monitor   = document.getElementById('coleta-monitor');
+
+    // Sempre atualiza status de cada tipo independentemente
+    _atualizarUltimaExec('api',     s.ultimo_api);
+    _atualizarUltimaExec('storage', s.ultimo_storage);
 
     if (s.em_execucao) {
       const isCanceling = s.cancelando;
@@ -4275,10 +4311,12 @@ async function loadColetaStatus() {
         monCancelBtn.textContent = isCanceling ? 'Cancelando...' : '✕ Cancelar';
       }
 
-      if (badge) {
-        badge.textContent = isCanceling ? 'Cancelando...' : 'Em Execução';
-        badge.style.background = isCanceling ? 'rgba(255,77,106,.15)' : 'rgba(255,140,66,.15)';
-        badge.style.color = isCanceling ? 'var(--danger)' : 'var(--orange)';
+      // Mostrar "Em Execução" no badge do tipo que está rodando
+      const badgeAtivo = document.getElementById('coleta-status-badge-' + tipo);
+      if (badgeAtivo) {
+        badgeAtivo.textContent = isCanceling ? 'Cancelando...' : 'Em Execução';
+        badgeAtivo.style.background = isCanceling ? 'rgba(255,77,106,.15)' : 'rgba(255,140,66,.15)';
+        badgeAtivo.style.color = isCanceling ? 'var(--danger)' : 'var(--orange)';
       }
       if (execBtn) { execBtn.disabled = true; execBtn.style.display = 'none'; }
       if (cancelBtn) {
@@ -4320,11 +4358,6 @@ async function loadColetaStatus() {
         log.scrollTop = log.scrollHeight;
       }
     } else {
-      if (badge) {
-        badge.textContent = 'Ocioso';
-        badge.style.background = 'rgba(34,197,94,.12)';
-        badge.style.color = 'var(--green)';
-      }
       if (execBtn) {
         execBtn.disabled = false;
         execBtn.style.display = '';
@@ -4365,17 +4398,8 @@ async function loadColetaStatus() {
       }
     }
 
-    const hist = s.ultimo;
-    if (hist) {
-      const dt = hist.iniciado_em ? new Date(hist.iniciado_em).toLocaleString('pt-BR') : '—';
-      document.getElementById('coleta-ultima-exec').textContent = dt;
-      document.getElementById('coleta-ultima-msg').textContent = hist.mensagem || '—';
-      const linhas = (hist.linhas_inseridas ?? 0) + (hist.linhas_atualizadas ?? 0);
-      document.getElementById('coleta-ultima-linhas').textContent = linhas.toLocaleString('pt-BR') + ' registros';
-    }
   } catch (e) {
-    const badge = document.getElementById('coleta-status-badge');
-    if (badge) badge.textContent = 'Indisponível';
+    // silencia erros de status — não crítico
   }
 }
 

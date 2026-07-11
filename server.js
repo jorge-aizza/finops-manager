@@ -5549,12 +5549,19 @@ app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
 app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`SELECT id,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 1`);
+    const cols = `id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem`;
+    const [rAll, rApi, rStg] = await Promise.all([
+      pool.query(`SELECT ${cols} FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 1`),
+      pool.query(`SELECT ${cols} FROM azure_coleta_historico WHERE tipo='api'     ORDER BY iniciado_em DESC LIMIT 1`),
+      pool.query(`SELECT ${cols} FROM azure_coleta_historico WHERE tipo='storage' ORDER BY iniciado_em DESC LIMIT 1`),
+    ]);
     res.json({
       em_execucao:     _coletaEmExecucao,
       cancelando:      _coletaCancelada,
       progresso:       _coletaProgresso,
-      ultimo:          r.rows[0] || null,
+      ultimo:          rAll.rows[0] || null,
+      ultimo_api:      rApi.rows[0] || null,
+      ultimo_storage:  rStg.rows[0] || null,
       circuit_breaker: {
         state:      _cbAPI.state,
         failures:   _cbAPI.failures,

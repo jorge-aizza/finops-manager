@@ -1759,6 +1759,31 @@
             <!-- Botões rápidos de wizard por SP -->
             <div id="api-wizard-sp-wrap" style="margin-bottom:16px"></div>
 
+            <!-- Status da última coleta API -->
+            <div class="stat-card" style="padding:16px 20px;margin-bottom:16px">
+              <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px">Última Execução — API</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div style="display:flex;flex-direction:column;gap:7px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:12px;color:var(--text-muted)">Estado</span>
+                    <span id="coleta-status-badge-api" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:rgba(147,51,234,.15);color:var(--accent)">—</span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:12px;color:var(--text-muted)">Início</span>
+                    <span id="coleta-ultima-exec-api" style="font-size:11px;color:var(--text)">—</span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                    <span style="font-size:12px;color:var(--text-muted)">Registros</span>
+                    <span id="coleta-ultima-linhas-api" style="font-size:11px;color:var(--text)">—</span>
+                  </div>
+                </div>
+                <div style="padding:10px 14px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
+                  <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">Mensagem</div>
+                  <span style="font-size:11px;color:var(--text-dim);word-break:break-word;line-height:1.5" id="coleta-ultima-msg-api">—</span>
+                </div>
+              </div>
+            </div>
+
             <!-- âncora: monitor será movido aqui quando coleta API estiver em andamento -->
             <div id="mon-anchor-api"></div>
 
@@ -1796,18 +1821,18 @@
                 <div style="display:flex;flex-direction:column;gap:8px">
                   <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
                     <span style="font-size:12px;color:var(--text-muted)">Estado atual</span>
-                    <span id="coleta-status-badge" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:rgba(147,51,234,.15);color:var(--accent)">Carregando...</span>
+                    <span id="coleta-status-badge-storage" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:rgba(147,51,234,.15);color:var(--accent)">—</span>
                   </div>
                   <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
                     <span style="font-size:12px;color:var(--text-muted)">Última execução</span>
-                    <span id="coleta-ultima-exec" style="font-size:12px;color:var(--text)">—</span>
+                    <span id="coleta-ultima-exec-storage" style="font-size:12px;color:var(--text)">—</span>
                   </div>
                   <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
                     <span style="font-size:12px;color:var(--text-muted)">Registros</span>
-                    <span id="coleta-ultima-linhas" style="font-size:12px;color:var(--text)">—</span>
+                    <span id="coleta-ultima-linhas-storage" style="font-size:12px;color:var(--text)">—</span>
                   </div>
                   <div style="padding:9px 12px;background:var(--bg-hover);border-radius:8px;border:1px solid var(--border)">
-                    <span style="font-size:11px;color:var(--text-dim);word-break:break-word" id="coleta-ultima-msg">—</span>
+                    <span style="font-size:11px;color:var(--text-dim);word-break:break-word" id="coleta-ultima-msg-storage">—</span>
                   </div>
                 </div>
               </div>
@@ -1947,6 +1972,7 @@
           <div class="stat-card" style="padding:20px">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
               <span style="font-size:14px;font-weight:700;color:var(--text)">Histórico de Execuções</span>
+              <span id="coleta-hist-tipo-badge" style="font-size:10px;padding:2px 9px;border-radius:10px;background:rgba(147,51,234,.15);color:var(--accent);font-weight:600;margin-left:4px">API Oficial</span>
               <div style="display:flex;gap:8px">
                 <button class="btn-ghost" style="font-size:11px;padding:4px 12px" onclick="loadColetaHistorico(_coletaTabAtual)">Atualizar</button>
                 <button id="btn-limpar-historico" class="btn-ghost" style="font-size:11px;padding:4px 12px;border-color:var(--danger);color:var(--danger)" onclick="limparHistoricoColeta()">Limpar</button>
