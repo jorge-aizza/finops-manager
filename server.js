@@ -5856,12 +5856,26 @@ async function _managementGetToken(tenantId, clientId, clientSecret) {
         client_secret: clientSecret, scope: 'https://management.azure.com/.default'
       }).toString(),
     },
-    { timeoutMs: 30_000, countCbFailure: false } // 4xx de credencial não abre CB
+    { timeoutMs: 30_000, countCbFailure: false }
   );
   if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Management falhou (${resp.status}): ${e}`); }
   const tkData = await _safeRespJson(resp);
   if (!tkData.access_token) throw new Error(`Token Management: resposta sem access_token`);
-  return tkData.access_token;
+  return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
+}
+
+// Retorna função getToken() que renova automaticamente 5 min antes do vencimento
+function _makeTokenGetter(tenantId, clientId, clientSecret) {
+  let _tok = null, _exp = 0;
+  return async function getToken(force = false) {
+    if (force || !_tok || Date.now() >= _exp - 300_000) {
+      const { token, expiresIn } = await _managementGetToken(tenantId, clientId, clientSecret);
+      _tok = token;
+      _exp = Date.now() + expiresIn * 1000;
+      if (force) _logColeta('[Token] Renovado por expiração');
+    }
+    return _tok;
+  };
 }
 
 // Lê JSON de uma Response sem quebrar em corpo vazio (Azure retorna 200/202 vazios)
@@ -5886,7 +5900,7 @@ async function _listarSubsBillingProfile(token, billingAccountId, billingProfile
 
 // Gera relatório, faz polling com limite de 60 tentativas (~6 min), baixa blobs e retorna caminhos locais
 // metric: 'ActualCost' (padrão) ou 'AmortizedCost' (reservas distribuídas mensalmente como no portal)
-async function _gerarRelatorioAPI(token, scopeUrl, startDate, endDate, label, metric = 'ActualCost') {
+async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label, metric = 'ActualCost') {
   const fs     = require('fs');
   const os     = require('os');
   const path   = require('path');
@@ -5897,7 +5911,8 @@ async function _gerarRelatorioAPI(token, scopeUrl, startDate, endDate, label, me
   const genUrl  = `https://management.azure.com${scopeUrl}/providers/Microsoft.CostManagement/generateCostDetailsReport?api-version=2023-08-01`;
   _logColeta(`→ Solicitando relatório: ${label}`);
 
-  const genResp = await _cbFetch(
+  let token = await getToken();
+  let genResp = await _cbFetch(
     genUrl,
     {
       method: 'POST',
@@ -5906,6 +5921,18 @@ async function _gerarRelatorioAPI(token, scopeUrl, startDate, endDate, label, me
     },
     { timeoutMs: 60_000 }
   );
+
+  // Token expirado → renova e tenta uma vez mais
+  if (genResp.status === 401) {
+    _logColeta(`  Token expirado, renovando para ${label}...`);
+    token = await getToken(true);
+    genResp = await _cbFetch(
+      genUrl,
+      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metric, timePeriod: { start: startDate, end: endDate } }) },
+      { timeoutMs: 60_000 }
+    );
+  }
 
   if (genResp.status === 404) { _logColeta(`  Sem dados: ${label}`); return []; }
   if (genResp.status >= 500) {
@@ -5935,7 +5962,7 @@ async function _gerarRelatorioAPI(token, scopeUrl, startDate, endDate, label, me
     await new Promise(r => setTimeout(r, 6000));
     tentativas++;
 
-    const pr = await _cbFetch(pollUrl, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+    const pr = await _cbFetch(pollUrl, { headers: { Authorization: `Bearer ${await getToken()}` } }, { timeoutMs: 30_000 });
     if (pr.status >= 500) {
       _cbRecordFailure();
       const e = await pr.text();
@@ -6058,13 +6085,14 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,sp_id) VALUES ('executando','api',$1) RETURNING id`, [spId || null]);
     histId = r.rows[0].id;
 
-    // 1) Credenciais e token
+    // 1) Credenciais e token (getter com renovação automática)
     const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [spId]);
     if (!spRow.rows.length) throw new Error('SP não encontrada');
     const spCfg   = spRow.rows[0];
-    const token   = await _managementGetToken(
+    const getToken = _makeTokenGetter(
       _safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret)
     );
+    await getToken(); // valida credenciais logo no início
 
     // 2) SQL de upsert
     await ensureAzureCostsTable();
@@ -6099,7 +6127,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           for (const chunk of chunks) {
             if (_coletaCancelada) break;
             const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
-            const arquivos = await _gerarRelatorioAPI(token, subScope, chunk.start, chunk.end, label, metric);
+            const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
             const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
             totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
           }
@@ -6114,7 +6142,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       _coletaProgresso.fase = 'Listando subscriptions do Billing Profile...';
       let subs = [];
       try {
-        subs = await _listarSubsBillingProfile(token, billingAccountId, billingProfileId);
+        subs = await _listarSubsBillingProfile(await getToken(), billingAccountId, billingProfileId);
         _logColeta(`${subs.length} subscription(s) encontrada(s)`);
       } catch (e) {
         _logColeta(`Aviso: não foi possível listar subscriptions (${e.message})`);
@@ -6145,7 +6173,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
             for (const chunk of chunks) {
               if (_coletaCancelada) break;
               const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
-              const arquivos = await _gerarRelatorioAPI(token, subScope, chunk.start, chunk.end, label, metric);
+              const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
               const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
               totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
             }
@@ -6166,7 +6194,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
             for (const chunk of chunks) {
               if (_coletaCancelada) break;
               const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
-              const arquivos = await _gerarRelatorioAPI(token, bpScope, chunk.start, chunk.end, label, metric);
+              const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric);
               const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
               totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
             }
@@ -6183,7 +6211,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         for (const chunk of chunks) {
           if (_coletaCancelada) break;
           const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
-          const arquivos = await _gerarRelatorioAPI(token, bpScope, chunk.start, chunk.end, label, metric);
+          const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric);
           const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
