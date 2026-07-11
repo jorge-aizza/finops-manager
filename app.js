@@ -4029,13 +4029,8 @@ function abrirEditarAgend(spId) {
   _agendSubSet  = new Set((sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean));
   _agendSubsAll = [];
   const listArea = document.getElementById('agend-subs-list-area');
-  const emptyEl  = document.getElementById('agend-subs-empty');
   if (listArea) listArea.style.display = 'none';
-  if (emptyEl) {
-    emptyEl.textContent = _agendSubSet.size
-      ? `${_agendSubSet.size} assinatura(s) salva(s) — clique em "Carregar do Azure" para ver e editar`
-      : 'Nenhuma assinatura salva — clique em "Carregar do Azure" para selecionar';
-  }
+  _agendRenderTags();
 
   document.getElementById('modal-editar-agend').classList.add('open');
 }
@@ -4082,6 +4077,7 @@ function agendToggleSub(id, checked) {
   checked ? _agendSubSet.add(id) : _agendSubSet.delete(id);
   const counter = document.getElementById('agend-subs-counter');
   if (counter) counter.textContent = `${_agendSubSet.size} selecionada(s) de ${_agendSubsAll.length}`;
+  _agendRenderTags();
 }
 
 function agendFiltrarSubs() { _agendRenderSubs(); }
@@ -4089,6 +4085,34 @@ function agendFiltrarSubs() { _agendRenderSubs(); }
 function agendSelTodasSubs(sel) {
   _agendSubsAll.forEach(s => sel ? _agendSubSet.add(s.subscriptionId) : _agendSubSet.delete(s.subscriptionId));
   _agendRenderSubs();
+  _agendRenderTags();
+}
+
+function agendRemoverSub(id) {
+  _agendSubSet.delete(id);
+  _agendRenderTags();
+  if (_agendSubsAll.length) _agendRenderSubs();
+}
+
+function _agendRenderTags() {
+  const el = document.getElementById('agend-subs-empty');
+  if (!el) return;
+  if (_agendSubSet.size === 0) {
+    el.innerHTML = '<span style="color:var(--text-muted);font-size:12px">Nenhuma assinatura salva — clique em "Carregar do Azure" para selecionar</span>';
+    return;
+  }
+  // Resolve nome a partir do cache do picker (se já carregado)
+  const nameMap = new Map(_agendSubsAll.map(s => [s.subscriptionId, s.nome]));
+  el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:5px">` +
+    [..._agendSubSet].map(id => {
+      const nome = nameMap.get(id) || id;
+      const label = nome !== id ? `<span title="${id}" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">${nome}</span>` : `<span style="font-size:10px;font-family:monospace">${id.slice(0,8)}…</span>`;
+      return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px 3px 10px;background:rgba(147,51,234,.12);border:1px solid rgba(147,51,234,.3);border-radius:20px;font-size:12px;color:var(--text)">
+        ${label}
+        <button onclick="agendRemoverSub('${id}')" title="Remover" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:14px;line-height:1;padding:0;margin:0;flex-shrink:0">✕</button>
+      </span>`;
+    }).join('') +
+  `</div>`;
 }
 
 function fecharEditarAgend() {
