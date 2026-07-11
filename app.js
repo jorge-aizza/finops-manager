@@ -470,8 +470,11 @@ function _syncThemeIcon() {
 // Sincroniza ícone ao carregar (tema pode ter sido lido do localStorage)
 document.addEventListener('DOMContentLoaded', _syncThemeIcon);
 
-function logout() {
-  if (!confirm('Deseja sair do sistema?')) return;
+let _logoutEmAndamento = false;
+function logout(pedirConfirmacao = true) {
+  if (_logoutEmAndamento) return;
+  if (pedirConfirmacao && !confirm('Deseja sair do sistema?')) return;
+  _logoutEmAndamento = true;
   sessionStorage.removeItem('finops_session');
   sessionStorage.removeItem('finops_token');
   localStorage.removeItem('finops_session');
@@ -488,6 +491,7 @@ function logout() {
   document.getElementById('login-email').value = '';
   document.getElementById('login-senha').value = '';
   document.getElementById('login-error').style.display = 'none';
+  _logoutEmAndamento = false;
 }
 let currentView = 'dashboard';
 let allAcoes = [];
@@ -552,7 +556,7 @@ async function api(method, path, body, timeoutMs = 30000) {
       body: body ? JSON.stringify(body) : undefined
     });
     clearTimeout(timer);
-    if (res.status === 401) { logout(); return; }
+    if (res.status === 401) { logout(false); return; }
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Erro desconhecido');
     return data;
@@ -1577,7 +1581,7 @@ function extendSession() {
 function sessionLogout() {
   clearInterval(_countdownInterval);
   clearTimeout(_inactivityTimer);
-  logout();
+  logout(false);
 }
 
 // ── EXPORT EXCEL — EXECUTIVO ──────────────────
