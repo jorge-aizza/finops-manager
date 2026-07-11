@@ -5742,7 +5742,7 @@ app.post('/api/azure-coleta/sps/:id/listar-subs', authMiddleware, dbMiddleware, 
     const r = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
     const cfg = r.rows[0];
-    const token = await _managementGetToken(
+    const { token } = await _managementGetToken(
       _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
     );
 
@@ -5865,15 +5865,17 @@ async function _managementGetToken(tenantId, clientId, clientSecret) {
   return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
 }
 
-// Retorna função getToken() que renova automaticamente 5 min antes do vencimento
+// Retorna função getToken() que renova automaticamente 10 min antes do vencimento
 function _makeTokenGetter(tenantId, clientId, clientSecret) {
   let _tok = null, _exp = 0;
   return async function getToken(force = false) {
-    if (force || !_tok || Date.now() >= _exp - 300_000) {
+    const agoraMs = Date.now();
+    const motivo = force ? 'forçado (401)' : !_tok ? 'primeiro uso' : 'buffer 10 min';
+    if (force || !_tok || agoraMs >= _exp - 600_000) {
       const { token, expiresIn } = await _managementGetToken(tenantId, clientId, clientSecret);
       _tok = token;
-      _exp = Date.now() + expiresIn * 1000;
-      if (force) _logColeta('[Token] Renovado por expiração');
+      _exp = agoraMs + expiresIn * 1000;
+      _logColeta(`[Token] Renovado — motivo: ${motivo}, válido por ${Math.round(expiresIn / 60)} min`);
     }
     return _tok;
   };
