@@ -6136,6 +6136,23 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       _coletaProgresso.fase      = 'Preparando coleta por subscriptions...';
       _coletaProgresso.sub_total = subscriptionIds.length;
       subCount = subscriptionIds.length;
+
+      // Coleta de uma subscription (reutilizada nos passes de recuperação)
+      const _coletarSubId = async (subId) => {
+        const subScope = `/subscriptions/${subId}`;
+        const chunks = _splitDateRange(startDate, endDate);
+        if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+        for (const chunk of chunks) {
+          if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+          const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
+          const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
+          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
+          totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+        }
+      };
+
+      // Passe principal
+      const _subsFalhou = [];
       for (let i = 0; i < subscriptionIds.length; i++) {
         if (_coletaCancelada) { _logColeta('Cancelado'); break; }
         const subId = subscriptionIds[i].trim();
@@ -6144,22 +6161,37 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         _coletaProgresso.sub_atual = subId;
         _coletaProgresso.fase      = `[${i + 1}/${subscriptionIds.length}] ${subId}`;
         try {
-          await _comRetentativa(async () => {
-            const subScope = `/subscriptions/${subId}`;
-            const chunks = _splitDateRange(startDate, endDate);
-            if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
-            for (const chunk of chunks) {
-              if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
-              const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
-              const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
-              const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
-              totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
-            }
-          }, subId);
+          await _comRetentativa(() => _coletarSubId(subId), subId);
         } catch (e) {
-          _logColeta(`  ✗ Falha definitiva — ${subId}: ${e.message}`);
-          totalErr++;
+          _logColeta(`  ✗ Falha após tentativas — ${subId}: ${e.message}`);
+          _subsFalhou.push(subId);
         }
+      }
+
+      // Passes de recuperação — repete apenas as que falharam
+      let aRetentar = [..._subsFalhou];
+      for (let passe = 2; aRetentar.length > 0 && !_coletaCancelada && passe <= 4; passe++) {
+        _logColeta(`\n🔄 Passe ${passe} — recuperando ${aRetentar.length} sub(s): ${aRetentar.join(', ')}`);
+        _logColeta(`  ↻ Aguardando 60s antes do passe ${passe}...`);
+        for (let s = 0; s < 60 && !_coletaCancelada; s++) await new Promise(r => setTimeout(r, 1000));
+        const aindaFalhou = [];
+        for (const subId of aRetentar) {
+          if (_coletaCancelada) break;
+          _coletaProgresso.sub_atual = subId;
+          _coletaProgresso.fase      = `[Passe ${passe}] ${subId}`;
+          try {
+            await _comRetentativa(() => _coletarSubId(subId), subId);
+            _logColeta(`  ✓ ${subId} coletada com sucesso no passe ${passe}`);
+          } catch (e) {
+            _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${subId}`);
+            aindaFalhou.push(subId);
+          }
+        }
+        aRetentar = aindaFalhou;
+      }
+      if (aRetentar.length > 0) {
+        _logColeta(`⚠ ${aRetentar.length} sub(s) não coletada(s) após todos os passes: ${aRetentar.join(', ')}`);
+        totalErr += aRetentar.length;
       }
 
     } else {
@@ -6185,6 +6217,23 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
 
       if (subs.length > 0) {
         _coletaProgresso.sub_total = subs.length + 1; // +1 para passagem de Tax
+
+        // Coleta de uma subscription BP (reutilizada nos passes de recuperação)
+        const _coletarSubBP = async (sub) => {
+          const subScope = `/subscriptions/${sub.subscriptionId}`;
+          const chunks = _splitDateRange(startDate, endDate);
+          if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+          for (const chunk of chunks) {
+            if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+            const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
+            const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
+            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
+            totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+          }
+        };
+
+        // Passe principal
+        const _subsBPFalhou = [];
         for (let i = 0; i < subs.length; i++) {
           if (_coletaCancelada) { _logColeta('Cancelado'); break; }
           const sub = subs[i];
@@ -6192,22 +6241,37 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.sub_atual = sub.nome;
           _coletaProgresso.fase      = `[${i + 1}/${subs.length}] ${sub.nome}`;
           try {
-            await _comRetentativa(async () => {
-              const subScope = `/subscriptions/${sub.subscriptionId}`;
-              const chunks = _splitDateRange(startDate, endDate);
-              if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
-              for (const chunk of chunks) {
-                if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
-                const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
-                const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
-                const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
-                totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
-              }
-            }, sub.nome);
+            await _comRetentativa(() => _coletarSubBP(sub), sub.nome);
           } catch (e) {
-            _logColeta(`  ✗ Falha definitiva — ${sub.nome}: ${e.message}`);
-            totalErr++;
+            _logColeta(`  ✗ Falha após tentativas — ${sub.nome}: ${e.message}`);
+            _subsBPFalhou.push(sub);
           }
+        }
+
+        // Passes de recuperação — repete apenas as que falharam
+        let aRetentarBP = [..._subsBPFalhou];
+        for (let passe = 2; aRetentarBP.length > 0 && !_coletaCancelada && passe <= 4; passe++) {
+          _logColeta(`\n🔄 Passe ${passe} — recuperando ${aRetentarBP.length} sub(s): ${aRetentarBP.map(s => s.nome).join(', ')}`);
+          _logColeta(`  ↻ Aguardando 60s antes do passe ${passe}...`);
+          for (let s = 0; s < 60 && !_coletaCancelada; s++) await new Promise(r => setTimeout(r, 1000));
+          const aindaFalhoBP = [];
+          for (const sub of aRetentarBP) {
+            if (_coletaCancelada) break;
+            _coletaProgresso.sub_atual = sub.nome;
+            _coletaProgresso.fase      = `[Passe ${passe}] ${sub.nome}`;
+            try {
+              await _comRetentativa(() => _coletarSubBP(sub), sub.nome);
+              _logColeta(`  ✓ ${sub.nome} coletada com sucesso no passe ${passe}`);
+            } catch (e) {
+              _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${sub.nome}`);
+              aindaFalhoBP.push(sub);
+            }
+          }
+          aRetentarBP = aindaFalhoBP;
+        }
+        if (aRetentarBP.length > 0) {
+          _logColeta(`⚠ ${aRetentarBP.length} sub(s) não coletada(s) após todos os passes: ${aRetentarBP.map(s => s.nome).join(', ')}`);
+          totalErr += aRetentarBP.length;
         }
 
         // Passagem no Billing Profile para capturar Tax/Purchase/Refund
