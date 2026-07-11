@@ -4980,7 +4980,7 @@ async function _wizardCarregarRGs() {
   try {
     const data = await api('POST', `/azure-coleta/sps/${_wizard.spId}/listar-rgs`, {
       subscription_ids: [..._wizard.selectedSubs],
-    });
+    }, 120_000); // até 2 min para listar RGs de muitas assinaturas
     _wizard.rgs = data.rgs || [];
     _wizardRenderRGs(data.fonte);
   } catch (e) {

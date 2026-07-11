@@ -5796,22 +5796,23 @@ app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, a
       const r = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
       if (!r.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
       const cfg = r.rows[0];
-      const token = await _managementGetToken(
+      const { token } = await _managementGetToken(
         _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
       );
-      const rgs = [];
-      for (const subId of subscription_ids) {
-        try {
-          let url = `https://management.azure.com/subscriptions/${subId}/resourcegroups?api-version=2021-04-01&$top=1000`;
-          while (url) {
-            const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
-            if (!resp.ok) break;
-            const data = await _safeRespJson(resp);
-            for (const rg of (data.value || [])) rgs.push({ subscriptionId: subId, name: rg.name });
-            url = data.nextLink || null;
-          }
-        } catch (_) {}
-      }
+      // Paralelo: busca RGs de todas as subs simultaneamente
+      const results = await Promise.allSettled(subscription_ids.map(async subId => {
+        const subRgs = [];
+        let url = `https://management.azure.com/subscriptions/${subId}/resourcegroups?api-version=2021-04-01&$top=1000`;
+        while (url) {
+          const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+          if (!resp.ok) break;
+          const data = await _safeRespJson(resp);
+          for (const rg of (data.value || [])) subRgs.push({ subscriptionId: subId, name: rg.name });
+          url = data.nextLink || null;
+        }
+        return subRgs;
+      }));
+      const rgs = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
       if (rgs.length > 0) return res.json({ rgs, fonte: 'arm' });
     } catch (_) {}
 
