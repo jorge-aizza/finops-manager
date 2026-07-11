@@ -4033,6 +4033,13 @@ function abrirEditarAgend(spId) {
   _agendRenderTags();
 
   document.getElementById('modal-editar-agend').classList.add('open');
+
+  // Busca nomes em background para exibir nas tags (sem abrir o picker)
+  if (_agendSubSet.size > 0) {
+    api('POST', `/azure-coleta/sps/${spId}/listar-subs`, {})
+      .then(data => { _agendSubsAll = data.subs || []; _agendRenderTags(); })
+      .catch(() => {});
+  }
 }
 
 async function agendBuscarSubs() {
@@ -4105,11 +4112,13 @@ function _agendRenderTags() {
   const nameMap = new Map(_agendSubsAll.map(s => [s.subscriptionId, s.nome]));
   el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:5px">` +
     [..._agendSubSet].map(id => {
-      const nome = nameMap.get(id) || id;
-      const label = nome !== id ? `<span title="${id}" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">${nome}</span>` : `<span style="font-size:10px;font-family:monospace">${id.slice(0,8)}…</span>`;
+      const nome = nameMap.get(id) || '';
+      const label = nome
+        ? `<span title="${id}">${nome}</span>`
+        : `<span style="font-size:11px;font-family:monospace;opacity:.7">${id.slice(0,8)}…</span>`;
       return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px 3px 10px;background:rgba(147,51,234,.12);border:1px solid rgba(147,51,234,.3);border-radius:20px;font-size:12px;color:var(--text)">
         ${label}
-        <button onclick="agendRemoverSub('${id}')" title="Remover" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:14px;line-height:1;padding:0;margin:0;flex-shrink:0">✕</button>
+        <button onclick="agendRemoverSub('${id}')" title="Remover ${id}" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:14px;line-height:1;padding:0;margin:0;flex-shrink:0">✕</button>
       </span>`;
     }).join('') +
   `</div>`;
