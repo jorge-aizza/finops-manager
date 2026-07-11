@@ -6070,6 +6070,26 @@ function _splitDateRange(startDate, endDate) {
   return chunks;
 }
 
+// Executa fn com até `tentativas` tentativas totais, aguardando entre falhas.
+// Lança na última tentativa ou se o usuário cancelar.
+async function _comRetentativa(fn, label, tentativas = 3) {
+  for (let t = 1; t <= tentativas; t++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e.message === 'Cancelado pelo usuário') throw e;
+      if (t === tentativas) throw e;
+      const esperaSeg = t * 30; // 30s na 1ª falha, 60s na 2ª
+      _logColeta(`  ✗ ${label} — tentativa ${t}/${tentativas}: ${e.message}`);
+      _logColeta(`  ↻ Aguardando ${esperaSeg}s antes de nova tentativa...`);
+      for (let s = 0; s < esperaSeg; s++) {
+        if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+  }
+}
+
 async function _executarColetaAPI(spId, billingAccountId, billingProfileId, startDate, endDate, modo = 'billing_profile', subscriptionIds = [], resourceGroups = [], metric = 'ActualCost') {
   if (_coletaEmExecucao) throw new Error('Coleta já em execução');
   if (!pool) throw new Error('Banco não conectado');
@@ -6124,18 +6144,20 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         _coletaProgresso.sub_atual = subId;
         _coletaProgresso.fase      = `[${i + 1}/${subscriptionIds.length}] ${subId}`;
         try {
-          const subScope = `/subscriptions/${subId}`;
-          const chunks = _splitDateRange(startDate, endDate);
-          if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
-          for (const chunk of chunks) {
-            if (_coletaCancelada) break;
-            const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
-            const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
-            const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
-            totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
-          }
+          await _comRetentativa(async () => {
+            const subScope = `/subscriptions/${subId}`;
+            const chunks = _splitDateRange(startDate, endDate);
+            if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+            for (const chunk of chunks) {
+              if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+              const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
+              const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
+              const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
+              totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+            }
+          }, subId);
         } catch (e) {
-          _logColeta(`Erro subscription ${subId}: ${e.message}`);
+          _logColeta(`  ✗ Falha definitiva — ${subId}: ${e.message}`);
           totalErr++;
         }
       }
@@ -6170,18 +6192,20 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.sub_atual = sub.nome;
           _coletaProgresso.fase      = `[${i + 1}/${subs.length}] ${sub.nome}`;
           try {
-            const subScope = `/subscriptions/${sub.subscriptionId}`;
-            const chunks = _splitDateRange(startDate, endDate);
-            if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
-            for (const chunk of chunks) {
-              if (_coletaCancelada) break;
-              const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
-              const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
-              const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
-              totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
-            }
+            await _comRetentativa(async () => {
+              const subScope = `/subscriptions/${sub.subscriptionId}`;
+              const chunks = _splitDateRange(startDate, endDate);
+              if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+              for (const chunk of chunks) {
+                if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+                const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
+                const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
+                const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
+                totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+              }
+            }, sub.nome);
           } catch (e) {
-            _logColeta(`Erro subscription ${sub.nome}: ${e.message}`);
+            _logColeta(`  ✗ Falha definitiva — ${sub.nome}: ${e.message}`);
             totalErr++;
           }
         }
@@ -6193,16 +6217,18 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.fase      = 'Coletando impostos fiscais (Tax) do Billing Profile...';
           _logColeta('Passagem Billing Profile — Tax/Purchase/Refund...');
           try {
-            const chunks = _splitDateRange(startDate, endDate);
-            for (const chunk of chunks) {
-              if (_coletaCancelada) break;
-              const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
-              const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric);
-              const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
-              totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
-            }
+            await _comRetentativa(async () => {
+              const chunks = _splitDateRange(startDate, endDate);
+              for (const chunk of chunks) {
+                if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+                const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
+                const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric);
+                const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
+                totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
+              }
+            }, 'Billing Profile (Tax)');
           } catch (e) {
-            _logColeta(`Aviso: passagem Billing Profile falhou — ${e.message}`);
+            _logColeta(`Aviso: passagem Billing Profile falhou definitivamente — ${e.message}`);
           }
         }
       } else {
