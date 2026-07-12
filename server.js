@@ -328,8 +328,10 @@ async function initDB() {
         ativo         BOOLEAN      DEFAULT true,
         criado_em     TIMESTAMPTZ  DEFAULT NOW()
       );
+      ALTER TABLE diretorias ADD COLUMN IF NOT EXISTS alerta_pct INTEGER DEFAULT 80;
       ALTER TABLE projetos ADD COLUMN IF NOT EXISTS diretoria_id  INTEGER REFERENCES diretorias(id) ON DELETE SET NULL;
       ALTER TABLE projetos ADD COLUMN IF NOT EXISTS budget_mensal NUMERIC(15,2);
+      ALTER TABLE projetos ADD COLUMN IF NOT EXISTS alerta_pct INTEGER DEFAULT 80;
     `);
 
     // ── Business Map — regras de mapeamento recurso→projeto (Fase 2) ──────────
@@ -1340,13 +1342,13 @@ app.post('/api/projetos', authMiddleware, dbMiddleware, async (req, res) => {
 });
 
 app.put('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, diretoria, descricao, diretoria_id, budget_mensal } = req.body;
+  const { nome, diretoria, descricao, diretoria_id, budget_mensal, alerta_pct } = req.body;
   if (!nome || typeof nome !== 'string' || nome.trim().length === 0)
     return res.status(400).json({ error: 'Nome e obrigatorio' });
   try {
     const r = await pool.query(
-      'UPDATE projetos SET nome=$1, diretoria=$2, descricao=$3, diretoria_id=$4, budget_mensal=$5, atualizado_em=NOW() WHERE id=$6 RETURNING *',
-      [nome.trim(), diretoria || null, descricao || null, diretoria_id || null, budget_mensal || null, req.params.id]
+      'UPDATE projetos SET nome=$1, diretoria=$2, descricao=$3, diretoria_id=$4, budget_mensal=$5, alerta_pct=$6, atualizado_em=NOW() WHERE id=$7 RETURNING *',
+      [nome.trim(), diretoria || null, descricao || null, diretoria_id || null, budget_mensal || null, alerta_pct || 80, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Projeto nao encontrado' });
     res.json(r.rows[0]);
@@ -1390,12 +1392,12 @@ app.post('/api/diretorias', authMiddleware, dbMiddleware, async (req, res) => {
 });
 
 app.put('/api/diretorias/:id', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, responsavel, budget_mensal, cor, ativo } = req.body;
+  const { nome, responsavel, budget_mensal, cor, ativo, alerta_pct } = req.body;
   if (!nome?.trim()) return res.status(400).json({ error: 'Nome obrigatorio' });
   try {
     const r = await pool.query(
-      'UPDATE diretorias SET nome=$1,responsavel=$2,budget_mensal=$3,cor=$4,ativo=$5 WHERE id=$6 RETURNING *',
-      [nome.trim(), responsavel||null, budget_mensal||null, cor||'#9333ea', ativo !== false, req.params.id]
+      'UPDATE diretorias SET nome=$1,responsavel=$2,budget_mensal=$3,cor=$4,ativo=$5,alerta_pct=$6 WHERE id=$7 RETURNING *',
+      [nome.trim(), responsavel||null, budget_mensal||null, cor||'#9333ea', ativo !== false, alerta_pct||80, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Diretoria nao encontrada' });
     res.json(r.rows[0]);
@@ -1606,6 +1608,132 @@ app.get('/api/mapa/custos', authMiddleware, dbMiddleware, async (req, res) => {
       diretorias: [...diretoriasMap.values()],
       nao_alocado: { total: parseFloat(naoAlocado.total || 0), total_recursos: parseInt(naoAlocado.total_recursos || 0) }
     });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── TENDÊNCIA MENSAL ─────────────────────────────────────────────────────────
+app.get('/api/mapa/tendencia', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const qtd = Math.min(12, Math.max(2, parseInt(req.query.meses) || 6));
+    const now  = new Date();
+    const end  = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0,10);
+    const start= new Date(now.getFullYear(), now.getMonth() - qtd + 1, 1).toISOString().slice(0,10);
+
+    const rulesR = await pool.query(`
+      SELECT m.id, m.projeto_id, m.campo, m.operador, m.valor
+      FROM projeto_mapeamentos m WHERE m.ativo = true ORDER BY m.projeto_id, m.id`);
+
+    const params = [start, end];
+    let caseExpr = 'NULL::integer';
+    if (rulesR.rows.length) {
+      const whens = rulesR.rows.map(r => {
+        const cond = _mapeamentoWhere(r.campo, r.operador, r.valor, params);
+        return `WHEN (${cond}) THEN ${parseInt(r.projeto_id)}`;
+      });
+      caseExpr = `CASE ${whens.join(' ')} ELSE NULL END`;
+    }
+
+    const r = await pool.query(`
+      WITH tagged AS (
+        SELECT TO_CHAR(DATE_TRUNC('month', cost_date),'YYYY-MM') AS mes,
+               COALESCE(cost_in_billing_currency,0) AS custo,
+               resource_id, ${caseExpr} AS projeto_id
+        FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2
+      )
+      SELECT mes, projeto_id, SUM(custo) AS total
+      FROM tagged GROUP BY mes, projeto_id ORDER BY mes, projeto_id`, params);
+
+    const projetosR = await pool.query(`
+      SELECT p.id, p.nome, p.diretoria_id, d.nome AS diretoria_nome, d.cor AS diretoria_cor
+      FROM projetos p LEFT JOIN diretorias d ON d.id = p.diretoria_id`);
+    const projMap = new Map(projetosR.rows.map(p => [p.id, p]));
+
+    // Gera array de meses mesmo sem dados
+    const mesesArr = [];
+    for (let i = qtd - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      mesesArr.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+    }
+
+    // Pivot por diretoria
+    const dirMap = new Map();
+    const naoAlocMap = {};
+    for (const row of r.rows) {
+      const pid  = row.projeto_id ? parseInt(row.projeto_id) : null;
+      const proj = pid ? projMap.get(pid) : null;
+      const tot  = parseFloat(row.total || 0);
+      if (pid === null) { naoAlocMap[row.mes] = (naoAlocMap[row.mes]||0) + tot; continue; }
+      const dKey = proj?.diretoria_id ?? 'sem';
+      if (!dirMap.has(dKey)) dirMap.set(dKey, { id: proj?.diretoria_id??null, nome: proj?.diretoria_nome||'Sem Diretoria', cor: proj?.diretoria_cor||'#7b6a9e', meses:{} });
+      const dir = dirMap.get(dKey);
+      dir.meses[row.mes] = (dir.meses[row.mes]||0) + tot;
+    }
+
+    res.json({ meses: mesesArr, diretorias: [...dirMap.values()], nao_alocado: naoAlocMap });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── ALERTAS DE BUDGET ────────────────────────────────────────────────────────
+app.get('/api/mapa/alertas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const mes   = (req.query.mes || new Date().toISOString().slice(0,7)).slice(0,7);
+    const [ano, mm] = mes.split('-').map(Number);
+    const start = `${mes}-01`;
+    const end   = new Date(ano, mm, 0).toISOString().slice(0,10);
+
+    const rulesR = await pool.query(`
+      SELECT m.id, m.projeto_id, m.campo, m.operador, m.valor
+      FROM projeto_mapeamentos m WHERE m.ativo=true ORDER BY m.projeto_id, m.id`);
+
+    const params = [start, end];
+    let caseExpr = 'NULL::integer';
+    if (rulesR.rows.length) {
+      const whens = rulesR.rows.map(r => {
+        const cond = _mapeamentoWhere(r.campo, r.operador, r.valor, params);
+        return `WHEN (${cond}) THEN ${parseInt(r.projeto_id)}`;
+      });
+      caseExpr = `CASE ${whens.join(' ')} ELSE NULL END`;
+    }
+
+    const r = await pool.query(`
+      WITH tagged AS (SELECT COALESCE(cost_in_billing_currency,0) AS custo, ${caseExpr} AS projeto_id FROM azure_costs WHERE cost_date>=$1 AND cost_date<=$2)
+      SELECT projeto_id, SUM(custo) AS total FROM tagged GROUP BY projeto_id`, params);
+
+    const costMap = new Map(r.rows.map(row => [row.projeto_id ? parseInt(row.projeto_id) : null, parseFloat(row.total||0)]));
+
+    const projetosR = await pool.query(`
+      SELECT p.id, p.nome, p.budget_mensal, p.alerta_pct, p.diretoria_id,
+             d.nome AS diretoria_nome, d.cor AS diretoria_cor, d.budget_mensal AS dir_budget, d.alerta_pct AS dir_alerta_pct
+      FROM projetos p LEFT JOIN diretorias d ON d.id = p.diretoria_id WHERE p.budget_mensal > 0`);
+
+    const alertas = [];
+    // Alertas por projeto
+    for (const p of projetosR.rows) {
+      const total = costMap.get(p.id) || 0;
+      const threshold = (p.alerta_pct || 80) / 100;
+      const pct = p.budget_mensal > 0 ? Math.round(total / parseFloat(p.budget_mensal) * 100) : 0;
+      if (pct >= (p.alerta_pct || 80)) {
+        alertas.push({ tipo: pct >= 100 ? 'budget_critico' : 'budget_alerta', entidade: 'projeto',
+          id: p.id, nome: p.nome, diretoria: p.diretoria_nome||'', cor: p.diretoria_cor||'#9333ea',
+          total, budget: parseFloat(p.budget_mensal), pct, mes });
+      }
+    }
+
+    // Alertas por diretoria (agrega projetos)
+    const dirsR = await pool.query('SELECT * FROM diretorias WHERE budget_mensal > 0');
+    for (const d of dirsR.rows) {
+      const projsDirIds = projetosR.rows.filter(p => p.diretoria_id === d.id).map(p => p.id);
+      const dirTotal = projsDirIds.reduce((s, pid) => s + (costMap.get(pid)||0), 0);
+      const pct = Math.round(dirTotal / parseFloat(d.budget_mensal) * 100);
+      if (pct >= (d.alerta_pct || 80)) {
+        alertas.push({ tipo: pct >= 100 ? 'budget_critico' : 'budget_alerta', entidade: 'diretoria',
+          id: d.id, nome: d.nome, cor: d.cor||'#9333ea',
+          total: dirTotal, budget: parseFloat(d.budget_mensal), pct, mes });
+      }
+    }
+
+    alertas.sort((a, b) => b.pct - a.pct);
+    res.json(alertas);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

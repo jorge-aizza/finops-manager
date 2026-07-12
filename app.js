@@ -322,13 +322,31 @@ function enterApp() {
 // ── NOTIFICAÇÕES ──────────────────────────────
 async function loadNotificacoes() {
   try {
-    const notifs = await api('GET', '/notificacoes');
+    const [notifs, alertas] = await Promise.all([
+      api('GET', '/notificacoes').catch(() => []),
+      api('GET', '/mapa/alertas').catch(() => []),
+    ]);
+
+    // Converte alertas para formato de notificação
+    const alertasNotif = alertas.map(a => ({
+      _kind:    'budget',
+      tipo:     a.tipo,
+      mensagem: a.pct >= 100
+        ? `🚨 ${a.entidade === 'diretoria' ? 'Diretoria' : 'Projeto'} ultrapassou o budget`
+        : `⚠ ${a.entidade === 'diretoria' ? 'Diretoria' : 'Projeto'} atingiu ${a.pct}% do budget`,
+      acao:     `${escHtml(a.nome)} — R$ ${parseFloat(a.total).toLocaleString('pt-BR',{minimumFractionDigits:2})} / R$ ${parseFloat(a.budget).toLocaleString('pt-BR',{minimumFractionDigits:2})}`,
+      sub:      a.diretoria ? `Diretoria: ${escHtml(a.diretoria)}` : `${a.mes}`,
+      _alertaId: a.id, _entidade: a.entidade,
+    }));
+
+    const todos = [...alertasNotif, ...notifs];
+
     const badge  = document.getElementById('notif-badge');
     const list   = document.getElementById('notif-list');
     const header = document.getElementById('notif-header-count');
     if (!badge || !list) return;
 
-    if (!notifs.length) {
+    if (!todos.length) {
       badge.style.display = 'none';
       list.innerHTML = `<div style="padding:28px 16px;text-align:center;color:var(--text-muted);font-size:13px">
         <div style="font-size:26px;margin-bottom:8px">✅</div>
@@ -338,34 +356,35 @@ async function loadNotificacoes() {
       return;
     }
 
-    const vencidas = notifs.filter(n => n.tipo === 'vencido');
-    const urgentes = notifs.filter(n => n.tipo !== 'vencido');
     badge.style.display = 'flex';
-    badge.textContent = notifs.length;
-    header.textContent = `${notifs.length} pendente${notifs.length !== 1 ? 's' : ''}`;
+    badge.textContent = todos.length;
+    header.textContent = `${todos.length} pendente${todos.length !== 1 ? 's' : ''}`;
 
     const iconMap = {
-      vencido: { icon:'⚠',  bg:'rgba(243,139,168,0.12)', color:'#f38ba8', border:'rgba(243,139,168,0.25)' },
-      hoje:    { icon:'🔴', bg:'rgba(243,139,168,0.08)', color:'#f38ba8', border:'rgba(243,139,168,0.2)'  },
-      urgente: { icon:'🟡', bg:'rgba(249,226,175,0.08)', color:'#f9e2af', border:'rgba(249,226,175,0.2)'  },
-      reserva: { icon:'🔖', bg:'rgba(147,51,234,0.08)',  color:'#c084fc', border:'rgba(147,51,234,0.25)'  },
+      vencido:        { icon:'⚠',  bg:'rgba(243,139,168,0.12)', color:'#f38ba8', border:'rgba(243,139,168,0.25)' },
+      hoje:           { icon:'🔴', bg:'rgba(243,139,168,0.08)', color:'#f38ba8', border:'rgba(243,139,168,0.2)'  },
+      urgente:        { icon:'🟡', bg:'rgba(249,226,175,0.08)', color:'#f9e2af', border:'rgba(249,226,175,0.2)'  },
+      reserva:        { icon:'🔖', bg:'rgba(147,51,234,0.08)',  color:'#c084fc', border:'rgba(147,51,234,0.25)'  },
+      budget_critico: { icon:'🚨', bg:'rgba(255,77,106,0.10)',  color:'var(--danger)', border:'rgba(255,77,106,0.3)' },
+      budget_alerta:  { icon:'💰', bg:'rgba(255,140,66,0.10)',  color:'var(--orange)', border:'rgba(255,140,66,0.3)' },
     };
 
-    list.innerHTML = notifs.map(n => {
+    list.innerHTML = todos.map(n => {
       const s = iconMap[n.tipo] || iconMap.urgente;
+      const isBudget  = n._kind === 'budget';
       const isReserva = n._kind === 'reserva';
-      const onclick = isReserva
-        ? `showView('reservas');closeNotifPanel()`
-        : `viewAcao(${n.id});closeNotifPanel()`;
-      const dataLabel = isReserva ? formatDate(n.data_vencimento) : formatDate(n.data_conclusao);
-      const sub = isReserva
-        ? `${escHtml(n.id_finops)}`
-        : `${escHtml(n.id_finops)} · ${escHtml(n.projeto_nome || '—')}`;
+      const onclick = isBudget
+        ? `showView('mapa');closeNotifPanel()`
+        : isReserva
+          ? `showView('reservas');closeNotifPanel()`
+          : `viewAcao(${n.id});closeNotifPanel()`;
+      const dataLabel = isBudget ? '' : isReserva ? formatDate(n.data_vencimento) : formatDate(n.data_conclusao);
+      const sub = isBudget ? (n.sub||'') : isReserva ? `${escHtml(n.id_finops)}` : `${escHtml(n.id_finops)} · ${escHtml(n.projeto_nome || '—')}`;
       return `<div onclick="${onclick}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;background:${s.bg}" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
         <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
         <div style="flex:1;min-width:0">
-          <div style="font-size:12px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.mensagem)}</div>
-          <div style="font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(n.acao)}</div>
+          <div style="font-size:12px;font-weight:600;color:${s.color};margin-bottom:2px">${n.mensagem}</div>
+          <div style="font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${n.acao}</div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${sub}</div>
         </div>
         <div style="font-size:10px;color:var(--text-dim);white-space:nowrap;padding-top:2px">${dataLabel}</div>
@@ -851,6 +870,8 @@ async function openProjetoModal(data = null) {
   document.getElementById('projeto-nome').value = data?.nome || '';
   document.getElementById('projeto-descricao').value = data?.descricao || '';
   document.getElementById('projeto-budget').value = data?.budget_mensal || '';
+  const alertaEl = document.getElementById('projeto-alerta-pct');
+  if (alertaEl) alertaEl.value = data?.alerta_pct ?? 80;
   // Carrega diretorias no select
   const sel = document.getElementById('projeto-diretoria-id');
   if (sel) {
@@ -889,6 +910,7 @@ async function submitProjeto(e) {
     descricao:     document.getElementById('projeto-descricao').value,
     diretoria_id:  dirId || null,
     budget_mensal: document.getElementById('projeto-budget')?.value || null,
+    alerta_pct:    parseInt(document.getElementById('projeto-alerta-pct')?.value || 80),
   };
   try {
     if (id) await api('PUT', '/projetos/' + id, body);
@@ -903,7 +925,7 @@ async function submitProjeto(e) {
 let _mapaMes = new Date().toISOString().slice(0, 7);
 
 async function loadMapa() {
-  await Promise.all([loadDiretorias(), loadMapaRegras(), loadMapaCustos()]);
+  await Promise.all([loadDiretorias(), loadMapaRegras(), loadMapaCustos(), loadMapaTendencia()]);
 }
 
 function _mapaMesLabel(mes) {
@@ -1043,6 +1065,7 @@ function openDiretoriaModal(data = null) {
   document.getElementById('diretoria-nome').value = data?.nome || '';
   document.getElementById('diretoria-responsavel').value = data?.responsavel || '';
   document.getElementById('diretoria-budget').value = data?.budget_mensal || '';
+  document.getElementById('diretoria-alerta-pct').value = data?.alerta_pct ?? 80;
   document.getElementById('diretoria-cor').value = data?.cor || '#9333ea';
   document.getElementById('modal-diretoria-title').textContent = data ? 'Editar Diretoria' : 'Nova Diretoria';
   document.getElementById('modal-diretoria').classList.add('open');
@@ -1071,6 +1094,7 @@ async function submitDiretoria(e) {
     nome:          document.getElementById('diretoria-nome').value,
     responsavel:   document.getElementById('diretoria-responsavel').value,
     budget_mensal: document.getElementById('diretoria-budget').value || null,
+    alerta_pct:    parseInt(document.getElementById('diretoria-alerta-pct')?.value || 80),
     cor:           document.getElementById('diretoria-cor').value || '#9333ea',
   };
   try {
@@ -1080,6 +1104,94 @@ async function submitDiretoria(e) {
     document.getElementById('modal-diretoria').classList.remove('open');
     loadDiretorias();
   } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+// ── Tendência Mensal ──────────────────────────
+async function loadMapaTendencia() {
+  const el = document.getElementById('mapa-tendencia-body');
+  if (!el) return;
+  el.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">Carregando...</div>';
+  try {
+    const d = await api('GET', '/mapa/tendencia?meses=6');
+    if (!d.meses.length || (!d.diretorias.length && !Object.keys(d.nao_alocado).length)) {
+      el.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">Nenhum dado disponível para tendência. Importe dados de custos e crie mapeamentos.</div>';
+      return;
+    }
+
+    const fmtK = v => {
+      const n = parseFloat(v || 0);
+      if (n >= 1000000) return 'R$ ' + (n/1000000).toFixed(1) + 'M';
+      if (n >= 1000)    return 'R$ ' + (n/1000).toFixed(1) + 'k';
+      return 'R$ ' + n.toLocaleString('pt-BR', { maximumFractionDigits: 0 });
+    };
+    const mesLabel = m => {
+      const [a, mm] = m.split('-');
+      return ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][parseInt(mm)-1] + ' ' + a.slice(2);
+    };
+
+    // Todas as linhas (diretorias + não alocado)
+    const linhas = [
+      ...d.diretorias.map(dir => ({ nome: dir.nome, cor: dir.cor, meses: dir.meses, isDir: true })),
+      ...(Object.keys(d.nao_alocado).length ? [{ nome: 'Não Alocado', cor: '#7b6a9e', meses: d.nao_alocado, isDir: false }] : [])
+    ];
+
+    // Total por mês
+    const totais = {};
+    for (const mes of d.meses) {
+      totais[mes] = linhas.reduce((s, l) => s + (l.meses[mes] || 0), 0);
+    }
+
+    // Máximo global para escala de calor
+    const maxVal = Math.max(...linhas.flatMap(l => d.meses.map(m => l.meses[m] || 0)), 1);
+
+    const deltaCell = (linha) => {
+      const meses = d.meses;
+      const ultimo = linha.meses[meses[meses.length-1]] || 0;
+      const penult = linha.meses[meses[meses.length-2]] || 0;
+      if (!penult) return '<td style="width:70px"></td>';
+      const pct = Math.round((ultimo - penult) / penult * 100);
+      const cor = pct > 10 ? 'var(--danger)' : pct > 0 ? 'var(--orange)' : 'var(--green)';
+      const seta = pct > 0 ? '▲' : '▼';
+      return `<td style="text-align:right;font-size:11px;font-weight:600;color:${cor};white-space:nowrap;padding:8px 10px">${seta} ${Math.abs(pct)}%</td>`;
+    };
+
+    let html = `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="border-bottom:1px solid var(--border)">
+        <th style="text-align:left;padding:8px 12px;color:var(--text-muted);font-weight:500;min-width:140px">Diretoria</th>
+        ${d.meses.map(m => `<th style="text-align:right;padding:8px 10px;color:var(--text-muted);font-weight:500;white-space:nowrap">${mesLabel(m)}</th>`).join('')}
+        <th style="text-align:right;padding:8px 10px;color:var(--text-muted);font-weight:500">Δ 1M</th>
+      </tr></thead>
+      <tbody>`;
+
+    for (const linha of linhas) {
+      html += `<tr style="border-top:1px solid var(--border)">
+        <td style="padding:8px 12px;display:flex;align-items:center;gap:7px">
+          <span style="width:9px;height:9px;border-radius:50%;background:${linha.cor};flex-shrink:0"></span>
+          <span style="font-weight:${linha.isDir?600:400};color:${linha.isDir?'var(--text)':'var(--text-muted)'}">${escHtml(linha.nome)}</span>
+        </td>
+        ${d.meses.map(m => {
+          const v = linha.meses[m] || 0;
+          const intensity = v / maxVal;
+          const bg = v > 0 ? `rgba(${linha.isDir ? '147,51,234' : '123,106,158'},${(intensity * 0.35 + 0.04).toFixed(2)})` : 'transparent';
+          return `<td style="text-align:right;padding:8px 10px;white-space:nowrap;background:${bg};color:${v>0?'var(--text)':'var(--text-muted)'}">${v > 0 ? fmtK(v) : '—'}</td>`;
+        }).join('')}
+        ${deltaCell(linha)}
+      </tr>`;
+    }
+
+    // Linha de total
+    html += `<tr style="border-top:2px solid var(--border);background:rgba(147,51,234,.05)">
+      <td style="padding:8px 12px;font-weight:700;color:var(--accent)">Total</td>
+      ${d.meses.map(m => `<td style="text-align:right;padding:8px 10px;font-weight:700;color:var(--accent);white-space:nowrap">${fmtK(totais[m]||0)}</td>`).join('')}
+      <td style="text-align:right;padding:8px 10px;font-size:11px;font-weight:600;color:${
+        (() => { const meses=d.meses; const u=totais[meses[meses.length-1]]||0; const p=totais[meses[meses.length-2]]||0; return p&&((u-p)/p*100)>0?'var(--danger)':'var(--green)'; })()
+      }"></td>
+    </tr></tbody></table></div>`;
+
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:16px">Erro: ${escHtml(e.message)}</div>`;
+  }
 }
 
 // ── Business Map — Mapeamentos ────────────────
