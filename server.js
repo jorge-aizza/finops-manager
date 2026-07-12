@@ -5019,7 +5019,7 @@ app.get('/api/calculadora/diag-databricks', authMiddleware, dbMiddleware, async 
 // ── GET /api/azure-costs/diag — Diagnóstico da tabela e cache ────────────────
 app.get('/api/azure-costs/diag', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
-    const [cnt, subs, rgs, sample] = await Promise.all([
+    const [cnt, subs, rgs, sample, tags] = await Promise.all([
       pool.query(`SELECT COUNT(*) AS total,
                          COUNT(subscription_id) AS com_sub,
                          COUNT(cost_date) AS com_data,
@@ -5030,6 +5030,10 @@ app.get('/api/azure-costs/diag', authMiddleware, dbMiddleware, async (_req, res)
       pool.query(`SELECT COUNT(*) AS total FROM azure_subs_cache`).catch(() => null),
       pool.query(`SELECT COUNT(*) AS total FROM azure_rg_cache`).catch(() => null),
       pool.query(`SELECT * FROM azure_costs LIMIT 1`).catch(() => null),
+      pool.query(`SELECT COUNT(*) AS total,
+                         COUNT(tags) FILTER (WHERE tags IS NOT NULL AND tags NOT IN ('null','{}','')) AS com_tags,
+                         (SELECT tags FROM azure_costs WHERE tags IS NOT NULL AND tags NOT IN ('null','{}','') LIMIT 1) AS amostra_tag
+                  FROM azure_costs`).catch(() => null),
     ]);
     res.json({
       azure_costs:     { ...cnt?.rows[0] },
@@ -5041,6 +5045,11 @@ app.get('/api/azure-costs/diag', authMiddleware, dbMiddleware, async (_req, res)
         cost_date:       sample.rows[0].cost_date,
         billing_currency:sample.rows[0].billing_currency,
         cost_in_billing_currency: sample.rows[0].cost_in_billing_currency,
+      } : null,
+      tags: tags?.rows[0] ? {
+        total_linhas:  parseInt(tags.rows[0].total   ?? 0),
+        com_tags:      parseInt(tags.rows[0].com_tags ?? 0),
+        amostra:       tags.rows[0].amostra_tag ?? null,
       } : null,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -5340,7 +5349,8 @@ async function ensureAzureColetaTable() {
       detalhes            JSONB
     )
   `);
-  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo VARCHAR(20)`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo   VARCHAR(20)`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS origem VARCHAR(20) DEFAULT 'manual'`);
 }
 
 function _encryptSecret(plain) {
@@ -5399,9 +5409,9 @@ function _iniciarAgendador() {
     // Safety valve: resetar coleta travada há mais de 30 min
     if (_coletaEmExecucao && _coletaIniciadaEm) {
       const elapsedMs = Date.now() - _coletaIniciadaEm.getTime();
-      if (elapsedMs > 30 * 60 * 1000) {
-        console.warn('[Agendador] SAFETY VALVE: coleta travada >30min — resetando');
-        _logColeta('[CB] Safety valve: coleta travada ' + Math.round(elapsedMs / 60000) + 'min — resetando flags');
+      if (elapsedMs > 6 * 60 * 60 * 1000) {
+        console.warn('[Agendador] SAFETY VALVE: coleta travada >6h — resetando');
+        _logColeta('[CB] Safety valve: coleta travada ' + Math.round(elapsedMs / 60000) + 'min (>6h) — resetando flags');
         _coletaEmExecucao = false;
         _coletaIniciadaEm = null;
         _cbAPI.state      = _CB_STATES.CLOSED;
@@ -5484,7 +5494,10 @@ function _iniciarAgendador() {
           modoSp === 'billing_profile' ? _decryptSecret(sp.billing_profile_id) : '',
           fmt(inicio), fmt(fim),
           modoSp,
-          subIds
+          subIds,
+          undefined,   // resourceGroups — default []
+          undefined,   // metric — default 'ActualCost'
+          'agendado'
         ).catch(e => console.error(`[Agendador] Erro coleta API #${sp.id}:`, e.message));
       }
 
@@ -5547,6 +5560,8 @@ app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
 });
 
 app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
+  // Auto-recover: if scheduler timer was lost (e.g. startup race), restart it
+  if (!_agendadorTimer && pool) _iniciarAgendador();
   try {
     await ensureAzureColetaTable();
     const cols = `id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem`;
@@ -5562,6 +5577,7 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
       ultimo:          rAll.rows[0] || null,
       ultimo_api:      rApi.rows[0] || null,
       ultimo_storage:  rStg.rows[0] || null,
+      agendador_ativo: !!_agendadorTimer,
       circuit_breaker: {
         state:      _cbAPI.state,
         failures:   _cbAPI.failures,
@@ -5839,18 +5855,37 @@ app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, a
 // ══════════════════════════════════════════════════════════════════════════════
 
 async function _storageGetToken(tenantId, clientId, clientSecret) {
-  const resp = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials', client_id: clientId,
-      client_secret: clientSecret, scope: 'https://storage.azure.com/.default'
-    }).toString()
-  });
-  if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Storage falhou (${resp.status}): ${e}`); }
-  const tkStg = await _safeRespJson(resp);
-  if (!tkStg.access_token) throw new Error(`Token Storage: resposta sem access_token`);
-  return tkStg.access_token;
+  const ac  = new AbortController();
+  const tid = setTimeout(() => ac.abort(), 30_000);
+  try {
+    const resp = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
+      method: 'POST', signal: ac.signal,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials', client_id: clientId,
+        client_secret: clientSecret, scope: 'https://storage.azure.com/.default'
+      }).toString()
+    });
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Storage falhou (${resp.status}): ${e}`); }
+    const tk = await _safeRespJson(resp);
+    if (!tk.access_token) throw new Error('Token Storage: resposta sem access_token');
+    return { token: tk.access_token, expiresIn: tk.expires_in || 3600 };
+  } finally { clearTimeout(tid); }
+}
+
+// Getter com cache e renovação proativa (buffer de 10 min)
+function _makeStorageTokenGetter(tenantId, clientId, clientSecret) {
+  let _tok = null, _exp = 0;
+  return async function getToken(force = false) {
+    const now    = Date.now();
+    const motivo = force ? 'forçado (401)' : !_tok ? 'primeiro uso' : 'buffer 10 min';
+    if (force || !_tok || now >= _exp - 600_000) {
+      const { token, expiresIn } = await _storageGetToken(tenantId, clientId, clientSecret);
+      _tok = token; _exp = now + expiresIn * 1000;
+      _logColeta(`[Token Storage] Renovado — motivo: ${motivo}, válido por ${Math.round(expiresIn / 60)} min`);
+    }
+    return _tok;
+  };
 }
 
 async function _managementGetToken(tenantId, clientId, clientSecret) {
@@ -6097,7 +6132,7 @@ async function _comRetentativa(fn, label, tentativas = 3) {
   }
 }
 
-async function _executarColetaAPI(spId, billingAccountId, billingProfileId, startDate, endDate, modo = 'billing_profile', subscriptionIds = [], resourceGroups = [], metric = 'ActualCost') {
+async function _executarColetaAPI(spId, billingAccountId, billingProfileId, startDate, endDate, modo = 'billing_profile', subscriptionIds = [], resourceGroups = [], metric = 'ActualCost', origem = 'manual') {
   if (_coletaEmExecucao) throw new Error('Coleta já em execução');
   if (!pool) throw new Error('Banco não conectado');
   _coletaEmExecucao = true;
@@ -6112,7 +6147,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
 
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,sp_id) VALUES ('executando','api',$1) RETURNING id`, [spId || null]);
+    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,sp_id,origem) VALUES ('executando','api',$1,$2) RETURNING id`, [spId || null, origem]);
     histId = r.rows[0].id;
 
     // 1) Credenciais e token (getter com renovação automática)
@@ -6401,7 +6436,8 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
 
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo) VALUES ('executando','storage') RETURNING id`);
+    const origemDb = origem === 'auto' ? 'agendado' : 'manual';
+    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,origem) VALUES ('executando','storage',$1) RETURNING id`, [origemDb]);
     histId = r.rows[0].id;
 
     // Storage config
@@ -6425,13 +6461,19 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     const clientId = _safeDecrypt(sp.client_id);
     const secret   = _safeDecrypt(sp.client_secret);
 
+    // Registra SP usada no histórico
+    if (histId && sp.id) await pool.query(
+      'UPDATE azure_coleta_historico SET sp_id=$1 WHERE id=$2', [sp.id, histId]
+    ).catch(() => {});
+
     _coletaProgresso.fase = 'Autenticando no Azure Storage...';
     _logColeta('Obtendo token de Storage...');
-    const token = await _storageGetToken(tenantId, clientId, secret);
+    const getStorageToken = _makeStorageTokenGetter(tenantId, clientId, secret);
+    await getStorageToken(); // valida credenciais logo no início
 
     _coletaProgresso.fase = 'Listando arquivos no container...';
     _logColeta(`Listando em ${storageAccount}/${container}/${prefix || '*'}`);
-    let blobs = await _storageListBlobs(token, storageAccount, container, prefix);
+    let blobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, prefix);
     blobs = blobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
     _logColeta(`${blobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`);
     if (!blobs.length) throw new Error('Nenhum arquivo CSV/Parquet/ZIP encontrado no caminho configurado');
@@ -6462,7 +6504,16 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
 
       let tmpFile;
       try {
-        tmpFile = await _storageDownloadBlob(token, storageAccount, container, blob.name);
+        let dlToken = await getStorageToken();
+        try {
+          tmpFile = await _storageDownloadBlob(dlToken, storageAccount, container, blob.name);
+        } catch (e401) {
+          if (e401.message.includes('(401)')) {
+            _logColeta(`  [Token Storage] 401 no download — renovando token...`);
+            dlToken = await getStorageToken(true);
+            tmpFile = await _storageDownloadBlob(dlToken, storageAccount, container, blob.name);
+          } else throw e401;
+        }
         const rows = await _lerArquivoRows(tmpFile, blob.name);
         _logColeta(`  ${rows.length} linhas`);
 
@@ -6515,7 +6566,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       _coletaProgresso.fase = 'Coletando Price List do Storage...';
       _logColeta(`[PL] Listando price list em ${storageAccount}/${container}/${plPrefix}`);
       try {
-        let plBlobs = await _storageListBlobs(token, storageAccount, container, plPrefix);
+        let plBlobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, plPrefix);
         plBlobs = plBlobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
         _logColeta(`[PL] ${plBlobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s) para price list`);
         let plIns = 0, plSkip = 0, plErr = 0;
@@ -6523,7 +6574,15 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
           if (_coletaCancelada) break;
           let plTmp;
           try {
-            plTmp = await _storageDownloadBlob(token, storageAccount, container, pb.name);
+            let plTok = await getStorageToken();
+            try {
+              plTmp = await _storageDownloadBlob(plTok, storageAccount, container, pb.name);
+            } catch (e401pl) {
+              if (e401pl.message.includes('(401)')) {
+                plTok = await getStorageToken(true);
+                plTmp = await _storageDownloadBlob(plTok, storageAccount, container, pb.name);
+              } else throw e401pl;
+            }
             const plR = await _importPriceListFromCSV(plTmp, pb.name.split('/').pop());
             plIns  += plR.inserted;
             plSkip += plR.skipped;
@@ -6748,6 +6807,7 @@ app.get('/health', (_req, res) => {
           createPool(cfg);
           await pool.query('SELECT 1');
           console.log('  Banco reconectado com sucesso.');
+          _iniciarAgendador();
         }
       } catch (e2) {
         console.error('  Falha ao reconectar:', e2.message);

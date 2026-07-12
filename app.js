@@ -1389,6 +1389,9 @@ function setRefreshInterval(minutes) {
   _refreshInterval = parseInt(minutes);
   clearInterval(_refreshTimer);
   clearInterval(_countdownTimer);
+  // Sincroniza o select com o valor programático (ex: re-login)
+  const selEl = document.getElementById('refresh-interval');
+  if (selEl) selEl.value = String(_refreshInterval || 0);
   const cdEl = document.getElementById('refresh-countdown');
   if (cdEl) cdEl.textContent = '';
   if (_refreshInterval > 0) {
@@ -1423,7 +1426,6 @@ async function manualRefresh() {
     else if (currentView === 'estimativas') await loadEstimativas();
     else if (currentView === 'reservas')    await loadReservas();
     else if (currentView === 'coleta')      await loadColeta();
-    else if (currentView === 'custos')      await loadAzureCosts?.();
   } finally {
     setTimeout(() => { if (icon) icon.classList.remove('spinning'); }, 500);
   }
@@ -1615,12 +1617,23 @@ async function exportarExcel() {
 
 // ── INIT ──────────────────────────────────────
 (async () => {
-  const session = sessionStorage.getItem('finops_session') || localStorage.getItem('finops_session');
-  const token   = sessionStorage.getItem('finops_token')   || localStorage.getItem('finops_token');
+  const sessFromSS = sessionStorage.getItem('finops_session');
+  const tokFromSS  = sessionStorage.getItem('finops_token');
+  const sessFromLS = localStorage.getItem('finops_session');
+  const tokFromLS  = localStorage.getItem('finops_token');
+  const session = sessFromSS || sessFromLS;
+  const token   = tokFromSS  || tokFromLS;
   if (session && token) {
     try {
       const payload = JSON.parse(atob(token.split('.')[1]));
       if (payload.exp * 1000 < Date.now()) throw new Error('expired');
+      // Auto-login timeout — somente ao restaurar de localStorage (sessionStorage = mesma aba = sempre ok)
+      if (!tokFromSS && tokFromLS) {
+        const horasConfig = parseInt(localStorage.getItem('finops_auto_login_h') ?? '8');
+        if (horasConfig === 0 || Date.now() - payload.iat * 1000 > horasConfig * 3_600_000) {
+          throw new Error('auto-login-timeout');
+        }
+      }
     } catch {
       sessionStorage.removeItem('finops_token');
       sessionStorage.removeItem('finops_session');
@@ -1629,7 +1642,7 @@ async function exportarExcel() {
       await checkFirstRun();
       return;
     }
-    if (!sessionStorage.getItem('finops_token')) {
+    if (!tokFromSS) {
       sessionStorage.setItem('finops_token', token);
       sessionStorage.setItem('finops_session', session);
     }
@@ -1711,6 +1724,7 @@ function roleName(r) {
 // ── CONFIGURAÇÕES / USUÁRIOS ──────────────────
 async function openSettingsModal() {
   document.getElementById('modal-settings').classList.add('open');
+  loadSessaoConfig();
   await renderUsersList();
   renderDbConnectionsList();
   try {
@@ -2747,6 +2761,29 @@ function _updatePortalLink(cfg) {
 function closeSettingsModal() {
   document.getElementById('modal-settings').classList.remove('open');
   if (_coletaPolling) { clearInterval(_coletaPolling); _coletaPolling = null; }
+}
+
+// ── SESSÃO / AUTO-LOGIN ────────────────────────────────────────────────────────
+function loadSessaoConfig() {
+  const h   = localStorage.getItem('finops_auto_login_h') ?? '8';
+  const sel = document.getElementById('sessao-auto-login-h');
+  if (sel) sel.value = h;
+}
+
+function saveSessaoConfig() {
+  const sel = document.getElementById('sessao-auto-login-h');
+  const msg = document.getElementById('sessao-cfg-msg');
+  if (!sel) return;
+  const h = sel.value;
+  localStorage.setItem('finops_auto_login_h', h);
+  if (msg) {
+    msg.textContent = h === '0'
+      ? '✅ Auto-login desativado. Ao fechar o browser, será necessário logar novamente.'
+      : `✅ Auto-login configurado para ${sel.options[sel.selectedIndex].text}.`;
+    msg.style.color = 'var(--green)';
+    msg.style.display = 'block';
+    setTimeout(() => { msg.style.display = 'none'; }, 4000);
+  }
 }
 
 async function renderUsersList() {
@@ -4265,6 +4302,20 @@ async function loadColetaStatus() {
     _atualizarUltimaExec('api',     s.ultimo_api);
     _atualizarUltimaExec('storage', s.ultimo_storage);
 
+    // Indicador de agendador
+    const agBadge = document.getElementById('agendador-status-badge');
+    if (agBadge) {
+      if (s.agendador_ativo) {
+        agBadge.textContent = '✓ Ativo';
+        agBadge.style.background = 'rgba(34,197,94,.12)';
+        agBadge.style.color = 'var(--green)';
+      } else {
+        agBadge.textContent = '⚠ Inativo';
+        agBadge.style.background = 'rgba(255,77,106,.12)';
+        agBadge.style.color = 'var(--danger)';
+      }
+    }
+
     if (s.em_execucao) {
       const isCanceling = s.cancelando;
       const tipo = (s.progresso && s.progresso.tipo) || 'storage';
@@ -5571,6 +5622,7 @@ async function loadColetaHistorico(tipo) {
   if (tab === 'manual') {
     // Histórico de imports manuais (fonte: azure_costs por arquivo)
     if (thead) thead.innerHTML = '<tr><th>Importado em</th><th>Arquivo</th><th style="text-align:right">Linhas</th><th>Período</th><th style="text-align:right">Total Cobrado</th><th>Moeda</th></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty-state" style="color:var(--text-muted)">Carregando...</td></tr>';
     try {
       const rows = await api('GET', '/azure-costs/imports');
       _historicoCache = [];
@@ -5601,12 +5653,13 @@ async function loadColetaHistorico(tipo) {
   }
 
   // API ou Storage
-  if (thead) thead.innerHTML = '<tr><th>Início</th><th>SP</th><th>Status</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>';
+  if (thead) thead.innerHTML = '<tr><th>Início</th><th>SP</th><th>Status</th><th>Origem</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>';
+  if (tbody) tbody.innerHTML = '<tr><td colspan="10" class="empty-state" style="color:var(--text-muted)">Carregando...</td></tr>';
   try {
     const rows = await api('GET', `/azure-coleta/historico?tipo=${tab}`);
     _historicoCache = rows || [];
     if (!rows || !rows.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Nenhuma execução registrada</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">Nenhuma execução registrada</td></tr>';
       return;
     }
     const statusColors = {
@@ -5633,10 +5686,16 @@ async function loadColetaHistorico(tipo) {
       const logBtn = temLog
         ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--accent);color:var(--accent)" onclick="verDetalhesColeta(${idx})" title="Ver log passo a passo">📋 Log</button>`
         : `<span style="font-size:10px;color:var(--text-muted)">—</span>`;
+      const origemBadge = r.origem === 'agendado'
+        ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(34,197,94,.10);color:var(--green)">⏰ Agendada</span>`
+        : r.origem === 'manual'
+        ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(77,166,255,.10);color:var(--blue)">👤 Manual</span>`
+        : `<span style="font-size:10px;color:var(--text-muted)">—</span>`;
       return `<tr>
         <td style="font-size:11px;white-space:nowrap">${inicio}</td>
         <td style="font-size:11px;color:var(--accent);max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${spNomeHist}">${spNomeHist}</td>
         <td><span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:${sc.bg};color:${sc.color}">${sc.label}</span></td>
+        <td>${origemBadge}</td>
         <td style="text-align:right;font-size:12px;color:var(--green)">${ins}</td>
         <td style="text-align:right;font-size:12px;color:var(--accent)">${upd}</td>
         <td style="text-align:right;font-size:12px;color:${r.linhas_erro > 0 ? 'var(--danger)' : 'var(--text-muted)'}">${err}</td>
@@ -5646,7 +5705,7 @@ async function loadColetaHistorico(tipo) {
       </tr>`;
     }).join('');
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty-state">Erro ao carregar histórico</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="empty-state">Erro ao carregar histórico</td></tr>`;
   }
 }
 
@@ -5666,12 +5725,15 @@ function verDetalhesColeta(idx) {
     dur = s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
   }
   const tipo = det.tipo === 'api' ? 'API Oficial' : det.tipo === 'storage' ? 'Via Storage' : '—';
+  const origemLabel = r.origem === 'agendado' ? '⏰ Agendada' : r.origem === 'manual' ? '👤 Manual' : '—';
+  const origemColor = r.origem === 'agendado' ? 'var(--green)' : r.origem === 'manual' ? 'var(--blue)' : 'var(--text-muted)';
   document.getElementById('coleta-det-meta').innerHTML = `
     <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:14px;padding:12px 14px;background:rgba(147,51,234,.08);border-radius:10px;border:1px solid var(--border)">
       <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Início</div><div style="font-size:12px">${inicio}</div></div>
       <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Duração</div><div style="font-size:12px">${dur}</div></div>
       <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Status</div><div style="font-size:12px;font-weight:600;color:${st.color}">${st.label}</div></div>
       <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Tipo</div><div style="font-size:12px">${tipo}</div></div>
+      <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Origem</div><div style="font-size:12px;font-weight:600;color:${origemColor}">${origemLabel}</div></div>
       <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Inseridos</div><div style="font-size:12px;color:var(--green);font-weight:600">${(r.linhas_inseridas??0).toLocaleString('pt-BR')}</div></div>
       <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Atualizados</div><div style="font-size:12px;color:var(--accent);font-weight:600">${(r.linhas_atualizadas??0).toLocaleString('pt-BR')}</div></div>
       ${r.linhas_erro > 0 ? `<div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Erros</div><div style="font-size:12px;color:var(--danger);font-weight:600">${r.linhas_erro.toLocaleString('pt-BR')}</div></div>` : ''}
