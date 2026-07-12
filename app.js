@@ -900,8 +900,115 @@ async function submitProjeto(e) {
 }
 
 // ── MAPA DE NEGÓCIOS ──────────────────────────
+let _mapaMes = new Date().toISOString().slice(0, 7);
+
 async function loadMapa() {
-  await Promise.all([loadDiretorias(), loadMapaRegras()]);
+  await Promise.all([loadDiretorias(), loadMapaRegras(), loadMapaCustos()]);
+}
+
+function _mapaMesLabel(mes) {
+  const [a, m] = mes.split('-');
+  const nomes = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  return `${nomes[parseInt(m)-1]} ${a}`;
+}
+
+function mapaMesAnterior() {
+  const [a, m] = _mapaMes.split('-').map(Number);
+  _mapaMes = m === 1 ? `${a-1}-12` : `${a}-${String(m-1).padStart(2,'0')}`;
+  loadMapaCustos();
+}
+function mapaMesSeguinte() {
+  const [a, m] = _mapaMes.split('-').map(Number);
+  _mapaMes = m === 12 ? `${a+1}-01` : `${a}-${String(m+1).padStart(2,'0')}`;
+  loadMapaCustos();
+}
+
+async function loadMapaCustos() {
+  const el = document.getElementById('mapa-custos-body');
+  const lblMes = document.getElementById('mapa-mes-label');
+  if (!el) return;
+  if (lblMes) lblMes.textContent = _mapaMesLabel(_mapaMes);
+  el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted)">Carregando...</div>';
+  try {
+    const d = await api('GET', `/mapa/custos?mes=${_mapaMes}`);
+    if (!d.diretorias.length && d.nao_alocado.total === 0) {
+      el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted)">Nenhum custo encontrado para este mês.<br><small>Importe dados de custos Azure e crie regras de mapeamento.</small></div>';
+      return;
+    }
+    const fmtBrl = v => 'R$ ' + parseFloat(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const pctBar = (val, budget, cor) => {
+      if (!budget) return '';
+      const pct = Math.min(100, Math.round(val / budget * 100));
+      const barCor = pct >= 100 ? 'var(--danger)' : pct >= 80 ? 'var(--orange)' : cor || 'var(--accent)';
+      return `<div style="margin-top:4px;height:4px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${barCor};border-radius:2px;transition:width .4s"></div>
+      </div><div style="font-size:10px;color:var(--text-muted);margin-top:2px">${pct}% do budget ${fmtBrl(budget)}</div>`;
+    };
+
+    let html = '';
+    let totalGeral = 0;
+
+    for (const dir of d.diretorias) {
+      if (!dir.projetos.length) continue;
+      totalGeral += dir.total;
+      const temBudget = dir.budget_mensal > 0;
+      const pctDir = temBudget ? Math.min(100, Math.round(dir.total / dir.budget_mensal * 100)) : null;
+      const statusCor = pctDir === null ? dir.cor : pctDir >= 100 ? 'var(--danger)' : pctDir >= 80 ? 'var(--orange)' : 'var(--green)';
+
+      html += `<div style="margin-bottom:16px;border:1px solid var(--border);border-radius:12px;overflow:hidden">
+        <div style="padding:14px 18px;background:${dir.cor}18;border-bottom:1px solid ${dir.cor}33;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="width:10px;height:10px;border-radius:50%;background:${dir.cor};flex-shrink:0"></span>
+          <strong style="color:${dir.cor};font-size:14px;flex:1">${escHtml(dir.nome)}</strong>
+          <span style="font-size:13px;font-weight:700;color:${statusCor}">${fmtBrl(dir.total)}</span>
+          ${temBudget ? `<span style="font-size:11px;color:var(--text-muted)">/ ${fmtBrl(dir.budget_mensal)} (${pctDir}%)</span>` : ''}
+        </div>
+        ${temBudget ? `<div style="height:4px;background:rgba(255,255,255,.06)"><div style="height:100%;width:${Math.min(100,pctDir)}%;background:${statusCor};transition:width .4s"></div></div>` : ''}
+        <div style="padding:0">
+          <table style="width:100%;border-collapse:collapse">`;
+
+      for (const p of dir.projetos) {
+        const pctP = p.budget_mensal ? Math.min(100, Math.round(p.total / p.budget_mensal * 100)) : null;
+        const pCor = pctP === null ? dir.cor : pctP >= 100 ? 'var(--danger)' : pctP >= 80 ? 'var(--orange)' : 'var(--green)';
+        html += `<tr style="border-top:1px solid var(--border)">
+          <td style="padding:10px 18px 10px 28px">
+            <div style="font-size:13px">${escHtml(p.nome)}</div>
+            ${pctP !== null ? `<div style="margin-top:3px;height:3px;background:rgba(255,255,255,.06);border-radius:2px"><div style="height:100%;width:${Math.min(100,pctP)}%;background:${pCor};border-radius:2px"></div></div>` : ''}
+          </td>
+          <td style="padding:10px 8px;text-align:right;font-size:11px;color:var(--text-muted);white-space:nowrap">${p.total_recursos} recurso${p.total_recursos===1?'':'s'}</td>
+          <td style="padding:10px 18px;text-align:right;font-weight:600;white-space:nowrap;color:${p.total>0?'var(--accent)':'var(--text-muted)'}">
+            ${fmtBrl(p.total)}
+            ${pctP !== null ? `<div style="font-size:10px;color:${pCor};font-weight:400">${pctP}% / ${fmtBrl(p.budget_mensal)}</div>` : ''}
+          </td>
+        </tr>`;
+      }
+
+      html += `</table></div></div>`;
+    }
+
+    // Sem diretoria (projetos sem diretoria não aparecem em d.diretorias se estiverem vazios)
+    // Não alocado
+    totalGeral += d.nao_alocado.total;
+    if (d.nao_alocado.total > 0) {
+      html += `<div style="border:1px dashed var(--border);border-radius:12px;padding:14px 18px;display:flex;align-items:center;gap:12px;opacity:.8">
+        <span style="font-size:18px">⚪</span>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600;color:var(--text-muted)">Não Alocado</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${d.nao_alocado.total_recursos} recurso${d.nao_alocado.total_recursos===1?'':'s'} sem regra de mapeamento</div>
+        </div>
+        <span style="font-size:14px;font-weight:700;color:var(--orange)">${fmtBrl(d.nao_alocado.total)}</span>
+      </div>`;
+    }
+
+    // Totalizador
+    html = `<div style="display:flex;justify-content:space-between;align-items:center;padding:0 0 16px 0;border-bottom:1px solid var(--border);margin-bottom:16px">
+      <span style="font-size:12px;color:var(--text-muted)">Total do mês</span>
+      <span style="font-size:20px;font-weight:700;color:var(--accent)">${fmtBrl(totalGeral)}</span>
+    </div>` + html;
+
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:16px">Erro: ${escHtml(e.message)}</div>`;
+  }
 }
 
 // ── Diretorias ────────────────────────────────

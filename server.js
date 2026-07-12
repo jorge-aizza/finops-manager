@@ -1414,37 +1414,32 @@ app.delete('/api/diretorias/:id', authMiddleware, dbMiddleware, async (req, res)
 
 // ─── BUSINESS MAP — MAPEAMENTOS ───────────────────────────────────────────────
 // Helper: monta condição SQL para uma regra de mapeamento
+// IMPORTANTE: captura o índice ANTES do push para que $N seja correto
 function _mapeamentoWhere(campo, operador, valor, params) {
-  const i = () => `$${params.length + 1}`;
+  const p = (v) => { const idx = params.length + 1; params.push(v); return `$${idx}`; };
   if (campo === 'resource_group') {
     const v = valor.toUpperCase();
-    if (operador === 'equals')      { params.push(v);         return `UPPER(resource_group_name) = ${i()}`; }
-    if (operador === 'contains')    { params.push(`%${v}%`);  return `UPPER(resource_group_name) LIKE ${i()}`; }
-    if (operador === 'starts_with') { params.push(`${v}%`);   return `UPPER(resource_group_name) LIKE ${i()}`; }
-    if (operador === 'ends_with')   { params.push(`%${v}`);   return `UPPER(resource_group_name) LIKE ${i()}`; }
+    if (operador === 'equals')      return `UPPER(resource_group_name) = ${p(v)}`;
+    if (operador === 'contains')    return `UPPER(resource_group_name) LIKE ${p('%'+v+'%')}`;
+    if (operador === 'starts_with') return `UPPER(resource_group_name) LIKE ${p(v+'%')}`;
+    if (operador === 'ends_with')   return `UPPER(resource_group_name) LIKE ${p('%'+v)}`;
   }
   if (campo === 'resource_id') {
     const v = valor.toLowerCase();
-    if (operador === 'equals')      { params.push(v);         return `LOWER(resource_id) = ${i()}`; }
-    if (operador === 'contains')    { params.push(`%${v}%`);  return `LOWER(resource_id) LIKE ${i()}`; }
-    if (operador === 'starts_with') { params.push(`${v}%`);   return `LOWER(resource_id) LIKE ${i()}`; }
-    if (operador === 'ends_with')   { params.push(`%${v}`);   return `LOWER(resource_id) LIKE ${i()}`; }
+    if (operador === 'equals')      return `LOWER(resource_id) = ${p(v)}`;
+    if (operador === 'contains')    return `LOWER(resource_id) LIKE ${p('%'+v+'%')}`;
+    if (operador === 'starts_with') return `LOWER(resource_id) LIKE ${p(v+'%')}`;
+    if (operador === 'ends_with')   return `LOWER(resource_id) LIKE ${p('%'+v)}`;
   }
-  if (campo === 'subscription_id') {
-    params.push(valor);
-    return `subscription_id = ${i()}`;
-  }
+  if (campo === 'subscription_id') return `subscription_id = ${p(valor)}`;
   if (campo === 'tag') {
     const eqIdx = valor.indexOf('=');
     if (eqIdx > 0) {
-      const k = valor.substring(0, eqIdx).trim();
-      const v = valor.substring(eqIdx + 1).trim();
-      params.push(k); params.push(v);
-      const ki = `$${params.length - 1}`, vi = `$${params.length}`;
-      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ->> ${ki}) ELSE NULL END) = ${vi}`;
+      const kp = p(valor.substring(0, eqIdx).trim());
+      const vp = p(valor.substring(eqIdx + 1).trim());
+      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ->> ${kp}) ELSE NULL END) = ${vp}`;
     } else {
-      params.push(valor.trim());
-      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ? ${i()}) ELSE false END)`;
+      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ? ${p(valor.trim())}) ELSE false END)`;
     }
   }
   return 'false';
@@ -1524,6 +1519,93 @@ app.post('/api/mapeamentos/preview', authMiddleware, dbMiddleware, async (req, r
       ORDER BY total_billing DESC
       LIMIT 200`, params);
     res.json(r.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── MAPA DE CUSTOS ───────────────────────────────────────────────────────────
+app.get('/api/mapa/custos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const mes = (req.query.mes || new Date().toISOString().slice(0, 7)).slice(0, 7);
+    const [ano, mm] = mes.split('-').map(Number);
+    const startDate = `${mes}-01`;
+    const endDate   = new Date(ano, mm, 0).toISOString().slice(0, 10);
+
+    // Todas as regras ativas, ordenadas para first-match-wins (menor projeto_id, menor id)
+    const rulesR = await pool.query(`
+      SELECT m.id, m.projeto_id, m.campo, m.operador, m.valor
+      FROM projeto_mapeamentos m
+      JOIN projetos p ON p.id = m.projeto_id
+      WHERE m.ativo = true
+      ORDER BY m.projeto_id, m.id`);
+
+    // Monta CASE WHEN dinâmico — projeto_id é literal inteiro (vem do nosso DB, não do usuário)
+    const params = [startDate, endDate];
+    let caseExpr = 'NULL::integer';
+    if (rulesR.rows.length) {
+      const whens = rulesR.rows.map(r => {
+        const cond = _mapeamentoWhere(r.campo, r.operador, r.valor, params);
+        return `WHEN (${cond}) THEN ${parseInt(r.projeto_id)}`;
+      });
+      caseExpr = `CASE ${whens.join(' ')} ELSE NULL END`;
+    }
+
+    const r = await pool.query(`
+      WITH tagged AS (
+        SELECT COALESCE(cost_in_billing_currency, 0) AS custo,
+               resource_id,
+               ${caseExpr} AS projeto_id
+        FROM azure_costs
+        WHERE cost_date >= $1 AND cost_date <= $2
+      )
+      SELECT projeto_id,
+             SUM(custo)                    AS total,
+             COUNT(DISTINCT resource_id)   AS total_recursos
+      FROM tagged
+      GROUP BY projeto_id`, params);
+
+    // Projetos com suas diretorias
+    const projetosR = await pool.query(`
+      SELECT p.id, p.nome, p.budget_mensal, p.diretoria_id,
+             d.nome AS diretoria_nome, d.cor AS diretoria_cor, d.budget_mensal AS dir_budget
+      FROM projetos p
+      LEFT JOIN diretorias d ON d.id = p.diretoria_id
+      ORDER BY COALESCE(d.nome,'') NULLS LAST, p.nome`);
+
+    const costMap = new Map(r.rows.map(row => [row.projeto_id ? parseInt(row.projeto_id) : null, row]));
+    const naoAlocado = costMap.get(null) || { total: 0, total_recursos: 0 };
+
+    // Agrupa por diretoria
+    const diretoriasMap = new Map();
+    for (const p of projetosR.rows) {
+      const dKey  = p.diretoria_id ?? 'sem';
+      const dNome = p.diretoria_nome || 'Sem Diretoria';
+      if (!diretoriasMap.has(dKey)) {
+        diretoriasMap.set(dKey, {
+          id: p.diretoria_id ?? null,
+          nome: dNome,
+          cor: p.diretoria_cor || '#7b6a9e',
+          budget_mensal: p.dir_budget ? parseFloat(p.dir_budget) : null,
+          total: 0,
+          projetos: []
+        });
+      }
+      const dir  = diretoriasMap.get(dKey);
+      const info = costMap.get(p.id) || { total: 0, total_recursos: 0 };
+      const tot  = parseFloat(info.total || 0);
+      dir.total += tot;
+      dir.projetos.push({
+        id: p.id, nome: p.nome,
+        budget_mensal: p.budget_mensal ? parseFloat(p.budget_mensal) : null,
+        total: tot,
+        total_recursos: parseInt(info.total_recursos || 0)
+      });
+    }
+
+    res.json({
+      mes,
+      diretorias: [...diretoriasMap.values()],
+      nao_alocado: { total: parseFloat(naoAlocado.total || 0), total_recursos: parseInt(naoAlocado.total_recursos || 0) }
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

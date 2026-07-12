@@ -1601,6 +1601,22 @@
               </table>
             </div>
           </div>
+          <!-- Custo por Diretoria / Projeto -->
+          <div class="card" style="margin-bottom:20px">
+            <div class="card-header" style="flex-wrap:wrap;gap:10px">
+              <span class="card-title">Custo por Diretoria / Projeto</span>
+              <div style="display:flex;align-items:center;gap:8px;margin-left:auto">
+                <button class="btn-ghost" style="padding:4px 10px;font-size:14px" onclick="mapaMesAnterior()">‹</button>
+                <span id="mapa-mes-label" style="font-size:13px;font-weight:600;min-width:90px;text-align:center"></span>
+                <button class="btn-ghost" style="padding:4px 10px;font-size:14px" onclick="mapaMesSeguinte()">›</button>
+                <button class="btn-ghost" style="padding:4px 12px;font-size:11px" onclick="loadMapaCustos()">↺</button>
+              </div>
+            </div>
+            <div style="padding:16px 20px" id="mapa-custos-body">
+              <div style="text-align:center;padding:32px;color:var(--text-muted)">Carregando...</div>
+            </div>
+          </div>
+
           <!-- Regras de mapeamento -->
           <div class="card">
             <div class="card-header">
