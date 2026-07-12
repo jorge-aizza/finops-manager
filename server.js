@@ -5457,6 +5457,8 @@ function _iniciarAgendador() {
       }
 
       // API: agendamento por hora+dia (suporta modo billing_profile e subscription)
+      // Detecção de modo pelas credenciais disponíveis, não pelo campo modo_coleta
+      // (evita bloqueio quando modo_coleta está desatualizado no banco)
       const rApi = await pool.query(`
         SELECT id, nome, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, granularidade_dias, hora_execucao, dias_semana
         FROM azure_coleta_config
@@ -5466,16 +5468,19 @@ function _iniciarAgendador() {
           AND dias_semana IS NOT NULL
           AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
           AND (
-            (COALESCE(modo_coleta,'billing_profile') = 'billing_profile' AND billing_account_id IS NOT NULL AND billing_profile_id IS NOT NULL)
+            (billing_account_id IS NOT NULL AND billing_profile_id IS NOT NULL)
             OR
-            (modo_coleta = 'subscription' AND subscription_ids IS NOT NULL AND subscription_ids <> '')
+            (subscription_ids IS NOT NULL AND subscription_ids <> '')
           )
         ORDER BY proxima_coleta ASC NULLS FIRST
         LIMIT 1
       `);
       if (rApi.rows.length) {
         const sp = rApi.rows[0];
-        const modoSp = sp.modo_coleta || 'billing_profile';
+        // Detecta modo pelo que está disponível, não pelo campo modo_coleta
+        const modoSp = (sp.billing_account_id && sp.billing_profile_id)
+          ? 'billing_profile'
+          : 'subscription';
         console.log(`[Agendador] Disparando coleta API SP #${sp.id} (${sp.nome}) modo=${modoSp}`);
         const proxima = _computeProximaColeta(sp.hora_execucao, sp.dias_semana);
         await pool.query(
