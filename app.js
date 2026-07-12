@@ -4291,6 +4291,34 @@ function _atualizarUltimaExec(tipo, hist) {
   if (msg)    msg.textContent    = hist.mensagem || '—';
 }
 
+async function diagAgendador() {
+  const el = document.getElementById('diag-agendador-body');
+  if (!el) return;
+  el.style.display = 'block';
+  el.innerHTML = '<span style="color:var(--text-muted)">Consultando...</span>';
+  try {
+    const d = await api('GET', '/azure-coleta/diag-agendador');
+    const ok = v => v ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--danger)">✗</span>';
+    let html = `<div style="background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:10px 12px;line-height:1.9">`;
+    html += `<div><b>TZ Node:</b> ${escHtml(d.tz_process)} &nbsp;|&nbsp; <b>Agora:</b> ${escHtml(d.agora_node_local)}</div>`;
+    html += `<div><b>Agendador ativo:</b> ${ok(d.agendador_ativo)} &nbsp;|&nbsp; <b>Coleta em exec:</b> ${ok(d.coleta_em_execucao)} ${d.coleta_em_execucao ? '<span style="color:var(--danger)">(bloqueando!)</span>' : ''}</div>`;
+    if (d.storage_sps && d.storage_sps.length) {
+      html += `<div style="margin-top:6px;color:var(--orange)"><b>⚠ Storage configs (rodam ANTES da API):</b></div>`;
+      d.storage_sps.forEach(s => {
+        html += `<div style="margin-left:10px">• ${escHtml(s.nome)} | ativo:${ok(s.ativo)} | deveria_rodar:${ok(s.deveria_rodar)} | proxima:${s.proxima_coleta ? new Date(s.proxima_coleta).toLocaleString('pt-BR') : 'NULL'} | hora:${s.hora_execucao ?? 'null'} | intervalo:${s.auto_coleta_horas ?? 'null'}h</div>`;
+      });
+    }
+    html += `<div style="margin-top:6px"><b>SPs API:</b></div>`;
+    (d.api_sps || []).forEach(s => {
+      html += `<div style="margin-left:10px">• <b>${escHtml(s.nome)}</b> | ativo:${ok(s.ativo)} | auto_coleta:${ok(s.auto_coleta)} | deveria_rodar:${ok(s.deveria_rodar)} | proxima:${s.proxima_coleta ? new Date(s.proxima_coleta).toLocaleString('pt-BR') : 'NULL'} | modo:${escHtml(s.modo_coleta||'')} | subs:${ok(s.subscription_ids)} | billing:${ok(s.tem_billing)}</div>`;
+    });
+    html += `</div>`;
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<span style="color:var(--danger)">Erro: ${escHtml(e.message)}</span>`;
+  }
+}
+
 async function loadColetaStatus() {
   try {
     const s = await api('GET', '/azure-coleta/status');
