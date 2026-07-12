@@ -317,38 +317,6 @@ async function initDB() {
       UPDATE projetos SET status = 'Ativo' WHERE status IS NULL;
     `);
 
-    // ── Diretorias (Business Map — Fase 1) ────────────────────────────────────
-    await c.query(`
-      CREATE TABLE IF NOT EXISTS diretorias (
-        id            SERIAL PRIMARY KEY,
-        nome          VARCHAR(100) NOT NULL UNIQUE,
-        responsavel   VARCHAR(100),
-        budget_mensal NUMERIC(15,2),
-        cor           VARCHAR(7)   DEFAULT '#9333ea',
-        ativo         BOOLEAN      DEFAULT true,
-        criado_em     TIMESTAMPTZ  DEFAULT NOW()
-      );
-      ALTER TABLE diretorias ADD COLUMN IF NOT EXISTS alerta_pct INTEGER DEFAULT 80;
-      ALTER TABLE projetos ADD COLUMN IF NOT EXISTS diretoria_id  INTEGER REFERENCES diretorias(id) ON DELETE SET NULL;
-      ALTER TABLE projetos ADD COLUMN IF NOT EXISTS budget_mensal NUMERIC(15,2);
-      ALTER TABLE projetos ADD COLUMN IF NOT EXISTS alerta_pct INTEGER DEFAULT 80;
-    `);
-
-    // ── Business Map — regras de mapeamento recurso→projeto (Fase 2) ──────────
-    await c.query(`
-      CREATE TABLE IF NOT EXISTS projeto_mapeamentos (
-        id          SERIAL PRIMARY KEY,
-        projeto_id  INTEGER NOT NULL REFERENCES projetos(id) ON DELETE CASCADE,
-        campo       VARCHAR(30)  NOT NULL,
-        operador    VARCHAR(20)  NOT NULL,
-        valor       TEXT         NOT NULL,
-        ativo       BOOLEAN      DEFAULT true,
-        criado_por  VARCHAR(100),
-        criado_em   TIMESTAMPTZ  DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_mapeamentos_projeto ON projeto_mapeamentos(projeto_id);
-    `);
-
     await c.query(`
       CREATE TABLE IF NOT EXISTS acoes_finops (
         id                  SERIAL PRIMARY KEY,
@@ -1302,37 +1270,26 @@ app.get('/api/diag', authMiddleware, async (req, res) => {
 
 // ─── PROJETOS ────────────────────────────────────────────────────────────────
 app.get('/api/projetos', authMiddleware, dbMiddleware, async (_req, res) => {
-  try {
-    const r = await pool.query(`
-      SELECT p.*, d.nome AS diretoria_nome, d.cor AS diretoria_cor,
-             (SELECT COUNT(*) FROM projeto_mapeamentos m WHERE m.projeto_id = p.id AND m.ativo = true) AS total_regras
-      FROM projetos p
-      LEFT JOIN diretorias d ON d.id = p.diretoria_id
-      ORDER BY p.nome`);
-    res.json(r.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json((await pool.query('SELECT * FROM projetos ORDER BY nome')).rows); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const r = await pool.query(`
-      SELECT p.*, d.nome AS diretoria_nome, d.cor AS diretoria_cor
-      FROM projetos p
-      LEFT JOIN diretorias d ON d.id = p.diretoria_id
-      WHERE p.id = $1`, [req.params.id]);
+    const r = await pool.query('SELECT * FROM projetos WHERE id = $1', [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'Projeto nao encontrado' });
     res.json(r.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/projetos', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, diretoria, descricao, diretoria_id, budget_mensal } = req.body;
+  const { nome, diretoria, descricao } = req.body;
   if (!nome || typeof nome !== 'string' || nome.trim().length === 0)
     return res.status(400).json({ error: 'Nome e obrigatorio' });
   try {
     const r = await pool.query(
-      'INSERT INTO projetos (nome, diretoria, descricao, diretoria_id, budget_mensal) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [nome.trim(), diretoria || null, descricao || null, diretoria_id || null, budget_mensal || null]
+      'INSERT INTO projetos (nome, diretoria, descricao) VALUES ($1,$2,$3) RETURNING *',
+      [nome.trim(), diretoria || null, descricao || null]
     );
     res.status(201).json(r.rows[0]);
   } catch (err) {
@@ -1342,13 +1299,13 @@ app.post('/api/projetos', authMiddleware, dbMiddleware, async (req, res) => {
 });
 
 app.put('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, diretoria, descricao, diretoria_id, budget_mensal, alerta_pct } = req.body;
+  const { nome, diretoria, descricao } = req.body;
   if (!nome || typeof nome !== 'string' || nome.trim().length === 0)
     return res.status(400).json({ error: 'Nome e obrigatorio' });
   try {
     const r = await pool.query(
-      'UPDATE projetos SET nome=$1, diretoria=$2, descricao=$3, diretoria_id=$4, budget_mensal=$5, alerta_pct=$6, atualizado_em=NOW() WHERE id=$7 RETURNING *',
-      [nome.trim(), diretoria || null, descricao || null, diretoria_id || null, budget_mensal || null, alerta_pct || 80, req.params.id]
+      'UPDATE projetos SET nome=$1, diretoria=$2, descricao=$3, atualizado_em=NOW() WHERE id=$4 RETURNING *',
+      [nome.trim(), diretoria || null, descricao || null, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Projeto nao encontrado' });
     res.json(r.rows[0]);
@@ -1359,381 +1316,6 @@ app.delete('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) =
   try {
     await pool.query('DELETE FROM projetos WHERE id = $1', [req.params.id]);
     res.json({ message: 'Projeto removido' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── DIRETORIAS ───────────────────────────────────────────────────────────────
-app.get('/api/diretorias', authMiddleware, dbMiddleware, async (_req, res) => {
-  try {
-    const r = await pool.query(`
-      SELECT d.*,
-             COUNT(p.id) AS total_projetos,
-             COALESCE(SUM(p.budget_mensal),0) AS budget_projetos
-      FROM diretorias d
-      LEFT JOIN projetos p ON p.diretoria_id = d.id
-      GROUP BY d.id ORDER BY d.nome`);
-    res.json(r.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/diretorias', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, responsavel, budget_mensal, cor } = req.body;
-  if (!nome?.trim()) return res.status(400).json({ error: 'Nome obrigatorio' });
-  try {
-    const r = await pool.query(
-      'INSERT INTO diretorias (nome,responsavel,budget_mensal,cor) VALUES ($1,$2,$3,$4) RETURNING *',
-      [nome.trim(), responsavel||null, budget_mensal||null, cor||'#9333ea']
-    );
-    res.status(201).json(r.rows[0]);
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Diretoria com este nome ja existe' });
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/diretorias/:id', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, responsavel, budget_mensal, cor, ativo, alerta_pct } = req.body;
-  if (!nome?.trim()) return res.status(400).json({ error: 'Nome obrigatorio' });
-  try {
-    const r = await pool.query(
-      'UPDATE diretorias SET nome=$1,responsavel=$2,budget_mensal=$3,cor=$4,ativo=$5,alerta_pct=$6 WHERE id=$7 RETURNING *',
-      [nome.trim(), responsavel||null, budget_mensal||null, cor||'#9333ea', ativo !== false, alerta_pct||80, req.params.id]
-    );
-    if (!r.rows.length) return res.status(404).json({ error: 'Diretoria nao encontrada' });
-    res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/diretorias/:id', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    const linked = await pool.query('SELECT COUNT(*) FROM projetos WHERE diretoria_id=$1',[req.params.id]);
-    if (parseInt(linked.rows[0].count) > 0)
-      return res.status(409).json({ error: 'Diretoria possui projetos vinculados. Desvincule-os antes de excluir.' });
-    await pool.query('DELETE FROM diretorias WHERE id=$1', [req.params.id]);
-    res.json({ message: 'Diretoria removida' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── BUSINESS MAP — MAPEAMENTOS ───────────────────────────────────────────────
-// Helper: monta condição SQL para uma regra de mapeamento
-// IMPORTANTE: captura o índice ANTES do push para que $N seja correto
-function _mapeamentoWhere(campo, operador, valor, params) {
-  const p = (v) => { const idx = params.length + 1; params.push(v); return `$${idx}`; };
-  if (campo === 'resource_group') {
-    const v = valor.toUpperCase();
-    if (operador === 'equals')      return `UPPER(resource_group_name) = ${p(v)}`;
-    if (operador === 'contains')    return `UPPER(resource_group_name) LIKE ${p('%'+v+'%')}`;
-    if (operador === 'starts_with') return `UPPER(resource_group_name) LIKE ${p(v+'%')}`;
-    if (operador === 'ends_with')   return `UPPER(resource_group_name) LIKE ${p('%'+v)}`;
-  }
-  if (campo === 'resource_id') {
-    const v = valor.toLowerCase();
-    if (operador === 'equals')      return `LOWER(resource_id) = ${p(v)}`;
-    if (operador === 'contains')    return `LOWER(resource_id) LIKE ${p('%'+v+'%')}`;
-    if (operador === 'starts_with') return `LOWER(resource_id) LIKE ${p(v+'%')}`;
-    if (operador === 'ends_with')   return `LOWER(resource_id) LIKE ${p('%'+v)}`;
-  }
-  if (campo === 'subscription_id') return `subscription_id = ${p(valor)}`;
-  if (campo === 'tag') {
-    const eqIdx = valor.indexOf('=');
-    if (eqIdx > 0) {
-      const kp = p(valor.substring(0, eqIdx).trim());
-      const vp = p(valor.substring(eqIdx + 1).trim());
-      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ->> ${kp}) ELSE NULL END) = ${vp}`;
-    } else {
-      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ? ${p(valor.trim())}) ELSE false END)`;
-    }
-  }
-  return 'false';
-}
-
-app.get('/api/projetos/:id/mapeamentos', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    const r = await pool.query(
-      'SELECT * FROM projeto_mapeamentos WHERE projeto_id=$1 ORDER BY id',
-      [req.params.id]);
-    res.json(r.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/projetos/:id/mapeamentos', authMiddleware, dbMiddleware, async (req, res) => {
-  const { campo, operador, valor } = req.body;
-  const campos_validos = ['resource_group','resource_id','subscription_id','tag'];
-  const ops_validos    = ['equals','contains','starts_with','ends_with'];
-  if (!campos_validos.includes(campo)) return res.status(400).json({ error: 'Campo invalido' });
-  if (!ops_validos.includes(operador) && !(campo === 'tag'))
-    return res.status(400).json({ error: 'Operador invalido' });
-  if (!valor?.trim()) return res.status(400).json({ error: 'Valor obrigatorio' });
-  try {
-    const user = req.user?.nome || req.user?.email || null;
-    const r = await pool.query(
-      'INSERT INTO projeto_mapeamentos(projeto_id,campo,operador,valor,criado_por) VALUES($1,$2,$3,$4,$5) RETURNING *',
-      [req.params.id, campo, operador, valor.trim(), user]
-    );
-    res.status(201).json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/mapeamentos/:rid', authMiddleware, dbMiddleware, async (req, res) => {
-  const { campo, operador, valor, ativo } = req.body;
-  try {
-    const r = await pool.query(
-      'UPDATE projeto_mapeamentos SET campo=$1,operador=$2,valor=$3,ativo=$4 WHERE id=$5 RETURNING *',
-      [campo, operador, valor?.trim(), ativo !== false, req.params.rid]
-    );
-    if (!r.rows.length) return res.status(404).json({ error: 'Regra nao encontrada' });
-    res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/mapeamentos/:rid', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM projeto_mapeamentos WHERE id=$1', [req.params.rid]);
-    res.json({ message: 'Regra removida' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/mapeamentos/preview', authMiddleware, dbMiddleware, async (req, res) => {
-  const { campo, operador, valor, data_inicio, data_fim } = req.body;
-  if (!campo || !valor?.trim()) return res.status(400).json({ error: 'campo e valor sao obrigatorios' });
-  try {
-    const params = [];
-    const cond = _mapeamentoWhere(campo, operador || 'contains', valor, params);
-    const dateConds = [];
-    if (data_inicio) { params.push(data_inicio); dateConds.push(`cost_date >= $${params.length}`); }
-    if (data_fim)    { params.push(data_fim);    dateConds.push(`cost_date <= $${params.length}`); }
-    if (!dateConds.length) {
-      params.push(30);
-      dateConds.push(`cost_date >= NOW() - ($${params.length} || ' days')::interval`);
-    }
-    const where = `(${cond}) AND ${dateConds.join(' AND ')}`;
-    const r = await pool.query(`
-      SELECT
-        resource_id,
-        MAX(COALESCE(NULLIF(SPLIT_PART(resource_id,'/',9),''), resource_id)) AS nome_recurso,
-        MAX(resource_group_name)               AS resource_group_name,
-        MAX(subscription_id)                   AS subscription_id,
-        SUM(COALESCE(cost_in_billing_currency,0)) AS total_billing,
-        MAX(cost_date::text)                   AS ultima_data
-      FROM azure_costs
-      WHERE ${where}
-      GROUP BY resource_id
-      ORDER BY total_billing DESC
-      LIMIT 200`, params);
-    res.json(r.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── MAPA DE CUSTOS ───────────────────────────────────────────────────────────
-app.get('/api/mapa/custos', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    const mes = (req.query.mes || new Date().toISOString().slice(0, 7)).slice(0, 7);
-    const [ano, mm] = mes.split('-').map(Number);
-    const startDate = `${mes}-01`;
-    const endDate   = new Date(ano, mm, 0).toISOString().slice(0, 10);
-
-    // Todas as regras ativas, ordenadas para first-match-wins (menor projeto_id, menor id)
-    const rulesR = await pool.query(`
-      SELECT m.id, m.projeto_id, m.campo, m.operador, m.valor
-      FROM projeto_mapeamentos m
-      JOIN projetos p ON p.id = m.projeto_id
-      WHERE m.ativo = true
-      ORDER BY m.projeto_id, m.id`);
-
-    // Monta CASE WHEN dinâmico — projeto_id é literal inteiro (vem do nosso DB, não do usuário)
-    const params = [startDate, endDate];
-    let caseExpr = 'NULL::integer';
-    if (rulesR.rows.length) {
-      const whens = rulesR.rows.map(r => {
-        const cond = _mapeamentoWhere(r.campo, r.operador, r.valor, params);
-        return `WHEN (${cond}) THEN ${parseInt(r.projeto_id)}`;
-      });
-      caseExpr = `CASE ${whens.join(' ')} ELSE NULL END`;
-    }
-
-    const r = await pool.query(`
-      WITH tagged AS (
-        SELECT COALESCE(cost_in_billing_currency, 0) AS custo,
-               resource_id,
-               ${caseExpr} AS projeto_id
-        FROM azure_costs
-        WHERE cost_date >= $1 AND cost_date <= $2
-      )
-      SELECT projeto_id,
-             SUM(custo)                    AS total,
-             COUNT(DISTINCT resource_id)   AS total_recursos
-      FROM tagged
-      GROUP BY projeto_id`, params);
-
-    // Projetos com suas diretorias
-    const projetosR = await pool.query(`
-      SELECT p.id, p.nome, p.budget_mensal, p.diretoria_id,
-             d.nome AS diretoria_nome, d.cor AS diretoria_cor, d.budget_mensal AS dir_budget
-      FROM projetos p
-      LEFT JOIN diretorias d ON d.id = p.diretoria_id
-      ORDER BY COALESCE(d.nome,'') NULLS LAST, p.nome`);
-
-    const costMap = new Map(r.rows.map(row => [row.projeto_id ? parseInt(row.projeto_id) : null, row]));
-    const naoAlocado = costMap.get(null) || { total: 0, total_recursos: 0 };
-
-    // Agrupa por diretoria
-    const diretoriasMap = new Map();
-    for (const p of projetosR.rows) {
-      const dKey  = p.diretoria_id ?? 'sem';
-      const dNome = p.diretoria_nome || 'Sem Diretoria';
-      if (!diretoriasMap.has(dKey)) {
-        diretoriasMap.set(dKey, {
-          id: p.diretoria_id ?? null,
-          nome: dNome,
-          cor: p.diretoria_cor || '#7b6a9e',
-          budget_mensal: p.dir_budget ? parseFloat(p.dir_budget) : null,
-          total: 0,
-          projetos: []
-        });
-      }
-      const dir  = diretoriasMap.get(dKey);
-      const info = costMap.get(p.id) || { total: 0, total_recursos: 0 };
-      const tot  = parseFloat(info.total || 0);
-      dir.total += tot;
-      dir.projetos.push({
-        id: p.id, nome: p.nome,
-        budget_mensal: p.budget_mensal ? parseFloat(p.budget_mensal) : null,
-        total: tot,
-        total_recursos: parseInt(info.total_recursos || 0)
-      });
-    }
-
-    res.json({
-      mes,
-      diretorias: [...diretoriasMap.values()],
-      nao_alocado: { total: parseFloat(naoAlocado.total || 0), total_recursos: parseInt(naoAlocado.total_recursos || 0) }
-    });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── TENDÊNCIA MENSAL ─────────────────────────────────────────────────────────
-app.get('/api/mapa/tendencia', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    const qtd = Math.min(12, Math.max(2, parseInt(req.query.meses) || 6));
-    const now  = new Date();
-    const end  = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0,10);
-    const start= new Date(now.getFullYear(), now.getMonth() - qtd + 1, 1).toISOString().slice(0,10);
-
-    const rulesR = await pool.query(`
-      SELECT m.id, m.projeto_id, m.campo, m.operador, m.valor
-      FROM projeto_mapeamentos m WHERE m.ativo = true ORDER BY m.projeto_id, m.id`);
-
-    const params = [start, end];
-    let caseExpr = 'NULL::integer';
-    if (rulesR.rows.length) {
-      const whens = rulesR.rows.map(r => {
-        const cond = _mapeamentoWhere(r.campo, r.operador, r.valor, params);
-        return `WHEN (${cond}) THEN ${parseInt(r.projeto_id)}`;
-      });
-      caseExpr = `CASE ${whens.join(' ')} ELSE NULL END`;
-    }
-
-    const r = await pool.query(`
-      WITH tagged AS (
-        SELECT TO_CHAR(DATE_TRUNC('month', cost_date),'YYYY-MM') AS mes,
-               COALESCE(cost_in_billing_currency,0) AS custo,
-               resource_id, ${caseExpr} AS projeto_id
-        FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2
-      )
-      SELECT mes, projeto_id, SUM(custo) AS total
-      FROM tagged GROUP BY mes, projeto_id ORDER BY mes, projeto_id`, params);
-
-    const projetosR = await pool.query(`
-      SELECT p.id, p.nome, p.diretoria_id, d.nome AS diretoria_nome, d.cor AS diretoria_cor
-      FROM projetos p LEFT JOIN diretorias d ON d.id = p.diretoria_id`);
-    const projMap = new Map(projetosR.rows.map(p => [p.id, p]));
-
-    // Gera array de meses mesmo sem dados
-    const mesesArr = [];
-    for (let i = qtd - 1; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      mesesArr.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
-    }
-
-    // Pivot por diretoria
-    const dirMap = new Map();
-    const naoAlocMap = {};
-    for (const row of r.rows) {
-      const pid  = row.projeto_id ? parseInt(row.projeto_id) : null;
-      const proj = pid ? projMap.get(pid) : null;
-      const tot  = parseFloat(row.total || 0);
-      if (pid === null) { naoAlocMap[row.mes] = (naoAlocMap[row.mes]||0) + tot; continue; }
-      const dKey = proj?.diretoria_id ?? 'sem';
-      if (!dirMap.has(dKey)) dirMap.set(dKey, { id: proj?.diretoria_id??null, nome: proj?.diretoria_nome||'Sem Diretoria', cor: proj?.diretoria_cor||'#7b6a9e', meses:{} });
-      const dir = dirMap.get(dKey);
-      dir.meses[row.mes] = (dir.meses[row.mes]||0) + tot;
-    }
-
-    res.json({ meses: mesesArr, diretorias: [...dirMap.values()], nao_alocado: naoAlocMap });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── ALERTAS DE BUDGET ────────────────────────────────────────────────────────
-app.get('/api/mapa/alertas', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    const mes   = (req.query.mes || new Date().toISOString().slice(0,7)).slice(0,7);
-    const [ano, mm] = mes.split('-').map(Number);
-    const start = `${mes}-01`;
-    const end   = new Date(ano, mm, 0).toISOString().slice(0,10);
-
-    const rulesR = await pool.query(`
-      SELECT m.id, m.projeto_id, m.campo, m.operador, m.valor
-      FROM projeto_mapeamentos m WHERE m.ativo=true ORDER BY m.projeto_id, m.id`);
-
-    const params = [start, end];
-    let caseExpr = 'NULL::integer';
-    if (rulesR.rows.length) {
-      const whens = rulesR.rows.map(r => {
-        const cond = _mapeamentoWhere(r.campo, r.operador, r.valor, params);
-        return `WHEN (${cond}) THEN ${parseInt(r.projeto_id)}`;
-      });
-      caseExpr = `CASE ${whens.join(' ')} ELSE NULL END`;
-    }
-
-    const r = await pool.query(`
-      WITH tagged AS (SELECT COALESCE(cost_in_billing_currency,0) AS custo, ${caseExpr} AS projeto_id FROM azure_costs WHERE cost_date>=$1 AND cost_date<=$2)
-      SELECT projeto_id, SUM(custo) AS total FROM tagged GROUP BY projeto_id`, params);
-
-    const costMap = new Map(r.rows.map(row => [row.projeto_id ? parseInt(row.projeto_id) : null, parseFloat(row.total||0)]));
-
-    const projetosR = await pool.query(`
-      SELECT p.id, p.nome, p.budget_mensal, p.alerta_pct, p.diretoria_id,
-             d.nome AS diretoria_nome, d.cor AS diretoria_cor, d.budget_mensal AS dir_budget, d.alerta_pct AS dir_alerta_pct
-      FROM projetos p LEFT JOIN diretorias d ON d.id = p.diretoria_id WHERE p.budget_mensal > 0`);
-
-    const alertas = [];
-    // Alertas por projeto
-    for (const p of projetosR.rows) {
-      const total = costMap.get(p.id) || 0;
-      const threshold = (p.alerta_pct || 80) / 100;
-      const pct = p.budget_mensal > 0 ? Math.round(total / parseFloat(p.budget_mensal) * 100) : 0;
-      if (pct >= (p.alerta_pct || 80)) {
-        alertas.push({ tipo: pct >= 100 ? 'budget_critico' : 'budget_alerta', entidade: 'projeto',
-          id: p.id, nome: p.nome, diretoria: p.diretoria_nome||'', cor: p.diretoria_cor||'#9333ea',
-          total, budget: parseFloat(p.budget_mensal), pct, mes });
-      }
-    }
-
-    // Alertas por diretoria (agrega projetos)
-    const dirsR = await pool.query('SELECT * FROM diretorias WHERE budget_mensal > 0');
-    for (const d of dirsR.rows) {
-      const projsDirIds = projetosR.rows.filter(p => p.diretoria_id === d.id).map(p => p.id);
-      const dirTotal = projsDirIds.reduce((s, pid) => s + (costMap.get(pid)||0), 0);
-      const pct = Math.round(dirTotal / parseFloat(d.budget_mensal) * 100);
-      if (pct >= (d.alerta_pct || 80)) {
-        alertas.push({ tipo: pct >= 100 ? 'budget_critico' : 'budget_alerta', entidade: 'diretoria',
-          id: d.id, nome: d.nome, cor: d.cor||'#9333ea',
-          total: dirTotal, budget: parseFloat(d.budget_mensal), pct, mes });
-      }
-    }
-
-    alertas.sort((a, b) => b.pct - a.pct);
-    res.json(alertas);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
