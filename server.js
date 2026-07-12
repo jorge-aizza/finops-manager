@@ -5406,9 +5406,8 @@ function _computeProximaColeta(horaExecucao, diasSemanaStr) {
 
 function _iniciarAgendador() {
   if (_agendadorTimer) return;
-  // Verifica a cada 5 minutos se alguma coleta está agendada para o momento atual
-  _agendadorTimer = setInterval(async () => {
-    // Safety valve: resetar coleta travada há mais de 30 min
+  const _tickAgendador = async () => {
+    // Safety valve: resetar coleta travada há mais de 6h
     if (_coletaEmExecucao && _coletaIniciadaEm) {
       const elapsedMs = Date.now() - _coletaIniciadaEm.getTime();
       if (elapsedMs > 6 * 60 * 60 * 1000) {
@@ -5424,8 +5423,6 @@ function _iniciarAgendador() {
     if (_coletaEmExecucao || !pool) return;
     try {
       await ensureAzureColetaTable();
-      // Garante que NOW() no PostgreSQL use o mesmo fuso do processo Node
-      await pool.query(`SET LOCAL timezone = 'America/Sao_Paulo'`);
       // Storage: suporta agendamento por hora+dia ou por intervalo (legado)
       const rStg = await pool.query(`
         SELECT id, nome, hora_execucao, dias_semana, auto_coleta_horas
@@ -5551,7 +5548,11 @@ function _iniciarAgendador() {
     } catch (e) {
       console.warn('[Agendador] Erro ao verificar schedule:', e.message);
     }
-  }, 5 * 60 * 1000); // 5 min
+  };
+  // Dispara imediatamente ao iniciar (pega coletas atrasadas pós-restart)
+  // e depois a cada 5 minutos
+  _tickAgendador();
+  _agendadorTimer = setInterval(_tickAgendador, 5 * 60 * 1000);
 }
 
 // ── Endpoints coleta ──────────────────────────────────────────────────────────
