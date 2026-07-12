@@ -1,4 +1,6 @@
-﻿'use strict';
+﻿process.env.TZ = process.env.TZ || 'America/Sao_Paulo'; // deve vir antes de qualquer require
+
+'use strict';
 
 // ─── AUTO-LOAD .env or .env.enc ──────────────────────────────────────────────
 (function loadEnv() {
@@ -5422,6 +5424,8 @@ function _iniciarAgendador() {
     if (_coletaEmExecucao || !pool) return;
     try {
       await ensureAzureColetaTable();
+      // Garante que NOW() no PostgreSQL use o mesmo fuso do processo Node
+      await pool.query(`SET LOCAL timezone = 'America/Sao_Paulo'`);
       // Storage: suporta agendamento por hora+dia ou por intervalo (legado)
       const rStg = await pool.query(`
         SELECT id, nome, hora_execucao, dias_semana, auto_coleta_horas
