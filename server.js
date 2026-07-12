@@ -5557,6 +5557,35 @@ function _iniciarAgendador() {
 
 // ── Endpoints coleta ──────────────────────────────────────────────────────────
 
+app.get('/api/azure-coleta/diag-agendador', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const now = new Date();
+    const [rApi, rStg] = await Promise.all([
+      pool.query(`
+        SELECT id, nome, ativo, auto_coleta, modo_coleta, hora_execucao, dias_semana,
+               subscription_ids, billing_account_id IS NOT NULL AS tem_billing,
+               proxima_coleta, NOW() AS agora_pg,
+               (proxima_coleta IS NULL OR proxima_coleta <= NOW()) AS deveria_rodar
+        FROM azure_coleta_config ORDER BY id`),
+      pool.query(`
+        SELECT id, nome, ativo, hora_execucao, dias_semana, auto_coleta_horas,
+               proxima_coleta, NOW() AS agora_pg,
+               (proxima_coleta IS NULL OR proxima_coleta <= NOW()) AS deveria_rodar
+        FROM azure_storage_config ORDER BY id`),
+    ]);
+    res.json({
+      agora_node:        now.toISOString(),
+      agora_node_local:  now.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }),
+      tz_process:        process.env.TZ || '(nao definido)',
+      coleta_em_execucao: _coletaEmExecucao,
+      agendador_ativo:   !!_agendadorTimer,
+      api_sps:           rApi.rows,
+      storage_sps:       rStg.rows,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
   if (!_coletaEmExecucao) return res.status(409).json({ error: 'Nenhuma coleta em execução' });
   _coletaCancelada = true;
