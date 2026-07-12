@@ -514,15 +514,15 @@ function showView(view) {
   }
   currentView = view;
 
-  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure' };
+  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure', mapa: 'Mapa de Negócios' };
   document.getElementById('page-title').textContent = titles[view] || view;
 
   const btn = document.getElementById('top-action-btn');
   const btnImport = document.getElementById('btn-import-projetos');
-  btn.style.display = (['dashboard', 'calculadora', 'estimativas', 'coleta'].includes(view)) ? 'none' : 'flex';
+  btn.style.display = (['dashboard', 'calculadora', 'estimativas', 'coleta', 'mapa'].includes(view)) ? 'none' : 'flex';
   btnImport.style.display = (view === 'projetos') ? 'flex' : 'none';
   btn.textContent = '';
-  if (!['dashboard', 'estimativas'].includes(view)) {
+  if (!['dashboard', 'estimativas', 'mapa'].includes(view)) {
     const labels = { projetos: 'Novo Projeto', acoes: 'Nova Ação', reservas: 'Nova Reserva' };
     btn.innerHTML = `<svg viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> ${labels[view] || 'Novo'}`;
     if (view === 'reservas') btn.setAttribute('onclick', 'openReservaModal()');
@@ -536,6 +536,7 @@ function showView(view) {
   if (view === 'estimativas') loadEstimativas();
   if (view === 'reservas') loadReservas();
   if (view === 'coleta') loadColeta();
+  if (view === 'mapa') loadMapa();
 }
 
 function openModal() {
@@ -811,16 +812,23 @@ async function loadProjetos() {
     document.getElementById('projetos-count').textContent = projetos.length;
     const tbody = document.getElementById('projetos-tbody');
     if (!projetos.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum projeto cadastrado</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nenhum projeto cadastrado</td></tr>';
       return;
     }
-    tbody.innerHTML = projetos.map(p => `
-      <tr>
+    tbody.innerHTML = projetos.map(p => {
+      const dirLabel = p.diretoria_nome
+        ? `<span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;background:${p.diretoria_cor}22;color:${p.diretoria_cor};border:1px solid ${p.diretoria_cor}44">${escHtml(p.diretoria_nome)}</span>`
+        : `<span style="color:var(--text-muted)">—</span>`;
+      const regrasLabel = parseInt(p.total_regras||0) > 0
+        ? `<button class="btn-ghost" style="font-size:11px;padding:2px 10px;border-color:var(--accent);color:var(--accent)" onclick="abrirMapeamento(${p.id},'${escHtml(p.nome)}')" title="Gerenciar regras de mapeamento">🗺 ${p.total_regras} regra${p.total_regras==1?'':'s'}</button>`
+        : `<button class="btn-ghost" style="font-size:11px;padding:2px 10px;color:var(--text-muted)" onclick="abrirMapeamento(${p.id},'${escHtml(p.nome)}')" title="Adicionar regras de mapeamento">🗺 Mapear</button>`;
+      return `<tr>
         <td><span class="finops-id">#${p.id}</span></td>
         <td><strong>${escHtml(p.nome)}</strong></td>
-        <td style="color:var(--text-muted)">${escHtml(p.diretoria || '—')}</td>
+        <td>${dirLabel}</td>
         <td style="color:var(--text-muted)">${escHtml(p.descricao || '—')}</td>
         <td style="color:var(--text-muted);font-size:12px">${formatDate(p.created_at)}</td>
+        <td>${regrasLabel}</td>
         <td>
           <div class="table-actions">
             <button class="btn-icon" onclick="editProjeto(${p.id})" title="Editar">
@@ -831,17 +839,27 @@ async function loadProjetos() {
             </button>
           </div>
         </td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
   } catch (e) {
     showToast('Erro ao carregar projetos: ' + e.message, 'error');
   }
 }
 
-function openProjetoModal(data = null) {
+async function openProjetoModal(data = null) {
   document.getElementById('projeto-id').value = data?.id || '';
   document.getElementById('projeto-nome').value = data?.nome || '';
-  document.getElementById('projeto-diretoria').value = data?.diretoria || '';
   document.getElementById('projeto-descricao').value = data?.descricao || '';
+  document.getElementById('projeto-budget').value = data?.budget_mensal || '';
+  // Carrega diretorias no select
+  const sel = document.getElementById('projeto-diretoria-id');
+  if (sel) {
+    try {
+      const dirs = await api('GET', '/diretorias');
+      sel.innerHTML = '<option value="">Sem diretoria</option>' +
+        dirs.filter(d => d.ativo).map(d => `<option value="${d.id}" ${data?.diretoria_id==d.id?'selected':''}>${escHtml(d.nome)}</option>`).join('');
+    } catch { sel.innerHTML = '<option value="">Sem diretoria</option>'; }
+  }
   document.getElementById('modal-projeto-title').textContent = data ? 'Editar Projeto' : 'Novo Projeto';
   document.getElementById('modal-projeto').classList.add('open');
 }
@@ -865,10 +883,12 @@ async function deleteProjeto(id) {
 async function submitProjeto(e) {
   e.preventDefault();
   const id = document.getElementById('projeto-id').value;
+  const dirId = document.getElementById('projeto-diretoria-id')?.value;
   const body = {
-    nome: document.getElementById('projeto-nome').value,
-    diretoria: document.getElementById('projeto-diretoria').value,
-    descricao: document.getElementById('projeto-descricao').value
+    nome:          document.getElementById('projeto-nome').value,
+    descricao:     document.getElementById('projeto-descricao').value,
+    diretoria_id:  dirId || null,
+    budget_mensal: document.getElementById('projeto-budget')?.value || null,
   };
   try {
     if (id) await api('PUT', '/projetos/' + id, body);
@@ -877,6 +897,226 @@ async function submitProjeto(e) {
     document.getElementById('modal-projeto').classList.remove('open');
     loadProjetos();
   } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+// ── MAPA DE NEGÓCIOS ──────────────────────────
+async function loadMapa() {
+  await Promise.all([loadDiretorias(), loadMapaRegras()]);
+}
+
+// ── Diretorias ────────────────────────────────
+async function loadDiretorias() {
+  const tbody = document.getElementById('diretorias-tbody');
+  if (!tbody) return;
+  try {
+    const dirs = await api('GET', '/diretorias');
+    document.getElementById('diretorias-count').textContent = dirs.length;
+    if (!dirs.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nenhuma diretoria cadastrada</td></tr>';
+      return;
+    }
+    tbody.innerHTML = dirs.map(d => `
+      <tr>
+        <td><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${d.cor};margin-right:6px;vertical-align:middle"></span><strong>${escHtml(d.nome)}</strong></td>
+        <td style="color:var(--text-muted)">${escHtml(d.responsavel || '—')}</td>
+        <td style="color:var(--accent)">${d.budget_mensal ? 'R$ ' + parseFloat(d.budget_mensal).toLocaleString('pt-BR',{minimumFractionDigits:2}) : '—'}</td>
+        <td style="color:var(--text-muted)">${d.total_projetos} projeto${d.total_projetos==1?'':'s'}</td>
+        <td>
+          <div class="table-actions">
+            <button class="btn-icon" onclick="editDiretoria(${d.id})" title="Editar"><svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
+            <button class="btn-icon delete" onclick="deleteDiretoria(${d.id})" title="Excluir"><svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+          </div>
+        </td>
+      </tr>`).join('');
+  } catch (e) { showToast('Erro ao carregar diretorias: ' + e.message, 'error'); }
+}
+
+function openDiretoriaModal(data = null) {
+  document.getElementById('diretoria-id').value = data?.id || '';
+  document.getElementById('diretoria-nome').value = data?.nome || '';
+  document.getElementById('diretoria-responsavel').value = data?.responsavel || '';
+  document.getElementById('diretoria-budget').value = data?.budget_mensal || '';
+  document.getElementById('diretoria-cor').value = data?.cor || '#9333ea';
+  document.getElementById('modal-diretoria-title').textContent = data ? 'Editar Diretoria' : 'Nova Diretoria';
+  document.getElementById('modal-diretoria').classList.add('open');
+}
+
+async function editDiretoria(id) {
+  try {
+    const dirs = await api('GET', '/diretorias');
+    openDiretoriaModal(dirs.find(d => d.id === id));
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function deleteDiretoria(id) {
+  if (!confirm('Excluir esta diretoria?')) return;
+  try {
+    await api('DELETE', '/diretorias/' + id);
+    showToast('Diretoria excluída', 'success');
+    loadDiretorias();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function submitDiretoria(e) {
+  e.preventDefault();
+  const id = document.getElementById('diretoria-id').value;
+  const body = {
+    nome:          document.getElementById('diretoria-nome').value,
+    responsavel:   document.getElementById('diretoria-responsavel').value,
+    budget_mensal: document.getElementById('diretoria-budget').value || null,
+    cor:           document.getElementById('diretoria-cor').value || '#9333ea',
+  };
+  try {
+    if (id) await api('PUT', '/diretorias/' + id, body);
+    else await api('POST', '/diretorias', body);
+    showToast('Diretoria salva!', 'success');
+    document.getElementById('modal-diretoria').classList.remove('open');
+    loadDiretorias();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+// ── Business Map — Mapeamentos ────────────────
+let _mapaProjetoId = null;
+let _mapaProjetoNome = '';
+
+async function loadMapaRegras() {
+  const tbody = document.getElementById('mapa-regras-tbody');
+  if (!tbody) return;
+  try {
+    const projetos = await api('GET', '/projetos');
+    const comRegras = projetos.filter(p => parseInt(p.total_regras||0) > 0);
+    if (!comRegras.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nenhuma regra cadastrada. Clique em 🗺 Mapear em um projeto para começar.</td></tr>';
+      return;
+    }
+    const rows = [];
+    for (const p of comRegras) {
+      const regs = await api('GET', `/projetos/${p.id}/mapeamentos`);
+      const dirLabel = p.diretoria_nome
+        ? `<span style="font-size:11px;padding:1px 7px;border-radius:20px;background:${p.diretoria_cor}22;color:${p.diretoria_cor};border:1px solid ${p.diretoria_cor}44">${escHtml(p.diretoria_nome)}</span>`
+        : '';
+      rows.push(`<tr style="background:rgba(147,51,234,.04)">
+        <td colspan="4"><strong>${escHtml(p.nome)}</strong> ${dirLabel}</td>
+        <td><button class="btn-ghost" style="font-size:11px;padding:2px 10px;border-color:var(--accent);color:var(--accent)" onclick="abrirMapeamento(${p.id},'${escHtml(p.nome)}')">✎ Editar</button></td>
+      </tr>`);
+      for (const r of regs) {
+        const campoLabel = { resource_group:'RG', resource_id:'Resource ID', subscription_id:'Subscription', tag:'Tag' }[r.campo] || r.campo;
+        const opLabel    = { equals:'=', contains:'contém', starts_with:'começa com', ends_with:'termina com' }[r.operador] || r.operador;
+        rows.push(`<tr style="opacity:${r.ativo?1:.45}">
+          <td style="padding-left:28px;font-size:12px;color:var(--text-muted)">${r.id}</td>
+          <td><span style="font-size:11px;padding:1px 7px;border-radius:4px;background:rgba(147,51,234,.1);color:var(--accent)">${campoLabel}</span></td>
+          <td style="font-size:12px;color:var(--text-muted)">${opLabel}</td>
+          <td><code style="font-size:11px;background:rgba(255,255,255,.05);padding:2px 6px;border-radius:4px">${escHtml(r.valor)}</code></td>
+          <td style="white-space:nowrap">
+            <button class="btn-icon ${r.ativo?'':'delete'}" onclick="toggleRegra(${r.id},${!r.ativo},${p.id})" title="${r.ativo?'Desativar':'Ativar'}">${r.ativo?'●':'○'}</button>
+            <button class="btn-icon delete" onclick="deleteRegra(${r.id},${p.id})" title="Excluir"><svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+          </td>
+        </tr>`);
+      }
+    }
+    tbody.innerHTML = rows.join('');
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function abrirMapeamento(projetoId, projetoNome) {
+  _mapaProjetoId   = projetoId;
+  _mapaProjetoNome = projetoNome;
+  document.getElementById('mapeamento-projeto-nome').textContent = projetoNome;
+  document.getElementById('mapeamento-campo').value    = 'resource_group';
+  document.getElementById('mapeamento-operador').value = 'contains';
+  document.getElementById('mapeamento-valor').value    = '';
+  document.getElementById('mapeamento-preview').innerHTML = '';
+  await _carregarRegrasProjeto(projetoId);
+  document.getElementById('modal-mapeamento').classList.add('open');
+}
+
+async function _carregarRegrasProjeto(projetoId) {
+  const tbody = document.getElementById('mapeamento-regras-tbody');
+  if (!tbody) return;
+  try {
+    const regs = await api('GET', `/projetos/${projetoId}/mapeamentos`);
+    if (!regs.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="font-size:12px">Nenhuma regra. Adicione abaixo.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = regs.map(r => {
+      const campoLabel = { resource_group:'RG', resource_id:'Resource ID', subscription_id:'Subscription', tag:'Tag' }[r.campo] || r.campo;
+      const opLabel    = { equals:'=', contains:'contém', starts_with:'começa com', ends_with:'termina com' }[r.operador] || r.operador;
+      return `<tr style="opacity:${r.ativo?1:.45}">
+        <td><span style="font-size:11px;padding:1px 7px;border-radius:4px;background:rgba(147,51,234,.1);color:var(--accent)">${campoLabel}</span> <span style="font-size:11px;color:var(--text-muted)">${opLabel}</span> <code style="font-size:11px;background:rgba(255,255,255,.05);padding:2px 6px;border-radius:4px">${escHtml(r.valor)}</code></td>
+        <td style="text-align:center"><input type="checkbox" ${r.ativo?'checked':''} onchange="toggleRegra(${r.id},this.checked,${projetoId})"></td>
+        <td style="text-align:center"><button class="btn-icon delete" onclick="deleteRegra(${r.id},${projetoId})" title="Excluir"><svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>
+      </tr>`;
+    }).join('');
+  } catch {}
+}
+
+async function adicionarRegra() {
+  const campo    = document.getElementById('mapeamento-campo').value;
+  const operador = document.getElementById('mapeamento-operador').value;
+  const valor    = document.getElementById('mapeamento-valor').value.trim();
+  if (!valor) { showToast('Informe o valor da regra', 'error'); return; }
+  try {
+    await api('POST', `/projetos/${_mapaProjetoId}/mapeamentos`, { campo, operador, valor });
+    showToast('Regra adicionada!', 'success');
+    document.getElementById('mapeamento-valor').value = '';
+    document.getElementById('mapeamento-preview').innerHTML = '';
+    await _carregarRegrasProjeto(_mapaProjetoId);
+    loadProjetos();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function toggleRegra(id, ativo, projetoId) {
+  try {
+    const r = await api('GET', `/projetos/${projetoId}/mapeamentos`);
+    const reg = r.find(x => x.id === id);
+    if (!reg) return;
+    await api('PUT', `/mapeamentos/${id}`, { ...reg, ativo });
+    await _carregarRegrasProjeto(projetoId);
+    if (currentView === 'mapa') loadMapaRegras();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function deleteRegra(id, projetoId) {
+  if (!confirm('Excluir esta regra?')) return;
+  try {
+    await api('DELETE', `/mapeamentos/${id}`);
+    showToast('Regra excluída', 'success');
+    await _carregarRegrasProjeto(projetoId);
+    loadProjetos();
+    if (currentView === 'mapa') loadMapaRegras();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function previewRegra() {
+  const campo    = document.getElementById('mapeamento-campo').value;
+  const operador = document.getElementById('mapeamento-operador').value;
+  const valor    = document.getElementById('mapeamento-valor').value.trim();
+  const el       = document.getElementById('mapeamento-preview');
+  if (!valor) { showToast('Informe o valor para pré-visualizar', 'error'); return; }
+  el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px 0">Buscando...</div>';
+  try {
+    const rows = await api('POST', '/mapeamentos/preview', { campo, operador, valor });
+    if (!rows.length) {
+      el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px 0">Nenhum recurso encontrado para esta regra nos últimos 30 dias.</div>';
+      return;
+    }
+    const total = rows.reduce((s, r) => s + parseFloat(r.total_billing||0), 0);
+    el.innerHTML = `
+      <div style="font-size:12px;color:var(--green);margin-bottom:8px">✓ ${rows.length} recurso${rows.length===1?'':'s'} encontrado${rows.length===1?'':'s'} — Total: <strong>R$ ${total.toLocaleString('pt-BR',{minimumFractionDigits:2})}</strong></div>
+      <div style="max-height:200px;overflow-y:auto">
+        <table style="width:100%;font-size:11px;border-collapse:collapse">
+          <thead><tr style="color:var(--text-muted)"><th style="text-align:left;padding:3px 6px">Recurso</th><th style="text-align:left;padding:3px 6px">RG</th><th style="text-align:right;padding:3px 6px">Custo</th></tr></thead>
+          <tbody>${rows.map(r => `<tr>
+            <td style="padding:3px 6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.resource_id)}">${escHtml(r.nome_recurso||r.resource_id)}</td>
+            <td style="padding:3px 6px;color:var(--text-muted)">${escHtml(r.resource_group_name||'')}</td>
+            <td style="padding:3px 6px;text-align:right;color:var(--accent)">R$ ${parseFloat(r.total_billing||0).toLocaleString('pt-BR',{minimumFractionDigits:2})}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:8px 0">Erro: ${escHtml(e.message)}</div>`;
+  }
 }
 
 // ── AÇÕES ─────────────────────────────────────

@@ -317,6 +317,36 @@ async function initDB() {
       UPDATE projetos SET status = 'Ativo' WHERE status IS NULL;
     `);
 
+    // ── Diretorias (Business Map — Fase 1) ────────────────────────────────────
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS diretorias (
+        id            SERIAL PRIMARY KEY,
+        nome          VARCHAR(100) NOT NULL UNIQUE,
+        responsavel   VARCHAR(100),
+        budget_mensal NUMERIC(15,2),
+        cor           VARCHAR(7)   DEFAULT '#9333ea',
+        ativo         BOOLEAN      DEFAULT true,
+        criado_em     TIMESTAMPTZ  DEFAULT NOW()
+      );
+      ALTER TABLE projetos ADD COLUMN IF NOT EXISTS diretoria_id  INTEGER REFERENCES diretorias(id) ON DELETE SET NULL;
+      ALTER TABLE projetos ADD COLUMN IF NOT EXISTS budget_mensal NUMERIC(15,2);
+    `);
+
+    // ── Business Map — regras de mapeamento recurso→projeto (Fase 2) ──────────
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS projeto_mapeamentos (
+        id          SERIAL PRIMARY KEY,
+        projeto_id  INTEGER NOT NULL REFERENCES projetos(id) ON DELETE CASCADE,
+        campo       VARCHAR(30)  NOT NULL,
+        operador    VARCHAR(20)  NOT NULL,
+        valor       TEXT         NOT NULL,
+        ativo       BOOLEAN      DEFAULT true,
+        criado_por  VARCHAR(100),
+        criado_em   TIMESTAMPTZ  DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_mapeamentos_projeto ON projeto_mapeamentos(projeto_id);
+    `);
+
     await c.query(`
       CREATE TABLE IF NOT EXISTS acoes_finops (
         id                  SERIAL PRIMARY KEY,
@@ -1270,26 +1300,37 @@ app.get('/api/diag', authMiddleware, async (req, res) => {
 
 // ─── PROJETOS ────────────────────────────────────────────────────────────────
 app.get('/api/projetos', authMiddleware, dbMiddleware, async (_req, res) => {
-  try { res.json((await pool.query('SELECT * FROM projetos ORDER BY nome')).rows); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const r = await pool.query(`
+      SELECT p.*, d.nome AS diretoria_nome, d.cor AS diretoria_cor,
+             (SELECT COUNT(*) FROM projeto_mapeamentos m WHERE m.projeto_id = p.id AND m.ativo = true) AS total_regras
+      FROM projetos p
+      LEFT JOIN diretorias d ON d.id = p.diretoria_id
+      ORDER BY p.nome`);
+    res.json(r.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const r = await pool.query('SELECT * FROM projetos WHERE id = $1', [req.params.id]);
+    const r = await pool.query(`
+      SELECT p.*, d.nome AS diretoria_nome, d.cor AS diretoria_cor
+      FROM projetos p
+      LEFT JOIN diretorias d ON d.id = p.diretoria_id
+      WHERE p.id = $1`, [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'Projeto nao encontrado' });
     res.json(r.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/projetos', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, diretoria, descricao } = req.body;
+  const { nome, diretoria, descricao, diretoria_id, budget_mensal } = req.body;
   if (!nome || typeof nome !== 'string' || nome.trim().length === 0)
     return res.status(400).json({ error: 'Nome e obrigatorio' });
   try {
     const r = await pool.query(
-      'INSERT INTO projetos (nome, diretoria, descricao) VALUES ($1,$2,$3) RETURNING *',
-      [nome.trim(), diretoria || null, descricao || null]
+      'INSERT INTO projetos (nome, diretoria, descricao, diretoria_id, budget_mensal) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [nome.trim(), diretoria || null, descricao || null, diretoria_id || null, budget_mensal || null]
     );
     res.status(201).json(r.rows[0]);
   } catch (err) {
@@ -1299,13 +1340,13 @@ app.post('/api/projetos', authMiddleware, dbMiddleware, async (req, res) => {
 });
 
 app.put('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
-  const { nome, diretoria, descricao } = req.body;
+  const { nome, diretoria, descricao, diretoria_id, budget_mensal } = req.body;
   if (!nome || typeof nome !== 'string' || nome.trim().length === 0)
     return res.status(400).json({ error: 'Nome e obrigatorio' });
   try {
     const r = await pool.query(
-      'UPDATE projetos SET nome=$1, diretoria=$2, descricao=$3, atualizado_em=NOW() WHERE id=$4 RETURNING *',
-      [nome.trim(), diretoria || null, descricao || null, req.params.id]
+      'UPDATE projetos SET nome=$1, diretoria=$2, descricao=$3, diretoria_id=$4, budget_mensal=$5, atualizado_em=NOW() WHERE id=$6 RETURNING *',
+      [nome.trim(), diretoria || null, descricao || null, diretoria_id || null, budget_mensal || null, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Projeto nao encontrado' });
     res.json(r.rows[0]);
@@ -1316,6 +1357,173 @@ app.delete('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) =
   try {
     await pool.query('DELETE FROM projetos WHERE id = $1', [req.params.id]);
     res.json({ message: 'Projeto removido' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── DIRETORIAS ───────────────────────────────────────────────────────────────
+app.get('/api/diretorias', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT d.*,
+             COUNT(p.id) AS total_projetos,
+             COALESCE(SUM(p.budget_mensal),0) AS budget_projetos
+      FROM diretorias d
+      LEFT JOIN projetos p ON p.diretoria_id = d.id
+      GROUP BY d.id ORDER BY d.nome`);
+    res.json(r.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/diretorias', authMiddleware, dbMiddleware, async (req, res) => {
+  const { nome, responsavel, budget_mensal, cor } = req.body;
+  if (!nome?.trim()) return res.status(400).json({ error: 'Nome obrigatorio' });
+  try {
+    const r = await pool.query(
+      'INSERT INTO diretorias (nome,responsavel,budget_mensal,cor) VALUES ($1,$2,$3,$4) RETURNING *',
+      [nome.trim(), responsavel||null, budget_mensal||null, cor||'#9333ea']
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Diretoria com este nome ja existe' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/diretorias/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  const { nome, responsavel, budget_mensal, cor, ativo } = req.body;
+  if (!nome?.trim()) return res.status(400).json({ error: 'Nome obrigatorio' });
+  try {
+    const r = await pool.query(
+      'UPDATE diretorias SET nome=$1,responsavel=$2,budget_mensal=$3,cor=$4,ativo=$5 WHERE id=$6 RETURNING *',
+      [nome.trim(), responsavel||null, budget_mensal||null, cor||'#9333ea', ativo !== false, req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Diretoria nao encontrada' });
+    res.json(r.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/diretorias/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const linked = await pool.query('SELECT COUNT(*) FROM projetos WHERE diretoria_id=$1',[req.params.id]);
+    if (parseInt(linked.rows[0].count) > 0)
+      return res.status(409).json({ error: 'Diretoria possui projetos vinculados. Desvincule-os antes de excluir.' });
+    await pool.query('DELETE FROM diretorias WHERE id=$1', [req.params.id]);
+    res.json({ message: 'Diretoria removida' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── BUSINESS MAP — MAPEAMENTOS ───────────────────────────────────────────────
+// Helper: monta condição SQL para uma regra de mapeamento
+function _mapeamentoWhere(campo, operador, valor, params) {
+  const i = () => `$${params.length + 1}`;
+  if (campo === 'resource_group') {
+    const v = valor.toUpperCase();
+    if (operador === 'equals')      { params.push(v);         return `UPPER(resource_group_name) = ${i()}`; }
+    if (operador === 'contains')    { params.push(`%${v}%`);  return `UPPER(resource_group_name) LIKE ${i()}`; }
+    if (operador === 'starts_with') { params.push(`${v}%`);   return `UPPER(resource_group_name) LIKE ${i()}`; }
+    if (operador === 'ends_with')   { params.push(`%${v}`);   return `UPPER(resource_group_name) LIKE ${i()}`; }
+  }
+  if (campo === 'resource_id') {
+    const v = valor.toLowerCase();
+    if (operador === 'equals')      { params.push(v);         return `LOWER(resource_id) = ${i()}`; }
+    if (operador === 'contains')    { params.push(`%${v}%`);  return `LOWER(resource_id) LIKE ${i()}`; }
+    if (operador === 'starts_with') { params.push(`${v}%`);   return `LOWER(resource_id) LIKE ${i()}`; }
+    if (operador === 'ends_with')   { params.push(`%${v}`);   return `LOWER(resource_id) LIKE ${i()}`; }
+  }
+  if (campo === 'subscription_id') {
+    params.push(valor);
+    return `subscription_id = ${i()}`;
+  }
+  if (campo === 'tag') {
+    const eqIdx = valor.indexOf('=');
+    if (eqIdx > 0) {
+      const k = valor.substring(0, eqIdx).trim();
+      const v = valor.substring(eqIdx + 1).trim();
+      params.push(k); params.push(v);
+      const ki = `$${params.length - 1}`, vi = `$${params.length}`;
+      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ->> ${ki}) ELSE NULL END) = ${vi}`;
+    } else {
+      params.push(valor.trim());
+      return `(CASE WHEN tags IS NOT NULL AND length(tags) > 2 THEN (tags::jsonb ? ${i()}) ELSE false END)`;
+    }
+  }
+  return 'false';
+}
+
+app.get('/api/projetos/:id/mapeamentos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT * FROM projeto_mapeamentos WHERE projeto_id=$1 ORDER BY id',
+      [req.params.id]);
+    res.json(r.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/projetos/:id/mapeamentos', authMiddleware, dbMiddleware, async (req, res) => {
+  const { campo, operador, valor } = req.body;
+  const campos_validos = ['resource_group','resource_id','subscription_id','tag'];
+  const ops_validos    = ['equals','contains','starts_with','ends_with'];
+  if (!campos_validos.includes(campo)) return res.status(400).json({ error: 'Campo invalido' });
+  if (!ops_validos.includes(operador) && !(campo === 'tag'))
+    return res.status(400).json({ error: 'Operador invalido' });
+  if (!valor?.trim()) return res.status(400).json({ error: 'Valor obrigatorio' });
+  try {
+    const user = req.user?.nome || req.user?.email || null;
+    const r = await pool.query(
+      'INSERT INTO projeto_mapeamentos(projeto_id,campo,operador,valor,criado_por) VALUES($1,$2,$3,$4,$5) RETURNING *',
+      [req.params.id, campo, operador, valor.trim(), user]
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/mapeamentos/:rid', authMiddleware, dbMiddleware, async (req, res) => {
+  const { campo, operador, valor, ativo } = req.body;
+  try {
+    const r = await pool.query(
+      'UPDATE projeto_mapeamentos SET campo=$1,operador=$2,valor=$3,ativo=$4 WHERE id=$5 RETURNING *',
+      [campo, operador, valor?.trim(), ativo !== false, req.params.rid]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Regra nao encontrada' });
+    res.json(r.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/mapeamentos/:rid', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM projeto_mapeamentos WHERE id=$1', [req.params.rid]);
+    res.json({ message: 'Regra removida' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/mapeamentos/preview', authMiddleware, dbMiddleware, async (req, res) => {
+  const { campo, operador, valor, data_inicio, data_fim } = req.body;
+  if (!campo || !valor?.trim()) return res.status(400).json({ error: 'campo e valor sao obrigatorios' });
+  try {
+    const params = [];
+    const cond = _mapeamentoWhere(campo, operador || 'contains', valor, params);
+    const dateConds = [];
+    if (data_inicio) { params.push(data_inicio); dateConds.push(`cost_date >= $${params.length}`); }
+    if (data_fim)    { params.push(data_fim);    dateConds.push(`cost_date <= $${params.length}`); }
+    if (!dateConds.length) {
+      params.push(30);
+      dateConds.push(`cost_date >= NOW() - ($${params.length} || ' days')::interval`);
+    }
+    const where = `(${cond}) AND ${dateConds.join(' AND ')}`;
+    const r = await pool.query(`
+      SELECT
+        resource_id,
+        MAX(COALESCE(NULLIF(SPLIT_PART(resource_id,'/',9),''), resource_id)) AS nome_recurso,
+        MAX(resource_group_name)               AS resource_group_name,
+        MAX(subscription_id)                   AS subscription_id,
+        SUM(COALESCE(cost_in_billing_currency,0)) AS total_billing,
+        MAX(cost_date::text)                   AS ultima_data
+      FROM azure_costs
+      WHERE ${where}
+      GROUP BY resource_id
+      ORDER BY total_billing DESC
+      LIMIT 200`, params);
+    res.json(r.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
