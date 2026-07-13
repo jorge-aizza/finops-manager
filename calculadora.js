@@ -3526,7 +3526,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     // Carregar resumo do banco
     const resumoEl = document.getElementById('cpurge-resumo');
     try {
-      const d = await _api('GET', '/azure-costs/resumo');
+      const d = await _api('GET', '/api/azure-costs/resumo');
       const r = d.resumo;
       const total = Number(r.total || 0).toLocaleString('pt-BR');
       const ini   = r.data_inicio ? r.data_inicio.slice(0,10) : '—';
@@ -3555,7 +3555,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       // Carrega lista de arquivos
       const sel = document.getElementById('cpurge-sel');
       sel.innerHTML = '<option value="">— selecione —</option>';
-      const imports = await _api('GET', '/azure-costs/imports');
+      const imports = await _api('GET', '/api/azure-costs/imports');
       if (Array.isArray(imports)) {
         imports.filter(i => i.arquivo_origem).forEach(imp => {
           const opt = document.createElement('option');
@@ -3604,7 +3604,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (confirmar) { confirmar.disabled = true; confirmar.style.opacity = '.45'; }
 
     try {
-      let url = '/azure-costs/purge/preview?';
+      let url = '/api/azure-costs/purge/preview?';
       if (modo === 'periodo') {
         const ini = document.getElementById('cpurge-data-ini').value;
         const fim = document.getElementById('cpurge-data-fim').value;
