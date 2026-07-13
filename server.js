@@ -1706,8 +1706,12 @@ async function ensureAzureCostsTable() {
       }
     }
 
-    // 3a) Adicionar colunas resource_name e resource_type se não existirem
-    for (const [col, def] of [['resource_name','VARCHAR(500)'],['resource_type','VARCHAR(200)']]) {
+    // 3a) Adicionar colunas opcionais se não existirem
+    for (const [col, def] of [
+      ['resource_name', 'VARCHAR(500)'],
+      ['resource_type', 'VARCHAR(200)'],
+      ['fonte',         "VARCHAR(20) DEFAULT 'manual'"],
+    ]) {
       const chkCol = await c.query(
         `SELECT 1 FROM information_schema.columns WHERE table_name='azure_costs' AND column_name=$1`, [col]
       );
@@ -5166,7 +5170,9 @@ app.get('/api/azure-costs/imports', authMiddleware, dbMiddleware, async (_req, r
              MIN(cost_date) AS periodo_inicio, MAX(cost_date) AS periodo_fim,
              SUM(cost_in_usd) AS total_usd, SUM(cost_in_billing_currency) AS total_billing,
              MIN(billing_currency) AS moeda, MAX(importado_em) AS importado_em
-      FROM azure_costs GROUP BY arquivo_origem ORDER BY importado_em DESC
+      FROM azure_costs
+      WHERE (fonte IS NULL OR fonte = 'manual')
+      GROUP BY arquivo_origem ORDER BY importado_em DESC
     `);
     res.json(r.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -6287,6 +6293,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
   if (!pool) throw new Error('Banco não conectado');
   _coletaEmExecucao = true;
   _coletaIniciadaEm = new Date();
+  const _coletaStartEm = _coletaIniciadaEm;
   _coletaCancelada  = false;
   _coletaProgresso  = { tipo: 'api', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0,
                         chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] };
@@ -6510,6 +6517,8 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     } catch (_) {}
 
     _logColeta(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err / ${totalLinhas} linhas`);
+    // Marca registros desta coleta como fonte='api' para não aparecerem no histórico de import manual
+    pool.query(`UPDATE azure_costs SET fonte='api' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     _refreshAzureCache().catch(() => {});
     const msgFinal = modo === 'subscription'
       ? `API Subscription — ${subCount} sub(s) | ${startDate}→${endDate}`
@@ -6589,6 +6598,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
   if (!pool) throw new Error('Banco não conectado');
   _coletaEmExecucao = true;
   _coletaCancelada  = false;
+  const _coletaStartEm = new Date();
   _coletaProgresso  = { tipo: 'storage', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] };
   _logColeta(`Coleta Storage iniciada (${modo}${storageId ? ' STG#'+storageId : ''})`);
 
@@ -6716,6 +6726,8 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       }
     }
 
+    // Marca registros desta coleta como fonte='storage' para não aparecerem no histórico de import manual
+    pool.query(`UPDATE azure_costs SET fonte='storage' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     _refreshAzureCache().catch(() => {});
 
     // ── Price List via Storage (opcional) ──────────────────────────────────────
