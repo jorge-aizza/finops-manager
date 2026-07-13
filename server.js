@@ -5189,6 +5189,7 @@ app.get('/api/azure-costs/imports', authMiddleware, dbMiddleware, async (_req, r
              MIN(billing_currency) AS moeda, MAX(importado_em) AS importado_em
       FROM azure_costs
       WHERE (fonte IS NULL OR fonte = 'manual')
+        AND (arquivo_origem IS NULL OR arquivo_origem NOT LIKE 'api-%')
       GROUP BY arquivo_origem ORDER BY importado_em DESC
     `);
     res.json(r.rows);
