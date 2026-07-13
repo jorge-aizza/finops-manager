@@ -1414,7 +1414,31 @@ app.get('/api/notificacoes', authMiddleware, dbMiddleware, async (req, res) => {
       });
     });
 
-    notifs.sort((a, b) => a.diffDias - b.diffDias);
+    // Notificações de coletas recentes (48h)
+    try {
+      const rSis = await pool.query(
+        `SELECT id, tipo, titulo, mensagem, criado_em FROM notificacoes_sistema WHERE expira_em > NOW() ORDER BY criado_em DESC LIMIT 20`
+      );
+      rSis.rows.forEach(n => {
+        notifs.push({
+          _kind:       'sistema',
+          _id:         n.id,
+          tipo:        n.tipo,
+          acao:        n.titulo,
+          mensagem:    n.mensagem || '',
+          id_finops:   '',
+          projeto_nome: null,
+          diffDias:    -9999,
+          criado_em:   n.criado_em,
+        });
+      });
+    } catch (_) {}
+
+    notifs.sort((a, b) => {
+      if (a._kind === 'sistema' && b._kind !== 'sistema') return 1;
+      if (b._kind === 'sistema' && a._kind !== 'sistema') return -1;
+      return a.diffDias - b.diffDias;
+    });
     res.json(notifs);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -5353,6 +5377,28 @@ async function ensureAzureColetaTable() {
   `);
   await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo   VARCHAR(20)`);
   await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS origem VARCHAR(20) DEFAULT 'manual'`);
+
+  // ── notificacoes_sistema ──────────────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notificacoes_sistema (
+      id         BIGSERIAL PRIMARY KEY,
+      tipo       VARCHAR(50) NOT NULL,
+      titulo     VARCHAR(200) NOT NULL,
+      mensagem   TEXT,
+      criado_em  TIMESTAMP DEFAULT NOW(),
+      expira_em  TIMESTAMP NOT NULL
+    )
+  `);
+}
+
+async function _registrarNotificacaoColeta(titulo, mensagem, tipo = 'coleta_concluida') {
+  if (!pool) return;
+  try {
+    await pool.query(
+      `INSERT INTO notificacoes_sistema (tipo, titulo, mensagem, expira_em) VALUES ($1,$2,$3, NOW() + INTERVAL '48 hours')`,
+      [tipo, titulo, mensagem]
+    );
+  } catch (_) {}
 }
 
 function _encryptSecret(plain) {
@@ -6431,6 +6477,11 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
     );
     _coletaProgresso.fase = 'Concluído';
+    _registrarNotificacaoColeta(
+      `Coleta API concluída`,
+      `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
+      'coleta_concluida'
+    ).catch(() => {});
 
   } catch (err) {
     _logColeta(`ERRO: ${err.message}`);
@@ -6438,6 +6489,11 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     if (histId) await pool.query(
       `UPDATE azure_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1,detalhes=$2 WHERE id=$3`,
       [err.message, detErr, histId]
+    ).catch(() => {});
+    _registrarNotificacaoColeta(
+      `Coleta API com erro`,
+      err.message,
+      'coleta_erro'
     ).catch(() => {});
   } finally {
     _coletaEmExecucao = false;
@@ -6688,6 +6744,11 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     _logColeta('Concluída: ' + msg);
     await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, msg, JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] }), histId]);
+    _registrarNotificacaoColeta(
+      `Coleta Storage concluída`,
+      `${origemDb === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msg}`,
+      'coleta_concluida'
+    ).catch(() => {});
     return { ok: true, msg };
   } catch (err) {
     _coletaProgresso.fase = 'Erro: ' + err.message.slice(0, 80);
@@ -6695,6 +6756,11 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     const detStgErr = JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] });
     if (histId) await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, err.message, detStgErr, histId]).catch(() => {});
+    _registrarNotificacaoColeta(
+      `Coleta Storage com erro`,
+      err.message,
+      'coleta_erro'
+    ).catch(() => {});
     throw err;
   } finally {
     _coletaEmExecucao = false;

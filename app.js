@@ -328,7 +328,15 @@ async function loadNotificacoes() {
     const header = document.getElementById('notif-header-count');
     if (!badge || !list) return;
 
-    if (!notifs.length) {
+    const sistemaNotifs = notifs.filter(n => n._kind === 'sistema');
+    const outrasNotifs  = notifs.filter(n => n._kind !== 'sistema');
+
+    // Badge: ações+reservas + sistema não vistas (via localStorage)
+    const ultimaVistaId = parseInt(localStorage.getItem('notif_sistema_vista_id') || '0');
+    const sisNaoVistas  = sistemaNotifs.filter(n => (n._id || 0) > ultimaVistaId).length;
+    const totalBadge    = outrasNotifs.length + sisNaoVistas;
+
+    if (!totalBadge && !outrasNotifs.length && !sistemaNotifs.length) {
       badge.style.display = 'none';
       list.innerHTML = `<div style="padding:28px 16px;text-align:center;color:var(--text-muted);font-size:13px">
         <div style="font-size:26px;margin-bottom:8px">✅</div>
@@ -338,20 +346,37 @@ async function loadNotificacoes() {
       return;
     }
 
-    const vencidas = notifs.filter(n => n.tipo === 'vencido');
-    const urgentes = notifs.filter(n => n.tipo !== 'vencido');
-    badge.style.display = 'flex';
-    badge.textContent = notifs.length;
-    header.textContent = `${notifs.length} pendente${notifs.length !== 1 ? 's' : ''}`;
+    if (totalBadge > 0) {
+      badge.style.display = 'flex';
+      badge.textContent = totalBadge;
+    } else {
+      badge.style.display = 'none';
+    }
+    const totalLabel = outrasNotifs.length + sistemaNotifs.length;
+    header.textContent = `${totalLabel} notificaç${totalLabel !== 1 ? 'ões' : 'ão'}`;
 
     const iconMap = {
-      vencido: { icon:'⚠',  bg:'rgba(243,139,168,0.12)', color:'#f38ba8', border:'rgba(243,139,168,0.25)' },
-      hoje:    { icon:'🔴', bg:'rgba(243,139,168,0.08)', color:'#f38ba8', border:'rgba(243,139,168,0.2)'  },
-      urgente: { icon:'🟡', bg:'rgba(249,226,175,0.08)', color:'#f9e2af', border:'rgba(249,226,175,0.2)'  },
-      reserva: { icon:'🔖', bg:'rgba(147,51,234,0.08)',  color:'#c084fc', border:'rgba(147,51,234,0.25)'  },
+      vencido:          { icon:'⚠',  bg:'rgba(243,139,168,0.12)', color:'#f38ba8', border:'rgba(243,139,168,0.25)' },
+      hoje:             { icon:'🔴', bg:'rgba(243,139,168,0.08)', color:'#f38ba8', border:'rgba(243,139,168,0.2)'  },
+      urgente:          { icon:'🟡', bg:'rgba(249,226,175,0.08)', color:'#f9e2af', border:'rgba(249,226,175,0.2)'  },
+      reserva:          { icon:'🔖', bg:'rgba(147,51,234,0.08)',  color:'#c084fc', border:'rgba(147,51,234,0.25)'  },
+      coleta_concluida: { icon:'✅', bg:'rgba(34,197,94,0.08)',   color:'var(--green)',  border:'rgba(34,197,94,0.25)'  },
+      coleta_erro:      { icon:'❌', bg:'rgba(255,77,106,0.08)',  color:'var(--danger)', border:'rgba(255,77,106,0.25)' },
     };
 
-    list.innerHTML = notifs.map(n => {
+    list.innerHTML = [...outrasNotifs, ...sistemaNotifs].map(n => {
+      if (n._kind === 'sistema') {
+        const s = iconMap[n.tipo] || iconMap.coleta_concluida;
+        const quando = n.criado_em ? new Date(n.criado_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+        return `<div data-notif-id="${n._id || 0}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
+          <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.acao)}</div>
+            <div style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHtml(n.mensagem)}">${escHtml(n.mensagem)}</div>
+          </div>
+          <div style="font-size:10px;color:var(--text-dim);white-space:nowrap;padding-top:2px">${quando}</div>
+        </div>`;
+      }
       const s = iconMap[n.tipo] || iconMap.urgente;
       const isReserva = n._kind === 'reserva';
       const onclick = isReserva
@@ -377,7 +402,20 @@ async function loadNotificacoes() {
 
 function toggleNotifPanel() {
   const panel = document.getElementById('notif-panel');
-  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  const opening = panel.style.display === 'none';
+  panel.style.display = opening ? 'block' : 'none';
+  if (opening) {
+    // Marca todas as notificações do sistema como vistas
+    const badge = document.getElementById('notif-badge');
+    try {
+      const items = document.querySelectorAll('#notif-list [data-notif-id]');
+      let maxId = parseInt(localStorage.getItem('notif_sistema_vista_id') || '0');
+      items.forEach(el => { const id = parseInt(el.dataset.notifId || 0); if (id > maxId) maxId = id; });
+      if (maxId > 0) localStorage.setItem('notif_sistema_vista_id', String(maxId));
+    } catch (_) {}
+    // Atualiza badge removendo contagem de sistema (serão zeradas na próxima loadNotificacoes)
+    loadNotificacoes();
+  }
 }
 function closeNotifPanel() {
   const panel = document.getElementById('notif-panel');
@@ -1384,6 +1422,7 @@ let _refreshCountdown = 0;
 let _countdownTimer  = null;
 let _dbStatusInterval = null;
 let _notifInterval    = null;
+let _coletaEraExecucando = false;
 
 function setRefreshInterval(minutes) {
   _refreshInterval = parseInt(minutes);
@@ -4345,6 +4384,7 @@ async function loadColetaStatus() {
     }
 
     if (s.em_execucao) {
+      _coletaEraExecucando = true;
       const isCanceling = s.cancelando;
       const tipo = (s.progresso && s.progresso.tipo) || 'storage';
 
@@ -4437,6 +4477,22 @@ async function loadColetaStatus() {
         log.scrollTop = log.scrollHeight;
       }
     } else {
+      // Transição: estava executando e agora terminou → toast + atualiza sino
+      if (_coletaEraExecucando && s.ultimo) {
+        _coletaEraExecucando = false;
+        const hist = s.ultimo;
+        if (hist.status === 'concluido') {
+          showToast(`✅ Coleta concluída — ${hist.mensagem || ''}`, 'success');
+        } else if (hist.status === 'erro') {
+          showToast(`❌ Coleta com erro — ${hist.mensagem || ''}`, 'error');
+        } else if (hist.status === 'cancelado') {
+          showToast('⊘ Coleta cancelada', 'error');
+        }
+        loadNotificacoes();
+      } else if (!s.em_execucao) {
+        _coletaEraExecucando = false;
+      }
+
       if (execBtn) {
         execBtn.disabled = false;
         execBtn.style.display = '';
