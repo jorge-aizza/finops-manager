@@ -5093,22 +5093,65 @@ app.post('/api/azure-costs/refresh-cache', authMiddleware, dbMiddleware, async (
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── DELETE /api/azure-costs/purge — Apaga todos os dados para re-importação limpa
+// ── GET /api/azure-costs/resumo — Sumário geral para o painel de expurgo
+app.get('/api/azure-costs/resumo', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT COUNT(*)                              AS total,
+             MIN(cost_date)                        AS data_inicio,
+             MAX(cost_date)                        AS data_fim,
+             SUM(cost_in_billing_currency)         AS total_billing,
+             MIN(billing_currency)                 AS moeda
+      FROM azure_costs
+    `);
+    const byMonth = await pool.query(`
+      SELECT TO_CHAR(cost_date,'YYYY-MM') AS mes,
+             COUNT(*)                     AS registros,
+             SUM(cost_in_billing_currency) AS total_billing
+      FROM azure_costs
+      GROUP BY mes ORDER BY mes DESC LIMIT 24
+    `);
+    res.json({ resumo: r.rows[0], por_mes: byMonth.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET /api/azure-costs/purge/preview — Conta registros antes de apagar
+app.get('/api/azure-costs/purge/preview', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { data_inicio, data_fim, arquivo } = req.query;
+    let q = 'SELECT COUNT(*) AS total FROM azure_costs WHERE 1=1';
+    const params = [];
+    if (arquivo)     { params.push(arquivo);     q += ` AND arquivo_origem = $${params.length}`; }
+    if (data_inicio) { params.push(data_inicio); q += ` AND cost_date >= $${params.length}`; }
+    if (data_fim)    { params.push(data_fim);    q += ` AND cost_date <= $${params.length}`; }
+    const r = await pool.query(q, params);
+    res.json({ total: parseInt(r.rows[0].total) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── DELETE /api/azure-costs/purge — Expurgo de dados por período ou arquivo
 app.delete('/api/azure-costs/purge', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { arquivo } = req.query;
-    let result;
+    const { arquivo, data_inicio, data_fim } = req.query;
+    let result, msg;
     if (arquivo) {
-      // Apaga só registros de um arquivo específico
       result = await pool.query('DELETE FROM azure_costs WHERE arquivo_origem = $1', [arquivo]);
-      console.log(`[Azure Purge] Removidos ${result.rowCount} registros do arquivo: ${arquivo}`);
-      res.json({ message: `${result.rowCount} registros do arquivo "${arquivo}" removidos. Reimporte o arquivo.`, removidos: result.rowCount });
+      msg = `${result.rowCount} registros do arquivo "${arquivo}" removidos.`;
+    } else if (data_inicio || data_fim) {
+      let q = 'DELETE FROM azure_costs WHERE 1=1';
+      const params = [];
+      if (data_inicio) { params.push(data_inicio); q += ` AND cost_date >= $${params.length}`; }
+      if (data_fim)    { params.push(data_fim);    q += ` AND cost_date <= $${params.length}`; }
+      result = await pool.query(q, params);
+      const de  = data_inicio || '—';
+      const ate = data_fim    || '—';
+      msg = `${result.rowCount} registros do período ${de} → ${ate} removidos.`;
     } else {
-      // Apaga tudo
       result = await pool.query('DELETE FROM azure_costs');
-      console.log(`[Azure Purge] Removidos TODOS os registros: ${result.rowCount}`);
-      res.json({ message: `Todos os ${result.rowCount} registros foram removidos. Reimporte os arquivos.`, removidos: result.rowCount });
+      msg = `Todos os ${result.rowCount} registros foram removidos.`;
     }
+    console.log(`[Azure Purge] ${msg}`);
+    res.json({ message: msg, removidos: result.rowCount });
   } catch (err) {
     console.error('Erro no purge:', err);
     res.status(500).json({ error: err.message });

@@ -172,26 +172,78 @@ const Calculadora = (() => {
 </div>
 
 <!-- MODAL PURGE -->
-<div id="cpurge-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;">
-  <div style="background:var(--bg-card,#1a1e28);border:1px solid var(--border);border-radius:12px;padding:24px;width:min(90vw,420px);box-shadow:0 20px 60px rgba(0,0,0,.5);">
-    <div style="font-size:1rem;font-weight:700;margin-bottom:8px;color:var(--text);">⚠️ Limpar dados importados</div>
-    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;line-height:1.6;">
-      Isso removerá os registros do banco para permitir uma re-importação com os dados corretos.<br>
-      Selecione o escopo da limpeza:
-    </p>
-    <div id="cpurge-arquivo-area" style="margin-bottom:16px;">
-      <label class="cl">Limpar apenas o arquivo:</label>
-      <select id="cpurge-sel" class="cs" style="margin-bottom:8px;">
-        <option value="">— Todos os dados —</option>
-      </select>
+<div id="cpurge-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-card,#1a1e28);border:1px solid var(--border);border-radius:14px;padding:0;width:min(92vw,500px);box-shadow:0 24px 70px rgba(0,0,0,.6);display:flex;flex-direction:column;max-height:90vh;overflow:hidden;">
+    <!-- Header -->
+    <div style="padding:18px 22px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div>
+        <div style="font-size:15px;font-weight:700;color:var(--text)">🗑 Expurgo de Dados</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Remove registros de custo do banco permanentemente</div>
+      </div>
+      <button onclick="Calculadora.fecharPurge()" style="background:none;border:none;color:var(--text-muted);font-size:18px;cursor:pointer;padding:4px">✕</button>
     </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;">
+    <!-- Body scrollável -->
+    <div style="padding:18px 22px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:14px">
+      <!-- Resumo do banco -->
+      <div id="cpurge-resumo" style="background:rgba(147,51,234,.07);border:1px solid rgba(147,51,234,.2);border-radius:10px;padding:12px 14px;font-size:12px;color:var(--text-muted)">
+        <span style="color:var(--accent)">⟳</span> Carregando dados do banco...
+      </div>
+      <!-- Modo -->
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Escopo do expurgo</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.02)">
+            <input type="radio" name="cpurge-tipo" value="periodo" checked onchange="Calculadora._purgeOnModo(this.value)" style="accent-color:var(--accent)">
+            <div><div style="font-size:13px;color:var(--text);font-weight:500">Por período</div><div style="font-size:11px;color:var(--text-muted)">Remove todos os registros dentro de um intervalo de datas</div></div>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.02)">
+            <input type="radio" name="cpurge-tipo" value="arquivo" onchange="Calculadora._purgeOnModo(this.value)" style="accent-color:var(--accent)">
+            <div><div style="font-size:13px;color:var(--text);font-weight:500">Por arquivo importado</div><div style="font-size:11px;color:var(--text-muted)">Remove apenas registros de um CSV/Parquet específico</div></div>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,77,106,.3);background:rgba(255,77,106,.04)">
+            <input type="radio" name="cpurge-tipo" value="tudo" onchange="Calculadora._purgeOnModo(this.value)" style="accent-color:#ff4d6a">
+            <div><div style="font-size:13px;color:var(--danger);font-weight:500">Todos os dados</div><div style="font-size:11px;color:var(--text-muted)">Apaga toda a base de custos — requer reimportação completa</div></div>
+          </label>
+        </div>
+      </div>
+      <!-- Área período -->
+      <div id="cpurge-area-periodo">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Data início</label>
+            <input type="date" id="cpurge-data-ini" class="cs" style="width:100%;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Data fim</label>
+            <input type="date" id="cpurge-data-fim" class="cs" style="width:100%;box-sizing:border-box">
+          </div>
+        </div>
+        <button onclick="Calculadora.verificarPurge()" style="font-size:12px;padding:6px 16px;border-radius:6px;border:1px solid var(--accent);background:rgba(147,51,234,.1);color:var(--accent);cursor:pointer">
+          🔍 Verificar quantos registros serão removidos
+        </button>
+      </div>
+      <!-- Área arquivo -->
+      <div id="cpurge-area-arquivo" style="display:none">
+        <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:6px">Arquivo importado</label>
+        <select id="cpurge-sel" class="cs" style="width:100%;box-sizing:border-box">
+          <option value="">— selecione —</option>
+        </select>
+        <button onclick="Calculadora.verificarPurge()" style="margin-top:8px;font-size:12px;padding:6px 16px;border-radius:6px;border:1px solid var(--accent);background:rgba(147,51,234,.1);color:var(--accent);cursor:pointer">
+          🔍 Verificar
+        </button>
+      </div>
+      <!-- Preview contagem -->
+      <div id="cpurge-preview" style="display:none;padding:10px 14px;border-radius:8px;font-size:13px;font-weight:600"></div>
+      <!-- Resultado final -->
+      <div id="cpurge-result" style="display:none;font-size:12px;padding:8px 12px;border-radius:6px;"></div>
+    </div>
+    <!-- Footer -->
+    <div style="padding:14px 22px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0">
       <button onclick="Calculadora.fecharPurge()" class="cbtn-sec">Cancelar</button>
-      <button onclick="Calculadora.executarPurge()" style="display:inline-flex;align-items:center;gap:6px;padding:0 16px;height:34px;border-radius:6px;border:none;background:#ff4d6a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;">
-        🗑 Confirmar Limpeza
+      <button id="cpurge-confirmar" onclick="Calculadora.executarPurge()" disabled style="display:inline-flex;align-items:center;gap:6px;padding:0 18px;height:36px;border-radius:6px;border:none;background:#ff4d6a;color:#fff;font-size:13px;font-weight:700;cursor:pointer;opacity:.45">
+        🗑 Confirmar Expurgo
       </button>
     </div>
-    <div id="cpurge-result" style="display:none;margin-top:12px;font-size:12px;padding:8px 12px;border-radius:6px;"></div>
   </div>
 </div>
 
@@ -3461,27 +3513,63 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   // ── Purge / Limpeza de dados ─────────────────────────────────────
   async function abrirPurge() {
     const modal = document.getElementById('cpurge-modal');
-    const sel   = document.getElementById('cpurge-sel');
-    const res   = document.getElementById('cpurge-result');
     if (!modal) return;
 
-    res.style.display = 'none';
-    sel.innerHTML = '<option value="">— Todos os dados —</option>';
+    // Reset estado
+    document.getElementById('cpurge-result').style.display  = 'none';
+    document.getElementById('cpurge-preview').style.display = 'none';
+    const confirmar = document.getElementById('cpurge-confirmar');
+    if (confirmar) { confirmar.disabled = true; confirmar.style.opacity = '.45'; }
+    document.querySelectorAll('input[name="cpurge-tipo"]').forEach(r => { if (r.value === 'periodo') r.checked = true; });
+    _purgeOnModo('periodo');
 
-    // Carregar lista de arquivos importados
+    // Carregar resumo do banco
+    const resumoEl = document.getElementById('cpurge-resumo');
     try {
-      const data = await _api('GET', '/azure-costs/imports');
-      if (Array.isArray(data) && data.length) {
-        data.forEach(imp => {
+      const d = await _api('GET', '/azure-costs/resumo');
+      const r = d.resumo;
+      const total = Number(r.total || 0).toLocaleString('pt-BR');
+      const ini   = r.data_inicio ? r.data_inicio.slice(0,10) : '—';
+      const fim   = r.data_fim    ? r.data_fim.slice(0,10)    : '—';
+      const custo = r.total_billing != null ? Number(r.total_billing).toLocaleString('pt-BR',{minimumFractionDigits:2}) : '—';
+      const moeda = r.moeda || '';
+      // Linha por mês
+      const meses = (d.por_mes || []).map(m => {
+        const reg = Number(m.registros).toLocaleString('pt-BR');
+        const val = Number(m.total_billing || 0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+        return `<span style="white-space:nowrap">${m.mes}: <b>${reg}</b> reg · ${moeda} ${val}</span>`;
+      }).join('<br>');
+      resumoEl.innerHTML = `
+        <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:${meses?'10px':'0'}">
+          <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Total de registros</div><div style="font-size:14px;font-weight:700;color:var(--accent)">${total}</div></div>
+          <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Período coberto</div><div style="font-size:13px;font-weight:600;color:var(--text)">${ini} → ${fim}</div></div>
+          <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Custo total</div><div style="font-size:13px;font-weight:600;color:var(--text)">${moeda} ${custo}</div></div>
+        </div>
+        ${meses ? `<details style="margin-top:4px"><summary style="font-size:11px;color:var(--text-muted);cursor:pointer">Ver por mês</summary><div style="margin-top:8px;font-size:11px;color:var(--text-muted);display:flex;flex-direction:column;gap:3px">${meses}</div></details>` : ''}`;
+      // Preenche datas padrão
+      const ini6 = r.data_inicio ? r.data_inicio.slice(0,10) : '';
+      const fim6 = r.data_fim    ? r.data_fim.slice(0,10)    : '';
+      if (!document.getElementById('cpurge-data-ini').value) document.getElementById('cpurge-data-ini').value = ini6;
+      if (!document.getElementById('cpurge-data-fim').value) document.getElementById('cpurge-data-fim').value = fim6;
+
+      // Carrega lista de arquivos
+      const sel = document.getElementById('cpurge-sel');
+      sel.innerHTML = '<option value="">— selecione —</option>';
+      const imports = await _api('GET', '/azure-costs/imports');
+      if (Array.isArray(imports)) {
+        imports.filter(i => i.arquivo_origem).forEach(imp => {
           const opt = document.createElement('option');
           opt.value = imp.arquivo_origem;
-          const ini = (imp.periodo_inicio || '').slice(0, 10);
-          const fim = (imp.periodo_fim   || '').slice(0, 10);
-          opt.textContent = `${imp.arquivo_origem}  (${imp.linhas} linhas · ${ini} → ${fim})`;
+          const ini2 = (imp.periodo_inicio || '').slice(0,10);
+          const fim2 = (imp.periodo_fim   || '').slice(0,10);
+          const lin  = Number(imp.linhas || 0).toLocaleString('pt-BR');
+          opt.textContent = `${imp.arquivo_origem}  (${lin} reg · ${ini2}→${fim2})`;
           sel.appendChild(opt);
         });
       }
-    } catch (_) {}
+    } catch (e) {
+      resumoEl.innerHTML = `<span style="color:var(--danger)">Erro ao carregar dados: ${e.message}</span>`;
+    }
 
     modal.style.display = 'flex';
   }
@@ -3489,6 +3577,63 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   function fecharPurge() {
     const modal = document.getElementById('cpurge-modal');
     if (modal) modal.style.display = 'none';
+  }
+
+  function _purgeOnModo(modo) {
+    document.getElementById('cpurge-area-periodo').style.display = modo === 'periodo'  ? '' : 'none';
+    document.getElementById('cpurge-area-arquivo').style.display = modo === 'arquivo'  ? '' : 'none';
+    document.getElementById('cpurge-preview').style.display = 'none';
+    const confirmar = document.getElementById('cpurge-confirmar');
+    if (confirmar) {
+      // Modo "tudo" habilita confirmar direto (sem verificar)
+      const ok = modo === 'tudo';
+      confirmar.disabled  = !ok;
+      confirmar.style.opacity = ok ? '1' : '.45';
+    }
+  }
+
+  async function verificarPurge() {
+    const modo = document.querySelector('input[name="cpurge-tipo"]:checked')?.value || 'periodo';
+    const preview = document.getElementById('cpurge-preview');
+    const confirmar = document.getElementById('cpurge-confirmar');
+    preview.style.display = 'block';
+    preview.style.background = 'rgba(147,51,234,.08)';
+    preview.style.border = '1px solid rgba(147,51,234,.2)';
+    preview.style.color = 'var(--accent)';
+    preview.textContent = '⟳ Verificando...';
+    if (confirmar) { confirmar.disabled = true; confirmar.style.opacity = '.45'; }
+
+    try {
+      let url = '/azure-costs/purge/preview?';
+      if (modo === 'periodo') {
+        const ini = document.getElementById('cpurge-data-ini').value;
+        const fim = document.getElementById('cpurge-data-fim').value;
+        if (!ini && !fim) { preview.style.color='var(--orange)'; preview.textContent='⚠ Informe ao menos uma data.'; return; }
+        if (ini) url += `data_inicio=${encodeURIComponent(ini)}&`;
+        if (fim) url += `data_fim=${encodeURIComponent(fim)}&`;
+      } else if (modo === 'arquivo') {
+        const arq = document.getElementById('cpurge-sel').value;
+        if (!arq) { preview.style.color='var(--orange)'; preview.textContent='⚠ Selecione um arquivo.'; return; }
+        url += `arquivo=${encodeURIComponent(arq)}&`;
+      }
+      const d = await _api('GET', url.replace(/[?&]$/, ''));
+      const total = Number(d.total || 0).toLocaleString('pt-BR');
+      if (d.total === 0) {
+        preview.style.color = 'var(--green)';
+        preview.style.background = 'rgba(34,197,94,.08)';
+        preview.style.border = '1px solid rgba(34,197,94,.2)';
+        preview.textContent = '✓ Nenhum registro encontrado nesse critério.';
+        return;
+      }
+      preview.style.color = 'var(--danger)';
+      preview.style.background = 'rgba(255,77,106,.08)';
+      preview.style.border = '1px solid rgba(255,77,106,.2)';
+      preview.textContent = `⚠ ${total} registros serão removidos permanentemente.`;
+      if (confirmar) { confirmar.disabled = false; confirmar.style.opacity = '1'; }
+    } catch (e) {
+      preview.style.color = 'var(--danger)';
+      preview.textContent = 'Erro: ' + e.message;
+    }
   }
 
   // ── Reconciliação de valores ─────────────────────────────────────────────────
@@ -3607,35 +3752,40 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   }
 
   async function executarPurge() {
-    const sel     = document.getElementById('cpurge-sel');
-    const res     = document.getElementById('cpurge-result');
-    const arquivo = sel ? sel.value.trim() : '';
+    const res  = document.getElementById('cpurge-result');
+    const modo = document.querySelector('input[name="cpurge-tipo"]:checked')?.value || 'periodo';
 
-    res.style.display  = 'block';
+    res.style.display    = 'block';
     res.style.background = 'rgba(147,51,234,.08)';
-    res.style.color    = 'var(--accent)';
-    res.style.border   = '1px solid rgba(147,51,234,.2)';
-    res.textContent    = 'Limpando dados...';
+    res.style.color      = 'var(--accent)';
+    res.style.border     = '1px solid rgba(147,51,234,.2)';
+    res.textContent      = 'Removendo dados...';
+
+    let url = '/azure-costs/purge';
+    if (modo === 'periodo') {
+      const ini = document.getElementById('cpurge-data-ini').value;
+      const fim = document.getElementById('cpurge-data-fim').value;
+      const p = [];
+      if (ini) p.push(`data_inicio=${encodeURIComponent(ini)}`);
+      if (fim) p.push(`data_fim=${encodeURIComponent(fim)}`);
+      if (p.length) url += '?' + p.join('&');
+    } else if (modo === 'arquivo') {
+      const arq = document.getElementById('cpurge-sel').value;
+      if (arq) url += `?arquivo=${encodeURIComponent(arq)}`;
+    }
 
     try {
-      const url   = arquivo
-        ? `/azure-costs/purge?arquivo=${encodeURIComponent(arquivo)}`
-        : '/azure-costs/purge';
       const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
-
       const r = await fetch(window.location.origin + '/api' + url, {
         method:  'DELETE',
         headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
       });
-
-      // Leitura segura: verifica Content-Type antes de parsear JSON
       const ct   = r.headers.get('content-type') || '';
       let data;
       if (ct.includes('application/json')) {
         data = await r.json();
       } else {
         const text = await r.text();
-        // Se retornou HTML (rota não encontrada), abortar com mensagem clara
         if (text.includes('<!DOCTYPE') || text.includes('<html')) {
           throw new Error('Rota não encontrada no servidor. Verifique se o server.js foi atualizado e reiniciado.');
         }
@@ -4788,7 +4938,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
            _selecionarTodosDropdown, _limparDropdown, _confirmarSub, _confirmarRg, _atualizarBotaoBuscar,
            _onAdicionaisChange, _salvarTaxasPadrao, _resetarTaxas,
            _setModoHoras, _calcHorasPeriodo, _sincDataFim, _sincHoraFim, _incluirPeriodo, _removerPeriodo,
-           abrirPurge, fecharPurge, executarPurge,
+           abrirPurge, fecharPurge, executarPurge, verificarPurge, _purgeOnModo,
            abrirReconciliacao, fecharReconciliacao, _onAzureRefInput,
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
            _diagCache, _forcarRefreshCache,
