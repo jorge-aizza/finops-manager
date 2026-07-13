@@ -5623,7 +5623,7 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
   if (!_agendadorTimer && pool) _iniciarAgendador();
   try {
     await ensureAzureColetaTable();
-    const cols = `id,tipo,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem`;
+    const cols = `id,tipo,origem,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem`;
     const [rAll, rApi, rStg] = await Promise.all([
       pool.query(`SELECT ${cols} FROM azure_coleta_historico ORDER BY iniciado_em DESC LIMIT 1`),
       pool.query(`SELECT ${cols} FROM azure_coleta_historico WHERE tipo='api'     ORDER BY iniciado_em DESC LIMIT 1`),
@@ -5650,7 +5650,7 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req,
   try {
     await ensureAzureColetaTable();
     const tipo = req.query.tipo;
-    const baseSelect = `SELECT h.id,h.tipo,h.iniciado_em,h.concluido_em,h.status,h.linhas_inseridas,h.linhas_atualizadas,h.linhas_erro,h.mensagem,h.detalhes,c.nome AS sp_nome FROM azure_coleta_historico h LEFT JOIN azure_coleta_config c ON c.id = h.sp_id`;
+    const baseSelect = `SELECT h.id,h.tipo,h.origem,h.iniciado_em,h.concluido_em,h.status,h.linhas_inseridas,h.linhas_atualizadas,h.linhas_erro,h.mensagem,h.detalhes,c.nome AS sp_nome FROM azure_coleta_historico h LEFT JOIN azure_coleta_config c ON c.id = h.sp_id`;
     const { rows } = tipo
       ? await pool.query(`${baseSelect} WHERE h.tipo=$1 ORDER BY h.iniciado_em DESC LIMIT 50`, [tipo])
       : await pool.query(`${baseSelect} ORDER BY h.iniciado_em DESC LIMIT 50`);
