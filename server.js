@@ -5651,7 +5651,9 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req,
     await ensureAzureColetaTable();
     const tipo = req.query.tipo;
     const baseSelect = `SELECT h.id,h.tipo,h.origem,h.iniciado_em,h.concluido_em,h.status,h.linhas_inseridas,h.linhas_atualizadas,h.linhas_erro,h.mensagem,h.detalhes,c.nome AS sp_nome FROM azure_coleta_historico h LEFT JOIN azure_coleta_config c ON c.id = h.sp_id`;
-    const { rows } = tipo
+    const { rows } = tipo === 'storage'
+      ? await pool.query(`${baseSelect} WHERE h.tipo = ANY($1::text[]) ORDER BY h.iniciado_em DESC LIMIT 50`, [['storage', 'price_list']])
+      : tipo
       ? await pool.query(`${baseSelect} WHERE h.tipo=$1 ORDER BY h.iniciado_em DESC LIMIT 50`, [tipo])
       : await pool.query(`${baseSelect} ORDER BY h.iniciado_em DESC LIMIT 50`);
     res.json(rows);
@@ -6495,7 +6497,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
 
   try {
     await ensureAzureColetaTable();
-    const origemDb = origem === 'auto' ? 'agendado' : 'manual';
+    const origemDb = modo === 'auto' ? 'agendado' : 'manual';
     const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,origem) VALUES ('executando','storage',$1) RETURNING id`, [origemDb]);
     histId = r.rows[0].id;
 
@@ -6618,17 +6620,25 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     _refreshAzureCache().catch(() => {});
 
     // ── Price List via Storage (opcional) ──────────────────────────────────────
-    // Se price_list_prefix estiver configurado, coleta CSV/Parquet/ZIP de lá.
     let plMsg = '';
     if (stg.price_list_prefix?.trim()) {
       const plPrefix = stg.price_list_prefix.trim();
-      _coletaProgresso.fase = 'Coletando Price List do Storage...';
-      _logColeta(`[PL] Listando price list em ${storageAccount}/${container}/${plPrefix}`);
+      let plHistId, plLog = [];
+      const _logPl = msg => { _logColeta(`[PL] ${msg}`); plLog.push(msg); };
       try {
-        let plBlobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, plPrefix);
+        const plHistR = await pool.query(
+          `INSERT INTO azure_coleta_historico (status,tipo,sp_id,origem) VALUES ('executando','price_list',$1,$2) RETURNING id`,
+          [sp.id || null, origemDb]
+        );
+        plHistId = plHistR.rows[0].id;
+      } catch (_) {}
+      _coletaProgresso.fase = 'Coletando Price List do Storage...';
+      _logPl(`Listando em ${storageAccount}/${container}/${plPrefix}`);
+      let plIns = 0, plSkip = 0, plErr = 0, plBlobs = [];
+      try {
+        plBlobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, plPrefix);
         plBlobs = plBlobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
-        _logColeta(`[PL] ${plBlobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s) para price list`);
-        let plIns = 0, plSkip = 0, plErr = 0;
+        _logPl(`${plBlobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`);
         for (const pb of plBlobs) {
           if (_coletaCancelada) break;
           let plTmp;
@@ -6646,9 +6656,9 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
             plIns  += plR.inserted;
             plSkip += plR.skipped;
             plErr  += plR.errors;
-            _logColeta(`[PL] ${pb.name.split('/').pop()} → ins:${plR.inserted} skip:${plR.skipped} err:${plR.errors}`);
+            _logPl(`${pb.name.split('/').pop()} → ins:${plR.inserted} skip:${plR.skipped} err:${plR.errors}`);
           } catch (plBlobErr) {
-            _logColeta(`[PL] ERRO ${pb.name.split('/').pop()}: ${plBlobErr.message.slice(0, 60)}`);
+            _logPl(`ERRO ${pb.name.split('/').pop()}: ${plBlobErr.message.slice(0, 60)}`);
             plErr++;
           } finally {
             const fs = require('fs');
@@ -6656,10 +6666,20 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
           }
         }
         plMsg = ` · PriceList: ${plBlobs.length} arquivo(s) · ins:${plIns} skip:${plSkip} err:${plErr}`;
-        _logColeta(`[PL] Concluída${plMsg}`);
+        _logPl(`Concluída${plMsg}`);
+        if (plHistId) await pool.query(
+          `UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+          [plIns, plSkip, plErr,
+           `Price List via Storage · ${plBlobs.length} arquivo(s) · ${plIns} inseridos · ${plSkip} ignorados · ${plErr} erros`,
+           JSON.stringify({ tipo: 'price_list', modo, log: plLog }), plHistId]
+        ).catch(() => {});
       } catch (plListErr) {
-        _logColeta(`[PL] Erro ao listar price list: ${plListErr.message.slice(0, 80)}`);
+        _logPl(`Erro ao listar: ${plListErr.message.slice(0, 80)}`);
         plMsg = ` · PriceList: erro (${plListErr.message.slice(0, 40)})`;
+        if (plHistId) await pool.query(
+          `UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',linhas_erro=1,mensagem=$1,detalhes=$2 WHERE id=$3`,
+          [plListErr.message, JSON.stringify({ tipo: 'price_list', modo, log: plLog }), plHistId]
+        ).catch(() => {});
       }
     }
 

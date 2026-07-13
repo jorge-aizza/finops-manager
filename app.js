@@ -5681,13 +5681,15 @@ async function loadColetaHistorico(tipo) {
   }
 
   // API ou Storage
-  if (thead) thead.innerHTML = '<tr><th>Início</th><th>SP</th><th>Status</th><th>Origem</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>';
-  if (tbody) tbody.innerHTML = '<tr><td colspan="10" class="empty-state" style="color:var(--text-muted)">Carregando...</td></tr>';
+  const _hastipoCol = tab === 'storage';
+  const _ncols = _hastipoCol ? 11 : 10;
+  if (thead) thead.innerHTML = `<tr><th>Início</th><th>SP</th>${_hastipoCol ? '<th>Tipo</th>' : ''}<th>Status</th><th>Origem</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>`;
+  if (tbody) tbody.innerHTML = `<tr><td colspan="${_ncols}" class="empty-state" style="color:var(--text-muted)">Carregando...</td></tr>`;
   try {
     const rows = await api('GET', `/azure-coleta/historico?tipo=${tab}`);
     _historicoCache = rows || [];
     if (!rows || !rows.length) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">Nenhuma execução registrada</td></tr>';
+      tbody.innerHTML = `<tr><td colspan="${_ncols}" class="empty-state">Nenhuma execução registrada</td></tr>`;
       return;
     }
     const statusColors = {
@@ -5719,9 +5721,15 @@ async function loadColetaHistorico(tipo) {
         : r.origem === 'manual'
         ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(77,166,255,.10);color:var(--blue)">👤 Manual</span>`
         : `<span style="font-size:10px;color:var(--text-muted)">—</span>`;
+      const tipoBadge = r.tipo === 'price_list'
+        ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(255,140,66,.12);color:var(--orange)">💲 Price List</span>`
+        : r.tipo === 'storage'
+        ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(77,166,255,.12);color:var(--blue)">🗄 Storage</span>`
+        : `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(147,51,234,.12);color:var(--accent)">⚡ API</span>`;
       return `<tr>
         <td style="font-size:11px;white-space:nowrap">${inicio}</td>
         <td style="font-size:11px;color:var(--accent);max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${spNomeHist}">${spNomeHist}</td>
+        ${_hastipoCol ? `<td>${tipoBadge}</td>` : ''}
         <td><span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:${sc.bg};color:${sc.color}">${sc.label}</span></td>
         <td>${origemBadge}</td>
         <td style="text-align:right;font-size:12px;color:var(--green)">${ins}</td>
@@ -5733,7 +5741,7 @@ async function loadColetaHistorico(tipo) {
       </tr>`;
     }).join('');
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="10" class="empty-state">Erro ao carregar histórico</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${_ncols}" class="empty-state">Erro ao carregar histórico</td></tr>`;
   }
 }
 
@@ -5752,7 +5760,7 @@ function verDetalhesColeta(idx) {
     const s = Math.round(ms / 1000);
     dur = s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
   }
-  const tipo = det.tipo === 'api' ? 'API Oficial' : det.tipo === 'storage' ? 'Via Storage' : '—';
+  const tipo = (r.tipo || det.tipo) === 'api' ? 'API Oficial' : (r.tipo || det.tipo) === 'storage' ? 'Via Storage' : (r.tipo || det.tipo) === 'price_list' ? 'Price List' : '—';
   const origemLabel = r.origem === 'agendado' ? '⏰ Agendada' : r.origem === 'manual' ? '👤 Manual' : '—';
   const origemColor = r.origem === 'agendado' ? 'var(--green)' : r.origem === 'manual' ? 'var(--blue)' : 'var(--text-muted)';
   document.getElementById('coleta-det-meta').innerHTML = `
