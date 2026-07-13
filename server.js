@@ -1721,23 +1721,6 @@ async function ensureAzureCostsTable() {
       }
     }
 
-    // 3b) Remarcar registros existentes importados por coletas automáticas
-    // Cruza importado_em de azure_costs com janelas de execução em azure_coleta_historico
-    try {
-      const migR = await c.query(`
-        UPDATE azure_costs ac
-        SET fonte = h.tipo
-        FROM azure_coleta_historico h
-        WHERE h.tipo IN ('api', 'storage')
-          AND h.concluido_em IS NOT NULL
-          AND ac.importado_em >= h.iniciado_em
-          AND ac.importado_em <= h.concluido_em + INTERVAL '5 minutes'
-          AND ac.fonte = 'manual'
-      `);
-      if (migR.rowCount > 0)
-        console.log(`[Migration] ${migR.rowCount} registros remarcados com fonte correta (api/storage)`);
-    } catch (_) {}
-
     // 3) Expandir VARCHAR pequenos (idempotente mas rápido)
     for (const sql of [
       "ALTER TABLE azure_costs ALTER COLUMN billing_currency TYPE VARCHAR(20)",
@@ -6999,6 +6982,18 @@ app.get('/health', (_req, res) => {
       try { await ensureAzureCostsTable(); } catch (e) { console.warn('[Azure] Tabela será criada na primeira importação:', e.message); }
       try { await ensureAzureColetaTable(); } catch (e) { console.warn('[Coleta] Tabela de histórico não iniciada:', e.message); }
       try { await ensurePriceListTable(); } catch (e) { console.warn('[PriceList] Tabela será criada no primeiro sync:', e.message); }
+      // Remarcar registros importados por coletas API/Storage que ficaram com fonte='manual'
+      // (deve rodar após ambas as tabelas existirem)
+      pool.query(`
+        UPDATE azure_costs ac
+        SET fonte = h.tipo
+        FROM azure_coleta_historico h
+        WHERE h.tipo IN ('api', 'storage')
+          AND h.concluido_em IS NOT NULL
+          AND ac.importado_em >= h.iniciado_em
+          AND ac.importado_em <= h.concluido_em + INTERVAL '5 minutes'
+          AND ac.fonte = 'manual'
+      `).then(r => { if (r.rowCount > 0) console.log(`[Migration] ${r.rowCount} registros remarcados com fonte api/storage`); }).catch(() => {});
       _iniciarAgendador();
       _refreshAzureCache().catch(e => console.warn('[Azure] Cache de dropdowns não pôde ser construído:', e.message));
       console.log('  Banco conectado e inicializado.');
