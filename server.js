@@ -5345,8 +5345,10 @@ async function _cbFetch(url, options = {}, { timeoutMs = 30000, maxRetries = 3, 
   }
 }
 
+let _coletaTableReady = false;
 async function ensureAzureColetaTable() {
   if (!pool) return;
+  if (_coletaTableReady) return;
 
   // Cada query é separada para que a falha de uma não impeça as seguintes.
   const run = (sql) => pool.query(sql).catch(e => {
@@ -5439,6 +5441,7 @@ async function ensureAzureColetaTable() {
       expira_em  TIMESTAMP NOT NULL
     )
   `);
+  _coletaTableReady = true;
 }
 
 async function _registrarNotificacaoColeta(titulo, mensagem, tipo = 'coleta_concluida') {
