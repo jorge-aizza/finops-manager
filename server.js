@@ -5424,10 +5424,13 @@ function _iniciarAgendador() {
     try {
       await ensureAzureColetaTable();
       // Storage: suporta agendamento por hora+dia ou por intervalo (legado)
+      // Exige storage_account + storage_container preenchidos (credenciais reais)
       const rStg = await pool.query(`
         SELECT id, nome, hora_execucao, dias_semana, auto_coleta_horas
         FROM azure_storage_config
         WHERE ativo = true
+          AND storage_account IS NOT NULL AND storage_account <> ''
+          AND storage_container IS NOT NULL AND storage_container <> ''
           AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
           AND (
             (hora_execucao IS NOT NULL AND dias_semana IS NOT NULL)
@@ -5569,14 +5572,31 @@ app.get('/api/azure-coleta/diag-agendador', authMiddleware, dbMiddleware, async 
     const [rApi, rStg] = await Promise.all([
       pool.query(`
         SELECT id, nome, ativo, auto_coleta, modo_coleta, hora_execucao, dias_semana,
-               subscription_ids, billing_account_id IS NOT NULL AS tem_billing,
+               subscription_ids IS NOT NULL AND subscription_ids <> '' AS tem_subs,
+               billing_account_id IS NOT NULL AS tem_billing,
                proxima_coleta, NOW() AS agora_pg,
-               (proxima_coleta IS NULL OR proxima_coleta <= NOW()) AS deveria_rodar
+               (ativo = true AND auto_coleta = true
+                AND hora_execucao IS NOT NULL AND dias_semana IS NOT NULL
+                AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
+                AND (
+                  (billing_account_id IS NOT NULL AND billing_profile_id IS NOT NULL)
+                  OR (subscription_ids IS NOT NULL AND subscription_ids <> '')
+                )
+               ) AS deveria_rodar
         FROM azure_coleta_config ORDER BY id`),
       pool.query(`
         SELECT id, nome, ativo, hora_execucao, dias_semana, auto_coleta_horas,
+               storage_account IS NOT NULL AND storage_account <> '' AS tem_storage,
                proxima_coleta, NOW() AS agora_pg,
-               (proxima_coleta IS NULL OR proxima_coleta <= NOW()) AS deveria_rodar
+               (ativo = true
+                AND storage_account IS NOT NULL AND storage_account <> ''
+                AND storage_container IS NOT NULL AND storage_container <> ''
+                AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
+                AND (
+                  (hora_execucao IS NOT NULL AND dias_semana IS NOT NULL)
+                  OR (auto_coleta_horas IS NOT NULL AND auto_coleta_horas > 0)
+                )
+               ) AS deveria_rodar
         FROM azure_storage_config ORDER BY id`),
     ]);
     res.json({

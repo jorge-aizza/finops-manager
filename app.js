@@ -4310,7 +4310,7 @@ async function diagAgendador() {
     }
     html += `<div style="margin-top:6px"><b>SPs API:</b></div>`;
     (d.api_sps || []).forEach(s => {
-      html += `<div style="margin-left:10px">• <b>${escHtml(s.nome)}</b> | ativo:${ok(s.ativo)} | auto_coleta:${ok(s.auto_coleta)} | deveria_rodar:${ok(s.deveria_rodar)} | proxima:${s.proxima_coleta ? new Date(s.proxima_coleta).toLocaleString('pt-BR') : 'NULL'} | modo:${escHtml(s.modo_coleta||'')} | subs:${ok(s.subscription_ids)} | billing:${ok(s.tem_billing)}</div>`;
+      html += `<div style="margin-left:10px">• <b>${escHtml(s.nome)}</b> | ativo:${ok(s.ativo)} | auto_coleta:${ok(s.auto_coleta)} | deveria_rodar:${ok(s.deveria_rodar)} | proxima:${s.proxima_coleta ? new Date(s.proxima_coleta).toLocaleString('pt-BR') : 'NULL'} | modo:${escHtml(s.modo_coleta||'')} | subs:${ok(s.tem_subs)} | billing:${ok(s.tem_billing)}</div>`;
     });
     html += `</div>`;
     el.innerHTML = html;
