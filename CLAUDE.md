@@ -139,16 +139,27 @@ Schema changes go directly in `initDB()` — must be idempotent.
 - JOIN primário: `pl_best_mv pl ON pl.meter_id_lower = LOWER(base._meter_id)`
 - JOIN fallback: `pl_sku_mv pls ON pl.meter_id_lower IS NULL AND pls.meter_name_lower = LOWER(base.meter_categories) AND pls.meter_cat_lower = LOWER(base.categoria)` — ativa quando meter_id exato não casa; usa `meter_name` + `meter_category` que são os mesmos namespaces do billing export
 
-**Endpoints de diagnóstico:**
+**Endpoints de diagnóstico e gestão:**
 ```
-GET  /api/azure-costs/diag          — diagnóstico: contagens, colunas, amostra
-POST /api/azure-costs/refresh-cache — força rebuild cache de dropdowns
-GET  /api/price-list/diag           — cobertura meter_ids billing × PL
+GET    /api/azure-costs/diag            — diagnóstico: contagens, colunas, amostra
+POST   /api/azure-costs/refresh-cache   — força rebuild cache de dropdowns
+GET    /api/azure-costs/resumo          — sumário geral: total registros, período, custo (cached 5 min)
+GET    /api/azure-costs/imports         — lista de arquivos importados com linhas e período (cached 5 min)
+GET    /api/azure-costs/purge/preview   — conta registros que seriam removidos (por período ou arquivo)
+DELETE /api/azure-costs/purge           — expurgo: sem params = TRUNCATE TABLE (evita deadlock); com params = DELETE com retry 3x em deadlock (código 40P01)
+GET    /api/price-list/diag             — cobertura meter_ids billing × PL
 ```
+
+**Expurgo — notas importantes:**
+- "Todos os dados" usa `TRUNCATE TABLE azure_costs` em vez de `DELETE FROM` — evita deadlock com imports concorrentes que fazem UPSERT por linha. TRUNCATE é DDL atômico (sem row-level locks).
+- DELETE por período/arquivo tem retry automático (3x, backoff 200 ms/400 ms/600 ms) para o erro 40P01 (deadlock).
+- Após qualquer expurgo: invalida `_coberturaCache`, `_resumoCache`, `_importsCache` e dispara `_refreshAzureCache()`.
+- `abrirPurge()` em `calculadora.js`: modal abre imediatamente com spinner; `/resumo` e `/imports` carregados em `Promise.all` (paralelo).
 
 **Azure Coleta tables:**
 - `azure_coleta_historico` — log of each automated collection run
 - `azure_coleta_sps` — Service Principals (tenantId, clientId, clientSecret encrypted)
+- `azure_coleta_pendentes` — one-time reprocessing jobs (sp_id, subscription_id, data_inicio, data_fim); scheduler processes and DELETE's them after each run (guaranteed single execution)
 - `azure_storage_config.price_list_prefix` — optional blob prefix for Price List CSV/ZIP auto-collection
 
 **Performance indexes on azure_costs:**
@@ -171,6 +182,18 @@ Rebuilds `azure_subs_cache` and `azure_rg_cache` from `azure_costs`.
 Called at startup and after every successful import (fire-and-forget).
 Subscription and resource-group endpoints fall back to a direct query if cache is empty.
 Reduces dropdown load from ~12 s (full GROUP BY) to < 5 ms (tiny cache table scan).
+On completion, resets `_coberturaCache`, `_resumoCache`, `_importsCache` to force re-query on next request.
+
+### In-memory query caches (server.js)
+Three caches prevent repeated heavy GROUP BY scans on `azure_costs` from concurrent requests:
+```
+_coberturaCache / _coberturaCacheTs   GET /api/azure-coleta/cobertura-meses   TTL 5 min
+_resumoCache    / _resumoCacheTs      GET /api/azure-costs/resumo              TTL 5 min
+_importsCache   / _importsCacheTs     GET /api/azure-costs/imports             TTL 5 min
+```
+- All three are invalidated by `_refreshAzureCache()` (runs after every import/collection) and by `DELETE /api/azure-costs/purge`
+- `GET /api/azure-coleta/cobertura-meses?force=1` bypasses cache (used by the ↻ button in the coverage panel)
+- `loadCoberturaMeses(force)` passes `force=true` from the ↻ button, 120 s client timeout (heavy query)
 
 ### Azure cost import
 `POST /api/azure-costs/import` — multer upload, accepts `.csv` and `.parquet`.
@@ -195,21 +218,32 @@ Automated cost collection via Azure Management + Storage APIs (no manual CSV nee
 
 **Endpoints:**
 ```
-GET  /api/azure-coleta/status          — current scheduler state + next run time
-GET  /api/azure-coleta/historico       — collection history log
-DELETE /api/azure-coleta/historico     — clear history
-POST /api/azure-coleta/cancelar        — cancel running collection
-GET  /api/azure-coleta/sps             — list Service Principals
-POST /api/azure-coleta/sps             — add Service Principal
-PUT  /api/azure-coleta/sps/:id         — update SP
-DELETE /api/azure-coleta/sps/:id       — remove SP
-POST /api/azure-coleta/sps/:id/testar  — test SP credentials
+GET  /api/azure-coleta/status               — current scheduler state + next run time
+GET  /api/azure-coleta/historico            — collection history log
+DELETE /api/azure-coleta/historico          — clear history
+POST /api/azure-coleta/cancelar             — cancel running collection
+GET  /api/azure-coleta/cobertura-meses      — monthly data coverage per subscription (cached 5 min; ?force=1 bypasses)
+GET  /api/azure-coleta/sps                  — list Service Principals
+POST /api/azure-coleta/sps                  — add Service Principal
+PUT  /api/azure-coleta/sps/:id              — update SP
+DELETE /api/azure-coleta/sps/:id            — remove SP
+POST /api/azure-coleta/sps/:id/testar       — test SP credentials
 POST /api/azure-coleta/sps/:id/coletar-api  — trigger manual collection
-POST /api/azure-coleta/sps/:id/listar-subs  — list subscriptions for SP
+POST /api/azure-coleta/listar-subs-preview  — list subs using credentials from body (no saved SP required — for new SP wizard)
+POST /api/azure-coleta/sps/:id/listar-subs  — list subscriptions for saved SP
 POST /api/azure-coleta/sps/:id/listar-rgs   — list resource groups for SP
-PATCH /api/azure-coleta/sps/:id/ativo  — toggle SP active
-PATCH /api/azure-coleta/sps/:id/padrao — set SP as default
+PATCH /api/azure-coleta/sps/:id/ativo       — toggle SP active
+PATCH /api/azure-coleta/sps/:id/padrao      — set SP as default
+GET  /api/azure-coleta/pendentes            — list pending one-time reprocessing jobs
+POST /api/azure-coleta/pendentes            — add pending job (sp_id optional, subscription_id, data_inicio, data_fim)
+DELETE /api/azure-coleta/pendentes/:id      — remove pending job
 ```
+
+**SP modal — subscription listing for new SPs:**
+`spBuscarSubs()` checks `sp-edit-id`. If empty (new SP), reads `sp-tenant-id`, `sp-client-id`, `sp-client-secret` from the form and calls `POST /api/azure-coleta/listar-subs-preview` with those values directly — no prior save required. If credential fields are also empty, shows a note to fill them first.
+
+**SP modal — `saveSP()` pitfall:**
+`sp-dia` element does not exist in the modal HTML — always use `document.getElementById('sp-dia')?.value` (optional chaining). The entire `saveSP()` body is wrapped in try/catch so any future `null.value` errors surface as a toast instead of silent failure.
 
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
@@ -695,7 +729,9 @@ Nav group CSS is defined **once** in styles.css (~line 213). Do not add a second
 Bell icon opens `#notif-panel`. Light theme: `rgba(110, 30, 170, 0.95)` (medium Vivo purple). Dark theme: default dark surface.
 
 ### Auto-refresh
-`setRefreshInterval(minutes)` — covers dashboard, projetos, ações, estimativas, reservas, and custos views. Countdown shown in FAB button. Timer stored in `_refreshTimer` + `_countdownTimer`, both cleared on logout and before recreation.
+`setRefreshInterval(minutes)` — covers dashboard, projetos, ações, estimativas, reservas, coleta, and calculadora views. Countdown shown in FAB button. Timer stored in `_refreshTimer` + `_countdownTimer`, both cleared on logout and before recreation.
+
+`manualRefresh()` — `try/catch/finally` wrapping all views; errors shown as error toast. `calculadora` view calls `Calculadora.buscarRecursos()` to re-run the current search.
 
 ### Interval lifecycle (app.js)
 All recurring timers have named references and are cleared on logout:

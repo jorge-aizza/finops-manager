@@ -3515,25 +3515,31 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     const modal = document.getElementById('cpurge-modal');
     if (!modal) return;
 
-    // Reset estado
+    // Mostra modal imediatamente com spinner
     document.getElementById('cpurge-result').style.display  = 'none';
     document.getElementById('cpurge-preview').style.display = 'none';
     const confirmar = document.getElementById('cpurge-confirmar');
     if (confirmar) { confirmar.disabled = true; confirmar.style.opacity = '.45'; }
     document.querySelectorAll('input[name="cpurge-tipo"]').forEach(r => { if (r.value === 'periodo') r.checked = true; });
     _purgeOnModo('periodo');
-
-    // Carregar resumo do banco
     const resumoEl = document.getElementById('cpurge-resumo');
+    resumoEl.innerHTML = '<span style="font-size:12px;color:var(--text-muted)">Carregando dados do banco...</span>';
+    modal.style.display = 'flex';
+
+    // Carrega resumo + imports em paralelo
     try {
-      const d = await _api('GET', '/api/azure-costs/resumo');
+      const [d, imports] = await Promise.all([
+        _api('GET', '/api/azure-costs/resumo'),
+        _api('GET', '/api/azure-costs/imports')
+      ]);
+
+      // Preenche resumo
       const r = d.resumo;
       const total = Number(r.total || 0).toLocaleString('pt-BR');
       const ini   = r.data_inicio ? r.data_inicio.slice(0,10) : '—';
       const fim   = r.data_fim    ? r.data_fim.slice(0,10)    : '—';
       const custo = r.total_billing != null ? Number(r.total_billing).toLocaleString('pt-BR',{minimumFractionDigits:2}) : '—';
       const moeda = r.moeda || '';
-      // Linha por mês
       const meses = (d.por_mes || []).map(m => {
         const reg = Number(m.registros).toLocaleString('pt-BR');
         const val = Number(m.total_billing || 0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -3546,16 +3552,14 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
           <div><div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Custo total</div><div style="font-size:13px;font-weight:600;color:var(--text)">${moeda} ${custo}</div></div>
         </div>
         ${meses ? `<details style="margin-top:4px"><summary style="font-size:11px;color:var(--text-muted);cursor:pointer">Ver por mês</summary><div style="margin-top:8px;font-size:11px;color:var(--text-muted);display:flex;flex-direction:column;gap:3px">${meses}</div></details>` : ''}`;
-      // Preenche datas padrão
       const ini6 = r.data_inicio ? r.data_inicio.slice(0,10) : '';
       const fim6 = r.data_fim    ? r.data_fim.slice(0,10)    : '';
       if (!document.getElementById('cpurge-data-ini').value) document.getElementById('cpurge-data-ini').value = ini6;
       if (!document.getElementById('cpurge-data-fim').value) document.getElementById('cpurge-data-fim').value = fim6;
 
-      // Carrega lista de arquivos
+      // Preenche select de arquivos
       const sel = document.getElementById('cpurge-sel');
       sel.innerHTML = '<option value="">— selecione —</option>';
-      const imports = await _api('GET', '/api/azure-costs/imports');
       if (Array.isArray(imports)) {
         imports.filter(i => i.arquivo_origem).forEach(imp => {
           const opt = document.createElement('option');
@@ -3570,8 +3574,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     } catch (e) {
       resumoEl.innerHTML = `<span style="color:var(--danger)">Erro ao carregar dados: ${e.message}</span>`;
     }
-
-    modal.style.display = 'flex';
   }
 
   function fecharPurge() {

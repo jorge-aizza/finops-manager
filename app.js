@@ -1465,6 +1465,10 @@ async function manualRefresh() {
     else if (currentView === 'estimativas') await loadEstimativas();
     else if (currentView === 'reservas')    await loadReservas();
     else if (currentView === 'coleta')      await loadColeta();
+    else if (currentView === 'calculadora') { if (typeof Calculadora !== 'undefined') Calculadora.buscarRecursos(); }
+  } catch(e) {
+    console.error('[manualRefresh]', e);
+    showToast('Erro ao atualizar: ' + (e.message || e), 'error');
   } finally {
     setTimeout(() => { if (icon) icon.classList.remove('spinning'); }, 500);
   }
@@ -3964,6 +3968,8 @@ function abrirPurgeAzure() {
 let _coletaPolling = null;
 
 async function loadColeta() {
+  loadCoberturaMeses();
+  loadPendentesCobertura();
   await loadSPList();
   await loadStorageList();
   await loadColetaStatus();
@@ -4358,6 +4364,273 @@ async function diagAgendador() {
   }
 }
 
+// Dados de cobertura cacheados para o painel de detalhe
+let _coberturaData = null;
+
+async function loadCoberturaMeses(force) {
+  const body = document.getElementById('cobertura-meses-body');
+  if (!body) return;
+  body.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:12px">Carregando cobertura...</div>';
+  try {
+    const path = '/azure-coleta/cobertura-meses' + (force ? '?force=1' : '');
+    const rows = await api('GET', path, undefined, 120000);
+    if (!rows || !rows.length) {
+      body.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:12px">Nenhum dado encontrado em <code>azure_costs</code>.</div>';
+      return;
+    }
+
+    // Agrupa: mesKey → { subs: [{subscription_id, registros, dias_com_dados, dias_no_mes, ultima_importacao, total_brl}] }
+    const porMes = new Map();
+    for (const r of rows) {
+      const key = r.mes.slice(0, 7); // 'YYYY-MM'
+      if (!porMes.has(key)) porMes.set(key, []);
+      porMes.get(key).push(r);
+    }
+    _coberturaData = porMes;
+
+    // Agrega por ano para a grade
+    const porAno = new Map();
+    for (const [key, subs] of porMes) {
+      const [ano, mesNum] = key.split('-').map(Number);
+      const mes = mesNum - 1;
+      if (!porAno.has(ano)) porAno.set(ano, new Array(12).fill(null));
+      // Métricas agregadas do mês (todas as subs)
+      const totalReg     = subs.reduce((s, r) => s + Number(r.registros), 0);
+      const diasNoMes    = subs[0].dias_no_mes;
+      const maxDiasSub   = Math.max(...subs.map(r => Number(r.dias_com_dados)));
+      const pct          = Math.round((maxDiasSub / diasNoMes) * 100);
+      const ultimaColeta = subs.reduce((best, r) => (!best || r.ultima_importacao > best) ? r.ultima_importacao : best, null);
+      porAno.get(ano)[mes] = { key, subs, totalReg, diasNoMes, maxDiasSub, pct, ultimaColeta };
+    }
+
+    const mNomes   = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+    const hoje     = new Date();
+    const mesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,'0')}`;
+    const fmtNum   = n => n >= 1000000 ? (n/1000000).toFixed(1)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n);
+
+    const _pctColor = pct => pct >= 95 ? '#22c55e' : pct >= 70 ? '#ff8c42' : '#ff4d6a';
+    const _pctBg    = pct => pct >= 95 ? 'rgba(34,197,94,.15)'  : pct >= 70 ? 'rgba(255,140,66,.15)' : 'rgba(255,77,106,.15)';
+    const _pctBord  = pct => pct >= 95 ? 'rgba(34,197,94,.35)'  : pct >= 70 ? 'rgba(255,140,66,.35)' : 'rgba(255,77,106,.35)';
+
+    let html = '';
+    const anos = [...porAno.keys()].sort((a,b) => b-a);
+    for (const ano of anos) {
+      const meses = porAno.get(ano);
+      html += `<div style="margin-bottom:14px">
+        <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${ano}</div>
+        <div style="display:grid;grid-template-columns:repeat(12,1fr);gap:4px">`;
+      for (let m = 0; m < 12; m++) {
+        const d = meses[m];
+        const isAtual = d && d.key === mesAtual;
+        if (d) {
+          const cor   = isAtual ? '#4da6ff' : _pctColor(d.pct);
+          const bg    = isAtual ? 'rgba(77,166,255,.15)' : _pctBg(d.pct);
+          const bord  = isAtual ? 'rgba(77,166,255,.35)' : _pctBord(d.pct);
+          const pctLbl = isAtual ? 'atual' : d.pct + '%';
+          html += `<div onclick="_coberturaDetalhe('${d.key}')"
+            title="Clique para ver detalhe por subscription"
+            style="padding:6px 2px;border-radius:6px;background:${bg};border:1px solid ${bord};text-align:center;cursor:pointer;transition:opacity .15s"
+            onmouseover="this.style.opacity='.75'" onmouseout="this.style.opacity='1'">
+            <div style="font-size:10px;font-weight:700;color:${cor}">${mNomes[m]}</div>
+            <div style="font-size:9px;color:${cor};margin-top:1px">${fmtNum(d.totalReg)}</div>
+            <div style="font-size:9px;font-weight:700;color:${cor};margin-top:1px">${pctLbl}</div>
+          </div>`;
+        } else {
+          html += `<div title="${mNomes[m]}/${ano} — sem dados"
+            style="padding:6px 2px;border-radius:6px;background:rgba(255,255,255,.03);border:1px solid var(--border);text-align:center;cursor:default">
+            <div style="font-size:10px;color:var(--text-dim);opacity:.4">${mNomes[m]}</div>
+            <div style="font-size:9px;color:var(--border);margin-top:1px">—</div>
+            <div style="font-size:9px;color:var(--border);margin-top:1px">—</div>
+          </div>`;
+        }
+      }
+      html += '</div></div>';
+    }
+
+    // Legenda + painel detalhe
+    html += `<div style="display:flex;gap:14px;margin-top:6px;flex-wrap:wrap;align-items:center">
+      <div style="display:flex;align-items:center;gap:4px"><div style="width:9px;height:9px;border-radius:2px;background:rgba(34,197,94,.3);border:1px solid rgba(34,197,94,.5)"></div><span style="font-size:10px;color:var(--text-muted)">≥95%</span></div>
+      <div style="display:flex;align-items:center;gap:4px"><div style="width:9px;height:9px;border-radius:2px;background:rgba(255,140,66,.2);border:1px solid rgba(255,140,66,.4)"></div><span style="font-size:10px;color:var(--text-muted)">70–94%</span></div>
+      <div style="display:flex;align-items:center;gap:4px"><div style="width:9px;height:9px;border-radius:2px;background:rgba(255,77,106,.2);border:1px solid rgba(255,77,106,.4)"></div><span style="font-size:10px;color:var(--text-muted)">&lt;70%</span></div>
+      <div style="display:flex;align-items:center;gap:4px"><div style="width:9px;height:9px;border-radius:2px;background:rgba(77,166,255,.2);border:1px solid rgba(77,166,255,.4)"></div><span style="font-size:10px;color:var(--text-muted)">Mês atual</span></div>
+      <span style="font-size:10px;color:var(--text-dim)">% = dias com dados ÷ dias do mês · Clique num mês para ver por subscription</span>
+    </div>
+    <div id="cobertura-detalhe-panel" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px"></div>`;
+
+    body.innerHTML = html;
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:8px">Erro ao carregar cobertura: ${e.message}</div>`;
+  }
+}
+
+async function _coberturaGetSP(precisaAgendamento) {
+  // Garante que o cache está carregado
+  if (!_coletaApiSPCache.length) {
+    try { _coletaApiSPCache = await api('GET', '/azure-coleta/sps'); } catch (_) {}
+  }
+  const sps = precisaAgendamento
+    ? _coletaApiSPCache.filter(s => s.ativo && s.auto_coleta)
+    : _coletaApiSPCache.filter(s => s.ativo);
+  return sps.find(s => s.is_padrao) || sps[0] || null;
+}
+
+function _coberturaGetSubName(mesKey, subId) {
+  const subs = _coberturaData?.get(mesKey) || [];
+  const found = subs.find(s => s.subscription_id === subId);
+  return found?.subscription_name || subId;
+}
+
+async function _coberturaColetarAgora(mesKey, subId) {
+  const sp = await _coberturaGetSP(false);
+  if (!sp) { showToast('Nenhuma SP ativa configurada', 'error'); return; }
+  const subName = _coberturaGetSubName(mesKey, subId);
+  const [ano, mes] = mesKey.split('-').map(Number);
+  const inicio = `${ano}-${String(mes).padStart(2,'0')}-01`;
+  const fim    = new Date(ano, mes, 0).toISOString().slice(0,10);
+  const desc   = `${subName} — ${String(mes).padStart(2,'0')}/${ano}`;
+  if (!confirm(`Iniciar coleta imediata:\n\n${desc}\n\nUsando SP: ${sp.nome}\nPeríodo: ${inicio} → ${fim}`)) return;
+  try {
+    // Sempre usa modo subscription para coletar uma sub específica
+    await api('POST', `/azure-coleta/sps/${sp.id}/coletar-api`, {
+      modo:             'subscription',
+      data_inicio:      inicio,
+      data_fim:         fim,
+      subscription_ids: [subId],
+      resource_groups:  [],
+      metric:           'ActualCost',
+    });
+    showToast(`Coleta iniciada para ${desc}`, 'success');
+    showView('coleta');
+    switchColetaTab('api');
+    setTimeout(loadColetaStatus, 800);
+  } catch (e) { showToast('Erro ao iniciar coleta: ' + e.message, 'error'); }
+}
+
+async function _coberturaAgendarPendente(mesKey, subId) {
+  const sp = await _coberturaGetSP(true);
+  if (!sp) { showToast('Nenhuma SP com agendamento ativo. Configure o agendamento primeiro.', 'error'); return; }
+  const subName = _coberturaGetSubName(mesKey, subId);
+  const [ano, mes] = mesKey.split('-').map(Number);
+  const inicio = `${ano}-${String(mes).padStart(2,'0')}-01`;
+  const fim    = new Date(ano, mes, 0).toISOString().slice(0,10);
+  const desc   = `${subName} — ${String(mes).padStart(2,'0')}/${ano}`;
+  if (!confirm(`Incluir no próximo agendamento (uma única vez):\n\n${desc}\n\nSP: ${sp.nome}\nPeríodo: ${inicio} → ${fim}\n\nEste item será removido automaticamente após a coleta.`)) return;
+  try {
+    await api('POST', '/azure-coleta/pendentes', {
+      sp_id:           sp.id,
+      subscription_id: subId,
+      sub_name:        subName,
+      data_inicio:     inicio,
+      data_fim:        fim,
+      descricao:       desc,
+    });
+    showToast(`Agendado: ${desc} — será coletado na próxima execução de ${sp.nome}`, 'success');
+    loadPendentesCobertura();
+  } catch (e) { showToast('Erro ao agendar: ' + e.message, 'error'); }
+}
+
+async function loadPendentesCobertura() {
+  const el = document.getElementById('cobertura-pendentes');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/azure-coleta/pendentes');
+    if (!rows || !rows.length) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.innerHTML = `
+      <div style="font-size:12px;font-weight:700;color:var(--orange);margin-bottom:8px">📅 Pendentes para próximo agendamento (${rows.length})</div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        ${rows.map(p => `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 12px;background:rgba(255,140,66,.08);border:1px solid rgba(255,140,66,.25);border-radius:7px">
+            <div>
+              <span style="font-size:12px;color:var(--text)">${p.descricao || p.data_inicio + ' → ' + p.data_fim}</span>
+              <span style="font-size:10px;color:var(--text-muted);margin-left:8px">SP: ${p.sp_nome || '—'}</span>
+            </div>
+            <button onclick="_removerPendente(${p.id})"
+              style="font-size:11px;padding:2px 8px;border-radius:5px;background:rgba(255,77,106,.12);color:var(--danger);border:1px solid rgba(255,77,106,.3);cursor:pointer">
+              ✕
+            </button>
+          </div>`).join('')}
+      </div>`;
+  } catch (_) { el.style.display = 'none'; }
+}
+
+async function _removerPendente(id) {
+  try {
+    await api('DELETE', `/azure-coleta/pendentes/${id}`);
+    loadPendentesCobertura();
+  } catch (e) { showToast('Erro ao remover: ' + e.message, 'error'); }
+}
+
+function _coberturaDetalhe(key) {
+  const panel = document.getElementById('cobertura-detalhe-panel');
+  if (!panel) return;
+  // Toggle: fechar se já está mostrando o mesmo mês
+  if (panel.dataset.key === key && panel.style.display !== 'none') {
+    panel.style.display = 'none';
+    panel.dataset.key = '';
+    return;
+  }
+  panel.dataset.key = key;
+  const subs = _coberturaData?.get(key);
+  if (!subs) { panel.style.display = 'none'; return; }
+
+  const [ano, mesNum] = key.split('-').map(Number);
+  const mNomes = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const fmtNum = n => Number(n).toLocaleString('pt-BR');
+  const fmtBrl = v => 'R$ ' + Number(v).toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const pctColor = pct => pct >= 95 ? 'var(--green)' : pct >= 70 ? 'var(--orange)' : 'var(--danger)';
+  const pctBg    = pct => pct >= 95 ? 'rgba(34,197,94,.15)' : pct >= 70 ? 'rgba(255,140,66,.15)' : 'rgba(255,77,106,.15)';
+
+  let rows = '';
+  for (const r of subs) {
+    const pct = Math.round((Number(r.dias_com_dados) / Number(r.dias_no_mes)) * 100);
+    const barW = Math.min(100, pct);
+    rows += `<tr>
+      <td style="font-size:11px;color:var(--text);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.subscription_id}">${r.subscription_name || r.subscription_id}</td>
+      <td style="font-size:11px;color:var(--text);text-align:right">${fmtNum(r.registros)}</td>
+      <td style="font-size:11px;color:var(--text);text-align:center">${r.dias_com_dados}/${r.dias_no_mes}</td>
+      <td style="min-width:100px">
+        <div style="display:flex;align-items:center;gap:6px">
+          <div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${barW}%;background:${pctColor(pct)};border-radius:3px;transition:width .4s"></div>
+          </div>
+          <span style="font-size:11px;font-weight:700;color:${pctColor(pct)};min-width:32px;text-align:right">${pct}%</span>
+        </div>
+      </td>
+      <td style="font-size:10px;color:var(--text-dim);text-align:right">${r.ultima_importacao || '—'}</td>
+      <td style="font-size:11px;color:var(--text-muted);text-align:right">${fmtBrl(r.total_brl)}</td>
+      <td style="text-align:right;white-space:nowrap">${pct < 100 ? `
+        <button onclick="_coberturaColetarAgora('${key}','${r.subscription_id}')"
+          style="font-size:10px;padding:3px 8px;border-radius:5px;background:rgba(147,51,234,.15);color:var(--accent);border:1px solid rgba(147,51,234,.3);cursor:pointer;margin-right:4px"
+          title="Iniciar coleta imediata deste mês">▶ Agora</button>
+        <button onclick="_coberturaAgendarPendente('${key}','${r.subscription_id}')"
+          style="font-size:10px;padding:3px 8px;border-radius:5px;background:rgba(255,140,66,.12);color:var(--orange);border:1px solid rgba(255,140,66,.3);cursor:pointer"
+          title="Incluir no próximo agendamento (executa uma única vez)">📅 Agendar</button>` : '<span style="font-size:10px;color:var(--green)">✓ OK</span>'}</td>
+    </tr>`;
+  }
+
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <span style="font-size:13px;font-weight:700;color:var(--text)">${mNomes[mesNum-1]} ${ano} — detalhe por subscription</span>
+      <button onclick="document.getElementById('cobertura-detalhe-panel').style.display='none'" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:14px">✕</button>
+    </div>
+    <div class="table-wrapper">
+      <table class="data-table" style="font-size:12px">
+        <thead><tr>
+          <th>Subscription</th>
+          <th style="text-align:right">Registros</th>
+          <th style="text-align:center">Dias c/ dados</th>
+          <th style="min-width:140px">Completude</th>
+          <th style="text-align:right">Última coleta</th>
+          <th style="text-align:right">Total BRL</th>
+          <th style="text-align:right">Ação</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 async function loadColetaStatus() {
   try {
     const s = await api('GET', '/azure-coleta/status');
@@ -4488,6 +4761,7 @@ async function loadColetaStatus() {
         } else if (hist.status === 'cancelado') {
           showToast('⊘ Coleta cancelada', 'error');
         }
+        loadCoberturaMeses(); // atualiza painel de cobertura ao terminar coleta
         loadNotificacoes();
       } else if (!s.em_execucao) {
         _coletaEraExecucando = false;
@@ -4646,7 +4920,8 @@ function openSPModal(id) {
         spBuscarSubs();
       }
       document.getElementById('sp-ativo').checked = sp.ativo;
-      if (sp.dia_execucao)       document.getElementById('sp-dia').value = sp.dia_execucao;
+      const spDiaEl = document.getElementById('sp-dia');
+      if (sp.dia_execucao && spDiaEl) spDiaEl.value = sp.dia_execucao;
       if (sp.granularidade_dias) _setGran('sp', sp.granularidade_dias);
     }).catch(() => {});
   }
@@ -4759,17 +5034,32 @@ function _setGran(prefixo, valor) {
 // ── SP Picker de Assinaturas ──────────────────────────────────────────────────
 
 async function spBuscarSubs() {
-  const id = document.getElementById('sp-edit-id').value;
-  if (!id) {
-    document.getElementById('sp-subs-new-note').style.display = '';
+  const id         = document.getElementById('sp-edit-id').value;
+  const tenantId   = document.getElementById('sp-tenant-id')?.value.trim();
+  const clientId   = document.getElementById('sp-client-id')?.value.trim();
+  const clientSec  = document.getElementById('sp-client-secret')?.value.trim();
+  const newNote    = document.getElementById('sp-subs-new-note');
+
+  // Nova SP sem credenciais preenchidas
+  if (!id && (!tenantId || !clientId || !clientSec)) {
+    if (newNote) newNote.style.display = '';
     return;
   }
+
+  if (newNote) newNote.style.display = 'none';
   document.getElementById('sp-subs-empty').style.display     = 'none';
   document.getElementById('sp-subs-list-area').style.display = 'none';
   document.getElementById('sp-subs-loading').style.display   = '';
   document.getElementById('sp-subs-error').style.display     = 'none';
   try {
-    const data = await api('POST', `/azure-coleta/sps/${id}/listar-subs`, {});
+    let data;
+    if (id) {
+      // SP já salva — usa endpoint com credenciais do banco
+      data = await api('POST', `/azure-coleta/sps/${id}/listar-subs`, {});
+    } else {
+      // Nova SP — passa credenciais direto no body (sem salvar ainda)
+      data = await api('POST', '/azure-coleta/listar-subs-preview', { tenant_id: tenantId, client_id: clientId, client_secret: clientSec });
+    }
     _spSubsAll = data.subs || [];
     _spRenderSubs(data.fonte);
   } catch (e) {
@@ -4852,32 +5142,32 @@ function _spGetSubscriptionIds() {
 }
 
 async function saveSP() {
-  const id   = document.getElementById('sp-edit-id').value;
-  const modo = document.getElementById('sp-modo-coleta').value;
-  const body = {
-    nome:               document.getElementById('sp-nome').value.trim(),
-    tenant_id:          document.getElementById('sp-tenant-id').value.trim(),
-    client_id:          document.getElementById('sp-client-id').value.trim(),
-    client_secret:      document.getElementById('sp-client-secret').value,
-    expiracao_secret:   document.getElementById('sp-expiracao').value || null,
-    modo_coleta:        modo,
-    billing_account_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-account').value.trim() || null) : null,
-    billing_profile_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-profile').value.trim() || null) : null,
-    subscription_ids:   modo === 'subscription'    ? _spGetSubscriptionIds() : null,
-    ativo:              document.getElementById('sp-ativo').checked,
-    dia_execucao:       parseInt(document.getElementById('sp-dia').value) || 5,
-    granularidade_dias: _getGran('sp'),
-  };
-  if (!body.nome || !body.tenant_id || !body.client_id) { showToast('Preencha Nome, Tenant ID e Client ID', 'error'); return; }
-  if (modo === 'billing_profile' && (!body.billing_account_id || !body.billing_profile_id)) { showToast('Preencha Billing Account ID e Billing Profile ID', 'error'); return; }
-  if (modo === 'subscription' && !body.subscription_ids) { showToast('Selecione ao menos uma assinatura ou cole os IDs manualmente', 'error'); return; }
   try {
+    const id   = document.getElementById('sp-edit-id').value;
+    const modo = document.getElementById('sp-modo-coleta').value;
+    const body = {
+      nome:               document.getElementById('sp-nome').value.trim(),
+      tenant_id:          document.getElementById('sp-tenant-id').value.trim(),
+      client_id:          document.getElementById('sp-client-id').value.trim(),
+      client_secret:      document.getElementById('sp-client-secret').value,
+      expiracao_secret:   document.getElementById('sp-expiracao').value || null,
+      modo_coleta:        modo,
+      billing_account_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-account').value.trim() || null) : null,
+      billing_profile_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-profile').value.trim() || null) : null,
+      subscription_ids:   modo === 'subscription'    ? _spGetSubscriptionIds() : null,
+      ativo:              document.getElementById('sp-ativo').checked,
+      dia_execucao:       parseInt(document.getElementById('sp-dia')?.value) || 5,
+      granularidade_dias: _getGran('sp'),
+    };
+    if (!body.nome || !body.tenant_id || !body.client_id) { showToast('Preencha Nome, Tenant ID e Client ID', 'error'); return; }
+    if (modo === 'billing_profile' && (!body.billing_account_id || !body.billing_profile_id)) { showToast('Preencha Billing Account ID e Billing Profile ID', 'error'); return; }
+    if (modo === 'subscription' && !body.subscription_ids) { showToast('Selecione ao menos uma assinatura ou cole os IDs manualmente', 'error'); return; }
     if (id) await api('PUT', `/azure-coleta/sps/${id}`, body);
     else    await api('POST', '/azure-coleta/sps', body);
     showToast('SP salva com sucesso', 'success');
     closeSPModal();
     loadSPList();
-  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+  } catch (e) { showToast('Erro ao salvar SP: ' + e.message, 'error'); }
 }
 
 async function deleteSP(id, nome) {
@@ -5203,8 +5493,94 @@ function _wizardRenderRGs(fonte) {
   setTimeout(() => document.getElementById('wizard-rgs-search')?.focus(), 100);
 }
 
+// ── Wizard Step 3 — modo e seleção de meses ──────────────────────────────────
+let _wizardModo    = 'periodo';   // 'periodo' | 'meses'
+let _wizardMesesSel = new Set();  // 'YYYY-M' strings
+let _wizardAnoSel   = new Date().getFullYear();
+
+const _MESES_NOMES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+
+function _wizardSwitchModo(modo) {
+  _wizardModo = modo;
+  const isPeriodo = modo === 'periodo';
+  const tabP = document.getElementById('wizard-tab-periodo');
+  const tabM = document.getElementById('wizard-tab-meses');
+  const panP = document.getElementById('wizard-panel-periodo');
+  const panM = document.getElementById('wizard-panel-meses');
+  if (tabP) { tabP.style.background = isPeriodo ? 'var(--accent)' : 'transparent'; tabP.style.color = isPeriodo ? '#fff' : 'var(--text-muted)'; }
+  if (tabM) { tabM.style.background = !isPeriodo ? 'rgba(147,51,234,.15)' : 'transparent'; tabM.style.color = !isPeriodo ? 'var(--accent)' : 'var(--text-muted)'; }
+  if (panP) panP.style.display = isPeriodo ? 'flex' : 'none';
+  if (panM) panM.style.display = !isPeriodo ? 'flex' : 'none';
+  if (!isPeriodo) _wizardRenderMeses();
+}
+
+function _wizardRenderAnos() {
+  const hoje = new Date();
+  const anos = [hoje.getFullYear(), hoje.getFullYear() - 1, hoje.getFullYear() - 2];
+  const el = document.getElementById('wizard-anos');
+  if (!el) return;
+  el.innerHTML = anos.map(a => `
+    <button onclick="_wizardSetAno(${a})" id="wizard-ano-${a}"
+      style="padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid ${a === _wizardAnoSel ? 'var(--accent)' : 'var(--border)'};background:${a === _wizardAnoSel ? 'rgba(147,51,234,.15)' : 'transparent'};color:${a === _wizardAnoSel ? 'var(--accent)' : 'var(--text-muted)'};transition:all .15s">
+      ${a}
+    </button>`).join('');
+}
+
+function _wizardSetAno(ano) {
+  _wizardAnoSel = ano;
+  _wizardRenderAnos();
+  _wizardRenderMeses();
+}
+
+function _wizardRenderMeses() {
+  _wizardRenderAnos();
+  const grid = document.getElementById('wizard-meses-grid');
+  if (!grid) return;
+  const hoje = new Date();
+  const maxKey = `${hoje.getFullYear()}-${hoje.getMonth() + 1}`;
+  grid.innerHTML = _MESES_NOMES.map((nome, idx) => {
+    const key  = `${_wizardAnoSel}-${idx + 1}`;
+    const sel  = _wizardMesesSel.has(key);
+    const futuro = key > maxKey;
+    return `<button onclick="_wizardToggleMes('${key}')" ${futuro ? 'disabled' : ''}
+      style="padding:10px 4px;border-radius:8px;font-size:13px;font-weight:700;cursor:${futuro ? 'default' : 'pointer'};border:2px solid ${sel ? 'var(--accent)' : 'var(--border)'};background:${sel ? 'rgba(147,51,234,.18)' : futuro ? 'rgba(0,0,0,.12)' : 'rgba(147,51,234,.04)'};color:${sel ? 'var(--accent)' : futuro ? 'var(--text-dim)' : 'var(--text)'};transition:all .15s;opacity:${futuro ? '.4' : '1'}">
+      ${nome}
+    </button>`;
+  }).join('');
+  _wizardAtualizarMesesPreview();
+}
+
+function _wizardToggleMes(key) {
+  if (_wizardMesesSel.has(key)) _wizardMesesSel.delete(key);
+  else _wizardMesesSel.add(key);
+  _wizardRenderMeses();
+}
+
+function _wizardAtualizarMesesPreview() {
+  const preview = document.getElementById('wizard-meses-preview');
+  if (!preview) return;
+  if (_wizardMesesSel.size === 0) { preview.style.display = 'none'; return; }
+  const { inicio, fim } = _wizardMesesToDatas();
+  preview.style.display = 'block';
+  preview.innerHTML = `📅 Período gerado: <strong style="color:var(--accent)">${inicio}</strong> → <strong style="color:var(--accent)">${fim}</strong> &nbsp;·&nbsp; ${_wizardMesesSel.size} mês(es)`;
+}
+
+function _wizardMesesToDatas() {
+  const chaves = [..._wizardMesesSel].sort();
+  const [anoIni, mesIni] = chaves[0].split('-').map(Number);
+  const [anoFim, mesFim] = chaves[chaves.length - 1].split('-').map(Number);
+  const ini = new Date(anoIni, mesIni - 1, 1);
+  const fim = new Date(anoFim, mesFim, 0);
+  return { inicio: ini.toISOString().slice(0, 10), fim: fim.toISOString().slice(0, 10) };
+}
+
 function wizardNext2() {
   _wizardShowStep(3);
+  _wizardModo = 'periodo';
+  _wizardMesesSel.clear();
+  _wizardAnoSel = new Date().getFullYear();
+  // Reseta tabs para período
+  _wizardSwitchModo('periodo');
   const hoje = new Date();
   const ini  = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
   const fim  = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
@@ -5232,10 +5608,20 @@ function _wizardSetPeriodo(tipo) {
 }
 
 function wizardNext3() {
-  const inicio = document.getElementById('wizard-inicio').value;
-  const fim    = document.getElementById('wizard-fim').value;
-  if (!inicio || !fim) { showToast('Informe as datas de início e fim', 'error'); return; }
-  if (inicio > fim)    { showToast('Data início deve ser anterior ao fim', 'error'); return; }
+  let inicio, fim;
+  if (_wizardModo === 'meses') {
+    if (_wizardMesesSel.size === 0) { showToast('Selecione ao menos um mês', 'error'); return; }
+    const datas = _wizardMesesToDatas();
+    inicio = datas.inicio;
+    fim    = datas.fim;
+    document.getElementById('wizard-inicio').value = inicio;
+    document.getElementById('wizard-fim').value    = fim;
+  } else {
+    inicio = document.getElementById('wizard-inicio').value;
+    fim    = document.getElementById('wizard-fim').value;
+    if (!inicio || !fim) { showToast('Informe as datas de início e fim', 'error'); return; }
+    if (inicio > fim)    { showToast('Data início deve ser anterior ao fim', 'error'); return; }
+  }
   _wizard.inicio = inicio;
   _wizard.fim    = fim;
 
@@ -5426,8 +5812,26 @@ async function wizardIniciarColeta() {
     fecharWizardColeta();
     showView('coleta');
     switchColetaTab('api');
+
+    // Mostrar monitor imediatamente — não esperar o polling detectar em_execucao
+    const _monEl  = document.getElementById('coleta-monitor');
+    const _ancEl  = document.getElementById('mon-anchor-api');
+    if (_monEl && _ancEl) {
+      _ancEl.appendChild(_monEl);
+      _monEl.style.display = '';
+      const _faseEl = document.getElementById('mon-fase');
+      if (_faseEl) _faseEl.textContent = 'Iniciando coleta...';
+      const _logEl = document.getElementById('mon-log');
+      if (_logEl) _logEl.innerHTML = '<div><span style="color:var(--accent);opacity:.6">' + new Date().toTimeString().slice(0,8) + '</span> Coleta iniciada — aguardando servidor...</div>';
+      const _closeBtnEl = document.getElementById('mon-close-btn');
+      const _cancelBtnEl = document.getElementById('mon-cancel-btn');
+      if (_closeBtnEl) _closeBtnEl.style.display = 'none';
+      if (_cancelBtnEl) _cancelBtnEl.style.display = '';
+    }
+    if (!_coletaPolling) _coletaPolling = setInterval(loadColetaStatus, 3000);
+
     showToast('Coleta iniciada' + (schedAtivo ? ' e agendamento salvo' : '') + ' — acompanhe o monitor abaixo', 'success');
-    setTimeout(() => { loadColetaStatus(); loadColetaHistorico(_coletaTabAtual); }, 600);
+    setTimeout(() => { loadColetaStatus(); loadColetaHistorico(_coletaTabAtual); }, 800);
   } catch (e) {
     clearTimeout(safetyTimer);
     showToast('Erro: ' + e.message, 'error');

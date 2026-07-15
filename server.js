@@ -1828,6 +1828,14 @@ async function ensureAzureCostsTable() {
 // Tabelas pequenas pré-calculadas — atualizadas após cada import.
 // Evita GROUP BY em toda a azure_costs a cada abertura da calculadora.
 let _cacheRefreshing = false;
+let _coberturaCache = null;
+let _coberturaCacheTs = 0;
+const _COBERTURA_TTL = 5 * 60 * 1000;
+let _resumoCache = null;
+let _resumoCacheTs = 0;
+let _importsCache = null;
+let _importsCacheTs = 0;
+const _RESUMO_TTL = 5 * 60 * 1000;
 async function _refreshAzureCache() {
   if (!pool || _cacheRefreshing) return;
   _cacheRefreshing = true;
@@ -1890,6 +1898,9 @@ async function _refreshAzureCache() {
         GROUP BY subscription_id, UPPER(resource_group_name)
     `);
     await c.query('COMMIT');
+    _coberturaCache = null;
+    _resumoCache = null;
+    _importsCache = null;
     console.log(`[Azure] Cache de dropdowns atualizado em ${Date.now()-t0}ms ✅`);
   } catch (err) {
     await c.query('ROLLBACK').catch(() => {});
@@ -5100,22 +5111,29 @@ app.post('/api/azure-costs/refresh-cache', authMiddleware, dbMiddleware, async (
 // ── GET /api/azure-costs/resumo — Sumário geral para o painel de expurgo
 app.get('/api/azure-costs/resumo', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
-    const r = await pool.query(`
-      SELECT COUNT(*)                              AS total,
-             MIN(cost_date)                        AS data_inicio,
-             MAX(cost_date)                        AS data_fim,
-             SUM(cost_in_billing_currency)         AS total_billing,
-             MIN(billing_currency)                 AS moeda
-      FROM azure_costs
-    `);
-    const byMonth = await pool.query(`
-      SELECT TO_CHAR(cost_date,'YYYY-MM') AS mes,
-             COUNT(*)                     AS registros,
-             SUM(cost_in_billing_currency) AS total_billing
-      FROM azure_costs
-      GROUP BY mes ORDER BY mes DESC LIMIT 24
-    `);
-    res.json({ resumo: r.rows[0], por_mes: byMonth.rows });
+    const now = Date.now();
+    if (_resumoCache && (now - _resumoCacheTs) < _RESUMO_TTL) return res.json(_resumoCache);
+    const [r, byMonth] = await Promise.all([
+      pool.query(`
+        SELECT COUNT(*)                       AS total,
+               MIN(cost_date)                 AS data_inicio,
+               MAX(cost_date)                 AS data_fim,
+               SUM(cost_in_billing_currency)  AS total_billing,
+               MIN(billing_currency)          AS moeda
+        FROM azure_costs
+      `),
+      pool.query(`
+        SELECT TO_CHAR(cost_date,'YYYY-MM')   AS mes,
+               COUNT(*)                       AS registros,
+               SUM(cost_in_billing_currency)  AS total_billing
+        FROM azure_costs
+        GROUP BY mes ORDER BY mes DESC LIMIT 24
+      `)
+    ]);
+    const payload = { resumo: r.rows[0], por_mes: byMonth.rows };
+    _resumoCache = payload;
+    _resumoCacheTs = now;
+    res.json(payload);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -5135,36 +5153,53 @@ app.get('/api/azure-costs/purge/preview', authMiddleware, dbMiddleware, async (r
 
 // ── DELETE /api/azure-costs/purge — Expurgo de dados por período ou arquivo
 app.delete('/api/azure-costs/purge', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    const { arquivo, data_inicio, data_fim } = req.query;
-    let result, msg;
-    if (arquivo) {
-      result = await pool.query('DELETE FROM azure_costs WHERE arquivo_origem = $1', [arquivo]);
-      msg = `${result.rowCount} registros do arquivo "${arquivo}" removidos.`;
-    } else if (data_inicio || data_fim) {
-      let q = 'DELETE FROM azure_costs WHERE 1=1';
-      const params = [];
-      if (data_inicio) { params.push(data_inicio); q += ` AND cost_date >= $${params.length}`; }
-      if (data_fim)    { params.push(data_fim);    q += ` AND cost_date <= $${params.length}`; }
-      result = await pool.query(q, params);
-      const de  = data_inicio || '—';
-      const ate = data_fim    || '—';
-      msg = `${result.rowCount} registros do período ${de} → ${ate} removidos.`;
-    } else {
-      result = await pool.query('DELETE FROM azure_costs');
-      msg = `Todos os ${result.rowCount} registros foram removidos.`;
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const { arquivo, data_inicio, data_fim } = req.query;
+      let removidos, msg;
+      if (arquivo) {
+        const r = await pool.query('DELETE FROM azure_costs WHERE arquivo_origem = $1', [arquivo]);
+        removidos = r.rowCount;
+        msg = `${removidos} registros do arquivo "${arquivo}" removidos.`;
+      } else if (data_inicio || data_fim) {
+        let q = 'DELETE FROM azure_costs WHERE 1=1';
+        const params = [];
+        if (data_inicio) { params.push(data_inicio); q += ` AND cost_date >= $${params.length}`; }
+        if (data_fim)    { params.push(data_fim);    q += ` AND cost_date <= $${params.length}`; }
+        const r = await pool.query(q, params);
+        removidos = r.rowCount;
+        msg = `${removidos} registros do período ${data_inicio || '—'} → ${data_fim || '—'} removidos.`;
+      } else {
+        // TRUNCATE evita deadlock com imports concorrentes (sem bloqueio por linha)
+        const count = (await pool.query('SELECT COUNT(*) AS n FROM azure_costs')).rows[0].n;
+        await pool.query('TRUNCATE TABLE azure_costs');
+        removidos = parseInt(count);
+        msg = `Todos os ${removidos} registros foram removidos.`;
+      }
+      _coberturaCache = null;
+      _resumoCache = null;
+      _importsCache = null;
+      console.log(`[Azure Purge] ${msg}`);
+      _refreshAzureCache().catch(() => {});
+      res.json({ message: msg, removidos });
+      return;
+    } catch (err) {
+      const isDeadlock = err.code === '40P01';
+      console.error(`[Azure Purge] Tentativa ${attempt}/${MAX_RETRIES}:`, err.message);
+      if (!isDeadlock || attempt === MAX_RETRIES) {
+        return res.status(500).json({ error: err.message });
+      }
+      await new Promise(r => setTimeout(r, 200 * attempt));
     }
-    console.log(`[Azure Purge] ${msg}`);
-    res.json({ message: msg, removidos: result.rowCount });
-  } catch (err) {
-    console.error('Erro no purge:', err);
-    res.status(500).json({ error: err.message });
   }
 });
 
 // ── GET /api/azure-costs/imports ─────────────────────────────────────────────
 app.get('/api/azure-costs/imports', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
+    const now = Date.now();
+    if (_importsCache && (now - _importsCacheTs) < _RESUMO_TTL) return res.json(_importsCache);
     const r = await pool.query(`
       SELECT arquivo_origem, COUNT(*) AS linhas,
              MIN(cost_date) AS periodo_inicio, MAX(cost_date) AS periodo_fim,
@@ -5175,6 +5210,8 @@ app.get('/api/azure-costs/imports', authMiddleware, dbMiddleware, async (_req, r
         AND (arquivo_origem IS NULL OR arquivo_origem NOT LIKE 'api-%')
       GROUP BY arquivo_origem ORDER BY importado_em DESC
     `);
+    _importsCache = r.rows;
+    _importsCacheTs = now;
     res.json(r.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -5441,6 +5478,19 @@ async function ensureAzureColetaTable() {
       expira_em  TIMESTAMP NOT NULL
     )
   `);
+  // ── azure_coleta_pendentes — reprocessamentos agendados para próxima execução ──
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_coleta_pendentes (
+      id              SERIAL PRIMARY KEY,
+      sp_id           INTEGER,
+      subscription_id VARCHAR(200),
+      sub_name        VARCHAR(500),
+      data_inicio     DATE NOT NULL,
+      data_fim        DATE NOT NULL,
+      descricao       VARCHAR(300),
+      criado_em       TIMESTAMP DEFAULT NOW()
+    )
+  `);
   _coletaTableReady = true;
 }
 
@@ -5596,17 +5646,26 @@ function _iniciarAgendador() {
         const subIds = modoSp === 'subscription'
           ? (sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
           : [];
-        _executarColetaAPI(
-          sp.id,
-          modoSp === 'billing_profile' ? _decryptSecret(sp.billing_account_id) : '',
-          modoSp === 'billing_profile' ? _decryptSecret(sp.billing_profile_id) : '',
-          fmt(inicio), fmt(fim),
-          modoSp,
-          subIds,
-          undefined,   // resourceGroups — default []
-          undefined,   // metric — default 'ActualCost'
-          'agendado'
-        ).catch(e => console.error(`[Agendador] Erro coleta API #${sp.id}:`, e.message));
+        const baId = modoSp === 'billing_profile' ? _decryptSecret(sp.billing_account_id) : '';
+        const bpId = modoSp === 'billing_profile' ? _decryptSecret(sp.billing_profile_id) : '';
+        _executarColetaAPI(sp.id, baId, bpId, fmt(inicio), fmt(fim), modoSp, subIds, undefined, undefined, 'agendado')
+          .then(async () => {
+            // Após coleta regular, processa itens pendentes desta SP
+            try {
+              const pend = await pool.query(
+                `DELETE FROM azure_coleta_pendentes WHERE sp_id=$1 OR sp_id IS NULL RETURNING *`,
+                [sp.id]
+              );
+              for (const p of pend.rows) {
+                if (_coletaEmExecucao) { await new Promise(r => setTimeout(r, 500)); }
+                const pSubIds = p.subscription_id ? [p.subscription_id] : subIds;
+                _logColeta(`[Pendente] Iniciando reprocessamento: ${p.descricao || p.data_inicio + '→' + p.data_fim}`);
+                await _executarColetaAPI(sp.id, baId, bpId, p.data_inicio, p.data_fim, modoSp, pSubIds, [], 'ActualCost', 'agendado-pendente')
+                  .catch(e => _logColeta(`[Pendente] Erro: ${e.message}`));
+              }
+            } catch (e) { console.error('[Agendador] Erro pendentes:', e.message); }
+          })
+          .catch(e => console.error(`[Agendador] Erro coleta API #${sp.id}:`, e.message));
       }
 
       // ── Price List: agendamento mensal ───────────────────────────────────────
@@ -5742,6 +5801,71 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
         open_until: _cbAPI.openUntil ? _cbAPI.openUntil.toISOString() : null,
       },
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const force = req.query.force === '1';
+    const now = Date.now();
+    if (!force && _coberturaCache && (now - _coberturaCacheTs) < _COBERTURA_TTL) {
+      return res.json(_coberturaCache);
+    }
+    const { rows } = await pool.query(`
+      SELECT
+        TO_CHAR(DATE_TRUNC('month', c.cost_date), 'YYYY-MM-DD')  AS mes,
+        c.subscription_id,
+        COALESCE(s.subscription_name, c.subscription_id)          AS subscription_name,
+        COUNT(*)::int                                              AS registros,
+        COUNT(DISTINCT c.cost_date)::int                          AS dias_com_dados,
+        ((DATE_TRUNC('month', MIN(c.cost_date)) + INTERVAL '1 month')::date
+          - DATE_TRUNC('month', MIN(c.cost_date))::date)           AS dias_no_mes,
+        TO_CHAR(MAX(c.importado_em), 'DD/MM/YYYY HH24:MI')       AS ultima_importacao,
+        ROUND(SUM(c.cost_in_billing_currency)::numeric, 2)        AS total_brl
+      FROM azure_costs c
+      LEFT JOIN azure_subs_cache s ON s.subscription_id = c.subscription_id
+      WHERE c.cost_date >= NOW() - INTERVAL '36 months'
+      GROUP BY 1, 2, 3
+      ORDER BY 1 DESC, 4 DESC
+    `);
+    _coberturaCache = rows;
+    _coberturaCacheTs = now;
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/azure-coleta/pendentes', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const { rows } = await pool.query(`
+      SELECT p.*, c.nome AS sp_nome
+      FROM azure_coleta_pendentes p
+      LEFT JOIN azure_coleta_config c ON c.id = p.sp_id
+      ORDER BY p.criado_em ASC
+    `);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/azure-coleta/pendentes', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const { sp_id, subscription_id, sub_name, data_inicio, data_fim, descricao } = req.body;
+    if (!data_inicio || !data_fim) return res.status(400).json({ error: 'data_inicio e data_fim obrigatórios' });
+    await pool.query(
+      `INSERT INTO azure_coleta_pendentes (sp_id, subscription_id, sub_name, data_inicio, data_fim, descricao)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [sp_id || null, subscription_id || null, sub_name || null, data_inicio, data_fim, descricao || null]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/azure-coleta/pendentes/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    await pool.query(`DELETE FROM azure_coleta_pendentes WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -5920,6 +6044,37 @@ app.post('/api/azure-coleta/sps/:id/testar', authMiddleware, dbMiddleware, async
 });
 
 // Lista subscriptions de uma SP (para wizard de coleta)
+// Endpoint de preview — aceita credenciais no body (nova SP ainda não salva)
+app.post('/api/azure-coleta/listar-subs-preview', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { tenant_id, client_id, client_secret } = req.body;
+    if (!tenant_id?.trim() || !client_id?.trim() || !client_secret?.trim())
+      return res.status(400).json({ error: 'tenant_id, client_id e client_secret são obrigatórios' });
+    const { token } = await _managementGetToken(tenant_id.trim(), client_id.trim(), client_secret.trim());
+    try {
+      const resp = await _cbFetch(
+        'https://management.azure.com/subscriptions?api-version=2022-12-01',
+        { headers: { Authorization: `Bearer ${token}` } },
+        { timeoutMs: 30_000 }
+      );
+      if (resp.ok) {
+        const data = await _safeRespJson(resp);
+        const subs = (data.value || [])
+          .filter(s => s.state === 'Enabled')
+          .map(s => ({ subscriptionId: s.subscriptionId, nome: s.displayName || s.subscriptionId }))
+          .sort((a, b) => a.nome.localeCompare(b.nome));
+        return res.json({ subs, fonte: 'tenant' });
+      }
+    } catch (_) {}
+    // Fallback: cache local
+    const cached = await pool.query(
+      `SELECT subscription_id, subscription_name FROM azure_subs_cache ORDER BY subscription_name`
+    );
+    const subs = cached.rows.map(r => ({ subscriptionId: r.subscription_id, nome: r.subscription_name || r.subscription_id }));
+    res.json({ subs, fonte: 'cache' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/azure-coleta/sps/:id/listar-subs', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const r = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
@@ -6255,19 +6410,20 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null)
 
 // ── Coleta via Azure Cost Management API ─────────────────────────────────────
 // modo: 'billing_profile' (padrão) ou 'subscription' (direto por subscription IDs)
-// Fatia um range em chunks de até 30 dias (limite Azure generateCostDetailsReport)
+// Fatia um range em chunks de 1 mês calendário (limite Azure generateCostDetailsReport)
+// Cada chunk começa no 1º dia do mês e termina no último — nunca cruza fronteira de mês
 function _splitDateRange(startDate, endDate) {
   const chunks = [];
   const fmt = d => d.toISOString().slice(0, 10);
   let cur = new Date(startDate + 'T12:00:00');
   const end = new Date(endDate + 'T12:00:00');
   while (cur <= end) {
-    const chunkEnd = new Date(cur);
-    chunkEnd.setDate(chunkEnd.getDate() + 29); // 30 dias inclusive (0..29)
-    if (chunkEnd > end) chunkEnd.setTime(end.getTime());
+    // Último dia do mês atual
+    const monthEnd = new Date(cur.getFullYear(), cur.getMonth() + 1, 0, 12, 0, 0);
+    const chunkEnd = monthEnd < end ? monthEnd : new Date(end);
     chunks.push({ start: fmt(cur), end: fmt(chunkEnd) });
-    cur = new Date(chunkEnd);
-    cur.setDate(cur.getDate() + 1);
+    // Avança para o 1º dia do mês seguinte
+    cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1, 12, 0, 0);
   }
   return chunks;
 }
