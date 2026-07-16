@@ -4069,7 +4069,10 @@ async function _loadColetaApiSPSelect() {
                 <button class="btn-ghost" style="font-size:11px;padding:2px 9px;border-color:var(--danger);color:var(--danger)" onclick="excluirAgendamentoSP(${s.id},'${(s.nome||'').replace(/'/g,"\\'")}')" >✕ Excluir</button>
               </div>
             </div>`;
-          })() : '';
+          })() : `<div style="margin-top:6px;padding:6px 10px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:7px;display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:11px;color:var(--text-muted)">Sem agendamento automático</span>
+              <button class="btn-ghost" style="font-size:11px;padding:2px 9px" onclick="abrirEditarAgend(${s.id})">⏰ Configurar Agendamento</button>
+            </div>`;
           return `
           <div style="padding:10px 12px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:8px">
             <div style="display:flex;align-items:center;justify-content:space-between">
@@ -4464,10 +4467,7 @@ async function loadCoberturaMeses(force) {
 }
 
 async function _coberturaGetSP(precisaAgendamento) {
-  // Garante que o cache está carregado
-  if (!_coletaApiSPCache.length) {
-    try { _coletaApiSPCache = await api('GET', '/azure-coleta/sps'); } catch (_) {}
-  }
+  try { _coletaApiSPCache = await api('GET', '/azure-coleta/sps'); } catch (_) {}
   const sps = precisaAgendamento
     ? _coletaApiSPCache.filter(s => s.ativo && s.auto_coleta)
     : _coletaApiSPCache.filter(s => s.ativo);
@@ -5873,23 +5873,56 @@ async function executarStorageAtivo() {
 async function loadStorageList() {
   const tbody = document.getElementById('storage-list-tbody');
   try {
-    const storages = await api('GET', '/azure-coleta/storages');
-    if (!storages || !storages.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum Storage cadastrado. Clique em "+ Novo Storage".</td></tr>'; return; }
-    tbody.innerHTML = storages.map(s => `<tr>
-      <td style="font-size:12px;font-weight:600;color:var(--text)">${s.nome || '—'}</td>
-      <td style="font-size:12px;color:var(--text-dim)">${s.storage_account || '—'}</td>
-      <td style="font-size:12px;color:var(--text-dim)">${s.storage_container || '—'}</td>
-      <td style="font-size:11px;color:var(--text-muted)">${s.storage_prefix || '—'}</td>
-      <td style="text-align:center">
-        <label class="toggle-switch" style="margin:0"><input type="checkbox" ${s.ativo?'checked':''} onchange="toggleStorageAtivo(${s.id},this.checked)"><span class="toggle-slider"></span></label>
-      </td>
-      <td style="white-space:nowrap;text-align:right">
-        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="testarStorageDireto(${s.id})">Testar</button>
-        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px;border-color:var(--green);color:var(--green)" onclick="executarStorage(${s.id})">▶</button>
-        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="openStorageModal(${s.id})">✏</button>
-        <button class="btn-ghost" style="font-size:10px;padding:3px 8px;border-color:var(--danger);color:var(--danger)" onclick="deleteStorage(${s.id},'${(s.nome||'Storage').replace(/'/g,"\\'")}')">🗑</button>
-      </td>
-    </tr>`).join('');
+    const [storages, sps] = await Promise.all([
+      api('GET', '/azure-coleta/storages'),
+      api('GET', '/azure-coleta/sps').catch(() => [])
+    ]);
+    const spMap = new Map((sps || []).map(s => [s.id, s]));
+    const _nd = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+    if (!storages || !storages.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum Storage cadastrado. Clique em "+ Novo Storage".</td></tr>';
+      return;
+    }
+    tbody.innerHTML = storages.map(s => {
+      const temSched = s.hora_execucao != null && s.dias_semana;
+      const spNome   = s.sp_id ? (spMap.get(s.sp_id)?.nome || `SP #${s.sp_id}`) : '— SP padrão —';
+      const diasNomes = temSched ? (s.dias_semana || '').split(',').map(d => _nd[+d]).filter(Boolean).join(', ') : '';
+      const proxLabel = temSched ? _proximaLabel(s.proxima_coleta) : '';
+      const schedBanner = temSched
+        ? `<span style="font-size:11px;font-weight:700;color:var(--green)">⏰ Agendado</span>
+           <span style="font-size:11px;color:var(--text-muted);margin-left:6px">${diasNomes} · ${s.hora_execucao}:00h</span>
+           <span style="font-size:11px;color:var(--text-dim);margin-left:6px">${proxLabel}</span>`
+        : `<span style="font-size:11px;color:var(--text-muted)">Sem agendamento</span>
+           <button class="btn-ghost" style="font-size:10px;padding:1px 8px;margin-left:8px" onclick="openStorageModal(${s.id})">⏰ Configurar</button>`;
+      return `<tr>
+        <td style="font-size:12px;font-weight:600;color:var(--text)">${s.nome || '—'}</td>
+        <td style="font-size:12px;color:var(--text-dim)">${s.storage_account || '—'}</td>
+        <td style="font-size:12px;color:var(--text-dim)">${s.storage_container || '—'}</td>
+        <td style="font-size:11px;color:var(--text-muted)">${s.storage_prefix || '—'}</td>
+        <td style="text-align:center">
+          <label class="toggle-switch" style="margin:0"><input type="checkbox" ${s.ativo?'checked':''} onchange="toggleStorageAtivo(${s.id},this.checked)"><span class="toggle-slider"></span></label>
+        </td>
+        <td style="white-space:nowrap;text-align:right">
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="testarStorageDireto(${s.id})">Testar</button>
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px;border-color:var(--green);color:var(--green)" onclick="executarStorage(${s.id})">▶</button>
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="openStorageModal(${s.id})">✏</button>
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;border-color:var(--danger);color:var(--danger)" onclick="deleteStorage(${s.id},'${(s.nome||'Storage').replace(/'/g,"\\'")}')">🗑</button>
+        </td>
+      </tr>
+      <tr>
+        <td colspan="6" style="padding:0 12px 8px;border-top:none">
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <div style="padding:4px 10px;background:rgba(147,51,234,.06);border:1px solid var(--border);border-radius:6px;display:flex;align-items:center;gap:6px">
+              <span style="font-size:10px;color:var(--text-muted)">SP:</span>
+              <span style="font-size:11px;font-weight:600;color:${s.sp_id ? 'var(--accent)' : 'var(--text-muted)'}">${spNome}</span>
+            </div>
+            <div style="padding:4px 10px;background:${temSched ? 'rgba(34,197,94,.07)' : 'rgba(255,255,255,.03)'};border:1px solid ${temSched ? 'rgba(34,197,94,.2)' : 'var(--border)'};border-radius:6px;display:flex;align-items:center">
+              ${schedBanner}
+            </div>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
   } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Erro: ${e.message}</td></tr>`; }
 }
 

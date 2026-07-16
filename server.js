@@ -5624,7 +5624,7 @@ function _iniciarAgendador() {
             OR
             (subscription_ids IS NOT NULL AND subscription_ids <> '')
           )
-        ORDER BY proxima_coleta ASC NULLS FIRST
+        ORDER BY is_padrao DESC, proxima_coleta ASC NULLS FIRST
         LIMIT 1
       `);
       if (rApi.rows.length) {
