@@ -6356,7 +6356,10 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
       const dlResp = await fetch(typeof blobUrl === 'string' ? blobUrl : String(blobUrl), { signal: blobCtrl.signal });
       clearTimeout(blobTimer);
       if (!dlResp.ok) throw new Error(`Download blob (${dlResp.status})`);
-      fs.writeFileSync(dest, Buffer.from(await dlResp.arrayBuffer()));
+      // Stream direto para disco — evita carregar blob inteiro na RAM
+      const { pipeline } = require('stream/promises');
+      const { Readable } = require('stream');
+      await pipeline(Readable.fromWeb(dlResp.body), fs.createWriteStream(dest));
     } catch (err) {
       clearTimeout(blobTimer);
       if (err.name === 'AbortError') throw new Error(`Timeout (120s) ao baixar blob de '${label}'`);
@@ -6373,15 +6376,14 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null)
   let ins = 0, upd = 0, err = 0, linhas = 0;
   for (const dest of tmpFiles) {
     try {
-      const rows = await _lerCSV(dest);
-      linhas += rows.length;
-      _logColeta(`  ${label}: importando ${rows.length} linhas${rgFilter ? ` (filtro: ${rgFilter.size} RGs)` : ''}`);
-      const client = await pool.connect();
-      let spCount = 0;
-      try {
-        await client.query('BEGIN');
-        for (let i = 0; i < rows.length; i += 200) {
-          for (const raw of rows.slice(i, i + 200)) {
+      // _lerCSVBatched processa 500 linhas por vez — nunca carrega o CSV inteiro na RAM
+      await _lerCSVBatched(dest, 500, async (batch) => {
+        linhas += batch.length;
+        const client = await pool.connect();
+        let spCount = 0;
+        try {
+          await client.query('BEGIN');
+          for (const raw of batch) {
             const m = _mapRowCSV(raw, `api-${label}`);
             if (rgFilter && !rgFilter.has((m.resource_group_name || '').toUpperCase())) continue;
             const sp = `sp_${spCount++}`;
@@ -6396,11 +6398,16 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null)
               err++;
             }
           }
-          _coletaProgresso.ins += ins; _coletaProgresso.upd += upd; _coletaProgresso.err += err;
+          await client.query('COMMIT');
+          _coletaProgresso.ins = ins; _coletaProgresso.upd = upd; _coletaProgresso.err = err;
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw e;
+        } finally {
+          client.release();
         }
-        await client.query('COMMIT');
-      } catch (e) { await client.query('ROLLBACK'); throw e; }
-      finally { client.release(); }
+      });
+      _logColeta(`  ${label}: ${linhas} linhas importadas${rgFilter ? ` (filtro: ${rgFilter.size} RGs)` : ''}`);
     } finally {
       try { fs.unlinkSync(dest); } catch (_) {}
     }
