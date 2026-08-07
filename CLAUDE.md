@@ -70,12 +70,17 @@ Single-process Node.js + Express backend serving a vanilla-JS SPA. No build step
 3. Apply security middleware (helmet, rate-limit on auth routes, CORS)
 4. `isConfigured()` — checks for `.finops_setup`; if absent, serves only the setup wizard
 5. `initDB()` — creates all core tables with `IF NOT EXISTS`
-6. `ensureAzureCostsTable()` — creates `azure_costs` + 11 indexes (incl. functional)
-7. `ensurePriceListTable()` — creates `azure_price_list` + indexes + materialized views `pl_best_mv` / `pl_sku_mv` (DROP + CREATE a cada startup)
-8. `ensureAzureColetaTable()` — creates `azure_coleta_historico` + `azure_coleta_sps`
-9. `_refreshAzureCache()` — rebuilds `azure_subs_cache` + `azure_rg_cache` in background
-10. `_iniciarAgendador()` — starts automated Azure cost collection scheduler
+6. `ensureAzureCostsTable()` — CREATE TABLE only (synchronous, fast); all CREATE INDEX run in background `_bgIdx` after 5s delay; `_azureTableReady = true` set immediately after table check
+7. `ensureAzureColetaTable()` — creates `azure_coleta_historico` + `azure_coleta_sps`
+8. `ensurePriceListTable()` — creates `azure_price_list` + indexes + `azure_price_list_meta` + materialized views `pl_best_mv` / `pl_sku_mv` (awaited before agendador so meta table exists on first tick)
+9. `_iniciarAgendador()` — starts automated Azure cost collection scheduler (first tick at 120s)
+10. `_refreshAzureCache()` — rebuilds `azure_subs_cache` + `azure_rg_cache` in background (90s delay)
 11. SIGTERM/SIGINT handlers registered — close pool + clear keep-alive timer before exit
+
+**Startup performance notes:**
+- `ensureAzureCostsTable()` never blocks on CREATE INDEX — all indexes created sequentially in background; server is fully usable in < 1s after DB connect
+- `_iniciarAgendador()` uses 120s initial delay to let background DDL and MV creation finish before first tick
+- `_tickAgendador` silently skips Price List schedule check if `azure_price_list_meta` doesn't exist yet (transient startup race — no log spam)
 
 ### Authentication
 Three methods — all issue the same JWT payload `{id, nome, email, perfil}`:
@@ -344,9 +349,21 @@ periodo  → todos os demais (disco, storage, bandwidth, etc.)
 - Funciona em ambos os portais (autenticado e público)
 
 **RG gerenciados — `_detectManagedRg(name)` (server.js):**
-- `DATABRICKS-RG-*` → `managed_type: 'databricks'`, `managed_label: workspace`
+- `DATABRICKS-RG-*` → `managed_type: 'databricks'`, `managed_label: workspace` (strip último segmento aleatório)
+- `MANAGED-RG-ADBX-*` → `managed_type: 'databricks'`, `managed_label: workspace` (strip último segmento)
+- `MANAGED-RG-*` (genérico) → `managed_type: 'databricks'`, `managed_label: sufixo completo` — cobre `MANAGED-RG-DBW-*`, `MANAGED-RG-ADB-*` e quaisquer outros prefixos customizados
 - `MC_*` → `managed_type: 'aks'`, `managed_label: cluster`, `managed_region`
 - Retornado nos endpoints de resource-groups; armazenado em `_managedRgMap` no cliente
+
+**`_resolveParentRgs` — cascata de 5 métodos para encontrar o RG pai:**
+1. **Cache** (`_dbWsCache`) — workspace do billing (`resource_id /workspaces/X`) → pai já conhecido; cobre `databricks-rg-{ws}`, `managed-rg-adbx-{ws}`, `managed-rg-{ws}`
+2. **Exact** — `managed_label` == nome exato de um RG não-gerenciado
+3. **Suffix** — RG normal TERMINA com `-{label}` (ex: `MANAGED-RG-DBW-X` → label=`DBW-X` → pai `RG-DBW-X`); mais confiável que substring
+4. **Prefix** — `label-` é prefixo de um RG normal
+5. **Substring** — `label` aparece em qualquer posição de um RG normal (menor nome vence)
+- Após resolução bem-sucedida: upsert em `azure_ws_cache` → requests subsequentes usam Método 1 (cache, sem heurística)
+- `_refreshAzureCache` usa **upsert** (não DELETE+INSERT) em `azure_ws_cache` — preserva entradas `MANAGED-RG-*` entre refreshes
+- `_dbWsCache` reconstruído por merge (não substituição) — entradas `MANAGED-RG-*` sobrevivem ao refresh do cache de billing
 
 **Custo/hora billing — 4 níveis de prioridade (SQL):**
 ```
@@ -639,11 +656,11 @@ Vivo purple palette (ARGB): `FF4A0080` dark · `FF7B2FBE` main · `FFF3E8FF` lig
 
 **CSS variables (`:root` in styles.css):**
 ```css
---bg:           #0c0014
---bg-card:      rgba(22, 4, 38, 0.82)
---bg-hover:     rgba(45, 8, 72, 0.70)
---border:       #280040
---border-light: #3d0060
+--bg:           #040009
+--bg-card:      rgba(12, 2, 22, 0.94)
+--bg-hover:     rgba(20, 4, 36, 0.80)
+--border:       #1e0040
+--border-light: #2a0058
 --text:         #e8eaf0
 --text-muted:   #7b6a9e
 --text-dim:     #a990cc
@@ -657,18 +674,22 @@ Vivo purple palette (ARGB): `FF4A0080` dark · `FF7B2FBE` main · `FFF3E8FF` lig
 --blue:         #4da6ff
 ```
 
-**Body background** — radial gradient (fixed):
+**Body background** — quase preto com sutilíssimo toque roxo, fixo:
 ```css
-radial-gradient(ellipse at 25% 45%, rgba(90,0,160,.55) ...) +
-radial-gradient(ellipse at 75% 80%, rgba(60,0,100,.30) ...) +
-linear-gradient(160deg, #1a0030 → #0c0014 → #04000c)
+background:
+  radial-gradient(ellipse at 20% 50%, rgba(80,0,140,.14) 0%, transparent 50%),
+  radial-gradient(ellipse at 80% 20%, rgba(50,0,100,.08) 0%, transparent 45%),
+  linear-gradient(170deg, #07000f 0%, #040009 60%, #020006 100%);
+background-attachment: fixed;
+/* --bg: #040009 — usado por portal.html e elementos que referenciam var(--bg) */
 ```
+`portal.html` usa `background: var(--bg)` (flat). `docs-faq.html` e `docs-portal-faq.html` têm degradê roxo próprio mais intenso.
 
 **Glassmorphism layers:**
-- `.sidebar`: `rgba(18,2,32,.75)` + `backdrop-filter: blur(18px)`
-- `.top-bar`: `rgba(18,2,32,.65)` + `backdrop-filter: blur(18px)` + `z-index: 20`
-- `.stat-card`: `rgba(22,4,38,.72)` + `backdrop-filter: blur(12px)`
-- `.modal`: `rgba(18,2,32,.88)` + `backdrop-filter: blur(24px)`
+- `.sidebar`: `rgba(6,0,14,.92)` + `backdrop-filter: blur(18px)`
+- `.top-bar`: `rgba(6,0,14,.86)` + `backdrop-filter: blur(18px)` + `z-index: 20`
+- `.stat-card`: `rgba(14,2,28,.90)` + `backdrop-filter: blur(12px)`
+- `.modal`: `rgba(8,0,18,.96)` + `backdrop-filter: blur(24px)`
 
 **Cloud stats strip** (`.cloud-stats-strip`) — sticky bar at top of views:
 - Container: `rgba(22,4,38,.72)` + `backdrop-filter: blur(14px)` + `border-radius: 14px`

@@ -203,9 +203,9 @@ function createPool(cfg) {
   if (pool) { try { pool.end(); } catch {} }
   pool = new Pool({
     ...cfg,
-    max:                    10,     // máximo de conexões simultâneas
+    max:                    20,     // máximo de conexões simultâneas (aumentado para suportar startup paralelo)
     min:                    2,      // mínimo mantido aquecido
-    connectionTimeoutMillis: 10000, // timeout ao adquirir conexão
+    connectionTimeoutMillis: 60000, // timeout ao adquirir conexão (60s — startup tem várias ops concorrentes)
     idleTimeoutMillis:      30000,  // fecha conexões ociosas após 30s
     allowExitOnIdle:        false,  // pool não impede shutdown manual
   });
@@ -1616,10 +1616,8 @@ async function ensureAzureCostsTable() {
   // em cada request, que causa lentidão séria com muitos dados
   if (_azureTableReady) return;
 
-  const c = await pool.connect();
-  try {
-    // 1) Criar tabela se não existir (sempre com VARCHAR — nunca UUID)
-    await c.query(`
+  // 1) Criar tabela se não existir — única operação síncrona (fast se já existe)
+  await pool.query(`
       CREATE TABLE IF NOT EXISTS azure_costs (
         id                               BIGSERIAL PRIMARY KEY,
         invoice_id                       VARCHAR(200),
@@ -1692,136 +1690,66 @@ async function ensureAzureCostsTable() {
         importado_em                     TIMESTAMP DEFAULT NOW(),
         arquivo_origem                   VARCHAR(500)
       );
-    `);
+  `);
 
-    // 2) Migração: converter colunas UUID → VARCHAR (executada uma única vez)
-    for (const col of ['meter_id', 'subscription_id']) {
-      const chk = await c.query(
-        `SELECT data_type FROM information_schema.columns
-         WHERE table_name='azure_costs' AND column_name=$1`, [col]
-      );
-      if (chk.rows[0]?.data_type === 'uuid') {
-        console.log(`[Migration] Convertendo coluna ${col}: UUID → VARCHAR(200)`);
-        await c.query(`ALTER TABLE azure_costs ALTER COLUMN ${col} TYPE VARCHAR(200) USING ${col}::text`);
+  // Marca como pronto imediatamente — migrações e índices rodam em background
+  // para não bloquear o startup (ALTER TABLE precisa de lock exclusivo)
+  _azureTableReady = true;
+
+  // Verifica índices existentes (fast — pg_indexes é catálogo, sem scan)
+  const { rows: idxExist } = await pool.query(`
+    SELECT indexname FROM pg_indexes WHERE tablename = 'azure_costs'
+  `);
+  const idxSet = new Set(idxExist.map(r => r.indexname));
+  console.log(`[Azure] Tabela azure_costs pronta ✅ (${idxSet.size} índices existentes — novos criados em background)`);
+
+    // 5) Criar índices em background (não bloqueia o startup)
+    // Cada índice é criado separado para não travar o pool com uma única query longa
+    const _bgIdx = async () => {
+      if (!pool) return;
+      const bg = (sql, name) => {
+        if (idxSet.has(name)) return Promise.resolve(); // já existe — skip
+        console.log(`[DB] Criando ${name}...`);
+        return pool.query(sql)
+          .then(() => console.log(`[DB] ${name} ✅`))
+          .catch(e => console.warn(`[DB] ${name}:`, e.message.slice(0, 80)));
+      };
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_date         ON azure_costs(cost_date)`, 'idx_azure_costs_date');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub          ON azure_costs(subscription_id)`, 'idx_azure_costs_sub');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_rg           ON azure_costs(resource_group_name)`, 'idx_azure_costs_rg');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_service      ON azure_costs(consumed_service)`, 'idx_azure_costs_service');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_meter_cat    ON azure_costs(meter_category)`, 'idx_azure_costs_meter_cat');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_resource_id  ON azure_costs(resource_id)`, 'idx_azure_costs_resource_id');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_importado    ON azure_costs(importado_em)`, 'idx_azure_costs_importado');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg       ON azure_costs(subscription_id, resource_group_name)`, 'idx_azure_costs_sub_rg');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_date     ON azure_costs(subscription_id, cost_date)`, 'idx_azure_costs_sub_date');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_rg_upper     ON azure_costs(UPPER(resource_group_name))`, 'idx_azure_costs_rg_upper');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_upper ON azure_costs(subscription_id, UPPER(resource_group_name))`, 'idx_azure_costs_sub_rg_upper');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_date  ON azure_costs(subscription_id, UPPER(resource_group_name), cost_date)`, 'idx_azure_costs_sub_rg_date');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_charge_type   ON azure_costs(charge_type)`, 'idx_azure_costs_charge_type');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_pricing_model ON azure_costs(pricing_model)`, 'idx_azure_costs_pricing_model');
+      // GIN trgm — requer superuser em alguns ambientes
+      try {
+        if (!idxSet.has('idx_azure_costs_uom_trgm')) {
+          await pool.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
+          await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_costs_uom_trgm ON azure_costs USING GIN (unit_of_measure gin_trgm_ops)`);
+          console.log('[DB] idx_azure_costs_uom_trgm (GIN) ✅');
+        }
+      } catch (e) { console.warn('[DB] pg_trgm não disponível:', e.message.slice(0,60)); }
+      // Dedup unique — necessário para ON CONFLICT nos imports
+      if (!idxSet.has('idx_azure_costs_dedup')) {
+        try {
+          const oldIdx = await pool.query(`SELECT indexdef FROM pg_indexes WHERE tablename='azure_costs' AND indexname='idx_azure_costs_dedup'`);
+          if (oldIdx.rowCount > 0 && !oldIdx.rows[0].indexdef.includes('COALESCE(subscription_id')) {
+            console.log('[Azure] Migrando índice de deduplicação...');
+            await pool.query(`DROP INDEX IF EXISTS idx_azure_costs_dedup`);
+          }
+          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_costs_dedup ON azure_costs(COALESCE(subscription_id,''),COALESCE(resource_id,''),cost_date,COALESCE(meter_id,''),COALESCE(charge_type,''),COALESCE(quantity,0))`);
+          console.log('[Azure] idx_azure_costs_dedup ✅');
+        } catch (e) { console.warn('[Azure] idx_azure_costs_dedup:', e.message.slice(0,80)); }
       }
-    }
-
-    // 3a) Adicionar colunas opcionais se não existirem
-    for (const [col, def] of [
-      ['resource_name', 'VARCHAR(500)'],
-      ['resource_type', 'VARCHAR(200)'],
-      ['fonte',         "VARCHAR(20) DEFAULT 'manual'"],
-    ]) {
-      const chkCol = await c.query(
-        `SELECT 1 FROM information_schema.columns WHERE table_name='azure_costs' AND column_name=$1`, [col]
-      );
-      if (chkCol.rowCount === 0) {
-        await c.query(`ALTER TABLE azure_costs ADD COLUMN ${col} ${def}`);
-        console.log(`[Migration] Coluna ${col} adicionada à azure_costs`);
-      }
-    }
-
-    // 3) Expandir VARCHAR pequenos (idempotente mas rápido)
-    for (const sql of [
-      "ALTER TABLE azure_costs ALTER COLUMN billing_currency TYPE VARCHAR(20)",
-      "ALTER TABLE azure_costs ALTER COLUMN pricing_currency TYPE VARCHAR(20)",
-    ]) {
-      try { await c.query(sql); } catch (_) {}
-    }
-
-    // 4) Criar índices de performance (IF NOT EXISTS — rápido se já existem)
-    await c.query(`
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_date         ON azure_costs(cost_date);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_sub          ON azure_costs(subscription_id);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_rg           ON azure_costs(resource_group_name);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_service      ON azure_costs(consumed_service);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_meter_cat    ON azure_costs(meter_category);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_resource_id  ON azure_costs(resource_id);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_importado    ON azure_costs(importado_em);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg       ON azure_costs(subscription_id, resource_group_name);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_date     ON azure_costs(subscription_id, cost_date);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_rg_upper     ON azure_costs(UPPER(resource_group_name));
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_upper ON azure_costs(subscription_id, UPPER(resource_group_name));
-
-      -- ── PERFORMANCE INDEXES v2.0 — azure_costs ─────────────────────────────
-      -- Reversão: ver rollback_performance_indexes.sql
-
-      -- Composto triplo: cobre o filtro principal da Calculadora (sub + rg + date)
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_date
-        ON azure_costs (subscription_id, UPPER(resource_group_name), cost_date);
-
-      -- charge_type e pricing_model: usados em CASE e WHERE da classificação de recursos
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_charge_type   ON azure_costs (charge_type);
-      CREATE INDEX IF NOT EXISTS idx_azure_costs_pricing_model ON azure_costs (pricing_model);
-
-      -- pg_trgm: permite ILIKE '%hour%' / '%hora%' usar index (antes era seq scan)
-      -- Nota: requer extensão pg_trgm — criada logo abaixo com IF NOT EXISTS
-    `);
-
-    // pg_trgm GIN index — isolado pois requer superuser em alguns ambientes
-    // Reversão: DROP INDEX IF EXISTS idx_azure_costs_uom_trgm;
-    try {
-      await c.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
-      await c.query(`
-        CREATE INDEX IF NOT EXISTS idx_azure_costs_uom_trgm
-          ON azure_costs USING GIN (unit_of_measure gin_trgm_ops)
-      `);
-      console.log('[DB] Index GIN pg_trgm em unit_of_measure criado ✅');
-    } catch (e) {
-      console.warn('[DB] pg_trgm não disponível — ILIKE continuará usando seq scan:', e.message);
-    }
-
-    // 5) Índice único funcional para deduplicação — COALESCE em TODAS as colunas nullable
-    //    Inclui subscription_id e resource_id (antes sem COALESCE — linhas NULL se duplicavam)
-    try {
-      // Migração: recriar índice se definição antiga não cobria subscription_id/resource_id
-      const oldIdx = await c.query(`
-        SELECT indexdef FROM pg_indexes
-        WHERE tablename = 'azure_costs' AND indexname = 'idx_azure_costs_dedup'
-      `);
-      const precisaRecriar = oldIdx.rowCount > 0 &&
-        !oldIdx.rows[0].indexdef.includes('COALESCE(subscription_id');
-      if (precisaRecriar) {
-        console.log('[Azure] Migrando índice de deduplicação para COALESCE completo...');
-        // Remover duplicatas com a nova chave antes de criar o índice
-        await c.query(`
-          DELETE FROM azure_costs a
-          USING azure_costs b
-          WHERE a.id > b.id
-            AND COALESCE(a.subscription_id,'') = COALESCE(b.subscription_id,'')
-            AND COALESCE(a.resource_id,'')     = COALESCE(b.resource_id,'')
-            AND a.cost_date                    = b.cost_date
-            AND COALESCE(a.meter_id,'')        = COALESCE(b.meter_id,'')
-            AND COALESCE(a.charge_type,'')     = COALESCE(b.charge_type,'')
-            AND COALESCE(a.quantity,0)         = COALESCE(b.quantity,0)
-        `);
-        await c.query(`DROP INDEX IF EXISTS idx_azure_costs_dedup`);
-      }
-      await c.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_costs_dedup
-        ON azure_costs(
-          COALESCE(subscription_id, ''),
-          COALESCE(resource_id, ''),
-          cost_date,
-          COALESCE(meter_id, ''),
-          COALESCE(charge_type, ''),
-          COALESCE(quantity, 0)
-        )
-      `);
-      console.log('[Azure] Índice de deduplicação criado/verificado ✅');
-    } catch (errIdx) {
-      console.warn('[Azure] ⚠ Índice de deduplicação não criado (provável duplicata existente):', errIdx.message);
-      console.warn('[Azure] Execute a query de limpeza de duplicatas e reinicie o servidor.');
-    }
-
-    _azureTableReady = true;
-    console.log('[Azure] Tabela azure_costs pronta ✅');
-  } catch (err) {
-    console.error('[Azure] Erro ao inicializar tabela:', err.message);
-    // Não marcar como ready para tentar novamente
-  } finally {
-    c.release();
-  }
+    };
+    setTimeout(_bgIdx, 5 * 1000); // 5s delay para não competir com o primeiro request
 }
 
 // ── Cache de dropdowns (subscriptions + resource groups) ─────────────────────
@@ -1839,10 +1767,10 @@ const _RESUMO_TTL = 5 * 60 * 1000;
 async function _refreshAzureCache() {
   if (!pool || _cacheRefreshing) return;
   _cacheRefreshing = true;
-  const c = await pool.connect();
+  const t0 = Date.now();
   try {
-    const t0 = Date.now();
-    await c.query(`
+    // Garante que as tabelas de cache existem
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS azure_subs_cache (
         subscription_id   VARCHAR(200) PRIMARY KEY,
         subscription_name VARCHAR(500),
@@ -1856,39 +1784,64 @@ async function _refreshAzureCache() {
         moeda                     VARCHAR(20),
         PRIMARY KEY (subscription_id, resource_group_name_upper)
       );
+      CREATE TABLE IF NOT EXISTS azure_cobertura_cache (
+        mes               VARCHAR(10),
+        subscription_id   VARCHAR(200),
+        subscription_name VARCHAR(500),
+        registros         INT,
+        dias_com_dados    INT,
+        dias_no_mes       INT,
+        ultima_importacao VARCHAR(20),
+        total_brl         NUMERIC(20,2),
+        atualizado_em     TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (mes, subscription_id)
+      );
+      CREATE TABLE IF NOT EXISTS azure_ws_cache (
+        ws_name   TEXT PRIMARY KEY,
+        parent_rg TEXT NOT NULL
+      );
     `);
-    // Diagnóstico ANTES do BEGIN — query com .catch não deve estar dentro de transação
-    // pois falha silenciosa no Node deixa o PostgreSQL em estado abortado
+
+    // Diagnóstico rápido via pg_stat_user_tables (sem scan — usa estatísticas do autovacuum)
     try {
-      const diag = await c.query(`
-        SELECT COUNT(*) AS total, COUNT(subscription_id) AS com_sub, COUNT(cost_date) AS com_data
-        FROM azure_costs
+      const { rows: [stat] } = await pool.query(`
+        SELECT n_live_tup AS total, n_dead_tup AS mortos
+        FROM pg_stat_user_tables WHERE relname = 'azure_costs'
       `);
-      const { total, com_sub, com_data } = diag.rows[0];
-      console.log(`[Azure Cache] azure_costs: ${total} linhas, ${com_sub} com subscription_id, ${com_data} com cost_date`);
-      if (parseInt(total) > 0 && parseInt(com_sub) === 0) {
-        const amostra = await c.query(`SELECT * FROM azure_costs LIMIT 1`).catch(() => null);
-        if (amostra?.rows?.length)
-          console.warn('[Azure Cache] ⚠ subscription_id nulo. Colunas:', Object.keys(amostra.rows[0]).join(', '));
-      }
+      if (stat) console.log(`[Azure Cache] azure_costs: ~${stat.total} linhas (pg_stat, mortos: ${stat.mortos}) | pool: ${pool.totalCount} total / ${pool.idleCount} idle / ${pool.waitingCount} waiting`);
     } catch (_) {}
 
-    await c.query('BEGIN');
-    await c.query('DELETE FROM azure_subs_cache');
-    await c.query(`
-      INSERT INTO azure_subs_cache
+    // Helper: abre conexão dedicada, habilita workers paralelos e roda uma query pesada
+    const _queryParalelo = async (sql) => {
+      const conn = await pool.connect();
+      let queryErr;
+      try {
+        await conn.query('SET max_parallel_workers_per_gather = 4');
+        const { rows } = await conn.query(sql);
+        return rows;
+      } catch (e) {
+        queryErr = e;
+        throw e;
+      } finally {
+        // Sinaliza conexão como inválida em caso de erro — evita ECONNRESET no pool
+        conn.release(queryErr);
+      }
+    };
+
+    // 4 scans pesados em PARALELO — cada um em sua própria conexão
+    console.log('[Azure] Iniciando 4 agregações em paralelo...');
+    const [subRows, rgRows, cobRows, wsRows] = await Promise.all([
+      _queryParalelo(`
         SELECT subscription_id,
                MAX(subscription_name) AS subscription_name,
-               MIN(cost_date)         AS periodo_inicio,
-               MAX(cost_date)         AS periodo_fim,
+               MIN(cost_date)::text   AS periodo_inicio,
+               MAX(cost_date)::text   AS periodo_fim,
                MIN(billing_currency)  AS moeda
         FROM azure_costs
         WHERE subscription_id IS NOT NULL AND subscription_id <> ''
         GROUP BY subscription_id
-    `);
-    await c.query('DELETE FROM azure_rg_cache');
-    await c.query(`
-      INSERT INTO azure_rg_cache
+      `),
+      _queryParalelo(`
         SELECT subscription_id,
                UPPER(resource_group_name) AS resource_group_name_upper,
                MIN(billing_currency)      AS moeda
@@ -1896,17 +1849,124 @@ async function _refreshAzureCache() {
         WHERE subscription_id IS NOT NULL AND subscription_id <> ''
           AND resource_group_name IS NOT NULL AND resource_group_name <> ''
         GROUP BY subscription_id, UPPER(resource_group_name)
-    `);
-    await c.query('COMMIT');
-    _coberturaCache = null;
-    _resumoCache = null;
-    _importsCache = null;
-    console.log(`[Azure] Cache de dropdowns atualizado em ${Date.now()-t0}ms ✅`);
+      `),
+      _queryParalelo(`
+        SELECT mes, subscription_id, subscription_name,
+               SUM(registros_dia)::int                    AS registros,
+               COUNT(*)::int                              AS dias_com_dados,
+               MAX(dias_no_mes)                           AS dias_no_mes,
+               MAX(ultima_importacao)                     AS ultima_importacao,
+               ROUND(SUM(total_brl)::numeric, 2)         AS total_brl
+        FROM (
+          SELECT
+            TO_CHAR(DATE_TRUNC('month', cost_date), 'YYYY-MM-DD')   AS mes,
+            cost_date,
+            subscription_id,
+            COALESCE(MAX(subscription_name), subscription_id)        AS subscription_name,
+            COUNT(*)::int                                             AS registros_dia,
+            ((DATE_TRUNC('month', cost_date) + INTERVAL '1 month')::date
+              - DATE_TRUNC('month', cost_date)::date)                 AS dias_no_mes,
+            TO_CHAR(MAX(importado_em), 'DD/MM/YYYY HH24:MI')        AS ultima_importacao,
+            SUM(cost_in_billing_currency)                             AS total_brl
+          FROM azure_costs
+          WHERE cost_date >= NOW() - INTERVAL '36 months'
+            AND subscription_id IS NOT NULL AND subscription_id <> ''
+          GROUP BY 1, 2, 3
+        ) daily
+        GROUP BY mes, subscription_id, subscription_name
+        ORDER BY 1 DESC, registros DESC
+      `),
+      // Databricks workspace → parent RG (usa índice idx_azure_costs_service — match exato)
+      _queryParalelo(`
+        SELECT UPPER(resource_group_name) AS rg_upper,
+               SPLIT_PART(SPLIT_PART(resource_id, '/workspaces/', 2), '/', 1) AS ws
+        FROM azure_costs
+        WHERE consumed_service IN ('Microsoft.Databricks','microsoft.databricks')
+        GROUP BY 1, 2
+        HAVING SPLIT_PART(SPLIT_PART(resource_id, '/workspaces/', 2), '/', 1) <> ''
+      `).catch(() => [])
+    ]);
+
+    // Grava nas tabelas de cache via UNNEST (batch único, sem loop)
+    const cw = await pool.connect();
+    try {
+      await cw.query('BEGIN');
+      await cw.query('DELETE FROM azure_subs_cache');
+      if (subRows.length) {
+        await cw.query(
+          `INSERT INTO azure_subs_cache (subscription_id, subscription_name, periodo_inicio, periodo_fim, moeda)
+           SELECT * FROM UNNEST($1::text[],$2::text[],$3::date[],$4::date[],$5::text[])`,
+          [
+            subRows.map(r => r.subscription_id),
+            subRows.map(r => r.subscription_name || null),
+            subRows.map(r => r.periodo_inicio || null),
+            subRows.map(r => r.periodo_fim     || null),
+            subRows.map(r => r.moeda           || null)
+          ]
+        );
+      }
+      await cw.query('DELETE FROM azure_rg_cache');
+      if (rgRows.length) {
+        await cw.query(
+          `INSERT INTO azure_rg_cache (subscription_id, resource_group_name_upper, moeda)
+           SELECT * FROM UNNEST($1::text[],$2::text[],$3::text[])`,
+          [
+            rgRows.map(r => r.subscription_id),
+            rgRows.map(r => r.resource_group_name_upper),
+            rgRows.map(r => r.moeda || null)
+          ]
+        );
+      }
+      // Persiste cobertura no banco — sobrevive a restarts
+      if (cobRows.length) {
+        await cw.query('DELETE FROM azure_cobertura_cache');
+        await cw.query(
+          `INSERT INTO azure_cobertura_cache
+             (mes, subscription_id, subscription_name, registros, dias_com_dados, dias_no_mes, ultima_importacao, total_brl)
+           SELECT * FROM UNNEST($1::text[],$2::text[],$3::text[],$4::int[],$5::int[],$6::int[],$7::text[],$8::numeric[])`,
+          [
+            cobRows.map(r => r.mes),
+            cobRows.map(r => r.subscription_id),
+            cobRows.map(r => r.subscription_name || null),
+            cobRows.map(r => r.registros),
+            cobRows.map(r => r.dias_com_dados),
+            cobRows.map(r => r.dias_no_mes),
+            cobRows.map(r => r.ultima_importacao || null),
+            cobRows.map(r => r.total_brl)
+          ]
+        );
+      }
+      await cw.query('COMMIT');
+    } catch (e) {
+      await cw.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      cw.release();
+    }
+
+    _coberturaCache   = cobRows;
+    _coberturaCacheTs = Date.now();
+    _resumoCache      = null;
+    _importsCache     = null;
+    // Popula e persiste cache do lookup Databricks (evita query por-request em 10M+ linhas)
+    const wsFiltered = wsRows.filter(r => r.ws);
+    if (wsFiltered.length) {
+      // Upsert em vez de DELETE+INSERT: preserva entradas MANAGED-RG-* persistidas por _resolveParentRgs
+      pool.query(
+        `INSERT INTO azure_ws_cache (ws_name, parent_rg) SELECT * FROM UNNEST($1::text[], $2::text[])
+         ON CONFLICT (ws_name) DO UPDATE SET parent_rg = EXCLUDED.parent_rg`,
+        [wsFiltered.map(r => r.ws), wsFiltered.map(r => r.rg_upper)]
+      ).catch(() => {});
+      // Merge no cache em memória: adiciona novos workspaces sem apagar entradas MANAGED-RG-*
+      const existing = _dbWsCache || new Map();
+      for (const r of wsFiltered) existing.set(r.ws, r.rg_upper);
+      _dbWsCache = existing;
+      _dbWsCacheTs = Date.now();
+    }
+    console.log(`[Azure] Cache atualizado em ${Date.now()-t0}ms ✅ — ${subRows.length} subs · ${rgRows.length} RGs · ${cobRows.length} meses · ${wsRows.length} ws Databricks`);
   } catch (err) {
-    await c.query('ROLLBACK').catch(() => {});
-    console.error('[Azure] Erro ao atualizar cache de dropdowns:', err.message);
+    console.error(`[Azure] Erro ao atualizar cache: ${err.message} | pool: ${pool?.totalCount}/${pool?.idleCount}/${pool?.waitingCount} (total/idle/waiting)`);
   } finally {
-    c.release();
     _cacheRefreshing = false;
   }
 }
@@ -1919,9 +1979,9 @@ let _priceListReady = false;
 
 async function ensurePriceListTable() {
   if (_priceListReady) return;
-  const c = await pool.connect();
+  const pq = (sql) => pool.query(sql);
   try {
-    await c.query(`
+    await pq(`
       CREATE TABLE IF NOT EXISTS azure_price_list (
         meter_id         VARCHAR(200)  NOT NULL,
         currency_code    VARCHAR(10)   NOT NULL DEFAULT 'BRL',
@@ -1954,7 +2014,7 @@ async function ensurePriceListTable() {
       );
     `);
     // ── Índices funcionais (idempotentes) ────────────────────────────────────
-    await c.query(`
+    await pq(`
       ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS retail_price_brl NUMERIC(20,10);
       ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS meter_name VARCHAR(500);
       ALTER TABLE azure_price_list ADD COLUMN IF NOT EXISTS meter_category VARCHAR(200);
@@ -1980,8 +2040,8 @@ async function ensurePriceListTable() {
     // o LEFT JOIN retorna NULL e a calculadora opera sem PL (comportamento correto).
     // retail_price_eff: usa unit_price como fallback quando retail_price = 0
     // (Azure Retail Prices API retorna retail_price=0 para muitos meters regionais).
-    await c.query(`DROP MATERIALIZED VIEW IF EXISTS pl_best_mv CASCADE`).catch(() => {});
-    await c.query(`
+    await pq(`DROP MATERIALIZED VIEW IF EXISTS pl_best_mv CASCADE`).catch(() => {});
+    await pq(`
       CREATE MATERIALIZED VIEW pl_best_mv AS
         SELECT DISTINCT ON (LOWER(meter_id))
           LOWER(meter_id) AS meter_id_lower,
@@ -2002,12 +2062,12 @@ async function ensurePriceListTable() {
           AND COALESCE(NULLIF(retail_price,0), unit_price, 0) < 10000
         ORDER BY LOWER(meter_id), (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
     `).catch(() => {});
-    await c.query(`
+    await pq(`
       CREATE UNIQUE INDEX IF NOT EXISTS pl_best_mv_idx ON pl_best_mv (meter_id_lower);
     `).catch(() => {});
 
-    await c.query(`DROP MATERIALIZED VIEW IF EXISTS pl_sku_mv CASCADE`).catch(() => {});
-    await c.query(`
+    await pq(`DROP MATERIALIZED VIEW IF EXISTS pl_sku_mv CASCADE`).catch(() => {});
+    await pq(`
       CREATE MATERIALIZED VIEW pl_sku_mv AS
         SELECT DISTINCT ON (LOWER(COALESCE(meter_name,'')), LOWER(COALESCE(meter_category,'')))
           LOWER(COALESCE(meter_name,''))     AS meter_name_lower,
@@ -2029,7 +2089,7 @@ async function ensurePriceListTable() {
         ORDER BY LOWER(COALESCE(meter_name,'')), LOWER(COALESCE(meter_category,'')),
                  (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
     `).catch(() => {});
-    await c.query(`
+    await pq(`
       CREATE UNIQUE INDEX IF NOT EXISTS pl_sku_mv_idx ON pl_sku_mv (meter_name_lower, meter_cat_lower);
     `).catch(() => {});
 
@@ -2037,8 +2097,6 @@ async function ensurePriceListTable() {
     console.log('[PriceList] Tabela + views prontas ✅');
   } catch (err) {
     console.warn('[PriceList] Erro ao criar tabela:', err.message);
-  } finally {
-    c.release();
   }
 }
 
@@ -4006,11 +4064,17 @@ function _detectManagedRg(name) {
     return { managed_type: 'databricks', managed_label: workspace };
   }
   if (upper.startsWith('MANAGED-RG-ADBX-')) {
-    // managed-rg-adbx-{workspace}-{suffix}
+    // managed-rg-adbx-{workspace}-{randomSuffix}
     const bare = name.slice('managed-rg-adbx-'.length);
     const lastDash = bare.lastIndexOf('-');
     const workspace = lastDash > 0 ? bare.slice(0, lastDash) : bare;
     return { managed_type: 'databricks', managed_label: workspace };
+  }
+  if (upper.startsWith('MANAGED-RG-')) {
+    // managed-rg-{suffix} — padrão genérico (ex: MANAGED-RG-DBW-*, MANAGED-RG-ADB-*)
+    // managed_label = sufixo completo; parent resolvido por substring em _resolveParentRgs
+    const bare = name.slice('managed-rg-'.length);
+    return { managed_type: 'databricks', managed_label: bare };
   }
   if (upper.startsWith('MC_')) {
     // MC_{resourceGroup}_{clusterName}_{location}
@@ -4025,6 +4089,12 @@ function _detectManagedRg(name) {
 
 // ── Helper: resolve parent_rg para RGs gerenciados (AKS e Databricks) ────────
 // rows: array já com managed_type/managed_label; subs: string[] de subscription_ids para filtrar query
+
+// Cache do mapa workspace→parent (query pesada com LIKE em 10M+ linhas)
+let _dbWsCache = null;
+let _dbWsCacheTs = 0;
+const _DB_WS_TTL = 30 * 60 * 1000; // 30 min — workspaces mudam raramente
+
 async function _resolveParentRgs(rows, subs) {
   if (!rows.length) return rows;
 
@@ -4034,28 +4104,15 @@ async function _resolveParentRgs(rows, subs) {
   );
 
   // Mapa workspace_lower → parent_rg_upper para Databricks (via resource_id no billing)
-  const workspaceToParent = new Map();
+  // Cache carregado em startup e atualizado pelo _refreshAzureCache (90s delay).
+  // Se cache ainda não está disponível, retorna RGs sem parent mapping (evita query pesada por-request).
+  let workspaceToParent = new Map();
   if (rows.some(r => r.managed_type === 'databricks')) {
-    try {
-      const subParam = subs && subs.length ? subs : null;
-      // HAVING não pode referenciar resource_id (não está no GROUP BY) — condição vai no WHERE
-      const subCond = subParam ? 'AND subscription_id = ANY($1)' : '';
-      const wkRes = await pool.query(
-        `SELECT UPPER(resource_group_name) AS rg_upper,
-                SPLIT_PART(SPLIT_PART(LOWER(resource_id), '/workspaces/', 2), '/', 1) AS ws
-         FROM azure_costs
-         WHERE (LOWER(consumed_service) LIKE '%databricks%' OR LOWER(resource_id) LIKE '%/microsoft.databricks%')
-           AND LOWER(resource_id) LIKE '%/workspaces/%'
-           AND SPLIT_PART(LOWER(resource_id), '/workspaces/', 2) <> ''
-           ${subCond}
-         GROUP BY 1, 2`,
-        subParam ? [subParam] : []
-      );
-      for (const row of wkRes.rows) {
-        if (row.ws) workspaceToParent.set(row.ws, row.rg_upper);
-      }
-      console.log(`[ResolveParentRgs] Databricks workspaces: ${workspaceToParent.size}${workspaceToParent.size > 0 ? ' — ' + [...workspaceToParent.keys()].slice(0, 5).join(', ') : ' (0 — sem linhas /workspaces/ no billing?)'}`);
-    } catch (e) { console.warn('[ResolveParentRgs] Databricks lookup error:', e.message); }
+    const now = Date.now();
+    if (_dbWsCache && (now - _dbWsCacheTs) < _DB_WS_TTL) {
+      workspaceToParent = _dbWsCache;
+    }
+    // Cache não disponível: retorna sem parent mapping — _refreshAzureCache popula em 90s
   }
 
   return rows.map(r => {
@@ -4080,18 +4137,35 @@ async function _resolveParentRgs(rows, subs) {
         if (rgLower === 'databricks-rg-' + wsLower ||
             rgLower.startsWith('databricks-rg-' + wsLower + '-') ||
             rgLower === 'managed-rg-adbx-' + wsLower ||
-            rgLower.startsWith('managed-rg-adbx-' + wsLower + '-')) {
+            rgLower.startsWith('managed-rg-adbx-' + wsLower + '-') ||
+            rgLower === 'managed-rg-' + wsLower ||
+            rgLower.startsWith('managed-rg-' + wsLower + '-')) {
           parent_rg = parentRgUpper;
           break;
         }
       }
-      // Método 2 (fallback exact): managed_label bate exatamente com um RG não-gerenciado
+      // Método 2 (exact): managed_label bate exatamente com um RG não-gerenciado
       if (!parent_rg) {
         const labelUpper = (r.managed_label || '').toUpperCase();
         if (labelUpper && normalRgs.has(labelUpper)) parent_rg = labelUpper;
       }
-      // Método 3 (fallback prefix): managed_label é prefixo do nome do RG pai
-      // Ex: workspace 'RG-DBW-TPAZ-BRSOUTH' → pai 'RG-DBW-TPAZ-BRSOUTH-TEST'
+      // Método 3 (suffix): RG pai TERMINA COM o managed_label
+      // Ex: MANAGED-RG-DBW-X → label=DBW-X → pai RG-DBW-X (termina com -DBW-X)
+      // Mais confiável que substring — sem risco de falso-positivo em nomes parecidos
+      if (!parent_rg) {
+        const labelUpper = (r.managed_label || '').toUpperCase();
+        if (labelUpper && labelUpper.length >= 6) {
+          let best = null, bestLen = Infinity;
+          for (const rg of normalRgs) {
+            if ((rg.endsWith('-' + labelUpper) || rg.endsWith('_' + labelUpper)) &&
+                rg.length < bestLen) {
+              bestLen = rg.length; best = rg;
+            }
+          }
+          if (best) parent_rg = best;
+        }
+      }
+      // Método 4 (prefix): managed_label é prefixo do nome do RG pai
       if (!parent_rg) {
         const labelUpper = (r.managed_label || '').toUpperCase();
         if (labelUpper) {
@@ -4105,8 +4179,7 @@ async function _resolveParentRgs(rows, subs) {
           if (best) parent_rg = best;
         }
       }
-      // Método 4 (substring): managed_label está contido no nome de algum RG normal
-      // Ex: workspace='VVIA-ENG-BRSOUTH-001' → pai='RG-DBW-VVIA-ENG-BRSOUTH-001'
+      // Método 5 (substring): managed_label está contido em algum RG normal — menor wins
       if (!parent_rg) {
         const labelUpper = (r.managed_label || '').toUpperCase();
         if (labelUpper && labelUpper.length >= 6) {
@@ -4118,6 +4191,15 @@ async function _resolveParentRgs(rows, subs) {
           }
           if (best) parent_rg = best;
         }
+      }
+      // Persiste mapeamento encontrado em azure_ws_cache para acelerar requisições futuras
+      if (parent_rg && pool) {
+        const wsKey = (r.resource_group_name || '').toUpperCase();
+        pool.query(
+          `INSERT INTO azure_ws_cache (ws_name, parent_rg) VALUES ($1, $2)
+           ON CONFLICT (ws_name) DO UPDATE SET parent_rg = EXCLUDED.parent_rg`,
+          [wsKey, parent_rg]
+        ).catch(() => {});
       }
     }
 
@@ -4147,6 +4229,7 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
     } catch (_) {}
     // Fallback: cache vazio — lê direto
     if (!rows.length) {
+      console.warn('[ResourceGroups] cache vazio — fallback para query direta em azure_costs');
       const fallbackCond = [...cond].map(c => c.replace('subscription_id', 'subscription_id'));
       const fd = await pool.query(`
         SELECT UPPER(resource_group_name) AS resource_group_name, MIN(billing_currency) AS moeda
@@ -4237,6 +4320,7 @@ app.get('/api/calculadora/reconciliacao', authMiddleware, dbMiddleware, async (r
 // ── GET /api/calculadora/recursos ────────────────────────────────────────────
 // Aceita subscription_id e resource_group como valores separados por vírgula
 app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, res) => {
+  console.log(`[Recursos] requisição recebida — sub=${req.query.subscription_id} rg=${req.query.resource_group} inicio=${req.query.data_inicio} fim=${req.query.data_fim}`);
   try {
     const { subscription_id, resource_group, data_inicio, data_fim } = req.query;
     const params = []; const cond = [];
@@ -4319,7 +4403,16 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
 
     const _t0 = Date.now();
 
-    const r = await pool.query(`
+    // Conexão dedicada com workers paralelos e work_mem elevado para o GROUP BY complexo
+    console.log(`[Recursos] aguardando conexão do pool...`);
+    const _conn = await pool.connect();
+    console.log(`[Recursos] conexão obtida — executando query...`);
+    let r;
+    try {
+      await _conn.query(`SET statement_timeout = '120s'`);
+      await _conn.query(`SET max_parallel_workers_per_gather = 4`);
+      await _conn.query(`SET work_mem = '256MB'`);
+      r = await _conn.query(`
       -- ── CTE base: agrega azure_costs por recurso ─────────────────────────────
       WITH base AS (
         SELECT
@@ -4591,6 +4684,9 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
       LEFT JOIN pico_databricks pdb ON pdb.rg = base.resource_group_name
       ORDER BY base.resource_group_name, base.total_billing DESC
     `, params);
+    } finally {
+      _conn.release();
+    }
 
     console.log(`[Recursos] ${r.rows.length} recursos — ${Date.now()-_t0}ms`);
     res.json(r.rows);
@@ -5464,8 +5560,13 @@ async function ensureAzureColetaTable() {
       detalhes            JSONB
     )
   `);
-  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo   VARCHAR(20)`);
-  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS origem VARCHAR(20) DEFAULT 'manual'`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS tipo              VARCHAR(20)`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS origem            VARCHAR(20) DEFAULT 'manual'`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS periodo_inicio    DATE`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS periodo_fim       DATE`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS subscriptions_ids TEXT[]`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS validacao_status  VARCHAR(20)`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS validacao_json    JSONB`);
 
   // ── notificacoes_sistema ──────────────────────────────────────────────────
   await pool.query(`
@@ -5707,17 +5808,21 @@ function _iniciarAgendador() {
             }
           }
         } catch (ePlSched) {
-          console.warn('[Agendador] Erro ao verificar schedule Price List:', ePlSched.message);
+          // "does not exist" = tabela ainda não criada (startup race) — skip silencioso
+          if (!ePlSched.message.includes('does not exist')) {
+            console.warn('[Agendador] Erro ao verificar schedule Price List:', ePlSched.message);
+          }
         }
       }
 
     } catch (e) {
-      console.warn('[Agendador] Erro ao verificar schedule:', e.message);
+      console.warn(`[Agendador] Erro ao verificar schedule: ${e.message} | pool: ${pool?.totalCount}/${pool?.idleCount}/${pool?.waitingCount} (total/idle/waiting)`);
     }
   };
-  // Dispara imediatamente ao iniciar (pega coletas atrasadas pós-restart)
-  // e depois a cada 5 minutos
-  _tickAgendador();
+  // Aguarda 120s no primeiro tick: CREATE MV (price list), CREATE INDEX (azure_costs)
+  // e _refreshAzureCache (90s delay) já terminaram antes de competir por conexões.
+  // Depois dispara a cada 5 minutos normalmente.
+  setTimeout(_tickAgendador, 120 * 1000);
   _agendadorTimer = setInterval(_tickAgendador, 5 * 60 * 1000);
 }
 
@@ -5811,25 +5916,69 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
     if (!force && _coberturaCache && (now - _coberturaCacheTs) < _COBERTURA_TTL) {
       return res.json(_coberturaCache);
     }
-    const { rows } = await pool.query(`
-      SELECT
-        TO_CHAR(DATE_TRUNC('month', c.cost_date), 'YYYY-MM-DD')  AS mes,
-        c.subscription_id,
-        COALESCE(s.subscription_name, c.subscription_id)          AS subscription_name,
-        COUNT(*)::int                                              AS registros,
-        COUNT(DISTINCT c.cost_date)::int                          AS dias_com_dados,
-        ((DATE_TRUNC('month', MIN(c.cost_date)) + INTERVAL '1 month')::date
-          - DATE_TRUNC('month', MIN(c.cost_date))::date)           AS dias_no_mes,
-        TO_CHAR(MAX(c.importado_em), 'DD/MM/YYYY HH24:MI')       AS ultima_importacao,
-        ROUND(SUM(c.cost_in_billing_currency)::numeric, 2)        AS total_brl
-      FROM azure_costs c
-      LEFT JOIN azure_subs_cache s ON s.subscription_id = c.subscription_id
-      WHERE c.cost_date >= NOW() - INTERVAL '36 months'
-      GROUP BY 1, 2, 3
-      ORDER BY 1 DESC, 4 DESC
-    `);
+
+    // Tenta carregar do banco (sobrevive a restarts — populado pelo _refreshAzureCache)
+    if (!force) {
+      try {
+        const { rows: dbRows } = await pool.query(
+          `SELECT mes, subscription_id, subscription_name, registros, dias_com_dados,
+                  dias_no_mes, ultima_importacao, total_brl::float AS total_brl
+           FROM azure_cobertura_cache ORDER BY mes DESC, registros DESC`
+        );
+        if (dbRows.length) {
+          _coberturaCache   = dbRows;
+          _coberturaCacheTs = now;
+          return res.json(dbRows);
+        }
+      } catch (_) {}
+    }
+
+    // Se o _refreshAzureCache já está rodando, espera ele terminar em vez de
+    // lançar uma segunda query pesada concorrente (10M+ linhas competindo).
+    if (_cacheRefreshing) {
+      const deadline = Date.now() + 6 * 60 * 1000; // até 6 min
+      while (_cacheRefreshing && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+      if (_coberturaCache) return res.json(_coberturaCache);
+    }
+
+    // Cache não foi populado pelo refresh — roda query direta com workers paralelos
+    const conn = await pool.connect();
+    let rows;
+    try {
+      await conn.query('SET max_parallel_workers_per_gather = 4');
+      ({ rows } = await conn.query(`
+        SELECT mes, subscription_id, subscription_name,
+               SUM(registros_dia)::int                   AS registros,
+               COUNT(*)::int                             AS dias_com_dados,
+               MAX(dias_no_mes)                          AS dias_no_mes,
+               MAX(ultima_importacao)                    AS ultima_importacao,
+               ROUND(SUM(total_brl)::numeric, 2)        AS total_brl
+        FROM (
+          SELECT
+            TO_CHAR(DATE_TRUNC('month', cost_date), 'YYYY-MM-DD')   AS mes,
+            cost_date,
+            subscription_id,
+            COALESCE(MAX(subscription_name), subscription_id)        AS subscription_name,
+            COUNT(*)::int                                             AS registros_dia,
+            ((DATE_TRUNC('month', cost_date) + INTERVAL '1 month')::date
+              - DATE_TRUNC('month', cost_date)::date)                 AS dias_no_mes,
+            TO_CHAR(MAX(importado_em), 'DD/MM/YYYY HH24:MI')        AS ultima_importacao,
+            SUM(cost_in_billing_currency)                             AS total_brl
+          FROM azure_costs
+          WHERE cost_date >= NOW() - INTERVAL '36 months'
+            AND subscription_id IS NOT NULL AND subscription_id <> ''
+          GROUP BY 1, 2, 3
+        ) daily
+        GROUP BY mes, subscription_id, subscription_name
+        ORDER BY 1 DESC, registros DESC
+      `));
+    } finally {
+      conn.release();
+    }
     _coberturaCache = rows;
-    _coberturaCacheTs = now;
+    _coberturaCacheTs = Date.now();
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -5873,7 +6022,7 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req,
   try {
     await ensureAzureColetaTable();
     const tipo = req.query.tipo;
-    const baseSelect = `SELECT h.id,h.tipo,h.origem,h.iniciado_em,h.concluido_em,h.status,h.linhas_inseridas,h.linhas_atualizadas,h.linhas_erro,h.mensagem,h.detalhes,c.nome AS sp_nome FROM azure_coleta_historico h LEFT JOIN azure_coleta_config c ON c.id = h.sp_id`;
+    const baseSelect = `SELECT h.id,h.tipo,h.origem,h.iniciado_em,h.concluido_em,h.status,h.linhas_inseridas,h.linhas_atualizadas,h.linhas_erro,h.mensagem,h.detalhes,h.periodo_inicio,h.periodo_fim,h.subscriptions_ids,h.validacao_status,h.validacao_json,c.nome AS sp_nome FROM azure_coleta_historico h LEFT JOIN azure_coleta_config c ON c.id = h.sp_id`;
     const { rows } = tipo === 'storage'
       ? await pool.query(`${baseSelect} WHERE h.tipo = ANY($1::text[]) ORDER BY h.iniciado_em DESC LIMIT 50`, [['storage', 'price_list']])
       : tipo
@@ -5888,6 +6037,22 @@ app.delete('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_
     await ensureAzureColetaTable();
     await pool.query(`TRUNCATE TABLE azure_coleta_historico RESTART IDENTITY`);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/azure-coleta/historico/:id/validar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { rows } = await pool.query(
+      `SELECT periodo_inicio, periodo_fim, subscriptions_ids FROM azure_coleta_historico WHERE id=$1`, [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Registro não encontrado' });
+    const { periodo_inicio, periodo_fim, subscriptions_ids } = rows[0];
+    await _validarColeta(id, subscriptions_ids, periodo_inicio, periodo_fim);
+    const { rows: updated } = await pool.query(
+      `SELECT validacao_status, validacao_json FROM azure_coleta_historico WHERE id=$1`, [id]
+    );
+    res.json(updated[0] || {});
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -6471,7 +6636,10 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
 
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,sp_id,origem) VALUES ('executando','api',$1,$2) RETURNING id`, [spId || null, origem]);
+    const r = await pool.query(
+      `INSERT INTO azure_coleta_historico (status,tipo,sp_id,origem,periodo_inicio,periodo_fim,subscriptions_ids) VALUES ('executando','api',$1,$2,$3,$4,$5) RETURNING id`,
+      [spId || null, origem, startDate || null, endDate || null, subscriptionIds.length ? subscriptionIds : null]
+    );
     histId = r.rows[0].id;
 
     // 1) Credenciais e token (getter com renovação automática)
@@ -6687,7 +6855,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     // Marca registros desta coleta como fonte='api' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='api' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
-    _coberturaCache = null; _resumoCache = null; _importsCache = null;
+    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null;
     _refreshAzureCache().catch(() => {});
     const msgFinal = modo === 'subscription'
       ? `API Subscription — ${subCount} sub(s) | ${startDate}→${endDate}`
@@ -6697,6 +6865,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       `UPDATE azure_coleta_historico SET status='concluido',concluido_em=NOW(),linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
     );
+    _validarColeta(histId, subscriptionIds, startDate, endDate).catch(() => {});
     _coletaProgresso.fase = 'Concluído';
     _registrarNotificacaoColeta(
       `Coleta API concluída`,
@@ -6898,7 +7067,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     // Marca registros desta coleta como fonte='storage' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='storage' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
-    _coberturaCache = null; _resumoCache = null; _importsCache = null;
+    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null;
     _refreshAzureCache().catch(() => {});
 
     // ── Price List via Storage (opcional) ──────────────────────────────────────
@@ -6970,6 +7139,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     _logColeta('Concluída: ' + msg);
     await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, msg, JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] }), histId]);
+    _validarColeta(histId, null, null, null).catch(() => {});
     _registrarNotificacaoColeta(
       `Coleta Storage concluída`,
       `${origemDb === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msg}`,
@@ -6991,6 +7161,114 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
   } finally {
     _coletaEmExecucao = false;
     _coletaCancelada  = false;
+  }
+}
+
+// ── Validação pós-coleta ──────────────────────────────────────────────────────
+async function _validarColeta(histId, subIds, inicio, fim) {
+  if (!histId || !pool) return;
+  try {
+    const subsArr = Array.isArray(subIds) ? subIds.filter(Boolean) : [];
+    let periodoInicio = inicio ? String(inicio).slice(0, 10) : null;
+    let periodoFim    = fim    ? String(fim).slice(0, 10)    : null;
+
+    // Para coleta Storage (sem período explícito): deriva do que foi inserido desde o início da coleta
+    if (!periodoInicio || !periodoFim) {
+      const { rows: [pr] } = await pool.query(
+        `SELECT MIN(cost_date)::text AS ini, MAX(cost_date)::text AS fim
+         FROM azure_costs
+         WHERE importado_em >= (SELECT iniciado_em FROM azure_coleta_historico WHERE id=$1)`,
+        [histId]
+      );
+      periodoInicio = pr?.ini || null;
+      periodoFim    = pr?.fim || null;
+    }
+
+    if (!periodoInicio || !periodoFim) {
+      await pool.query(
+        `UPDATE azure_coleta_historico SET validacao_status='inconclusivo', validacao_json=$1 WHERE id=$2`,
+        [JSON.stringify({ erro: 'Período não determinado — sem registros novos', validado_em: new Date().toISOString() }), histId]
+      );
+      return;
+    }
+
+    const diasEsperados = Math.round((new Date(periodoFim) - new Date(periodoInicio)) / 86400000) + 1;
+
+    // Totais do período
+    const mainQ = subsArr.length
+      ? `SELECT COUNT(DISTINCT cost_date) AS dias, COUNT(DISTINCT subscription_id) AS subs,
+                COUNT(*) AS total, COALESCE(SUM(cost_in_billing_currency),0) AS custo
+         FROM azure_costs WHERE subscription_id = ANY($1) AND cost_date BETWEEN $2 AND $3`
+      : `SELECT COUNT(DISTINCT cost_date) AS dias, COUNT(DISTINCT subscription_id) AS subs,
+                COUNT(*) AS total, COALESCE(SUM(cost_in_billing_currency),0) AS custo
+         FROM azure_costs WHERE cost_date BETWEEN $1 AND $2`;
+    const mainParams = subsArr.length ? [subsArr, periodoInicio, periodoFim] : [periodoInicio, periodoFim];
+    const { rows: [row] } = await pool.query(mainQ, mainParams);
+
+    const diasComDados = parseInt(row.dias  || 0);
+    const subsComDados = parseInt(row.subs  || 0);
+    const totalReg     = parseInt(row.total || 0);
+    const custoTotal   = parseFloat(row.custo || 0);
+
+    // Dias sem dados (máx 31 para não pesar)
+    let diasSemDados = [];
+    if (totalReg > 0 && diasComDados < diasEsperados) {
+      const gapQ = subsArr.length
+        ? `SELECT gs::date::text AS dt FROM generate_series($1::date,$2::date,'1 day') gs
+           WHERE gs::date NOT IN (
+             SELECT DISTINCT cost_date FROM azure_costs
+             WHERE subscription_id=ANY($3) AND cost_date BETWEEN $1 AND $2
+           ) ORDER BY dt LIMIT 31`
+        : `SELECT gs::date::text AS dt FROM generate_series($1::date,$2::date,'1 day') gs
+           WHERE gs::date NOT IN (
+             SELECT DISTINCT cost_date FROM azure_costs WHERE cost_date BETWEEN $1 AND $2
+           ) ORDER BY dt LIMIT 31`;
+      const gapParams = subsArr.length ? [periodoInicio, periodoFim, subsArr] : [periodoInicio, periodoFim];
+      const { rows: gaps } = await pool.query(gapQ, gapParams);
+      diasSemDados = gaps.map(g => g.dt);
+    }
+
+    // Subscriptions sem dados (apenas quando lista explícita foi fornecida)
+    let subsSemDados = [];
+    if (subsArr.length > 0) {
+      const { rows: subRows } = await pool.query(
+        `SELECT DISTINCT subscription_id FROM azure_costs
+         WHERE subscription_id = ANY($1) AND cost_date BETWEEN $2 AND $3`,
+        [subsArr, periodoInicio, periodoFim]
+      );
+      const comDados = new Set(subRows.map(r => r.subscription_id));
+      subsSemDados = subsArr.filter(s => !comDados.has(s));
+    }
+
+    // Status
+    let validStatus;
+    if (totalReg === 0) {
+      validStatus = 'falha';
+    } else if (subsSemDados.length > 0 || diasComDados < Math.floor(diasEsperados * 0.85)) {
+      validStatus = 'aviso';
+    } else {
+      validStatus = 'ok';
+    }
+
+    const validJson = {
+      dias_esperados:  diasEsperados,
+      dias_com_dados:  diasComDados,
+      subs_esperadas:  subsArr.length,
+      subs_com_dados:  subsComDados,
+      total_registros: totalReg,
+      custo_total:     custoTotal,
+      subs_sem_dados:  subsSemDados,
+      dias_sem_dados:  diasSemDados,
+      validado_em:     new Date().toISOString()
+    };
+
+    await pool.query(
+      `UPDATE azure_coleta_historico SET validacao_status=$1, validacao_json=$2, periodo_inicio=$3, periodo_fim=$4 WHERE id=$5`,
+      [validStatus, JSON.stringify(validJson), periodoInicio, periodoFim, histId]
+    );
+    console.log(`[Validação] #${histId}: ${validStatus} — ${totalReg} reg | ${diasComDados}/${diasEsperados} dias | ${subsComDados}/${subsArr.length || '?'} subs`);
+  } catch (e) {
+    console.warn(`[Validação] Erro #${histId}:`, e.message);
   }
 }
 
@@ -7135,7 +7413,25 @@ app.get('/health', (_req, res) => {
 
 // ─── START ───────────────────────────────────────────────────────────────────
 (async () => {
-  // Start HTTP server first — wizard needs it
+  // Limpar uploads_tmp ao iniciar — arquivos temporários deixados por crash ou restart
+  try {
+    const tmpDir = path.join(__dirname, 'uploads_tmp');
+    if (fs.existsSync(tmpDir)) {
+      const tmpFiles = fs.readdirSync(tmpDir);
+      let freed = 0;
+      for (const f of tmpFiles) {
+        try {
+          const fp = path.join(tmpDir, f);
+          const stat = fs.statSync(fp);
+          freed += stat.size;
+          fs.unlinkSync(fp);
+        } catch {}
+      }
+      if (tmpFiles.length > 0) console.log(`  [Startup] Limpeza uploads_tmp: ${tmpFiles.length} arquivo(s) removido(s) (${(freed/1024/1024).toFixed(0)} MB)`);
+    }
+  } catch {}
+
+  // Start HTTP server first — wizard needs it before DB is ready
   app.listen(PORT, () => {
     console.log('');
     console.log('  FinOps Manager rodando em http://localhost:' + PORT);
@@ -7145,27 +7441,77 @@ app.get('/health', (_req, res) => {
   // Try to connect with existing config
   const cfg = getDbConfig();
   if (cfg) {
+    console.log(`  Conectando ao banco: ${cfg.host || cfg.connectionString?.split('@')[1]?.split('/')[0] || 'localhost'}:${cfg.port || 5432}/${cfg.database || cfg.connectionString?.split('/').pop() || '?'}`);
     try {
       createPool(cfg);
+      // Teste rápido de conectividade antes do initDB completo
+      try {
+        await pool.query('SELECT 1');
+        console.log('  Conexao com banco OK.');
+      } catch (connErr) {
+        throw new Error('Nao foi possivel conectar ao PostgreSQL: ' + connErr.message);
+      }
       await initDB();
-      // Inicializar tabela Azure na startup — uma vez só, não em cada request
+      // Inicializar tabelas na startup — uma vez só, não em cada request
       try { await ensureAzureCostsTable(); } catch (e) { console.warn('[Azure] Tabela será criada na primeira importação:', e.message); }
       try { await ensureAzureColetaTable(); } catch (e) { console.warn('[Coleta] Tabela de histórico não iniciada:', e.message); }
+      // Price List: cria azure_price_list_meta (necessária para o agendador) antes de iniciar o timer.
+      // MVs podem demorar com dados; executar antes do agendador garante que a tabela exista no primeiro tick.
       try { await ensurePriceListTable(); } catch (e) { console.warn('[PriceList] Tabela será criada no primeiro sync:', e.message); }
-      // Remarcar registros importados por coletas API/Storage que ficaram com fonte='manual'
-      // (deve rodar após ambas as tabelas existirem)
-      pool.query(`
-        UPDATE azure_costs ac
-        SET fonte = h.tipo
-        FROM azure_coleta_historico h
-        WHERE h.tipo IN ('api', 'storage')
-          AND h.concluido_em IS NOT NULL
-          AND ac.importado_em >= h.iniciado_em
-          AND ac.importado_em <= h.concluido_em + INTERVAL '5 minutes'
-          AND ac.fonte = 'manual'
-      `).then(r => { if (r.rowCount > 0) console.log(`[Migration] ${r.rowCount} registros remarcados com fonte api/storage`); }).catch(() => {});
       _iniciarAgendador();
-      _refreshAzureCache().catch(e => console.warn('[Azure] Cache de dropdowns não pôde ser construído:', e.message));
+      // Carrega caches persistentes imediatamente do banco (sem query pesada)
+      pool.query(`SELECT ws_name, parent_rg FROM azure_ws_cache`).then(r => {
+        if (r.rows.length) {
+          _dbWsCache = new Map(r.rows.map(x => [x.ws_name, x.parent_rg]));
+          _dbWsCacheTs = Date.now();
+          console.log(`  [WsCache] ${r.rows.length} workspaces Databricks carregados`);
+        } else {
+          // Cache vazio — warmup rápido via consumed_service (usa índice, sem ILIKE)
+          pool.query(`
+            SELECT UPPER(resource_group_name) AS rg_upper,
+                   SPLIT_PART(SPLIT_PART(resource_id, '/workspaces/', 2), '/', 1) AS ws
+            FROM azure_costs
+            WHERE consumed_service IN ('Microsoft.Databricks','microsoft.databricks')
+            GROUP BY 1, 2
+            HAVING SPLIT_PART(SPLIT_PART(resource_id, '/workspaces/', 2), '/', 1) <> ''
+          `).then(wk => {
+            if (wk.rows.length) {
+              _dbWsCache = new Map(wk.rows.map(r => [r.ws, r.rg_upper]));
+              _dbWsCacheTs = Date.now();
+              console.log(`  [WsCache] ${wk.rows.length} workspaces Databricks (warmup direto)`);
+            }
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+      // Cache é pesado — escalonado para não saturar o pool no startup.
+      setTimeout(() => {
+        _refreshAzureCache().catch(e => console.warn('[Azure] Cache de dropdowns não pôde ser construído:', e.message));
+      }, 90 * 1000);
+      // Índice pesado criado em background (3 min de delay) — evita saturar o pool no startup
+      setTimeout(() => {
+        if (!pool) return;
+        console.log('[DB] Criando idx_azure_costs_sub_date_rg em background...');
+        pool.query(`
+          CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_date_rg
+            ON azure_costs (subscription_id, cost_date, UPPER(resource_group_name))
+        `).then(() => console.log('[DB] idx_azure_costs_sub_date_rg pronto ✅'))
+          .catch(e => console.warn('[DB] Índice sub_date_rg:', e.message));
+      }, 3 * 60 * 1000);
+      // Migração de fonte: remarcar registros de coletas API/Storage que ficaram com fonte='manual'.
+      // Roda com 60s de delay para não competir com os requests iniciais pelo pool de conexões.
+      setTimeout(() => {
+        if (!pool) return;
+        pool.query(`
+          UPDATE azure_costs ac
+          SET fonte = h.tipo
+          FROM azure_coleta_historico h
+          WHERE h.tipo IN ('api', 'storage')
+            AND h.concluido_em IS NOT NULL
+            AND ac.importado_em >= h.iniciado_em
+            AND ac.importado_em <= h.concluido_em + INTERVAL '5 minutes'
+            AND ac.fonte = 'manual'
+        `).then(r => { if (r.rowCount > 0) console.log(`[Migration] ${r.rowCount} registros remarcados com fonte api/storage`); }).catch(() => {});
+      }, 60 * 1000);
       console.log('  Banco conectado e inicializado.');
     } catch (err) {
       console.warn('  Aviso: falha ao conectar ao banco configurado:', err.message);

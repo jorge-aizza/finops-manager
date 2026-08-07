@@ -4376,7 +4376,7 @@ async function loadCoberturaMeses(force) {
   body.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:12px">Carregando cobertura...</div>';
   try {
     const path = '/azure-coleta/cobertura-meses' + (force ? '?force=1' : '');
-    const rows = await api('GET', path, undefined, 120000);
+    const rows = await api('GET', path, undefined, 8 * 60 * 1000); // até 8 min — cache é pesado na 1ª carga (10M+ linhas)
     if (!rows || !rows.length) {
       body.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:12px">Nenhum dado encontrado em <code>azure_costs</code>.</div>';
       return;
@@ -5537,9 +5537,10 @@ function _wizardRenderMeses() {
   const grid = document.getElementById('wizard-meses-grid');
   if (!grid) return;
   const hoje = new Date();
-  const maxKey = `${hoje.getFullYear()}-${hoje.getMonth() + 1}`;
+  // Zero-pad obrigatório: comparação string "2026-10" < "2026-7" seria falsa sem padding
+  const maxKey = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2,'0')}`;
   grid.innerHTML = _MESES_NOMES.map((nome, idx) => {
-    const key  = `${_wizardAnoSel}-${idx + 1}`;
+    const key  = `${_wizardAnoSel}-${String(idx + 1).padStart(2,'0')}`;
     const sel  = _wizardMesesSel.has(key);
     const futuro = key > maxKey;
     return `<button onclick="_wizardToggleMes('${key}')" ${futuro ? 'disabled' : ''}
@@ -6175,8 +6176,8 @@ async function loadColetaHistorico(tipo) {
 
   // API ou Storage
   const _hastipoCol = tab === 'storage';
-  const _ncols = _hastipoCol ? 11 : 10;
-  if (thead) thead.innerHTML = `<tr><th>Início</th><th>SP</th>${_hastipoCol ? '<th>Tipo</th>' : ''}<th>Status</th><th>Origem</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Log</th></tr>`;
+  const _ncols = _hastipoCol ? 13 : 12;
+  if (thead) thead.innerHTML = `<tr><th>Início</th><th>SP</th>${_hastipoCol ? '<th>Tipo</th>' : ''}<th>Status</th><th>Origem</th><th style="text-align:right">Inseridos</th><th style="text-align:right">Atualizados</th><th style="text-align:right">Erros</th><th>Duração</th><th>Mensagem</th><th style="text-align:center">Validação</th><th style="text-align:center">Log</th></tr>`;
   if (tbody) tbody.innerHTML = `<tr><td colspan="${_ncols}" class="empty-state" style="color:var(--text-muted)">Carregando...</td></tr>`;
   try {
     const rows = await api('GET', `/azure-coleta/historico?tipo=${tab}`);
@@ -6209,6 +6210,16 @@ async function loadColetaHistorico(tipo) {
       const logBtn = temLog
         ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--accent);color:var(--accent)" onclick="verDetalhesColeta(${idx})" title="Ver log passo a passo">📋 Log</button>`
         : `<span style="font-size:10px;color:var(--text-muted)">—</span>`;
+      const vs = r.validacao_status;
+      const valBtn = vs === 'ok'
+        ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--green);color:var(--green)" onclick="verValidacaoColeta(${idx})">✅ OK</button>`
+        : vs === 'aviso'
+        ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--orange);color:var(--orange)" onclick="verValidacaoColeta(${idx})">⚠ Aviso</button>`
+        : vs === 'falha'
+        ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--danger);color:var(--danger)" onclick="verValidacaoColeta(${idx})">❌ Falha</button>`
+        : vs === 'inconclusivo'
+        ? `<button class="btn-ghost" style="font-size:10px;padding:2px 8px;border-color:var(--text-muted);color:var(--text-muted)" onclick="verValidacaoColeta(${idx})">— S/dados</button>`
+        : `<span style="font-size:10px;color:var(--text-muted)">—</span>`;
       const origemBadge = r.origem === 'agendado'
         ? `<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(34,197,94,.10);color:var(--green)">⏰ Agendada</span>`
         : r.origem === 'manual'
@@ -6230,6 +6241,7 @@ async function loadColetaHistorico(tipo) {
         <td style="text-align:right;font-size:12px;color:${r.linhas_erro > 0 ? 'var(--danger)' : 'var(--text-muted)'}">${err}</td>
         <td style="font-size:11px">${dur}</td>
         <td style="font-size:10px;color:var(--text-dim);max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${msg.replace(/"/g,'&quot;')}">${msg}</td>
+        <td style="text-align:center">${valBtn}</td>
         <td style="text-align:center">${logBtn}</td>
       </tr>`;
     }).join('');
@@ -6295,4 +6307,107 @@ function verDetalhesColeta(idx) {
 }
 
 function fecharDetalhesColeta() { document.getElementById('modal-coleta-det').classList.remove('open'); }
+
+function verValidacaoColeta(idx) {
+  const r = _historicoCache[idx];
+  if (!r) return;
+  const modal = document.getElementById('modal-validacao-coleta');
+  const corpo = document.getElementById('modal-val-corpo');
+  const tit   = document.getElementById('modal-val-titulo');
+
+  tit.textContent = `Validação — Coleta #${r.id}`;
+
+  const vs = r.validacao_status;
+  const vj = r.validacao_json && (typeof r.validacao_json === 'object' ? r.validacao_json : JSON.parse(r.validacao_json || '{}'));
+
+  const pIni = r.periodo_inicio ? new Date(r.periodo_inicio).toLocaleDateString('pt-BR') : null;
+  const pFim = r.periodo_fim    ? new Date(r.periodo_fim).toLocaleDateString('pt-BR')    : null;
+  const periodo = pIni && pFim ? `${pIni} → ${pFim}` : '—';
+
+  const statusCfg = {
+    ok:           { color: 'var(--green)',     label: '✅ OK — dados íntegros' },
+    aviso:        { color: 'var(--orange)',    label: '⚠ Aviso — dados parciais' },
+    falha:        { color: 'var(--danger)',    label: '❌ Falha — sem dados' },
+    inconclusivo: { color: 'var(--text-muted)', label: '— Inconclusivo' }
+  };
+  const sc = statusCfg[vs] || { color: 'var(--text-muted)', label: '— Não validado' };
+
+  if (!vs || !vj) {
+    corpo.innerHTML = `
+      <div style="text-align:center;padding:24px;color:var(--text-muted);font-size:12px">
+        Coleta sem validação registrada.<br>
+        <button class="btn-primary" style="margin-top:14px;font-size:12px;padding:7px 18px" onclick="revalidarColeta(${r.id},${idx})">🔍 Validar agora</button>
+      </div>`;
+    modal.classList.add('open');
+    return;
+  }
+
+  const fmtNum = n => Number(n || 0).toLocaleString('pt-BR');
+  const fmtBrl = n => Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+  const diasOk  = vj.dias_com_dados >= Math.floor((vj.dias_esperados || 1) * 0.85);
+  const subsOk  = !vj.subs_esperadas || vj.subs_sem_dados?.length === 0;
+  const validEm = vj.validado_em ? new Date(vj.validado_em).toLocaleString('pt-BR') : '—';
+
+  corpo.innerHTML = `
+    <div style="padding:10px 14px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--border);margin-bottom:4px">
+      <div style="font-size:14px;font-weight:700;color:${sc.color}">${sc.label}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Período: ${periodo} · Validado em: ${validEm}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div style="padding:10px 14px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--border)">
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px">Registros</div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">${fmtNum(vj.total_registros)}</div>
+      </div>
+      <div style="padding:10px 14px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--border)">
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px">Custo total</div>
+        <div style="font-size:16px;font-weight:700;color:var(--accent)">R$ ${fmtBrl(vj.custo_total)}</div>
+      </div>
+      <div style="padding:10px 14px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid ${diasOk ? 'var(--border)' : 'var(--orange)'}">
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px">Dias com dados</div>
+        <div style="font-size:15px;font-weight:700;color:${diasOk ? 'var(--green)' : 'var(--orange)'}">${vj.dias_com_dados} / ${vj.dias_esperados}</div>
+        ${!diasOk ? `<div style="font-size:10px;color:var(--orange);margin-top:2px">abaixo de 85% — pode ser lag</div>` : ''}
+      </div>
+      ${vj.subs_esperadas ? `
+      <div style="padding:10px 14px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid ${subsOk ? 'var(--border)' : 'var(--danger)'}">
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px">Subscriptions</div>
+        <div style="font-size:15px;font-weight:700;color:${subsOk ? 'var(--green)' : 'var(--danger)'}">${vj.subs_com_dados} / ${vj.subs_esperadas}</div>
+      </div>` : `
+      <div style="padding:10px 14px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--border)">
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px">Subscriptions</div>
+        <div style="font-size:15px;font-weight:700;color:var(--text)">${fmtNum(vj.subs_com_dados)}</div>
+      </div>`}
+    </div>
+    ${vj.subs_sem_dados?.length ? `
+    <div style="padding:10px 14px;border-radius:8px;background:rgba(255,77,106,.06);border:1px solid rgba(255,77,106,.25)">
+      <div style="font-size:11px;font-weight:600;color:var(--danger);margin-bottom:6px">❌ Subscriptions sem dados (${vj.subs_sem_dados.length})</div>
+      ${vj.subs_sem_dados.map(s => `<div style="font-size:10px;color:var(--text-dim);font-family:monospace;padding:2px 0">${s}</div>`).join('')}
+    </div>` : ''}
+    ${vj.dias_sem_dados?.length ? `
+    <div style="padding:10px 14px;border-radius:8px;background:rgba(255,140,66,.06);border:1px solid rgba(255,140,66,.20)">
+      <div style="font-size:11px;font-weight:600;color:var(--orange);margin-bottom:6px">⚠ Dias sem dados (${vj.dias_sem_dados.length}${vj.dias_sem_dados.length === 31 ? '+' : ''})</div>
+      <div style="font-size:10px;color:var(--text-dim);line-height:1.8">${vj.dias_sem_dados.map(d => new Date(d+'T00:00:00').toLocaleDateString('pt-BR')).join(' · ')}</div>
+    </div>` : ''}
+    <div style="display:flex;justify-content:flex-end;padding-top:4px">
+      <button class="btn-ghost" style="font-size:12px;padding:6px 16px" onclick="revalidarColeta(${r.id},${idx})">🔍 Revalidar</button>
+    </div>`;
+
+  modal.classList.add('open');
+}
+
+async function revalidarColeta(histId, idx) {
+  const corpo = document.getElementById('modal-val-corpo');
+  if (corpo) corpo.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-muted);font-size:12px">Validando dados no banco…</div>`;
+  try {
+    const result = await api('POST', `/azure-coleta/historico/${histId}/validar`);
+    if (_historicoCache[idx]) {
+      _historicoCache[idx].validacao_status = result.validacao_status;
+      _historicoCache[idx].validacao_json   = result.validacao_json;
+    }
+    verValidacaoColeta(idx);
+  } catch (e) {
+    if (corpo) corpo.innerHTML = `<div style="text-align:center;padding:24px;color:var(--danger);font-size:12px">Erro ao revalidar: ${e.message}</div>`;
+  }
+}
+
+function fecharValidacaoColeta() { document.getElementById('modal-validacao-coleta').classList.remove('open'); }
 

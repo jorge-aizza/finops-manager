@@ -47,7 +47,7 @@ const Calculadora = (() => {
   let _ultimaUrlRecursos   = '';                 // path da última busca (para reuso no lazy pico)
 
   // ── API helper ───────────────────────────────────────────────────
-  async function _api(method, path, body) {
+  async function _api(method, path, body, timeoutMs) {
     const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = 'Bearer ' + token;
@@ -59,7 +59,24 @@ const Calculadora = (() => {
     const url = cleanPath.startsWith('/api/')
       ? window.location.origin + cleanPath
       : window.location.origin + _apiBase + cleanPath;
-    const r = await fetch(url, opts);
+
+    let timer;
+    if (timeoutMs) {
+      const ctrl = new AbortController();
+      opts.signal = ctrl.signal;
+      timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    }
+
+    let r;
+    try {
+      r = await fetch(url, opts);
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error('Timeout: o servidor demorou muito para responder. Tente um período menor ou aguarde.');
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
     const ct = r.headers.get('content-type') || '';
     if (!ct.includes('application/json')) {
       throw new Error(`Servidor retornou HTTP ${r.status} — reinicie o servidor e tente novamente.`);
@@ -1755,7 +1772,7 @@ const Calculadora = (() => {
       console.log('[Calculadora] Buscando recursos:', url);
       console.log('[Calculadora] Subs:', subs, '| RGs:', rgs);
 
-      const data = await _api('GET', url);
+      const data = await _api('GET', url, undefined, 3 * 60 * 1000);
       console.log('[Calculadora] Resposta:', Array.isArray(data) ? `${data.length} itens` : data);
 
       if (data && data.error) throw new Error(data.error);

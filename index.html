@@ -2456,6 +2456,19 @@
     </div>
   </div>
 
+  <!-- Modal: Validação de Coleta -->
+  <div id="modal-validacao-coleta" class="modal-overlay" onclick="if(event.target===this)fecharValidacaoColeta()">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <h3 id="modal-val-titulo" class="modal-title">Validação de Coleta</h3>
+        <button class="modal-close" onclick="fecharValidacaoColeta()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:16px 20px;display:flex;flex-direction:column;gap:12px">
+        <div id="modal-val-corpo"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: Coletar via API -->
   <div id="modal-coleta-api" class="modal-overlay" onclick="if(event.target===this)fecharColetaAPI()">
     <div class="modal modal-wide" style="max-width:500px">
