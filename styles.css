@@ -1602,4 +1602,11 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   cursor: pointer;
 }
 
+/* Tema claro: ícone escuro combinando com o texto dos inputs */
+[data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator,
+[data-theme="light"] input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: brightness(0) opacity(0.55);
+  cursor: pointer;
+}
+
 
