@@ -1417,6 +1417,32 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .top-bar .btn-icon:hover,
 [data-theme="light"] .top-bar .btn-theme:hover   { color: #ffffff; background: rgba(255,255,255,0.15); }
 
+/* ── Botão hamburguer/X — branco no fundo roxo da top-bar ── */
+[data-theme="light"] .btn-menu {
+  border-color: rgba(255,255,255,0.35);
+  color: #ffffff;
+}
+[data-theme="light"] .btn-menu:hover {
+  border-color: rgba(255,255,255,0.70);
+  background: rgba(255,255,255,0.15);
+  color: #ffffff;
+}
+
+/* ── User info no rodapé da sidebar ── */
+[data-theme="light"] #sidebar-user-info {
+  border-top-color: rgba(255,255,255,0.15) !important;
+}
+[data-theme="light"] #sidebar-user-avatar {
+  background: rgba(255,255,255,0.20) !important;
+  color: #ffffff !important;
+}
+[data-theme="light"] #sidebar-user-name {
+  color: #ffffff !important;
+}
+[data-theme="light"] #sidebar-user-role {
+  color: #c4b5fd !important;
+}
+
 /* ── Logo "vivo" — branco no fundo roxo ── */
 [data-theme="light"] #topbar-vivo-text {
   fill: #ffffff;
