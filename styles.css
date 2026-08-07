@@ -1390,6 +1390,7 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .sidebar .nav-group-header   { color: #c4b5fd; }
 [data-theme="light"] .sidebar .nav-section-label  { color: #a78bfa; }
 [data-theme="light"] .sidebar .sidebar-brand      { color: #ffffff; }
+[data-theme="light"] .sidebar .brand-name         { color: #ffffff; }
 [data-theme="light"] .sidebar .brand-sub          { color: #c4b5fd; }
 [data-theme="light"] .sidebar .db-status,
 [data-theme="light"] .sidebar #db-status-text     { color: #c4b5fd; }
@@ -1414,6 +1415,29 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .top-bar .btn-theme         { color: #ddd6fe; }
 [data-theme="light"] .top-bar .btn-icon:hover,
 [data-theme="light"] .top-bar .btn-theme:hover   { color: #ffffff; background: rgba(255,255,255,0.15); }
+
+/* ── Logo "vivo" — branco no fundo roxo ── */
+[data-theme="light"] #topbar-vivo-text {
+  fill: #ffffff;
+}
+[data-theme="light"] #topbar-vivo-svg {
+  filter: drop-shadow(0 0 5px rgba(255,255,255,0.20)) !important;
+}
+
+/* ── Botões top-bar (tema, ajuda, sininho) — borda e ícone brancos ── */
+[data-theme="light"] #btn-theme-toggle,
+[data-theme="light"] #notif-btn,
+[data-theme="light"] .top-actions > a {
+  border-color: rgba(255,255,255,0.35) !important;
+  color: #ffffff !important;
+}
+[data-theme="light"] #btn-theme-toggle:hover,
+[data-theme="light"] #notif-btn:hover,
+[data-theme="light"] .top-actions > a:hover {
+  border-color: rgba(255,255,255,0.70) !important;
+  background: rgba(255,255,255,0.15) !important;
+  color: #ffffff !important;
+}
 
 /* ── STAT-CARDS: branco, sombra limpa, barra colorida no topo ── */
 [data-theme="light"] .stat-card {
