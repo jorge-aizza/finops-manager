@@ -1566,18 +1566,19 @@ select option { background: var(--bg-card); }
 
 /* ── PAINEL DE NOTIFICAÇÕES ── */
 [data-theme="light"] #notif-panel {
-  background: rgba(109, 40, 217, 0.96) !important;
-  border-color: #7c3aed !important;
-  box-shadow: 0 8px 32px rgba(80,0,140,0.25) !important;
-  color: #e8eaf0;
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.12) !important;
+  color: #111827 !important;
 }
-[data-theme="light"] #notif-panel * { color: #e8eaf0; }
+[data-theme="light"] #notif-panel * { color: #111827; }
+[data-theme="light"] #notif-panel span[style*="font-weight:600"] { color: #111827 !important; }
 [data-theme="light"] #notif-panel [style*="color:var(--text-muted)"],
-[data-theme="light"] #notif-panel .notif-meta { color: #c4b5fd !important; }
-[data-theme="light"] #notif-panel [style*="border-bottom"] { border-bottom-color: rgba(196,181,253,0.25) !important; }
-[data-theme="light"] #notif-panel [style*="border-top"]    { border-top-color:    rgba(196,181,253,0.25) !important; }
+[data-theme="light"] #notif-panel .notif-meta { color: #6b7280 !important; }
+[data-theme="light"] #notif-panel [style*="border-bottom"] { border-bottom-color: #e2e8f0 !important; }
+[data-theme="light"] #notif-panel [style*="border-top"]    { border-top-color:    #e2e8f0 !important; }
 [data-theme="light"] #notif-panel [style*="background:var(--bg-hover)"],
-[data-theme="light"] #notif-panel > div > div:hover        { background: rgba(255,255,255,0.12) !important; }
+[data-theme="light"] #notif-panel > div > div:hover        { background: #f5f0ff !important; }
 
 /* Botão de toggle de tema — ícone sol/lua */
 .btn-theme {
