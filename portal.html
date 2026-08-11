@@ -6,6 +6,7 @@
   <title>Portal de Serviço — Calculadora Azure</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
+  <script>(function(){if(localStorage.getItem('finops-theme')==='light')document.documentElement.setAttribute('data-theme','light');})()</script>
   <style>
     /* ── Reset / base ───────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -232,6 +233,90 @@
     .toast.success { background: var(--accent); color: #fff; }
     .toast.error   { background: #ff4d6a;        color: #fff; }
     .toast.warn    { background: #ff8c42;         color: #fff; }
+
+    /* Botão de tema do portal */
+    .portal-theme-btn {
+      background: none; border: 1px solid var(--border); border-radius: 8px;
+      padding: 6px 9px; cursor: pointer; color: var(--text-dim);
+      display: flex; align-items: center; height: 32px;
+      transition: border-color .15s, color .15s, background .15s;
+    }
+    .portal-theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Tema Claro: overrides portal ── */
+    [data-theme="light"] html,
+    [data-theme="light"] body { background: #f0f2f5; }
+
+    [data-theme="light"] .portal-header {
+      background: #6d28d9;
+      border-bottom-color: #5b21b6;
+    }
+    /* Brand: nome e subtítulo brancos no header roxo */
+    [data-theme="light"] .portal-brand-name {
+      background: none !important;
+      -webkit-background-clip: unset !important;
+      background-clip: unset !important;
+      -webkit-text-fill-color: #ffffff !important;
+      color: #ffffff !important;
+    }
+    [data-theme="light"] .portal-brand-sub { color: #c4b5fd !important; }
+    [data-theme="light"] .portal-badge {
+      background: rgba(255,255,255,0.15) !important;
+      border-color: rgba(255,255,255,0.30) !important;
+      color: #ffffff !important;
+    }
+    /* Botões no header roxo: brancos */
+    [data-theme="light"] #portal-help-btn {
+      border-color: rgba(255,255,255,0.35) !important;
+      color: #ffffff !important;
+    }
+    [data-theme="light"] #portal-help-btn:hover {
+      background: rgba(255,255,255,0.15) !important;
+      border-color: rgba(255,255,255,0.55) !important;
+    }
+    [data-theme="light"] .portal-theme-btn {
+      border-color: rgba(255,255,255,0.35) !important;
+      color: #ffffff !important;
+    }
+    [data-theme="light"] .portal-theme-btn:hover {
+      background: rgba(255,255,255,0.15) !important;
+      border-color: rgba(255,255,255,0.55) !important;
+    }
+    /* Ícone do header brand: rect suave + traço branco */
+    [data-theme="light"] .portal-brand > svg {
+      filter: none;
+    }
+    [data-theme="light"] .portal-brand > svg > rect {
+      fill: rgba(255,255,255,0.18) !important;
+    }
+    [data-theme="light"] .portal-brand > svg > path {
+      stroke: rgba(255,255,255,0.92) !important;
+    }
+    /* Ícone do calendário nos inputs de data — preto a 45% (visível em qualquer browser) */
+    [data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator,
+    [data-theme="light"] input[type="time"]::-webkit-calendar-picker-indicator {
+      filter: brightness(0) !important;
+      opacity: 0.45 !important;
+      cursor: pointer;
+    }
+    /* Inputs de data com fundo branco no tema claro */
+    [data-theme="light"] input[type="date"],
+    [data-theme="light"] input[type="time"] {
+      background: #ffffff !important;
+      border-color: #d1d5db !important;
+      color: #111827 !important;
+      color-scheme: light;
+    }
+    [data-theme="light"] .portal-hero {
+      border-bottom-color: #e2e8f0;
+      background: linear-gradient(180deg, rgba(147,51,234,0.07) 0%, transparent 100%);
+    }
+    [data-theme="light"] .portal-chip {
+      background: rgba(147,51,234,0.08);
+      border-color: rgba(147,51,234,0.22);
+      color: #7c3aed;
+    }
+    [data-theme="light"] #portal-loading { color: var(--text-muted); }
   </style>
 </head>
 <body class="portal-mode">
@@ -250,7 +335,12 @@
   </div>
   <div style="display:flex;align-items:center;gap:10px;">
     <div id="portal-user-badge" class="portal-user-badge" style="display:none;"></div>
-    <a href="docs-portal-faq.html" target="_blank" title="Ajuda" style="background:none;border:1px solid var(--border);border-radius:8px;padding:6px 9px;cursor:pointer;color:var(--text-dim);display:flex;align-items:center;gap:5px;transition:all .15s;height:32px;text-decoration:none;font-size:12px;font-weight:600;" onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text-dim)'">
+    <!-- Botão tema -->
+    <button id="portal-theme-btn" class="portal-theme-btn" onclick="_portalToggleTheme()" title="Modo claro">
+      <svg id="portal-theme-sun" viewBox="0 0 20 20" fill="none" width="14" height="14"><circle cx="10" cy="10" r="4" stroke="currentColor" stroke-width="1.5"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.22 4.22l1.42 1.42M14.36 14.36l1.42 1.42M4.22 15.78l1.42-1.42M14.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <svg id="portal-theme-moon" viewBox="0 0 20 20" fill="none" width="14" height="14" style="display:none;"><path d="M17.5 12.5A7.5 7.5 0 018 3a7.5 7.5 0 100 14 7.5 7.5 0 009.5-4.5z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <a id="portal-help-btn" href="docs-portal-faq.html" target="_blank" title="Ajuda" style="background:none;border:1px solid var(--border);border-radius:8px;padding:6px 9px;cursor:pointer;color:var(--text-dim);display:flex;align-items:center;gap:5px;transition:all .15s;height:32px;text-decoration:none;font-size:12px;font-weight:600;">
       <svg viewBox="0 0 20 20" fill="none" width="14" height="14"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"/><path d="M10 14v-1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M10 11c0-1.5 2.5-2 2.5-3.5a2.5 2.5 0 00-5 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
       Ajuda
     </a>
@@ -501,6 +591,30 @@ function _abrirCalculadora(calcWrap) {
 }
 
 initPortal();
+
+function _portalToggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    localStorage.removeItem('finops-theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', 'light');
+    localStorage.setItem('finops-theme', 'light');
+  }
+  _portalSyncThemeIcon();
+}
+
+function _portalSyncThemeIcon() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  const sun  = document.getElementById('portal-theme-sun');
+  const moon = document.getElementById('portal-theme-moon');
+  const btn  = document.getElementById('portal-theme-btn');
+  if (sun)  sun.style.display  = isLight ? 'none' : '';
+  if (moon) moon.style.display = isLight ? ''     : 'none';
+  if (btn)  btn.title = isLight ? 'Modo escuro' : 'Modo claro';
+}
+
+_portalSyncThemeIcon();
 
 function showToast(msg, type) {
   const t = document.getElementById('toast');

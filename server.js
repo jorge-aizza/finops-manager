@@ -166,7 +166,18 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.static(path.join(__dirname), { index: 'index.html' }));
+
+// HTML: sempre revalida no servidor (evita quebra após deploy)
+// JS/CSS/imagens: ETag padrão do Express (só baixa se mudou)
+app.use((req, res, next) => {
+  if (/\.html?$/i.test(req.path) || req.path === '/' || req.path === '') {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+  }
+  next();
+});
+app.use(express.static(path.join(__dirname), { index: 'index.html', etag: true, lastModified: true }));
 
 // ─── DB ──────────────────────────────────────────────────────────────────────
 let pool = null; // Created lazily after setup

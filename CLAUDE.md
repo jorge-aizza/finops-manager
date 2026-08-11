@@ -26,8 +26,8 @@ server.js               (~6 500 lines)  All API routes, auth, DB init, middlewar
 app.js                  (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
 calculadora.js          (~5 600 lines)  Azure cost calculator — self-contained IIFE
 index.html              (~3 650 lines)  SPA shell — all views toggled by showView()
-portal.html             (~515 lines)    Portal público — calculadora sem autenticação (serve /portal.html)
-styles.css              (~1 550 lines)  Dark-mode CSS, Vivo purple theme
+portal.html             (~640 lines)    Portal público — calculadora sem autenticação (serve /portal.html)
+styles.css              (~1 650 lines)  Dark/light-mode CSS, Vivo purple theme
 encrypt-env.js          (139 lines)     AES-256-GCM .env encryption utility
 favicon.svg                             App icon (SVG)
 mascote.png                             Vivo mascot used in login screen (not tracked by git — keep locally)
@@ -101,9 +101,19 @@ app.use((req, res, next) => {
   if (_SENSITIVE.test(req.path) || req.path.includes('node_modules')) return res.status(403).end();
   next();
 });
-app.use(express.static(path.join(__dirname), { index: 'index.html' }));
+// HTML: no-cache para evitar que o browser sirva versão desatualizada após deploy
+app.use((req, res, next) => {
+  if (/\.html?$/i.test(req.path) || req.path === '/' || req.path === '') {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+  }
+  next();
+});
+app.use(express.static(path.join(__dirname), { index: 'index.html', etag: true, lastModified: true }));
 ```
 Blocks HTTP access to source code and secrets while serving `index.html`, `app.js`, `styles.css`, `calculadora.js`, `favicon.svg`, `mascote.png` normally.
+JS/CSS served with ETag + Last-Modified for cache revalidation. HTML always bypasses cache (`no-store`) — garante que o browser nunca use versão antiga após deploy.
 
 ### Database — PostgreSQL only
 Tables created by `initDB()` at startup with `IF NOT EXISTS`. No migration framework.
@@ -570,6 +580,13 @@ assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Pri
 `portal.html` — calculadora Azure pública, sem login. Serve `/portal.html` diretamente via `express.static`.
 
 **Ativação:** admin habilita via Configurações → Portal Público → toggle Ativar + Salvar. Config armazenada em `portal_config` (key=`'config'`).
+
+**Tema claro/escuro:** `portal.html` suporta alternância de tema via botão sol/lua no header.
+- Inline script antes do primeiro render lê `localStorage 'finops-theme'` e aplica `data-theme="light"` no `<html>` antes do paint (evita flash)
+- `_portalToggleTheme()` alterna `data-theme` + salva em `localStorage 'finops-theme'`
+- Tema compartilhado com o app autenticado — preferência persiste entre portal e sistema principal
+- Header roxo (`#6d28d9`) mantém elementos brancos no tema claro via `[data-theme="light"] .portal-header { background: #6d28d9 }`
+- Classe `.crcard-ov` adicionada nos cards do overlay Configurar Estimativa (`calculadora.js`) para permitir sobrescrita via CSS no tema claro
 
 **Middleware `_portalMiddleware`:** lê `portal_config`, bloqueia com 403 se `ativo=false`. Injeta `req.portalCfg` para os handlers seguintes.
 

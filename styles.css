@@ -1489,6 +1489,26 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .stat-card.blue-card   .stat-value { color: #1d4ed8; }
 
 /* ── MODAL ── */
+/* Inputs calculadora (.ci/.cs) — fundo branco no tema claro */
+[data-theme="light"] .ci,
+[data-theme="light"] .cs {
+  background: #ffffff !important;
+  border-color: #d1d5db !important;
+  color: #111827 !important;
+  color-scheme: light;
+}
+[data-theme="light"] .ci:focus,
+[data-theme="light"] .cs:focus {
+  border-color: #9333ea !important;
+  box-shadow: 0 0 0 2px rgba(147,51,234,0.12);
+}
+/* color-scheme garante que controles nativos (dd/mm/aaaa, ícone calendário) renderizem em modo claro */
+[data-theme="light"] input[type="date"],
+[data-theme="light"] input[type="time"],
+[data-theme="light"] input[type="datetime-local"] {
+  color-scheme: light;
+}
+
 [data-theme="light"] .modal {
   background: #ffffff;
   border: 1px solid #e2e8f0;
@@ -1498,6 +1518,15 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .modal label { color: #374151; }
 [data-theme="light"] .modal h2,
 [data-theme="light"] .modal h3    { color: #111827; }
+
+/* Timeout modal — tema claro: sombra com toque roxo */
+[data-theme="light"] #modal-timeout .modal {
+  box-shadow: 0 24px 64px rgba(88,28,135,0.14), 0 0 0 1px rgba(147,51,234,0.10);
+}
+/* Timeout modal — tema escuro: reforça borda e sombra já nativas */
+#modal-timeout .modal {
+  box-shadow: 0 32px 80px rgba(60,0,100,0.60), 0 0 0 1px rgba(147,51,234,0.14);
+}
 
 /* ── CLOUD STATS ── */
 [data-theme="light"] .cloud-stats-strip {
@@ -1602,11 +1631,74 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   cursor: pointer;
 }
 
-/* Tema claro: ícone escuro combinando com o texto dos inputs */
+/* Tema claro: ícone calendário/relógio preto a 45% — visível em qualquer browser */
 [data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator,
 [data-theme="light"] input[type="time"]::-webkit-calendar-picker-indicator {
-  filter: brightness(0) opacity(0.55);
+  filter: brightness(0) !important;
+  opacity: 0.45 !important;
   cursor: pointer;
 }
 
+/* ── Tema claro: overlay Configurar Estimativa — design profissional ── */
+
+/* Painel esquerdo (recursos): fundo levemente cinza para respirar */
+[data-theme="light"] #cov-recursos {
+  background: transparent;
+}
+
+/* Cards de recurso (lista central) */
+[data-theme="light"] .crcard-ov {
+  background: #ffffff !important;
+  border: 1px solid #ede8f5 !important;
+  box-shadow: 0 1px 4px rgba(88,28,135,0.06), 0 0 0 0 transparent !important;
+  transition: box-shadow .18s, border-color .18s !important;
+}
+[data-theme="light"] .crcard-ov:hover {
+  border-color: #c4b5fd !important;
+  box-shadow: 0 4px 16px rgba(147,51,234,0.13) !important;
+}
+
+/* Estimativa card (painel lateral existente) */
+[data-theme="light"] .crcard {
+  background: #ffffff !important;
+  border: 1px solid #ede8f5 !important;
+  border-top: 3px solid #9333ea !important;
+  box-shadow: 0 1px 4px rgba(88,28,135,0.06) !important;
+}
+[data-theme="light"] .crcard:hover {
+  border-color: #c4b5fd !important;
+  box-shadow: 0 3px 12px rgba(147,51,234,0.10) !important;
+}
+
+/* Base comum para todos os cards do painel direito */
+[data-theme="light"] div:has(> #cperiodo-res),
+[data-theme="light"] #chl-card,
+[data-theme="light"] #chad-card,
+[data-theme="light"] div:has(> #ctaxas-grid),
+[data-theme="light"] div:has(> #cov-sub) {
+  background: #ffffff !important;
+  border: 1px solid #ede8f5 !important;
+  border-left: none !important;
+  border-right: none !important;
+  border-bottom: none !important;
+  box-shadow: 0 2px 8px rgba(88,28,135,0.07) !important;
+}
+
+/* Cada card com cor de topo única — mesmo padrão das stat-cards do dashboard */
+[data-theme="light"] div:has(> #cperiodo-res) {
+  border-top: 3px solid #6366f1 !important; /* Índigo — Período */
+}
+[data-theme="light"] #chl-card {
+  border-top: 3px solid #10b981 !important; /* Esmeralda — Horário Livre */
+}
+[data-theme="light"] #chad-card {
+  border-top: 3px solid #f59e0b !important; /* Âmbar — Horas Adicionais */
+}
+[data-theme="light"] div:has(> #ctaxas-grid) {
+  border-top: 3px solid #9333ea !important; /* Roxo Vivo — Taxas */
+}
+[data-theme="light"] div:has(> #cov-sub) {
+  border-top: 3px solid #9333ea !important; /* Roxo Vivo — Totais */
+  background: #faf8ff !important;           /* fundo levemente lavanda p/ destacar */
+}
 

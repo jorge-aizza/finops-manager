@@ -172,6 +172,19 @@ body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;col
 
   <div class="faq-item" data-cat="calc">
     <div class="faq-q" onclick="toggleFaq(this)">
+      <span class="faq-q-text">O que é o card Horas Adicionais (⏱)?</span>
+      <span class="faq-cat-badge cat-calc">Calculadora</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O card <strong>Horas Adicionais</strong> estima o custo incremental de usar os recursos por horas extras além do período analisado — útil para calcular o impacto de trabalho adicional ou horas de projeto fora do intervalo importado.</p>
+      <p><strong>Como usar:</strong> informe a quantidade de horas extras por dia e o número de dias do projeto. O sistema exibe automaticamente uma coluna <strong>⏱ Adicional</strong> (laranja) na tabela com o custo extra por recurso e um banner de resumo acima da tabela.</p>
+      <p>Disponível apenas no modo Período, após o primeiro Buscar. Recursos com cobrança de Reserva (<code>🔒</code>) mostram R$ 0 adicional — o custo já está pago na compra da reserva.</p>
+    </div>
+  </div>
+
+  <div class="faq-item" data-cat="calc">
+    <div class="faq-q" onclick="toggleFaq(this)">
       <span class="faq-q-text">O que é o custo 🔒 Fixo/mês no painel de estimativa?</span>
       <span class="faq-cat-badge cat-calc">Calculadora</span>
       <span class="faq-chevron">⌄</span>
@@ -366,7 +379,7 @@ body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;col
     <div class="faq-a">
       <p>O Databricks gera <strong>dois streams de billing independentes</strong> por workspace:</p>
       <ul>
-        <li><strong>Infraestrutura (VMs)</strong> — aparece no RG gerenciado <code>DATABRICKS-RG-*</code>, criado automaticamente pelo Azure. Serviço: Microsoft.Compute.</li>
+        <li><strong>Infraestrutura (VMs)</strong> — aparece no RG gerenciado criado automaticamente pelo Azure: <code>DATABRICKS-RG-*</code> ou variantes como <code>MANAGED-RG-DBW-*</code>, <code>MANAGED-RG-ADBX-*</code>. Serviço: Microsoft.Compute.</li>
         <li><strong>Software (DBUs)</strong> — aparece no RG do workspace definido pelo usuário. Serviço: Microsoft.Databricks.</li>
       </ul>
       <p>O custo total real = custo de infraestrutura + custo de software DBU. Os dois devem ser somados para ter o custo completo do workspace.</p>
