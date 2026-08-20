@@ -666,38 +666,36 @@ const Calculadora = (() => {
   </div>
 </div>
 
-<!-- Preview — document viewer screen -->
-<div id="cinv-preview-modal" style="display:none;position:fixed;inset:0;z-index:9999;flex-direction:column;background:radial-gradient(ellipse at 30% 40%,rgba(80,0,140,.45) 0%,transparent 60%),linear-gradient(160deg,#1a0030 0%,#0c0014 55%,#04000c 100%);">
+<!-- Preview — document viewer screen (tema claro) -->
+<div id="cinv-preview-modal" style="display:none;position:fixed;inset:0;z-index:9999;flex-direction:column;background:#f0f2f5;">
 
   <!-- Toolbar -->
-  <div style="display:flex;align-items:center;gap:10px;padding:11px 20px;background:rgba(14,2,26,.88);border-bottom:1px solid rgba(147,51,234,.22);flex-shrink:0;backdrop-filter:blur(16px);">
+  <div style="display:flex;align-items:center;gap:10px;padding:11px 20px;background:rgba(255,255,255,.92);border-bottom:1px solid #e5e7eb;flex-shrink:0;backdrop-filter:blur(16px);">
     <button onclick="Calculadora.voltarParaConfirmacao()" class="cbtn-sec" style="gap:6px;flex-shrink:0;">
       <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Editar Dados
     </button>
     <div style="flex:1;min-width:0;text-align:center;">
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.14em;color:#7b6a9e;margin-bottom:1px;">Prévia da Estimativa</div>
-      <div id="cinv-preview-title" style="font-size:13px;font-weight:600;color:#c084fc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.14em;color:#6b7280;margin-bottom:1px;">Prévia da Estimativa</div>
+      <div id="cinv-preview-title" style="font-size:13px;font-weight:600;color:#7c3aed;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
     </div>
     <button onclick="Calculadora.imprimirEstimativa()" class="cbtn-go" style="gap:6px;flex-shrink:0;">
       <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><path d="M4 6V2h8v4M4 11H2V6h12v5h-2M4 11v3h8v-3" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
       Imprimir / Salvar PDF
     </button>
-    <button onclick="Calculadora.fecharPreviewModal()" title="Fechar" style="background:rgba(255,77,106,.08);border:1px solid rgba(255,77,106,.25);color:#ff4d6a;cursor:pointer;padding:5px 9px;font-size:15px;line-height:1;border-radius:7px;transition:background .15s;" onmouseover="this.style.background='rgba(255,77,106,.18)'" onmouseout="this.style.background='rgba(255,77,106,.08)'">&#10005;</button>
+    <button onclick="Calculadora.fecharPreviewModal()" title="Fechar" style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);color:#ef4444;cursor:pointer;padding:5px 9px;font-size:15px;line-height:1;border-radius:7px;transition:background .15s;" onmouseover="this.style.background='rgba(239,68,68,.16)'" onmouseout="this.style.background='rgba(239,68,68,.08)'">&#10005;</button>
   </div>
 
   <!-- Document area — scrollable, centered -->
   <div style="flex:1;overflow-y:auto;padding:32px 20px 48px;display:flex;flex-direction:column;align-items:center;">
-    <!-- Glow halo behind the document -->
     <div style="position:relative;width:100%;max-width:900px;">
-      <div style="position:absolute;inset:-18px;background:radial-gradient(ellipse,rgba(147,51,234,.18) 0%,transparent 70%);border-radius:24px;pointer-events:none;"></div>
       <iframe id="cinv-preview-frame"
-        style="position:relative;width:100%;min-height:80vh;border:none;border-radius:12px;box-shadow:0 8px 48px rgba(0,0,0,.7),0 0 0 1px rgba(147,51,234,.2);background:#fff;display:block;">
+        style="position:relative;width:100%;min-height:80vh;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.10);background:#fff;display:block;">
       </iframe>
     </div>
     <!-- Bottom hint -->
-    <div style="margin-top:18px;font-size:11px;color:#4a3a6a;text-align:center;letter-spacing:.05em;">
-      Use <strong style="color:#7b6a9e;">Imprimir / Salvar PDF</strong> para exportar &nbsp;·&nbsp; Pressione <strong style="color:#7b6a9e;">Ctrl+P</strong> para imprimir direto
+    <div style="margin-top:18px;font-size:11px;color:#6b7280;text-align:center;letter-spacing:.05em;">
+      Use <strong style="color:#374151;">Imprimir / Salvar PDF</strong> para exportar &nbsp;·&nbsp; Pressione <strong style="color:#374151;">Ctrl+P</strong> para imprimir direto
     </div>
   </div>
 
@@ -3284,32 +3282,32 @@ const Calculadora = (() => {
 <style>
 @font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:300 700;font-display:swap;src:url('${_origin}/fonts/ibm-plex-sans-latin-400.woff2') format('woff2')}
 @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('${_origin}/fonts/ibm-plex-mono-latin-400.woff2') format('woff2')}
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'IBM Plex Sans','Segoe UI',Arial,sans-serif;font-size:9pt;color:#1a202c;background:#0d0f14;padding:16px}
-.page{background:#fff;max-width:960px;margin:0 auto;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.55)}
-/* ── CABEÇALHO compacto 52px ── */
-.hdr{background:linear-gradient(135deg,#0d0218 0%,#1a0035 45%,#0d0014 100%);display:flex;align-items:center;height:52px;padding:0 18px;gap:14px;position:relative;overflow:hidden}
-.hdr::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:rgba(147,51,234,.3)}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}
+body{font-family:'IBM Plex Sans','Segoe UI',Arial,sans-serif;font-size:9pt;color:#1a202c;background:#f0f2f5;padding:16px}
+.page{background:#fff;max-width:960px;margin:0 auto;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.10)}
+/* ── CABEÇALHO compacto 52px — tema claro ── */
+.hdr{background:linear-gradient(135deg,#faf7ff 0%,#f0e6ff 100%);display:flex;align-items:center;height:52px;padding:0 18px;gap:14px;position:relative;overflow:hidden}
+.hdr::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:rgba(147,51,234,.25)}
 .hdr-vivo{display:flex;align-items:center;gap:4px;flex-shrink:0}
-.hdr-mascote{height:30px;width:auto;object-fit:contain;filter:drop-shadow(0 0 5px rgba(147,51,234,.4));vertical-align:middle}
+.hdr-mascote{height:30px;width:auto;object-fit:contain;vertical-align:middle}
 .hdr-divider{width:1px;height:26px;background:rgba(147,51,234,.2);flex-shrink:0}
 .hdr-meta{flex:1;display:flex;flex-direction:column;justify-content:center;gap:1px}
-.hdr-title{font-size:9pt;font-weight:700;color:#c084fc;letter-spacing:.01em}
-.hdr-sub{font-size:6pt;color:#6b5480;letter-spacing:.14em;text-transform:uppercase}
+.hdr-title{font-size:9pt;font-weight:700;color:#5b21b6;letter-spacing:.01em}
+.hdr-sub{font-size:6pt;color:#7c5fa0;letter-spacing:.14em;text-transform:uppercase}
 .hdr-r{text-align:right;flex-shrink:0}
-.hdr-num{font-size:8.5pt;font-weight:700;color:#9333ea;font-family:'IBM Plex Mono',monospace;letter-spacing:.05em}
+.hdr-num{font-size:8.5pt;font-weight:700;color:#7c3aed;font-family:'IBM Plex Mono',monospace;letter-spacing:.05em}
 .hdr-date{font-size:6pt;color:#7c5fa0;margin-top:1px}
 /* ── STRIPE ── */
 .stripe{height:3px;background:linear-gradient(90deg,#2d0060 0%,#660099 25%,#9333ea 50%,#660099 75%,#2d0060 100%)}
 /* ── META BAR ── */
-.meta-bar{display:grid;grid-template-columns:2fr 2fr 1fr 1.6fr;border-bottom:2px solid #0d0014}
+.meta-bar{display:grid;grid-template-columns:2fr 2fr 1fr 1.6fr;border-bottom:2px solid #ede9f7}
 .mb{padding:9px 14px;border-right:1px solid #ede9f7;background:#fff}
-.mb:last-child{border-right:none;background:linear-gradient(135deg,#0d0218,#1a0035)}
+.mb:last-child{border-right:none;background:linear-gradient(135deg,#f5f0ff,#ede4ff)}
 .mb-lbl{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.17em;color:#9aa0be;margin-bottom:3px}
 .mb-val{font-size:9pt;font-weight:600;color:#1a202c;line-height:1.2}
 .mb-sub{font-size:6.5pt;color:#64748b;margin-top:2px}
 .mb:last-child .mb-lbl{color:#6b5480}
-.mb:last-child .mb-val{font-size:12pt;font-weight:700;color:#c084fc;font-family:'IBM Plex Mono',monospace}
+.mb:last-child .mb-val{font-size:12pt;font-weight:700;color:#7c3aed;font-family:'IBM Plex Mono',monospace}
 /* ── SUMÁRIO POR CATEGORIA ── */
 .cat-wrap{padding:9px 14px 10px;border-bottom:1px solid #ede9f7}
 .cat-title{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.17em;color:#7c3aed;margin-bottom:7px}
@@ -3320,8 +3318,8 @@ body{font-family:'IBM Plex Sans','Segoe UI',Arial,sans-serif;font-size:9pt;color
 .cat-vl{font-size:8.5pt;font-weight:700;color:#7c3aed;font-family:'IBM Plex Mono',monospace;margin-top:2px}
 /* ── TABELA COMPACTA ── */
 table{width:100%;border-collapse:collapse;font-size:7.5pt}
-thead tr{background:#13161e}
-thead th{padding:6px 8px;font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9aa0be;text-align:left;white-space:nowrap;border-bottom:2px solid #9333ea}
+thead tr{background:#f5f0ff}
+thead th{padding:6px 8px;font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#5b21b6;text-align:left;white-space:nowrap;border-bottom:2px solid #9333ea}
 thead th:last-child{text-align:right}
 tbody tr{border-bottom:1px solid #f0eef8}
 tbody tr:nth-child(odd){background:#fff}
@@ -3341,9 +3339,9 @@ tfoot td{padding:5px 8px}
 .tr-sub td:last-child{font-family:'IBM Plex Mono',monospace;text-align:right;font-weight:600;color:#6d28d9}
 .tr-add td{background:#f5f0ff;color:#64748b;font-size:7pt;border-top:1px solid #ede9f7}
 .tr-add td:last-child{font-family:'IBM Plex Mono',monospace;text-align:right}
-.tr-total td{background:linear-gradient(90deg,#0d0218,#1a0035);color:#9aa0be;font-weight:700;font-size:9pt;border-top:3px solid #9333ea;padding:9px 8px}
-.tr-total td:first-child{padding-left:14px;color:#e9d5ff;letter-spacing:.05em;text-transform:uppercase;font-size:7.5pt}
-.tr-total td:last-child{font-family:'IBM Plex Mono',monospace;font-size:12pt;text-align:right;color:#c084fc;padding-right:14px;font-weight:700}
+.tr-total td{background:linear-gradient(90deg,#f5f0ff,#ede4ff);color:#5b21b6;font-weight:700;font-size:9pt;border-top:3px solid #9333ea;padding:9px 8px}
+.tr-total td:first-child{padding-left:14px;color:#5b21b6;letter-spacing:.05em;text-transform:uppercase;font-size:7.5pt}
+.tr-total td:last-child{font-family:'IBM Plex Mono',monospace;font-size:12pt;text-align:right;color:#7c3aed;padding-right:14px;font-weight:700}
 /* ── OBS ── */
 .obs{padding:9px 14px;border-top:1px solid #ede9f7;background:#faf7ff;border-left:3px solid #9333ea}
 .obs-lbl{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.16em;color:#7c3aed;margin-bottom:3px}
@@ -3358,7 +3356,7 @@ tfoot td{padding:5px 8px}
 .per-tbl .p-h{font-family:'IBM Plex Mono',monospace;text-align:right;color:#6d28d9;font-weight:600;white-space:nowrap}
 .per-tbl .p-total td{font-weight:700;color:#4a0080;background:#ede9f7}
 /* ── RODAPÉ ── */
-.foot{padding:7px 14px;background:linear-gradient(135deg,#0d0218 0%,#1a0035 45%,#0d0014 100%);display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(147,51,234,.2);gap:12px}
+.foot{padding:7px 14px;background:linear-gradient(135deg,#faf7ff 0%,#f0e6ff 100%);display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(147,51,234,.2);gap:12px}
 .foot-l{font-size:6pt;color:#7c5fa0;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 .foot-dot{width:3px;height:3px;border-radius:50%;background:#9333ea;display:inline-block;opacity:.7}
 .foot-disc{font-size:5.5pt;color:#6b5480;font-style:italic}
@@ -3438,8 +3436,8 @@ window.onload=function(){
     <div class="mb-lbl">Total Estimado BRL</div>
     <div class="mb-val">${_brl(totalFinal)}</div>
     ${p.horas ? '<div class="mb-sub" style="margin-top:3px;">'
-      + '<span style="color:#9aa0be;font-size:6pt;">⏱\xA0</span>'
-      + '<strong style="color:#c084fc;font-family:\'IBM Plex Mono\',monospace;">' + parseFloat(p.horas).toLocaleString('pt-BR') + '\xA0h</strong>'
+      + '<span style="color:#6b5480;font-size:6pt;">⏱\xA0</span>'
+      + '<strong style="color:#7c3aed;font-family:\'IBM Plex Mono\',monospace;">' + parseFloat(p.horas).toLocaleString('pt-BR') + '\xA0h</strong>'
       + (parseFloat(p.horas) > 0 ? '<span style="color:#6b5480;font-size:5.5pt;margin-left:5px;">≈\xA0' + _brl((p.total_brl||0) / parseFloat(p.horas)) + '/h</span>' : '')
       + '</div>' : ''}
   </div>
@@ -3576,6 +3574,12 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     const frame = document.getElementById('cinv-preview-frame');
     const titleEl = document.getElementById('cinv-preview-title');
     if (!modal || !frame) return;
+    // O modal nasce dentro de #view-calculadora (injetado por Calculadora.init()).
+    // Quando chamado de outra tela (ex: Estimativas), #view-calculadora está com
+    // display:none — e um filho não aparece na tela com display:none no ancestral,
+    // mesmo sendo position:fixed. Move o modal para o <body> pra funcionar de
+    // qualquer tela.
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
     if (titleEl) titleEl.textContent = title || '';
     frame.style.minHeight = '80vh';
     frame.srcdoc = html;

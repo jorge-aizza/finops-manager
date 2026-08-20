@@ -223,9 +223,6 @@ async function doLogin() {
     sessionStorage.setItem('finops_session', JSON.stringify(data.user));
     localStorage.setItem('finops_token', data.token);
     localStorage.setItem('finops_session', JSON.stringify(data.user));
-    // Garante tema escuro como padrão ao logar
-    localStorage.removeItem('finops-theme');
-    document.documentElement.removeAttribute('data-theme');
     currentUser = data.user;
     enterApp();
   } catch (e) {
@@ -487,7 +484,7 @@ function toggleTheme() {
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
   if (isLight) {
     document.documentElement.removeAttribute('data-theme');
-    localStorage.removeItem('finops-theme');
+    localStorage.setItem('finops-theme', 'dark');
   } else {
     document.documentElement.setAttribute('data-theme', 'light');
     localStorage.setItem('finops-theme', 'light');
@@ -1316,6 +1313,11 @@ async function viewEstimativa(id) {
 function gerarPDFEstimativaSalva() {
   if (!_currentEstimativaDetalhe) return;
   if (typeof Calculadora !== 'undefined' && typeof Calculadora.gerarPDFSalvo === 'function') {
+    // O modal de preview (#cinv-preview-modal) só existe depois que Calculadora.init()
+    // injeta o HTML dela em #view-calculadora — o que só acontece ao visitar aquela aba.
+    // Sem isso, gerarPDFSalvo() roda até o fim sem erro, mas não acha o modal e não
+    // exibe nada (bug silencioso ao gerar PDF direto da tela de Estimativas).
+    if (!document.getElementById('cinv-preview-modal')) Calculadora.init();
     Calculadora.gerarPDFSalvo(_currentEstimativaDetalhe);
   } else {
     showToast('Calculadora não disponível. Acesse pela aba Calculadora.', 'error');

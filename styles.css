@@ -216,7 +216,6 @@ body {
   width: 34px;
   height: 34px;
   display: block;
-  filter: drop-shadow(0 0 8px var(--accent-glow));
 }
 
 .brand-text {
@@ -395,7 +394,6 @@ body {
   width: 6px; height: 6px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-glow);
 }
 
 /* Divisor de seção */
@@ -503,10 +501,7 @@ body {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: #ffffff;
-  text-shadow:
-    0 0 8px rgba(220, 180, 255, 1),
-    0 0 20px rgba(147, 51, 234, 0.90),
-    0 0 45px rgba(147, 51, 234, 0.55);
+  text-shadow: none;
 }
 
 
@@ -869,7 +864,7 @@ body {
   cursor: pointer;
   transition: all 0.15s;
 }
-.btn-primary:hover { background: #7c3aed; box-shadow: 0 0 16px var(--accent-glow); }
+.btn-primary:hover { background: #7c3aed; }
 .btn-primary svg { width: 14px; height: 14px; }
 
 .btn-ghost {

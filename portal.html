@@ -6,7 +6,8 @@
   <title>Portal de Serviço — Calculadora Azure</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
-  <script>(function(){if(localStorage.getItem('finops-theme')==='light')document.documentElement.setAttribute('data-theme','light');})()</script>
+  <!-- Claro é o padrão, exceto se o usuário escolheu escuro explicitamente -->
+  <script>(function(){if(localStorage.getItem('finops-theme')!=='dark')document.documentElement.setAttribute('data-theme','light');})()</script>
   <style>
     /* ── Reset / base ───────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -596,7 +597,7 @@ function _portalToggleTheme() {
   const isLight = document.documentElement.getAttribute('data-theme') === 'light';
   if (isLight) {
     document.documentElement.setAttribute('data-theme', 'dark');
-    localStorage.removeItem('finops-theme');
+    localStorage.setItem('finops-theme', 'dark');
   } else {
     document.documentElement.setAttribute('data-theme', 'light');
     localStorage.setItem('finops-theme', 'light');

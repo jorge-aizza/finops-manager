@@ -8,8 +8,8 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="shortcut icon" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
-  <!-- Carrega tema antes do primeiro render para evitar flash -->
-  <script>(function(){if(localStorage.getItem('finops-theme')==='light')document.documentElement.setAttribute('data-theme','light');})()</script>
+  <!-- Carrega tema antes do primeiro render para evitar flash — claro é o padrão, exceto se o usuário escolheu escuro explicitamente -->
+  <script>(function(){if(localStorage.getItem('finops-theme')!=='dark')document.documentElement.setAttribute('data-theme','light');})()</script>
   <style>
     /* ── Replicate box ── */
     .replicate-box {
@@ -419,6 +419,45 @@
       flex-direction: column;
       align-items: center;
     }
+    /* ── Tela de login — tema claro: fundo neutro, mesma animação de fundo
+       (pulso central + raios girando), só com a opacidade reduzida — a
+       mesma cor roxa dos botões (#9333ea), só que sutil sobre fundo claro
+       em vez de brilho forte sobre fundo quase-preto. ── */
+    [data-theme="light"] .login-screen { background: #f0f2f5; }
+    [data-theme="light"] .login-screen::before {
+      background: radial-gradient(ellipse at center,
+        rgba(147,51,234,.20) 0%,
+        rgba(109,40,217,.12) 25%,
+        rgba(76,29,149,.06) 55%,
+        transparent 75%);
+    }
+    [data-theme="light"] .login-screen::after {
+      background: repeating-conic-gradient(
+        from 0deg,
+        rgba(147,51,234,.09) 0deg 1.5deg,
+        transparent 1.5deg 9deg
+      );
+    }
+    [data-theme="light"] .login-rays {
+      background: repeating-conic-gradient(
+        from 0deg,
+        rgba(124,58,237,.06) 0deg .7deg,
+        transparent .7deg 6deg
+      );
+    }
+    [data-theme="light"] .login-glow {
+      background: radial-gradient(ellipse at center,
+        rgba(147,51,234,.14) 0%,
+        transparent 70%);
+    }
+    [data-theme="light"] .login-box {
+      background: #ffffff;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      border: 1px solid #e5e7eb;
+      box-shadow: 0 8px 32px rgba(0,0,0,.10);
+    }
+    [data-theme="light"] .login-error { color: #dc2626; border-color: rgba(220,38,38,.3); background: rgba(220,38,38,.08); }
     .login-logo { margin-bottom: 12px; display:flex; justify-content:center; }
     .login-brand {
       font-size: 22px; font-weight: 700;
@@ -1318,7 +1357,7 @@
           <!-- Logo Vivo -->
           <div class="topbar-vivo-brand" style="display:flex;align-items:center;flex-shrink:0;">
             <svg id="topbar-vivo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="58" height="26"
-                 style="flex-shrink:0;display:block;filter:drop-shadow(0 0 6px rgba(147,51,234,.55));">
+                 style="flex-shrink:0;display:block;">
               <text id="topbar-vivo-text" x="1" y="30"
                     font-family="'Arial Black','Arial Bold',Arial"
                     font-weight="900" font-size="32" fill="#9333ea" letter-spacing="-1">vivo</text>

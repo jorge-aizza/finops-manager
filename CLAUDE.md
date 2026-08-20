@@ -575,6 +575,25 @@ assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Pri
 - `_ovRMap` cacheado por referência de `_recursos` (`_ovRMapSrc`) — evita rebuild O(N) em aberturas consecutivas sem nova busca
 - IntersectionObserver (`rootMargin: 200px`) no final de cada lote — substitui botão "Carregar mais"; próximos 100 cards carregam automaticamente ao rolar
 - `_carregarPico()`: lazy — busca `?pico=1` em background ao abrir overlay; quando resolve, re-renderiza se modal ainda estiver aberto
+- Após `_carregarPico()` resolver, `_atualizarEstimativa()` também é chamado (não só `_ovRenderRecursos()`) — sem isso o Subtotal/Total do rodapé fica preso no valor pré-pico enquanto os cards já mostram os valores de pico recarregados
+
+**`_calcEstimado(r, horas)` — fonte única do cálculo financeiro por recurso:**
+- Definida perto de `_dbInfoParaRecurso`; usada pelos cards do overlay (`_ovRenderRecursos`), pelo Subtotal/Total (`_atualizarEstimativa`) e pelo builder de `resultados` do invoice/PDF — os três nunca divergem entre si
+- Antes existiam três implementações inline quase-idênticas; os cards usavam pico (RN v2.1) mas o Subtotal/Total e o invoice usavam sempre a média — Subtotal não batia com a soma dos cards nem com o PDF gerado
+- Retorna `{ tipo, chora, mesBrl, bill, taxaEf, dbValida, picoBrl, picoClusterBrl, usaPico, usaPicoCluster, estimado, ... }`; não aplica gordura — cada chamador multiplica pelo próprio fator
+
+**Guard-rail de escopo (`_abrirConfigStep` → `#cov-guardrail`):**
+- Compara RGs cobertos pela seleção atual vs RGs presentes em `_recursos` (resultado da busca) — alerta quando `sel.length > 500 && rgsTot.size >= 5 && pctRgs >= 0.7`
+- Evita interpretar "custo de manter o ambiente inteiro rodando em paralelo" como "custo de um projeto" — comum quando o usuário seleciona a maioria dos recursos sem perceber a escala
+
+**Preview de PDF — `_abrirPreviewModal` precisa reparentar o modal para `<body>`:**
+- `#cinv-preview-modal` nasce dentro de `#view-calculadora` (injetado por `Calculadora.init()`), que tem `display:none` quando a tela ativa não é a Calculadora
+- Um `position:fixed` **não escapa** de um ancestral com `display:none` — por isso `gerarPDFEstimativaSalva()` (tela de Estimativas) rodava até o fim sem erro mas o modal nunca aparecia
+- `_abrirPreviewModal` agora faz `document.body.appendChild(modal)` antes de exibi-lo (idempotente — só move se ainda não for filho direto do `body`)
+- `gerarPDFEstimativaSalva()` (app.js) também garante `Calculadora.init()` antes de chamar `gerarPDFSalvo` se `#cinv-preview-modal` ainda não existir (visitar a aba Calculadora não é mais pré-requisito)
+- `_buildPDFHtml`: `*,*::before,*::after` tem `print-color-adjust:exact` — sem isso o Chrome remove fundos/gradientes coloridos ao "Salvar como PDF"/imprimir, mesmo aparecendo colorido na tela
+
+**PDF e modal de preview — tema claro:** ambos migrados de faixas roxo-escuro/quase-preto para lavanda clara (`#f5f0ff`/`#ede4ff`) com texto roxo escuro (`#5b21b6`/`#7c3aed`) — cabeçalho, coluna de total na barra de metadados, cabeçalho de tabela, linha de total final e rodapé do PDF; toolbar do modal de branco translúcido; halo/glow removidos (mantém só sombra suave). Corpo do documento (tabela, cards de categoria, observações) já era claro e não mudou.
 
 ### Portal Público
 `portal.html` — calculadora Azure pública, sem login. Serve `/portal.html` diretamente via `express.static`.
@@ -702,11 +721,16 @@ background-attachment: fixed;
 ```
 `portal.html` usa `background: var(--bg)` (flat). `docs-faq.html` e `docs-portal-faq.html` têm degradê roxo próprio mais intenso.
 
-**Glassmorphism layers:**
+**Glassmorphism layers (tema escuro — default):**
 - `.sidebar`: `rgba(6,0,14,.92)` + `backdrop-filter: blur(18px)`
 - `.top-bar`: `rgba(6,0,14,.86)` + `backdrop-filter: blur(18px)` + `z-index: 20`
 - `.stat-card`: `rgba(14,2,28,.90)` + `backdrop-filter: blur(12px)`
 - `.modal`: `rgba(8,0,18,.96)` + `backdrop-filter: blur(24px)`
+- **Sem glow decorativo**: `text-shadow` do `.page-title`, `drop-shadow` do ícone da marca, `box-shadow` do ponto ativo no submenu e do hover do `.btn-primary`, e o `drop-shadow` do logo "vivo" foram removidos — mantém o fundo quase-preto com tom roxo e a barra de acento roxa no topo da sidebar, só sem brilho neon. Blur/glassmorphism foi mantido (não é "glow", é textura aceita em produtos corporativos)
+
+**Tema claro — Direção A ("Sidebar Clara"):** ao contrário do escuro, sidebar e top-bar são **brancas** (`#ffffff`, borda `#e5e7eb`), com roxo só como acento — item ativo do menu (`#f3e8ff` bg + `#7c3aed` texto), botões, números. Não é glassmorphism nem roxo sólido; é o padrão "chrome neutro" comum em SaaS corporativo (Stripe, Linear). Stat-cards são brancas lisas com borda uniforme (sem faixa colorida no topo). Tabelas (`table thead`) também neutras (`#f9fafb`), não mais roxo sólido. Ver `[data-theme="light"] .sidebar` / `.top-bar` em `styles.css` (~linha 1380+).
+
+**`.view-hero`** (novo): classe opcional para título+subtítulo de seção dentro do conteúdo (ex: tela Coleta de Custos). Só tem estilo no tema claro — fundo em gradiente lavanda-roxo, texto branco; no escuro fica sem estilo próprio (mantém o `.page-title` branco padrão, que já lê bem no fundo quase preto). Uso: `<div class="view-hero"><div class="page-title">Título</div><div class="view-hero-sub">Subtítulo</div></div>`.
 
 **Cloud stats strip** (`.cloud-stats-strip`) — sticky bar at top of views:
 - Container: `rgba(22,4,38,.72)` + `backdrop-filter: blur(14px)` + `border-radius: 14px`
@@ -715,8 +739,9 @@ background-attachment: fixed;
 
 **Page titles** (`.page-title`):
 - `font-size: 22px`, `font-weight: 700`, `text-transform: uppercase`
-- Gradient text: `linear-gradient(90deg, #c084fc → #9333ea → #7c3aed)`
-- `filter: drop-shadow(0 0 8px rgba(147,51,234,.5))`
+- Tema escuro (default): texto branco sólido, sem `text-shadow` (glow removido)
+- Tema claro, dentro do conteúdo (fundo cinza claro): gradiente de texto `linear-gradient(90deg, #5b21b6 → #9333ea)`
+- Tema claro, dentro da `.top-bar` (fundo branco): sólido `#111827` — regra `[data-theme="light"] .top-bar .page-title` com especificidade maior que a regra geral acima, senão o gradiente roxo fica quase invisível sobre o próprio fundo branco/roxo da barra
 
 **Button classes:**
 - `.btn-primary` — filled accent purple, white text (defined in `styles.css`)
@@ -747,14 +772,20 @@ Left group: hamburger button + `div.topbar-vivo-brand` containing a single SVG `
 Hidden on mobile via `@media (max-width: 768px) { .topbar-vivo-brand { display: none !important; } }`.
 
 ### Login screen
-- Background: dark `#0c0014` + `::before` radial glow + `::after` conic-gradient rays (animated)
+- Tema escuro (default): Background `#0c0014` + `::before` radial glow + `::after` conic-gradient rays (animated)
 - `.login-rays` + `.login-glow` — extra animated ray layers for depth
 - Logo: SVG "vivo" text (`#9333ea`, 46px Arial Black) com canvas do `mascote.png` ao lado
   - Canvas starts at `opacity:0`; `onload` revela ambos juntos para evitar flash
   - **`onerror` handler:** se `mascote.png` falhar, SVG "vivo" aparece sozinho (canvas hidden)
   - `mascote.png` não está no git (`.gitignore: *.png`) — manter cópia local no servidor
 - Card: `rgba(18,2,32,.78)` + `backdrop-filter: blur(24px)` + purple border + float animation
-- **Dark theme is the default** — `doLogin()` removes `data-theme` attribute and clears `localStorage 'finops-theme'` on every login
+- **Tema claro**: fundo `#f0f2f5`; mesmas camadas de animação (`::before`/`::after`/`.login-rays`/`.login-glow`, mesmo keyframe `vivo-pulse`/`vivo-rotate`) só com opacidade bem reduzida (ex: `.58` → `.20` no pulso central) — mesma cor roxa dos botões (`#9333ea`), só sutil em vez de brilho forte, apropriado pra fundo claro. `.login-box` vira card branco com borda cinza e sombra suave (sem o glow roxo do shadow)
+
+### Tema claro/escuro — padrão do sistema
+- **Claro é o padrão** em `index.html`, `portal.html` e na tela de login — script inline no `<head>` aplica `data-theme="light"` a menos que `localStorage['finops-theme'] === 'dark'` (antes era o oposto: só aplicava claro se `=== 'light'`)
+- `toggleTheme()` (app.js) e `_portalToggleTheme()` (portal.html) agora **salvam `'dark'` explicitamente** no `localStorage` ao escolher o tema escuro — antes removiam a chave, o que só funcionava com a regra padrão antiga ("ausência = escuro"); com o padrão invertido, ausência agora significa claro, então escuro precisa ficar persistido
+- `doLogin()` **não força mais tema escuro no login** — antes tinha `localStorage.removeItem('finops-theme')` + `removeAttribute('data-theme')` hardcoded a cada login ("garante tema escuro como padrão"); removido — login preserva o tema já ativo na página
+- `_syncThemeIcon()` / `_portalSyncThemeIcon()` já eram chamados em `DOMContentLoaded` — ícone sol/lua sincroniza corretamente com o novo padrão sem mudança adicional
 
 ### Navigation
 `openNavGroup(id)` — always opens a sidebar nav group (adds `.open`).
