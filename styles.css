@@ -1466,20 +1466,14 @@ select option { background: var(--bg-card); }
   color: #ffffff !important;
 }
 
-/* ── STAT-CARDS: branco, sombra limpa, barra colorida no topo ── */
+/* ── STAT-CARDS: branco liso, borda uniforme, sem faixa colorida no topo ── */
 [data-theme="light"] .stat-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-top: 3px solid #9333ea;
   box-shadow: 0 1px 3px rgba(0,0,0,0.07), 0 1px 2px rgba(0,0,0,0.04);
   color: #111827;
 }
 [data-theme="light"] .stat-card::before           { display: none; }
-[data-theme="light"] .stat-card.accent            { border-top-color: #9333ea; }
-[data-theme="light"] .stat-card.danger            { border-top-color: #ef4444; }
-[data-theme="light"] .stat-card.green-card        { border-top-color: #22c55e; }
-[data-theme="light"] .stat-card.yellow-card       { border-top-color: #f59e0b; }
-[data-theme="light"] .stat-card.blue-card         { border-top-color: #3b82f6; }
 [data-theme="light"] .stat-card .stat-label       { color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
 [data-theme="light"] .stat-card .stat-value       { color: #111827; font-weight: 700; }
 [data-theme="light"] .stat-card.accent      .stat-value { color: #7c3aed; }
@@ -1551,6 +1545,7 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .cloud-stat-card.active .cloud-label { color: #7c3aed !important; }
 
 /* ── PAGE TITLE ── */
+/* Título de seção dentro do conteúdo (fundo claro) — texto roxo em gradiente */
 [data-theme="light"] .page-title {
   background: linear-gradient(90deg, #5b21b6, #9333ea);
   -webkit-background-clip: text;
@@ -1558,6 +1553,36 @@ select option { background: var(--bg-card); }
   -webkit-text-fill-color: transparent;
   filter: none;
   text-shadow: none;
+}
+/* Título dentro da top-bar roxa — precisa ficar sólido branco, senão o clip do
+   gradiente acima (tons de roxo) fica quase invisível sobre o próprio fundo roxo */
+[data-theme="light"] .top-bar .page-title {
+  background: none;
+  -webkit-background-clip: unset;
+  background-clip: unset;
+  -webkit-text-fill-color: #ffffff;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.18);
+}
+
+/* ── HERO: título+subtítulo de seção em fundo roxo (ex: tela Coleta) ──
+   Só cor/fundo — sem cantos arredondados nem sombra.
+   Só no tema claro — no escuro o .view-hero fica sem estilo próprio (mantém
+   o texto branco com glow já existente, que já lê bem no fundo quase preto). */
+[data-theme="light"] .view-hero {
+  background: linear-gradient(135deg, #4a0080 0%, #6d28d9 55%, #7c3aed 100%);
+  padding: 20px 24px;
+}
+[data-theme="light"] .view-hero .page-title {
+  background: none;
+  -webkit-background-clip: unset;
+  background-clip: unset;
+  -webkit-text-fill-color: #ffffff;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.18);
+}
+[data-theme="light"] .view-hero .view-hero-sub {
+  color: #ede9fe !important;
 }
 
 /* ── BOTÕES ── */

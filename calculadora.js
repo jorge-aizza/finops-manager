@@ -723,6 +723,9 @@ const Calculadora = (() => {
         onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--text)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text-muted)'">✕</button>
     </div>
 
+    <!-- Guard-rail: aviso quando a seleção cobre a maior parte do ambiente carregado -->
+    <div id="cov-guardrail" style="display:none;margin:12px 20px 0;padding:10px 14px;background:rgba(255,140,66,.08);border:1px solid rgba(255,140,66,.35);border-radius:10px;font-size:12px;line-height:1.4;color:var(--orange,#ff8c42);flex-shrink:0;"></div>
+
     <!-- Body: two-column with independent scroll -->
     <div style="flex:1;display:grid;grid-template-columns:1fr 340px;min-height:0;overflow:hidden;">
 
@@ -1870,6 +1873,61 @@ const Calculadora = (() => {
     const rg = (r.resource_group_name || '').toLowerCase();
     if (!rg.startsWith('databricks-rg-')) return null;
     return _dbTaxaMap.get(rg) || null;
+  }
+
+  // Fonte única do cálculo financeiro de estimativa por recurso — usada pelos
+  // cards do overlay, pelo Subtotal/Total e pelo builder do invoice/export,
+  // para que os três nunca divirjam entre si (pico, cluster Databricks, RI/SP
+  // amortizado, fallback proporcional). Não aplica "gordura" — cada chamador
+  // multiplica o resultado pelo próprio fator de gordura.
+  function _calcEstimado(r, horas) {
+    const isBRL  = (r.moeda || 'BRL') === 'BRL';
+    const uom    = (r.unidade || '').toLowerCase();
+    const tipo   = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
+    const tcDB   = parseFloat(r.taxa_cambio || 0);
+    const convR  = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
+
+    const choraRaw    = parseFloat(r.custo_hora_billing || 0);
+    const taxaAmort   = r.usa_amortizado && choraRaw === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
+    const chora       = (choraRaw > 0 ? choraRaw : taxaAmort) * convR;
+    const custoUomRaw = parseFloat(r.custo_uom_billing || 0);
+    const custoUomBrl = isBRL ? custoUomRaw : custoUomRaw * convR;
+    const diasAtiv    = parseInt(r.dias_ativos || 1) || 1;
+    const totalBill   = parseFloat(r.total_billing || 0);
+    const mesRaw      = parseFloat(r.custo_mes_billing) || (totalBill / diasAtiv * 30);
+    const mesBrl      = mesRaw * convR;
+    const bill        = totalBill * convR;
+
+    // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
+    const dbInfo   = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
+    const dbValida = !!(dbInfo && dbInfo.valida);
+    const taxaEf   = dbValida && dbInfo.hDriver > 0 ? bill / dbInfo.hDriver : chora;
+
+    // Estimado: pico do período quando disponível; senão billing
+    const upqBrl        = parseFloat(r.total_upq_brl || 0) * convR;
+    const fallback       = upqBrl > 0 ? (upqBrl / diasAtiv * 30) : mesBrl;
+    const picoRaw         = parseFloat(r.custo_hora_pico || 0);
+    const picoBrl         = picoRaw > 0 ? picoRaw * convR : 0;
+    const usaPico         = picoBrl > 0 && tipo !== 'reserva' && tipo !== 'mes' && !dbValida;
+    const picoClusterRaw  = parseFloat(r.custo_hora_pico_cluster || 0);
+    const picoClusterBrl  = picoClusterRaw > 0 ? picoClusterRaw * convR : 0;
+    const usaPicoCluster  = dbValida && picoClusterBrl > 0;
+
+    const estimado = (tipo === 'mes')
+      ? mesBrl
+      : usaPicoCluster
+        ? picoClusterBrl * horas
+        : usaPico
+          ? picoBrl * horas
+          : (tipo === 'periodo')
+            ? fallback / 720 * horas
+            : taxaEf * horas;
+
+    return {
+      tipo, isBRL, convR, chora, custoUomBrl, diasAtiv, mesBrl, bill,
+      dbInfo, dbValida, taxaEf, picoBrl, picoClusterBrl, usaPico, usaPicoCluster,
+      estimado,
+    };
   }
 
   function _atualizarNotaRodape() {
@@ -3036,16 +3094,20 @@ const Calculadora = (() => {
         + '</div></div>';
     }
 
-    // ── Tabela agrupada por categoria ──
+    // ── Tabela agrupada por categoria — apenas itens dinâmicos (tipo≠mes) ──
+    // Infra Fixa (tipo=mes) é mostrada à parte abaixo: ela é cobrada independente das
+    // horas do projeto e NÃO entra no Total Final, então não pode ser somada aqui —
+    // do contrário o total da tabela não bate com o Total Final exibido no rodapé.
     const _catPrev = new Map();
     for (const r of itens) {
+      if (r.tipo_custo === 'mes') continue;
       const cat = r.categoria || 'Outros';
       if (!_catPrev.has(cat)) _catPrev.set(cat, { count: 0, horas: 0, total: 0, allPeriodo: true });
       const c = _catPrev.get(cat);
       c.count++;
       c.total += parseFloat(r.estimado_brl || 0);
       const tc = r.tipo_custo || (r.isHora ? 'hora' : 'periodo');
-      if (tc !== 'periodo' && tc !== 'mes') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
+      if (tc !== 'periodo') { c.allPeriodo = false; c.horas += parseFloat(r.horas || 0); }
     }
     html += '<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px;">'
       + '<thead><tr style="border-bottom:1px solid rgba(147,51,234,.25);">'
@@ -3065,6 +3127,28 @@ const Calculadora = (() => {
         + '</tr>';
     }
     html += '</tbody></table>';
+
+    // ── Infra Fixa (tipo=mes) — cobrada independente das horas, fora do Total Final ──
+    const _fixoMesPrev = parseFloat(_estimativa.total_fixo_mes || 0);
+    const _resMesPrev  = _estimativa.recursos_mes || [];
+    if (_fixoMesPrev > 0) {
+      html += '<div style="margin-bottom:10px;padding:10px 12px;border-radius:8px;background:rgba(77,166,255,.07);border:1px solid rgba(77,166,255,.28);">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;">'
+        + '<span style="font-size:11px;font-weight:700;color:var(--blue,#4da6ff);">🔒 Infra Fixa/mês</span>'
+        + '<span style="font-family:IBM Plex Mono,monospace;font-size:12px;font-weight:700;color:var(--blue,#4da6ff);">' + _brl(_fixoMesPrev) + '</span>'
+        + '</div>'
+        + '<div style="font-size:9px;color:var(--text-muted);margin-top:3px;">' + _resMesPrev.length + ' recurso' + (_resMesPrev.length !== 1 ? 's' : '') + ' com custo mensal fixo (ex: discos, licenças) — cobrado independente das horas do projeto, não soma no Total Final abaixo.</div>'
+        + (_resMesPrev.length > 0
+          ? '<details style="margin-top:6px;"><summary style="font-size:9px;color:var(--blue,#4da6ff);cursor:pointer;list-style:none;">▶ Ver ' + _resMesPrev.length + ' recurso' + (_resMesPrev.length !== 1 ? 's' : '') + '</summary>'
+            + '<div style="margin-top:5px;display:flex;flex-direction:column;gap:2px;">'
+            + _resMesPrev.map(m => '<div style="display:flex;justify-content:space-between;gap:6px;padding:3px 0;border-top:1px solid rgba(77,166,255,.10);font-size:9px;">'
+              + '<span style="color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="' + _esc(m.nome) + '">' + _esc(m.nome) + '</span>'
+              + '<span style="font-family:IBM Plex Mono,monospace;color:var(--blue,#4da6ff);white-space:nowrap;flex-shrink:0;">' + _brl(m.valor) + '</span>'
+              + '</div>').join('')
+            + '</div></details>'
+          : '')
+        + '</div>';
+    }
 
     // ── Horas estimadas + taxa média ──
     const _hPrev   = parseFloat(_estimativa.horas || 0);
@@ -3956,42 +4040,21 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     sel.forEach(rid => {
       const r = _rMapEst.get(rid);
       if (!r) return;
-      const isBRL  = (r.moeda || 'BRL') === 'BRL';
-      const tcDB   = parseFloat(r.taxa_cambio || 0);
-      const convR  = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
-      const cr     = isBRL ? 1 : convR;
-      totalCobrado += parseFloat(r.total_billing||0) * cr;
+      const isBRL = (r.moeda || 'BRL') === 'BRL';
+      const tcDB  = parseFloat(r.taxa_cambio || 0);
+      const convR = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
+      totalCobrado += parseFloat(r.total_billing||0) * convR;
       if (!_horasAplicadas) return;
-      const horas   = _selecionados[rid] || 720;
-      const uom     = (r.unidade || '').toLowerCase();
-      const tipo    = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
-      const chora   = parseFloat(r.custo_hora_billing || 0) * cr;
-      const dias    = parseInt(r.dias_ativos || 1) || 1;
-      const mesRaw  = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / dias * 30);
-      const mesBrl  = mesRaw * cr;
+      const horas = _selecionados[rid] || 720;
+      // Fonte única do cálculo financeiro — mesma função usada nos cards e no invoice
+      const calc = _calcEstimado(r, horas);
       // RN-mes: custo mensal fixo (disco, licença por unidade/mês) — não entra no Total Estimado
-      if (tipo === 'mes') {
-        totalFixoMes += mesBrl;
-        _recursosMes.push({ nome: r.nome_recurso || rid.split('/').pop() || rid.slice(0,40), uom: r.unidade || '—', valor: mesBrl, tipo: _tipoRecurso(r), svc: r.consumed_service || '—', cat: r.meter_category || '—' });
+      if (calc.tipo === 'mes') {
+        totalFixoMes += calc.mesBrl;
+        _recursosMes.push({ nome: r.nome_recurso || rid.split('/').pop() || rid.slice(0,40), uom: r.unidade || '—', valor: calc.mesBrl, tipo: _tipoRecurso(r), svc: r.consumed_service || '—', cat: r.meter_category || '—' });
         return;
       }
-      let estimado  = 0;
-      if (tipo === 'reserva') {
-        estimado = chora * horas;
-      } else if (tipo === 'hora' || tipo === 'dia') {
-        const _dbInf = _dbInfoParaRecurso(r);
-        if (_dbInf && _dbInf.valida) {
-          const billRec = parseFloat(r.total_billing || 0) * cr;
-          estimado = _dbInf.hDriver > 0 ? (billRec / _dbInf.hDriver) * horas : chora * horas;
-        } else {
-          estimado = chora * horas;
-        }
-      } else {
-        const upqBrl   = parseFloat(r.total_upq_brl || 0) * cr;
-        const fallback = upqBrl > 0 ? (upqBrl / dias * 30) : mesBrl;
-        estimado = fallback / 720 * horas;
-      }
-      totalGeral += estimado;
+      totalGeral += calc.estimado;
     });
 
     // Painel lateral: resumo compacto — lista detalhada disponível no modal Configurar Estimativa
@@ -4087,30 +4150,16 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       vl_gordura:     gordFator > 1 ? Math.round((totalGeral - totalGeral / gordFator) * 100) / 100 : 0,
       horas: parseInt(document.getElementById('chglobal')?.value) || 720,
       resultados: sel.map(rid => {
-        const r   = _rMapEst.get(rid);
+        const r = _rMapEst.get(rid);
         if (!r) return null;
-        const isBRL  = (r.moeda || 'BRL') === 'BRL';
-        // RN-005: taxa real do export quando disponível, senão _taxaBrl do usuário
-        const tcDB2  = parseFloat(r.taxa_cambio || 0);
-        const convR2 = !isBRL ? (tcDB2 > 1 ? tcDB2 : _taxaBrl) : 1;
-        const bill   = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
-        const uom2   = (r.unidade || '').toLowerCase();
-        const tipo2  = r.tipo_custo || (uom2.includes('hour') || uom2.includes('hora') ? 'hora' : 'periodo');
-        const isHora = tipo2 === 'hora' || tipo2 === 'dia';
-        const horas  = _selecionados[rid] || 720;
-        const choraRaw  = parseFloat(r.custo_hora_billing || 0);
-        // RN-007: fallback amortizado para RI/SP coberto (custo_hora_billing=0, effective_price>0)
-        const _amortRaw2 = r.usa_amortizado && choraRaw === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
-        const chora     = (choraRaw > 0 ? choraRaw : _amortRaw2) * convR2;
-        const _diasP    = parseInt(r.dias_ativos || 1) || 1;
-        const mesRaw    = parseFloat(r.custo_mes_billing) ||
-                          (parseFloat(r.total_billing || 0) / _diasP * 30);
-        const custo_mes = isBRL ? mesRaw : mesRaw * convR2;
-        // mes: custo fixo mensal — estimado_brl = custo do mês (não proporcional às horas)
-        if (tipo2 === 'mes') {
+        const horas = _selecionados[rid] || 720;
+        // Fonte única do cálculo financeiro — mesma função usada nos cards e no Subtotal/Total
+        const calc  = _calcEstimado(r, horas);
+        const nome  = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50);
+        if (calc.tipo === 'mes') {
           return {
             resource_id:      rid,
-            nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+            nome,
             sku:              r.meter_categories || '',
             categoria:        r.categoria || '',
             consumed_service: r.consumed_service || '',
@@ -4122,50 +4171,34 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
             horas:            0,
             custo_hora:       0,
             fonte_estimado:   'billing',
-            custo_mes:        custo_mes,
-            dias_ativos:      _diasP,
-            total_cobrado:    bill,
-            estimado_brl:     custo_mes * gordFator,
+            custo_mes:        calc.mesBrl,
+            dias_ativos:      calc.diasAtiv,
+            total_cobrado:    calc.bill,
+            estimado_brl:     calc.mesBrl * gordFator,
             moeda:            r.moeda || 'BRL',
           };
         }
-        // Estimado: periodo → billing/mês ÷ 720 | hora → billing/h × horas
-        const _diasP2    = _diasP;
-        const _mesR2     = parseFloat(r.custo_mes_billing) || (parseFloat(r.total_billing || 0) / _diasP2 * 30);
-        const _upqBrl2   = isBRL ? parseFloat(r.total_upq_brl || 0) : parseFloat(r.total_upq_brl || 0) * convR2;
-        const custo_mes2 = isBRL ? _mesR2 : _mesR2 * convR2;
-        const _fallback2 = _upqBrl2 > 0 ? (_upqBrl2 / _diasP2 * 30) : custo_mes2;
-        // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
-        const _dbInf2  = tipo2 === 'hora' ? _dbInfoParaRecurso(r) : null;
-        const _dbValida = _dbInf2 && _dbInf2.valida;
-        const billRec2  = isBRL ? parseFloat(r.total_billing||0) : parseFloat(r.total_billing||0) * convR2;
-        const taxaEf2   = _dbValida && _dbInf2.hDriver > 0 ? billRec2 / _dbInf2.hDriver : 0;
-        // Estimado: sempre billing — sem Price List
-        const estimado = (tipo2 === 'periodo')
-          ? _fallback2 / 720 * horas
-          : _dbValida ? taxaEf2 * horas
-          : chora * horas;
         return {
           resource_id:      rid,
-          nome:             r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0,50),
+          nome,
           sku:              r.meter_categories || '',
           categoria:        r.categoria || '',
           consumed_service: r.consumed_service || '',
           resource_group:   r.resource_group_name || '',
           uom:              r.unidade || '',
-          tipo_custo:       tipo2,
+          tipo_custo:       calc.tipo,
           fixo_mensal:      false,
-          isHora,
+          isHora:           calc.tipo === 'hora' || calc.tipo === 'dia',
           horas,
-          custo_hora:       chora,
+          custo_hora:       calc.chora,
           fonte_estimado:   'billing',
-          custo_mes:        custo_mes,
-          dias_ativos:      parseInt(r.dias_ativos) || 0,
-          total_cobrado:    bill,
-          estimado_brl:     estimado * gordFator,
+          custo_mes:        calc.mesBrl,
+          dias_ativos:      calc.diasAtiv,
+          total_cobrado:    calc.bill,
+          estimado_brl:     calc.estimado * gordFator,
           moeda:            r.moeda || 'BRL',
-          databricks_valida: _dbValida || false,
-          databricks_taxa:   taxaEf2,
+          databricks_valida: calc.dbValida,
+          databricks_taxa:   calc.taxaEf,
         };
       }).filter(Boolean)
     };
@@ -4187,6 +4220,24 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     const cntEl = document.getElementById('cov-cnt');
     if (cntEl) cntEl.textContent = sel.length + ' recurso' + (sel.length === 1 ? '' : 's') + ' selecionado' + (sel.length === 1 ? '' : 's');
 
+    // Guard-rail: alerta quando a seleção cobre a maior parte do ambiente carregado
+    // na busca atual — evita interpretar "custo do ambiente inteiro" como "custo do projeto"
+    const _guardEl = document.getElementById('cov-guardrail');
+    if (_guardEl) {
+      const _rMapGr = new Map(_recursos.map(rr => [rr._key || rr.resource_id, rr]));
+      const _rgsSel = new Set(sel.map(rid => (_rMapGr.get(rid)?.resource_group_name || '').toUpperCase()).filter(Boolean));
+      const _rgsTot = new Set(_recursos.map(rr => (rr.resource_group_name || '').toUpperCase()).filter(Boolean));
+      const _pctRgs = _rgsTot.size > 0 ? _rgsSel.size / _rgsTot.size : 0;
+      if (sel.length > 500 && _rgsTot.size >= 5 && _pctRgs >= 0.7) {
+        _guardEl.style.display = 'block';
+        _guardEl.innerHTML = '⚠️ Você selecionou <strong>' + sel.length.toLocaleString('pt-BR') + ' recursos</strong> em <strong>'
+          + _rgsSel.size + ' de ' + _rgsTot.size + ' Resource Groups</strong> carregados nesta busca — isso reflete o custo de manter '
+          + 'praticamente todo o ambiente rodando em paralelo, não o de um recorte específico de projeto. Confira a seleção antes de usar este valor.';
+      } else {
+        _guardEl.style.display = 'none';
+      }
+    }
+
     _hlCarregar();
     _ovAtualizarTotal();
     setTimeout(() => _ovRenderRecursos(), 0);
@@ -4195,7 +4246,12 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
     if (!_picoCarregado && _recursos.length) {
       _carregarPico().then(() => {
         const m = document.getElementById('covmodal');
-        if (m && m.style.display !== 'none') setTimeout(() => _ovRenderRecursos(), 0);
+        if (m && m.style.display !== 'none') {
+          // Recalcula Subtotal/Total também — sem isso o rodapé fica preso na média
+          // (pré-pico) enquanto os cards já mostram os valores de pico recarregados.
+          _atualizarEstimativa();
+          setTimeout(() => _ovRenderRecursos(), 0);
+        }
       });
     }
   }
@@ -4295,29 +4351,18 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       // ─────────────────────────────────────────────────────────────────────────
       const nome     = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0, 60);
       const subtit   = r.produto || r.subcategoria || r.regiao || '';
-      const isBRL    = (r.moeda || 'BRL') === 'BRL';
-      const uom      = (r.unidade || '').toLowerCase();
-      // RN-001..004: usa tipo_custo do banco; fallback por UoM
-      const tipo     = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo');
-      const isHora   = tipo === 'hora' || tipo === 'dia';
-      // RN-005: taxa real do export quando >1, senão _taxaBrl
-      const tcDB     = parseFloat(r.taxa_cambio || 0);
-      const convR    = !isBRL ? (tcDB > 1 ? tcDB : _taxaBrl) : 1;
       const horas    = _selecionados[rid] || 720;
-      const choraRaw  = parseFloat(r.custo_hora_billing || 0);
-      // RN-007: RI/SP coberto — custo_in_billing=0; usa taxa_hora_rate (effective_price amortizado)
-      const _taxaAmort = r.usa_amortizado && choraRaw === 0 ? parseFloat(r.taxa_hora_rate || 0) : 0;
-      const chora     = (choraRaw > 0 ? choraRaw : _taxaAmort) * convR;
-      // RN-006: Cost ÷ Qty — taxa por unidade nativa do UoM (para exibição em periodo/mes)
-      const custo_uom_raw2 = parseFloat(r.custo_uom_billing || 0);
-      const custo_uom_brl2 = isBRL ? custo_uom_raw2 : custo_uom_raw2 * convR;
-      const diasAtiv  = parseInt(r.dias_ativos || 1) || 1;
-      const totalBill = parseFloat(r.total_billing || 0);
-      // custo_mes_billing: campo do banco ou fallback total_billing / dias * 30
-      const mesRaw    = parseFloat(r.custo_mes_billing) ||
-                        (totalBill / diasAtiv * 30);
-      const mesBrl    = mesRaw * convR;
-      const bill      = totalBill * convR;
+      // Fonte única do cálculo financeiro — mesma função usada no Subtotal/Total e no invoice
+      const _calc = _calcEstimado(r, horas);
+      const {
+        tipo, isBRL, convR, chora, mesBrl, bill, diasAtiv,
+        dbInfo: _dbInfOv, dbValida: _dbValidaOv, taxaEf: taxaEfOv,
+        picoBrl: _picoBrl, picoClusterBrl: _picoClusterBrl,
+        usaPico: _usaPico, usaPicoCluster: _usaPicoCluster,
+        custoUomBrl: custo_uom_brl2,
+      } = _calc;
+      const isHora   = tipo === 'hora' || tipo === 'dia';
+      const estimado = _calc.estimado * _gordFat;
       const qty      = parseFloat(r.total_qty || 0).toLocaleString('pt-BR', {maximumFractionDigits: 4});
       const cor      = tipo === 'reserva' ? 'var(--blue)' : (tipo === 'periodo' || tipo === 'mes') ? 'var(--orange)' : 'var(--accent)';
       const cat      = _esc(r.categoria || '');
@@ -4333,31 +4378,6 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
       const horasReais = parseFloat(r.horas_reais || 0);
       // Uso parcial: recurso ficou ligado menos de 55% do mês (~400h de 720h)
       const usoParcial = isHora && horasReais > 0 && horasReais < 400;
-      // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
-      const _dbInfOv    = tipo === 'hora' ? _dbInfoParaRecurso(r) : null;
-      const _dbValidaOv = _dbInfOv && _dbInfOv.valida;
-      const taxaEfOv    = _dbValidaOv && _dbInfOv.hDriver > 0 ? bill / _dbInfOv.hDriver : chora;
-
-      // Estimado: pico do período quando disponível; senão billing
-      const _upqBrl3         = parseFloat(r.total_upq_brl || 0) * convR;
-      const _fallback3       = _upqBrl3 > 0 ? (_upqBrl3 / diasAtiv * 30) : mesBrl;
-      const _picoRaw         = parseFloat(r.custo_hora_pico || 0);
-      const _picoBrl         = _picoRaw > 0 ? _picoRaw * convR : 0;
-      const _usaPico         = _picoBrl > 0 && tipo !== 'reserva' && tipo !== 'mes' && !_dbValidaOv;
-      // Pico do cluster Databricks: pior dia do RG inteiro (captura autoscale)
-      const _picoClusterRaw  = parseFloat(r.custo_hora_pico_cluster || 0);
-      const _picoClusterBrl  = _picoClusterRaw > 0 ? _picoClusterRaw * convR : 0;
-      const _usaPicoCluster  = _dbValidaOv && _picoClusterBrl > 0;
-      const estimadoMes = mesBrl;
-      const estimado = ((tipo === 'mes')
-        ? estimadoMes
-        : _usaPicoCluster
-          ? _picoClusterBrl * horas                // pico cluster → taxa/h × horas
-          : _usaPico
-            ? _picoBrl * horas
-            : (tipo === 'periodo')
-              ? _fallback3 / 720 * horas
-              : taxaEfOv * horas) * _gordFat;
 
       // Coluna 1: preço base da estimativa
       let col1Lbl, col1Val, col1Suf, col1Tip = '';
