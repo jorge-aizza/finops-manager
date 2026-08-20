@@ -1377,93 +1377,97 @@ select option { background: var(--bg-card); }
 
 [data-theme="light"] body { background: #f0f2f5; }
 
-/* ── SIDEBAR: roxo Vivo sólido, mesma família do top-bar ── */
+/* ── SIDEBAR: branca — Direção A (clean corporate). Roxo só como acento
+   (item ativo, brand, hover), não mais como fundo sólido. ── */
 [data-theme="light"] .sidebar {
-  background: #5b21b6;
-  border-right: 1px solid #4c1d95;
-  color: #ede9fe;
+  background: #ffffff;
+  border-right: 1px solid #e5e7eb;
+  color: #111827;
 }
-[data-theme="light"] .sidebar .nav-item           { color: #ddd6fe; }
-[data-theme="light"] .sidebar .nav-item:hover     { color: #ffffff; background: rgba(255,255,255,0.15); }
-[data-theme="light"] .sidebar .nav-item.active    { color: #ffffff; background: rgba(255,255,255,0.22); }
+[data-theme="light"] .sidebar .nav-item           { color: #6b7280; }
+[data-theme="light"] .sidebar .nav-item:hover     { color: #111827; background: #f3f4f6; }
+[data-theme="light"] .sidebar .nav-item.active    { color: #7c3aed; background: #f3e8ff; }
 [data-theme="light"] .sidebar .nav-item svg       { color: inherit; }
-[data-theme="light"] .sidebar .nav-group-header   { color: #c4b5fd; }
-[data-theme="light"] .sidebar .nav-section-label  { color: #a78bfa; }
-[data-theme="light"] .sidebar .sidebar-brand      { color: #ffffff; border-bottom-color: rgba(255,255,255,0.15); }
-[data-theme="light"] .sidebar .brand-name         { color: #ffffff; }
-[data-theme="light"] .sidebar .brand-sub          { color: #c4b5fd; }
-[data-theme="light"] .sidebar .brand-icon svg     { filter: brightness(0) invert(1) drop-shadow(0 0 5px rgba(255,255,255,0.25)); }
+[data-theme="light"] .sidebar .nav-group-header   { color: #6b7280; }
+[data-theme="light"] .sidebar .nav-group-header:hover  { color: #111827; background: #f3f4f6; }
+[data-theme="light"] .sidebar .nav-group-header.active { color: #7c3aed; background: #f3e8ff; }
+[data-theme="light"] .sidebar .nav-section-label  { color: #9ca3af; }
+[data-theme="light"] .sidebar .nav-section-label::after { background: #e5e7eb; }
+[data-theme="light"] .sidebar .sidebar-brand      { color: #111827; border-bottom-color: #e5e7eb; }
+[data-theme="light"] .sidebar .brand-name         { color: #7c3aed; }
+[data-theme="light"] .sidebar .brand-sub          { color: #9ca3af; }
+[data-theme="light"] .sidebar .brand-icon svg     { filter: none; }
 [data-theme="light"] .sidebar .db-status,
-[data-theme="light"] .sidebar #db-status-text     { color: #c4b5fd; }
+[data-theme="light"] .sidebar #db-status-text     { color: #6b7280; }
 [data-theme="light"] .sidebar .btn-gear,
 [data-theme="light"] .sidebar .btn-theme,
-[data-theme="light"] .sidebar .btn-logout         { color: #c4b5fd; }
+[data-theme="light"] .sidebar .btn-logout         { color: #6b7280; }
 [data-theme="light"] .sidebar .btn-gear:hover,
 [data-theme="light"] .sidebar .btn-theme:hover,
-[data-theme="light"] .sidebar .btn-logout:hover   { color: #ffffff; background: rgba(255,255,255,0.15); }
-[data-theme="light"] .sidebar::before             { background: rgba(255,255,255,0.25); }
+[data-theme="light"] .sidebar .btn-logout:hover   { color: #111827; background: #f3f4f6; }
+[data-theme="light"] .sidebar::before             { background: linear-gradient(90deg, #9333ea 0%, transparent 100%); }
 
-/* ── TOP-BAR: roxo sólido Vivo ── */
+/* ── TOP-BAR: branca, alinhada ao sidebar — Direção A ── */
 [data-theme="light"] .top-bar {
-  background: #6d28d9;
-  border-bottom: 1px solid #5b21b6;
-  color: #ffffff;
+  background: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+  color: #111827;
 }
-[data-theme="light"] .top-bar .page-header-title { color: #ffffff; }
-[data-theme="light"] .top-bar .user-name         { color: #ede9fe; }
-[data-theme="light"] .top-bar .user-role         { color: #c4b5fd; }
+[data-theme="light"] .top-bar .page-header-title { color: #111827; }
+[data-theme="light"] .top-bar .user-name         { color: #111827; }
+[data-theme="light"] .top-bar .user-role         { color: #6b7280; }
 [data-theme="light"] .top-bar .btn-icon,
-[data-theme="light"] .top-bar .btn-theme         { color: #ddd6fe; }
+[data-theme="light"] .top-bar .btn-theme         { color: #6b7280; }
 [data-theme="light"] .top-bar .btn-icon:hover,
-[data-theme="light"] .top-bar .btn-theme:hover   { color: #ffffff; background: rgba(255,255,255,0.15); }
+[data-theme="light"] .top-bar .btn-theme:hover   { color: #111827; background: #f3f4f6; }
 
-/* ── Botão hamburguer/X — branco no fundo roxo da top-bar ── */
+/* ── Botão hamburguer/X ── */
 [data-theme="light"] .btn-menu {
-  border-color: rgba(255,255,255,0.35);
-  color: #ffffff;
+  border-color: #e5e7eb;
+  color: #6b7280;
 }
 [data-theme="light"] .btn-menu:hover {
-  border-color: rgba(255,255,255,0.70);
-  background: rgba(255,255,255,0.15);
-  color: #ffffff;
+  border-color: #c4b5fd;
+  background: #f3e8ff;
+  color: #7c3aed;
 }
 
 /* ── User info no rodapé da sidebar ── */
 [data-theme="light"] #sidebar-user-info {
-  border-top-color: rgba(255,255,255,0.15) !important;
+  border-top-color: #e5e7eb !important;
 }
 [data-theme="light"] #sidebar-user-avatar {
-  background: rgba(255,255,255,0.20) !important;
-  color: #ffffff !important;
+  background: #f3e8ff !important;
+  color: #7c3aed !important;
 }
 [data-theme="light"] #sidebar-user-name {
-  color: #ffffff !important;
+  color: #111827 !important;
 }
 [data-theme="light"] #sidebar-user-role {
-  color: #c4b5fd !important;
+  color: #6b7280 !important;
 }
 
-/* ── Logo "vivo" — branco no fundo roxo ── */
+/* ── Logo "vivo" — roxo sólido, sem glow branco (fundo agora é claro) ── */
 [data-theme="light"] #topbar-vivo-text {
-  fill: #ffffff;
+  fill: #7c3aed;
 }
 [data-theme="light"] #topbar-vivo-svg {
-  filter: drop-shadow(0 0 5px rgba(255,255,255,0.20)) !important;
+  filter: none !important;
 }
 
-/* ── Botões top-bar (tema, ajuda, sininho) — borda e ícone brancos ── */
+/* ── Botões top-bar (tema, ajuda, sininho) — bordas e ícones neutros ── */
 [data-theme="light"] #btn-theme-toggle,
 [data-theme="light"] #notif-btn,
 [data-theme="light"] .top-actions > a {
-  border-color: rgba(255,255,255,0.35) !important;
-  color: #ffffff !important;
+  border-color: #e5e7eb !important;
+  color: #6b7280 !important;
 }
 [data-theme="light"] #btn-theme-toggle:hover,
 [data-theme="light"] #notif-btn:hover,
 [data-theme="light"] .top-actions > a:hover {
-  border-color: rgba(255,255,255,0.70) !important;
-  background: rgba(255,255,255,0.15) !important;
-  color: #ffffff !important;
+  border-color: #c4b5fd !important;
+  background: #f3e8ff !important;
+  color: #7c3aed !important;
 }
 
 /* ── STAT-CARDS: branco liso, borda uniforme, sem faixa colorida no topo ── */
@@ -1554,15 +1558,14 @@ select option { background: var(--bg-card); }
   filter: none;
   text-shadow: none;
 }
-/* Título dentro da top-bar roxa — precisa ficar sólido branco, senão o clip do
-   gradiente acima (tons de roxo) fica quase invisível sobre o próprio fundo roxo */
+/* Título dentro da top-bar — Direção A: top-bar branca, título sólido escuro */
 [data-theme="light"] .top-bar .page-title {
   background: none;
   -webkit-background-clip: unset;
   background-clip: unset;
-  -webkit-text-fill-color: #ffffff;
-  color: #ffffff;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.18);
+  -webkit-text-fill-color: #111827;
+  color: #111827;
+  text-shadow: none;
 }
 
 /* ── HERO: título+subtítulo de seção em fundo roxo (ex: tela Coleta) ──
@@ -1610,9 +1613,9 @@ select option { background: var(--bg-card); }
   box-shadow: 0 0 0 3px rgba(147,51,234,0.12);
 }
 
-/* ── TABELA ── */
-[data-theme="light"] table thead tr    { background: #6d28d9; color: #ffffff; }
-[data-theme="light"] table thead th    { color: #ffffff; border-color: #5b21b6; }
+/* ── TABELA: cabeçalho neutro — Direção A ── */
+[data-theme="light"] table thead tr    { background: #f9fafb; color: #6b7280; }
+[data-theme="light"] table thead th    { color: #6b7280; border-color: #e5e7eb; }
 [data-theme="light"] table tbody tr    { background: #ffffff; color: #111827; }
 [data-theme="light"] table tbody tr:nth-child(even) { background: #f8f7ff; }
 [data-theme="light"] table tbody td    { color: #374151; border-color: #e5e7eb; }
