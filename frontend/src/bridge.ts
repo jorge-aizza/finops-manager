@@ -58,11 +58,14 @@ declare global {
   // módulos compartilham o global lexical environment do realm). Por isso o
   // acesso correto é `typeof Calculadora !== 'undefined'` / `Calculadora.x`,
   // NUNCA `window.Calculadora` (sempre undefined) — mesmo padrão de app.js.
+  // Só `init` é chamado por código React hoje — PortalApp.tsx (Portal
+  // Público, calculadora pública ainda 100% legada). O fluxo de PDF/invoice
+  // (antes `abrirInvoiceExterno`/`gerarPDFSalvo`) foi portado pra
+  // frontend/src/lib/buildPdfHtml.ts + InvoiceModal/InvoicePreviewModal e
+  // removido do calculadora.js — não bridgeado mais.
   // eslint-disable-next-line no-var
   var Calculadora: {
     init: (opts?: unknown) => void
-    gerarPDFSalvo: (estimativa: unknown) => void
-    abrirInvoiceExterno: (estimativa: unknown) => void
   } | undefined
 }
 

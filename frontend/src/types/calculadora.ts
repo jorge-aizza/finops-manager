@@ -180,12 +180,12 @@ export interface RecursoMesFixo {
   cat: string
 }
 
-// Porta de _estimativa (calculadora.js) — objeto passado pro bridge
-// Calculadora.abrirInvoiceExterno() quando o usuário clica "Visualizar
-// Estimativa" no overlay. NÃO é o mesmo shape de uma estimativa já salva no
-// banco (Estimativa, em types/estimativa.ts) — vira isso só depois que o
-// usuário preenche o modal de invoice (projeto/responsável/e-mail) e o
-// legado faz o POST /api/estimativas.
+// Porta de _estimativa (calculadora.js) — objeto passado pro InvoiceModal
+// (frontend/src/views/InvoiceModal.tsx) quando o usuário clica "Visualizar
+// Estimativa" no overlay Configurar Estimativa. NÃO é o mesmo shape de uma
+// estimativa já salva no banco (Estimativa, em types/estimativa.ts) — vira
+// isso só depois que o usuário preenche o formulário de invoice
+// (projeto/responsável/e-mail) e o InvoiceModal faz o POST /api/estimativas.
 export interface EstimativaCalculada {
   total_cobrado: number
   total_brl: number

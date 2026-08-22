@@ -1,6 +1,7 @@
-// Contrato de server.js (rotas /api/estimativas). Tela é read/manage-only —
-// não existe criação por aqui: estimativas nascem só via "Gerar Invoice" na
-// Calculadora (calculadora.js), que faz POST /api/estimativas fire-and-forget.
+// Contrato de server.js (rotas /api/estimativas). A tela EstimativasView é
+// read/manage-only — não existe criação por aqui: estimativas nascem só via
+// "Visualizar Estimativa" na Calculadora (CalculadoraView/InvoiceModal), que
+// faz POST /api/estimativas fire-and-forget (ver createEstimativa em api/estimativas.ts).
 
 export type EstimativaStatus = 'Pendente' | 'Aprovado' | 'Nao Aprovado'
 
@@ -15,7 +16,7 @@ export interface RecursoEstimativa {
   consumed_service: string
   resource_group: string
   uom: string
-  tipo_custo: 'hora' | 'dia' | 'periodo' | 'mes'
+  tipo_custo: 'hora' | 'dia' | 'periodo' | 'mes' | 'reserva'
   fixo_mensal: boolean
   isHora: boolean
   horas: number
@@ -61,4 +62,26 @@ export interface EstimativaResumo {
 export interface Estimativa extends Omit<EstimativaResumo, 'projeto_nome_atual'> {
   recursos: RecursoEstimativa[]
   email?: string
+}
+
+// Corpo de POST /api/estimativas — fire-and-forget, resultado ignorado pelo
+// chamador (mesmo comportamento do calculadora.js legado: o preview do PDF
+// não depende do save ter funcionado).
+export interface EstimativaInput {
+  projeto_id: number | null
+  projeto_nome: string
+  numero: string
+  titulo: string
+  responsavel: string
+  validade_dias: number
+  data_estimativa: string
+  horas: number | null
+  pct_imposto: number
+  pct_cond: number
+  vl_imposto: number
+  vl_cond: number
+  total_brl: number
+  total_final: number
+  observacoes: string
+  recursos: RecursoEstimativa[]
 }

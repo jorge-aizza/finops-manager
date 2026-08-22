@@ -32,7 +32,7 @@ beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
   document.documentElement.removeAttribute('data-theme')
-  window.Calculadora = { init: vi.fn(), gerarPDFSalvo: vi.fn(), abrirInvoiceExterno: vi.fn() }
+  window.Calculadora = { init: vi.fn() }
 })
 
 describe('PortalApp', () => {

@@ -102,4 +102,25 @@ describe('EstimativasView', () => {
 
     await waitFor(() => expect(estimativasApi.deleteEstimativa).toHaveBeenCalledWith(1))
   });
+
+  it('"Gerar PDF" abre a prévia via buildPdfHtml — sem bridge pro calculadora.js legado', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('EST-100001')
+    await user.click(screen.getByTitle('Ver detalhes'))
+    await screen.findByText('VM produção')
+
+    await user.click(screen.getByRole('button', { name: 'Gerar PDF' }))
+
+    // InvoicePreviewModal renderiza um <iframe> com o HTML gerado por
+    // buildPdfHtml() — confirma que o preview abre sem depender de
+    // window.Calculadora (que nem está definido neste teste).
+    const frame = await screen.findByTitle('Estimativa Azure · EST-100001')
+    expect(frame.tagName).toBe('IFRAME')
+    // buildPdfHtml agrupa por categoria (não lista recurso por recurso) —
+    // confirma número, categoria do recurso e total, todos vindos do detalhe real.
+    expect((frame as HTMLIFrameElement).srcdoc).toContain('EST-100001')
+    expect((frame as HTMLIFrameElement).srcdoc).toContain('Virtual Machines')
+    expect((frame as HTMLIFrameElement).srcdoc).toContain('15.757,66')
+  });
 });

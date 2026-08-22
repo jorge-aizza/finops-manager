@@ -204,7 +204,9 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
   - `calculadora` (`frontend/src/views/CalculadoraView.tsx` + `ConfigurarEstimativaOverlay.tsx`) — **Fase A**:
     fluxo completo de consulta/estimativa (seleção sub/RG, busca, filtros, 3 visões, overlay "Configurar
     Estimativa" com Período/Horário Livre/Taxas/Totais). PDF, Purge, Diagnóstico, Reconciliação (modal) e
-    Portal Público **ficam no `calculadora.js` legado via bridge** — não portados nesta fase.
+    Portal Público **ficaram no `calculadora.js` legado via bridge** nesta fase — PDF/Invoice e Reconciliação
+    foram portados na Fase B (ver abaixo); Purge/Diagnóstico continuam bridgeados (não pertencem à tela
+    Calculadora — ver Fase B); Portal Público continua 100% legado (fase própria, separada).
     **Motor de cálculo portado como módulo puro testável**, não reimplementado ad-hoc dentro dos componentes:
     `frontend/src/lib/calcEstimado.ts` (`_calcEstimado`/`_dbInfoParaRecurso`/`_dbComputeTaxas` — RN-DB-001, pico,
     RI/SP amortizado), `frontend/src/lib/tipoRecurso.ts` (`_tipoRecurso`, cascata de classificação),
@@ -231,36 +233,61 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     **Pico (peak) é lazy** — `carregarPico()` só dispara ao abrir o overlay (`_abrirConfigStep` equivalente),
     mesclando por `resource_id+unidade` sem re-executar `computeDbTaxas()` (mesmo comportamento do legado:
     os campos que RN-DB-001 usa não mudam com o pico).
-    **Novo ponto de bridge — `Calculadora.abrirInvoiceExterno(estimativa)`** (adicionado em `calculadora.js`,
-    não existia antes): como o React mantém seu próprio estado (não escreve em `_recursos`/`_selecionados` do
-    legado), `abrirInvoice()` — que só lê a variável de closure `_estimativa`, sem receber parâmetro — não tinha
-    como ser alimentada de fora. A nova função é um wrapper de uma linha (`_estimativa = estimativa; return
-    abrirInvoice();`), mesmo padrão já usado por `gerarPDFSalvo(e)` pra Estimativas. O botão "Visualizar
-    Estimativa" do overlay React monta o objeto localmente (`buildEstimativa()`, mesmo shape de
-    `_atualizarEstimativa()`) e entrega pronto.
-    **Pegadinha real encontrada e corrigida — 4 modais do `calculadora.js` ficariam inacessíveis fora da tela
-    Calculadora**: `Calculadora.init()` injeta TODO o HTML da Calculadora (`_html()`) como filho de
+    **Pegadinha real encontrada e corrigida (Fase A) — 4 modais do `calculadora.js` ficariam inacessíveis fora
+    da tela Calculadora**: `Calculadora.init()` injeta TODO o HTML da Calculadora (`_html()`) como filho de
     `#view-calculadora`. Antes desta fase, `#view-calculadora` podia ficar visível (usuário navegando pra lá),
-    então modais como `#cinv-modal`, `#cpurge-modal`, `#cdiag-modal`, `#crecon-modal` apareciam normalmente.
-    Com `'calculadora'` migrada pro React, `#view-calculadora` fica `display:none` **permanentemente** — um
-    filho `position:fixed` não escapa de um ancestral `display:none` (mesma causa raiz já documentada pro
-    `#cinv-preview-modal`). Isso quebraria silenciosamente os botões "Diagnóstico"/"Limpar Dados" que a tela
-    de Coleta Azure legada (Fase B, ainda não migrada) chama via `_ensureCalcIniciado()` → `Calculadora.
-    abrirDiagnostico()`/`abrirPurge()`. Corrigido adicionando o mesmo fix de reparentar pro `document.body` em
-    `abrirInvoice()`, `abrirPurge()`, `abrirDiagnostico()` e `abrirReconciliacao()` — confirmado via Playwright
-    que os dois primeiros (chamados de fora da Calculadora) continuam abrindo visíveis após a migração.
-    **Gap conhecido e deliberado**: o botão "Reconciliar" (abre `#crecon-modal` com o breakdown completo por
-    charge_type) não tem trigger na tela React — vivia só dentro do HTML injetado por `Calculadora.init()`,
-    que a tela React nunca chama. A busca em background de reconciliação (`GET /api/calculadora/reconciliacao`)
-    e o rodapé com nota de charge_types ocultos também não foram portados nesta fase (só o endpoint/tipo
-    `Reconciliacao` existem em `api/calculadora.ts`, não usados ainda). Avaliar se vale adicionar um botão que
-    chama `Calculadora.abrirReconciliacao()` via bridge (já reparenta certo) quando fizer sentido — mesmo
-    padrão de "Gerar PDF"/"Visualizar Estimativa".
+    então modais como `#cinv-modal` (removido na Fase B), `#cpurge-modal`, `#cdiag-modal`, `#crecon-modal`
+    (removido na Fase B) apareciam normalmente. Com `'calculadora'` migrada pro React, `#view-calculadora` fica
+    `display:none` **permanentemente** — um filho `position:fixed` não escapa de um ancestral `display:none`.
+    Isso quebraria silenciosamente os botões "Diagnóstico"/"Limpar Dados" que a tela de Coleta Azure legada
+    chama via `_ensureCalcIniciado()` → `Calculadora.abrirDiagnostico()`/`abrirPurge()` — corrigido reparentando
+    esses dois pro `document.body`, mesmo fix já usado por `_abrirPreviewModal`.
     **Multiselect novo, não reaproveita `CmsSelect.tsx`**: `CmsSelect.tsx` (usado em Reservas) é single-select
     (radio, pending→commit). Assinatura/RG da Calculadora são multi-select (checkbox, `Todos`/`Limpar`/`OK ✓`) —
     `frontend/src/components/CmsMultiSelect.tsx` reaproveita as mesmas classes CSS `.cms-*` mas com semântica de
     checkbox e cascata pai→filho pra RGs gerenciados (marcar `RG-WORKSPACE` auto-marca `DATABRICKS-RG-*`/`MC_*`
     filhos, dentro do estado *pending* — só confirma ao clicar OK).
+  - **Calculadora Fase B** (`frontend/src/lib/buildPdfHtml.ts` + `views/InvoiceModal.tsx` +
+    `components/InvoicePreviewModal.tsx` + `components/ReconciliacaoModal.tsx`) — porta PDF/Invoice e
+    Reconciliação; Purge/Diagnóstico **deliberadamente ficaram de fora** (ver decisão de escopo abaixo).
+    **Descoberta que mudou o escopo**: um levantamento detalhado revelou que os botões "Diagnóstico"/"Limpar
+    Dados" (que abrem `abrirDiagnostico()`/`abrirPurge()`) nunca viveram dentro da tela Calculadora — sempre
+    foram triggados pela tela **Coleta Azure** legada (`index.html`/`app.js`, ainda 100% vanilla). Portar essas
+    duas features "como parte da Calculadora" teria exigido inventar botões novos numa tela que nunca os teve.
+    Escolha: `buildPdfHtml.ts`/`InvoiceModal.tsx`/`ReconciliacaoModal.tsx` agora (pertencem de fato à
+    Calculadora — o botão "Visualizar Estimativa" e o antigo "Reconciliar" sempre viveram lá), Purge/Diagnóstico
+    ficam pra quando a Coleta Azure Fase B acontecer (seu lar de verdade).
+    **`_buildPDFHtml` compartilhado entre DOIS call sites, não só um**: além do fluxo "Visualizar Estimativa" da
+    Calculadora, `EstimativasView.tsx`'s botão "Gerar PDF" (de uma estimativa já salva) também chamava
+    `Calculadora.gerarPDFSalvo()`, que reusava a mesma função de ~350 linhas. Os dois agora chamam
+    `buildPdfHtml()` diretamente (função pura em `frontend/src/lib/buildPdfHtml.ts`, port verbatim de
+    `_buildPDFHtml`, incluindo o `<script>` de tingimento do mascote que roda dentro do `<iframe srcdoc>` gerado)
+    — nunca duas implementações divergentes de um documento financeiro real. `InvoicePreviewModal.tsx`
+    (iframe + toolbar Editar/Imprimir/Fechar) também é compartilhado pelos dois.
+    **Limpeza real de código morto em `calculadora.js`** (não só "deixar bridge inerte"): confirmado via
+    levantamento que `abrirInvoice`, `abrirInvoiceExterno`, `_atualizarInfoProjeto`, `_atualizarPreviewInvoice`,
+    `fecharInvoice`, `_buildPDFHtml`, `gerarInvoicePDF`, `gerarPDFSalvo`, `_abrirPreviewModal`,
+    `fecharPreviewModal`, `voltarParaConfirmacao`, `imprimirEstimativa` (~625 linhas) e o HTML de `#cinv-modal`/
+    `#cinv-preview-modal` (~107 linhas) não tinham mais nenhum chamador vivo — removidos de vez, não deixados
+    como bridge morto. `_ovGerarEstimativa()` (só acionável pelo próprio `#covmodal` legado, HTML nunca exibido
+    já que React é dono da tela Calculadora) virou um toast de aviso em vez de chamar uma função que não existe
+    mais, evitando um `ReferenceError` morto-vivo caso algo ainda alcance esse caminho. `Calculadora` (tipo
+    ambiente em `bridge.ts`) encolheu pra só `init` — nenhum código React chama mais `gerarPDFSalvo`/
+    `abrirInvoiceExterno`. Confirmado via Playwright que os dois pontos de bridge que sobrevivem
+    (`abrirDiagnostico`/`abrirPurge`, chamados pela Coleta Azure) continuam funcionando após a remoção.
+    **Bug de tipo pré-existente corrigido em `types/estimativa.ts`**: `RecursoEstimativa.tipo_custo` nunca
+    incluía `'reserva'` no union (só `'hora'|'dia'|'periodo'|'mes'`), mesmo sendo um valor real e válido vindo
+    de `_calcEstimado`/`calcEstimado`. Como o `POST /api/estimativas` legado era JS solto (sem TS), esse gap
+    nunca dava erro — só apareceu agora que `InvoiceModal.tsx` tenta enviar `estimativa.resultados` (tipado)
+    nesse formato. Corrigido adicionando `'reserva'` ao union, alinhando com a realidade do negócio.
+    **Reconciliação virou um componente novo, não um bridge**: diferente de Purge/Diagnóstico,
+    `abrirReconciliacao()` não podia ser simplesmente bridgeado — `_reconciliacao` (closure legada) só era
+    populado como efeito colateral da busca legada de recursos (`_carregarRecursos()`), que a tela React nunca
+    chama, então ficaria eternamente `null`. `ReconciliacaoModal.tsx` busca seus próprios dados via `useQuery`
+    (`getReconciliacao()`, já existia desde a Fase A mas nunca tinha sido usado), alimentado pelo
+    `subsSel`/`rgsSel`/`dataInicio`/`dataFim` do `useCalculadora()` — mesmo padrão já usado por `detalheQuery`/
+    `servicoQuery`. Novo botão "🔍 Reconciliar" na toolbar principal da `CalculadoraView` (não existia link
+    algum antes — o trigger original vivia só dentro do HTML nunca exibido do `#view-calculadora`).
   - `portal` (`frontend/src/PortalApp.tsx`) — **Fase A: só o "chrome"**, decisão explícita do usuário dado que
     portar a calculadora pública inteira seria 40-60% do esforço de uma tela nova (o React `CalculadoraView.tsx`
     autenticado não tem nenhuma noção de `_modoPublico`/`_defaultConfig`, e portar isso é trabalho real, não um

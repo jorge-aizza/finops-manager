@@ -4,12 +4,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import CalculadoraView from './CalculadoraView'
 import * as calcApi from '../api/calculadora'
+import * as projetosApi from '../api/projetos'
+import * as estimativasApi from '../api/estimativas'
 import type { RecursoBilling, ResourceGroupOption, SubscriptionOption } from '../types/calculadora'
 
 vi.mock('../api/calculadora', async () => {
   const actual = await vi.importActual<typeof calcApi>('../api/calculadora')
   return { ...actual, listSubscriptions: vi.fn(), listResourceGroups: vi.fn(), getRecursos: vi.fn(), getReconciliacao: vi.fn(), getDetalheDiario: vi.fn(), getPorServico: vi.fn() }
 })
+vi.mock('../api/projetos')
+vi.mock('../api/estimativas')
 
 const mockSubs: SubscriptionOption[] = [
   { subscription_id: 'sub-1', subscription_name: 'Assinatura Produção', periodo_inicio: '2026-07-01', periodo_fim: '2026-08-01', moeda: 'BRL' },
@@ -51,6 +55,10 @@ beforeEach(() => {
   vi.mocked(calcApi.listResourceGroups).mockResolvedValue(mockRgs)
   vi.mocked(calcApi.getRecursos).mockResolvedValue(mockRecursos)
   vi.mocked(calcApi.getReconciliacao).mockResolvedValue({ por_tipo: [], por_moeda: [], total_bruto: 0, total_excluido: 0, total_sistema: 0 })
+  vi.mocked(projetosApi.listProjetos).mockResolvedValue([
+    { id: 1, nome: 'Projeto Alpha', diretoria: 'TI', descricao: null, status: 'Ativo', criado_em: '', atualizado_em: '' },
+  ])
+  vi.mocked(estimativasApi.createEstimativa).mockResolvedValue({} as never)
   window.showToast = vi.fn()
 })
 
@@ -119,5 +127,60 @@ describe('CalculadoraView', () => {
 
     await user.type(screen.getByPlaceholderText('Filtrar recursos...'), 'inexistente-xyz')
     expect(await screen.findByText('Nenhum recurso encontrado para os filtros selecionados.')).toBeInTheDocument()
+  });
+
+  it('"Visualizar Estimativa" abre o InvoiceModal, valida campos obrigatórios e gera o preview do PDF (sem bridge pro legado)', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await selecionarSubEBuscar(user)
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[checkboxes.length - 1])
+    await user.click(screen.getByRole('button', { name: 'Estimar' }))
+    await screen.findByText('Total Final')
+
+    await user.click(screen.getByRole('button', { name: 'Visualizar Estimativa' }))
+
+    // InvoiceModal (#cinv-modal) abriu — Configurar Estimativa some, formulário de invoice aparece
+    await screen.findByText('Gerar Estimativa')
+    expect(screen.queryByText('Configurar Estimativa')).not.toBeInTheDocument()
+
+    // Sem projeto/motivo — bloqueia e mostra erro, sem chamar createEstimativa
+    await user.click(screen.getByRole('button', { name: 'Visualizar Estimativa' }))
+    expect(await screen.findByText('Selecione um projeto.')).toBeInTheDocument()
+    expect(estimativasApi.createEstimativa).not.toHaveBeenCalled()
+
+    await user.selectOptions(screen.getByLabelText('Projeto *'), '1')
+    await user.click(screen.getByRole('button', { name: 'Visualizar Estimativa' }))
+    expect(await screen.findByText('Informe o motivo da solicitação do ambiente ligado.')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('Informe o motivo da solicitação do ambiente ligado...'), 'Projeto piloto')
+    await user.click(screen.getByRole('button', { name: 'Visualizar Estimativa' }))
+
+    await waitFor(() => expect(estimativasApi.createEstimativa).toHaveBeenCalledWith(
+      expect.objectContaining({ projeto_id: 1, observacoes: 'Projeto piloto' }),
+    ))
+    // InvoicePreviewModal abre com o iframe do PDF — InvoiceModal fecha
+    expect(await screen.findByRole('button', { name: /Imprimir \/ Salvar PDF/ })).toBeInTheDocument()
+    expect(screen.queryByText('Gerar Estimativa')).not.toBeInTheDocument()
+  });
+
+  it('botão Reconciliar abre o ReconciliacaoModal com dados reais (não depende de busca legada)', async () => {
+    const user = userEvent.setup()
+    vi.mocked(calcApi.getReconciliacao).mockResolvedValue({
+      por_tipo: [{ charge_type: 'Usage', linhas: 10, total: 1000, excluido: false }],
+      por_moeda: [{ moeda: 'BRL', total: 1000 }],
+      total_bruto: 1000, total_excluido: 0, total_sistema: 1000,
+    })
+    renderWithClient()
+    await selecionarSubEBuscar(user)
+
+    await user.click(screen.getByRole('button', { name: '🔍 Reconciliar' }))
+
+    const modal = (await screen.findByText('Reconciliação de Valores')).closest<HTMLElement>('.modal')!
+    expect(await within(modal).findByText('Usage')).toBeInTheDocument()
+    expect(calcApi.getReconciliacao).toHaveBeenCalledWith(
+      expect.objectContaining({ subscription_id: ['sub-1'], resource_group: ['RG-PROD'] }),
+    )
   });
 });

@@ -3,7 +3,7 @@ import { buildEstimativa } from '../lib/buildEstimativa'
 import { calcEstimado } from '../lib/calcEstimado'
 import { calcHorasPeriodo, defaultHorarioLivre } from '../lib/periodo'
 import { recursoKey, type UseCalculadoraReturn } from '../hooks/useCalculadora'
-import type { HorarioLivre, Periodo } from '../types/calculadora'
+import type { EstimativaCalculada, HorarioLivre, Periodo } from '../types/calculadora'
 
 function brl(v: number): string {
   return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -27,9 +27,10 @@ interface Props {
   calc: UseCalculadoraReturn
   taxaBrl: number
   onClose: () => void
+  onVisualizarEstimativa: (estimativa: EstimativaCalculada, periodos: Periodo[]) => void
 }
 
-export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose }: Props) {
+export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, onVisualizarEstimativa }: Props) {
   const [modo, setModo] = useState<'horas' | 'periodo'>('horas')
   const [periodos, setPeriodos] = useState<Periodo[]>([])
   const [iniData, setIniData] = useState('')
@@ -123,13 +124,7 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose }: 
 
   function visualizarEstimativa() {
     if (!estimativa.resultados.length) return
-    onClose()
-    if (typeof Calculadora === 'undefined' || typeof Calculadora.abrirInvoiceExterno !== 'function') {
-      window.showToast?.('Calculadora não disponível. Acesse pela aba Calculadora.', 'error')
-      return
-    }
-    Calculadora.init()
-    Calculadora.abrirInvoiceExterno(estimativa)
+    onVisualizarEstimativa(estimativa, periodos)
   }
 
   return (

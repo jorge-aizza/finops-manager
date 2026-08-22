@@ -5,15 +5,22 @@ import CmsMultiSelect from '../components/CmsMultiSelect'
 import RecursosTable from '../components/RecursosTable'
 import DetalheDiarioTable from '../components/DetalheDiarioTable'
 import PorServicoTable from '../components/PorServicoTable'
+import InvoicePreviewModal from '../components/InvoicePreviewModal'
+import ReconciliacaoModal from '../components/ReconciliacaoModal'
 import { useCalculadora } from '../hooks/useCalculadora'
 import { tipoColor, tipoRecurso } from '../lib/tipoRecurso'
 import ConfigurarEstimativaOverlay from './ConfigurarEstimativaOverlay'
+import InvoiceModal from './InvoiceModal'
+import type { EstimativaCalculada, Periodo } from '../types/calculadora'
 
 const TAXA_BRL_FALLBACK = 5.70
 
 export default function CalculadoraView() {
   const calc = useCalculadora()
   const [overlayOpen, setOverlayOpen] = useState(false)
+  const [reconOpen, setReconOpen] = useState(false)
+  const [invoiceData, setInvoiceData] = useState<{ estimativa: EstimativaCalculada; periodos: Periodo[] } | null>(null)
+  const [preview, setPreview] = useState<{ html: string; title: string } | null>(null)
 
   const subOptions = useMemo(
     () => (calc.subsQuery.data || []).map((s) => ({ value: s.subscription_id, label: s.subscription_name || s.subscription_id })),
@@ -130,6 +137,9 @@ export default function CalculadoraView() {
           </span>
           <button className="cbtn-sec" onClick={() => calc.checkAll(true)}>Sel. todos</button>
           <button className="cbtn-sec" onClick={() => calc.checkAll(false)}>Limpar</button>
+          <button className="cbtn-sec" disabled={!calc.subsSel.length} onClick={() => setReconOpen(true)} title="Reconciliar com Azure Cost Management">
+            🔍 Reconciliar
+          </button>
           <div style={{ flex: 1 }} />
           <div style={{ display: 'flex', gap: 2, background: 'rgba(255,255,255,.06)', borderRadius: 7, padding: 2, flexShrink: 0 }}>
             {(['recursos', 'detalhe', 'servico'] as const).map((v) => (
@@ -221,7 +231,39 @@ export default function CalculadoraView() {
       </div>
 
       {overlayOpen && (
-        <ConfigurarEstimativaOverlay calc={calc} taxaBrl={TAXA_BRL_FALLBACK} onClose={() => setOverlayOpen(false)} />
+        <ConfigurarEstimativaOverlay
+          calc={calc}
+          taxaBrl={TAXA_BRL_FALLBACK}
+          onClose={() => setOverlayOpen(false)}
+          onVisualizarEstimativa={(estimativa, periodos) => {
+            setOverlayOpen(false)
+            setInvoiceData({ estimativa, periodos })
+          }}
+        />
+      )}
+
+      {invoiceData && (
+        <InvoiceModal
+          estimativa={invoiceData.estimativa}
+          periodos={invoiceData.periodos}
+          onClose={() => setInvoiceData(null)}
+          onGerado={(html, title) => { setInvoiceData(null); setPreview({ html, title }) }}
+        />
+      )}
+
+      {preview && (
+        <InvoicePreviewModal html={preview.html} title={preview.title} onClose={() => setPreview(null)} />
+      )}
+
+      {reconOpen && (
+        <ReconciliacaoModal
+          subscriptionIds={calc.subsSel}
+          resourceGroups={calc.rgsSel}
+          dataInicio={calc.dataInicio}
+          dataFim={calc.dataFim}
+          taxaBrl={TAXA_BRL_FALLBACK}
+          onClose={() => setReconOpen(false)}
+        />
       )}
     </div>
   )

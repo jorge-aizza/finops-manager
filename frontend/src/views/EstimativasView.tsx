@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteEstimativa, getEstimativa, listEstimativas, setEstimativaStatus } from '../api/estimativas'
+import { buildPdfHtml } from '../lib/buildPdfHtml'
+import InvoicePreviewModal from '../components/InvoicePreviewModal'
 import type { Estimativa, EstimativaResumo, EstimativaStatus } from '../types/estimativa'
 
 function formatBRL(v: number | null | undefined): string {
@@ -203,14 +205,36 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
 }) {
   const detalheQuery = useQuery({ queryKey: ['estimativa', id], queryFn: () => getEstimativa(id) })
   const e = detalheQuery.data
+  const [preview, setPreview] = useState<{ html: string; title: string } | null>(null)
 
+  // Porta de gerarPDFSalvo(e) (calculadora.js) — mesmo buildPdfHtml() usado
+  // pelo fluxo "Visualizar Estimativa" da Calculadora, pra nunca divergir
+  // visualmente entre os dois PDFs gerados a partir do mesmo shape de dados.
   function gerarPDF(estimativa: Estimativa) {
-    if (typeof Calculadora === 'undefined' || typeof Calculadora.gerarPDFSalvo !== 'function') {
-      window.showToast?.('Calculadora não disponível. Acesse pela aba Calculadora.', 'error')
-      return
-    }
-    if (!document.getElementById('cinv-preview-modal')) Calculadora.init()
-    Calculadora.gerarPDFSalvo(estimativa)
+    const dataVal = estimativa.data_estimativa ? String(estimativa.data_estimativa).slice(0, 10) : new Date().toISOString().slice(0, 10)
+    const dataFmt = new Date(dataVal + 'T12:00:00').toLocaleDateString('pt-BR')
+    const valDias = estimativa.validade_dias || 5
+    const dataValid = new Date(new Date(dataVal + 'T12:00:00').getTime() + valDias * 86400000).toLocaleDateString('pt-BR')
+    const recursos = Array.isArray(estimativa.recursos) ? estimativa.recursos : []
+    const fixoMes = recursos.filter((r) => r.tipo_custo === 'mes').reduce((s, r) => s + (r.estimado_brl || r.custo_mes || 0), 0)
+    const html = buildPdfHtml({
+      invoiceNum: estimativa.numero || 'EST-000000',
+      dataFmt, dataValid,
+      nomeProjeto: estimativa.projeto_nome || '',
+      titulo: estimativa.titulo || 'Estimativa de Custos Azure',
+      resp: estimativa.responsavel || '',
+      email: estimativa.email || '',
+      obs: estimativa.observacoes || '',
+      itens: recursos,
+      total_brl: estimativa.total_brl || 0,
+      total_fixo_mes: fixoMes,
+      total_final: estimativa.total_final || 0,
+      pct_imposto: estimativa.pct_imposto || 0,
+      vl_imposto: estimativa.vl_imposto || 0,
+      pct_cond: estimativa.pct_cond || 0,
+      vl_cond: estimativa.vl_cond || 0,
+    })
+    setPreview({ html, title: (estimativa.titulo || 'Estimativa') + ' · ' + (estimativa.numero || '') })
   }
 
   return (
@@ -299,6 +323,7 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
           <button className="btn-ghost" onClick={onClose}>Fechar</button>
         </div>
       </div>
+      {preview && <InvoicePreviewModal html={preview.html} title={preview.title} onClose={() => setPreview(null)} />}
     </div>
   )
 }
