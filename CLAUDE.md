@@ -201,10 +201,68 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
   precisa listar esses campos ali antes de fazer conta ou formatar como moeda. Achado testando de verdade
   com Playwright (a tabela mostrava "R$ 2400.00" em vez de "R$ 2.400,00") — os testes unitários (Vitest) não
   pegam isso porque mockam a API já com `number` de mentirinha.
-- **Ordem planejada pras próximas**: Calculadora (por último — RN-006/007/DB-001, pico, PDF; mais arriscada)
-  → Portal público.
-  Coleta Azure Fase B (wizard, monitor ao vivo, testar/coletar agora) fica pendente indefinidamente,
-  a ser retomada quando fizer sentido — não faz parte da sequência acima.
+  - `calculadora` (`frontend/src/views/CalculadoraView.tsx` + `ConfigurarEstimativaOverlay.tsx`) — **Fase A**:
+    fluxo completo de consulta/estimativa (seleção sub/RG, busca, filtros, 3 visões, overlay "Configurar
+    Estimativa" com Período/Horário Livre/Taxas/Totais). PDF, Purge, Diagnóstico, Reconciliação (modal) e
+    Portal Público **ficam no `calculadora.js` legado via bridge** — não portados nesta fase.
+    **Motor de cálculo portado como módulo puro testável**, não reimplementado ad-hoc dentro dos componentes:
+    `frontend/src/lib/calcEstimado.ts` (`_calcEstimado`/`_dbInfoParaRecurso`/`_dbComputeTaxas` — RN-DB-001, pico,
+    RI/SP amortizado), `frontend/src/lib/tipoRecurso.ts` (`_tipoRecurso`, cascata de classificação),
+    `frontend/src/lib/periodo.ts` (`_calcHorasPeriodo`/`_calcHorasLivres`), `frontend/src/lib/buildEstimativa.ts`
+    (monta o objeto `_estimativa` — mesma fonte que os cards do overlay e o Subtotal/Total, igual ao legado).
+    48 testes unitários golden-fixture cobrem esse motor (`calcEstimado.test.ts`, `periodo.test.ts`,
+    `tipoRecurso.test.ts`, `buildEstimativa.test.ts`) — porta verbatim de cada fórmula, sem "melhorar" nada,
+    incluindo bugs latentes preservados de propósito (ver abaixo).
+    **Bug latente preservado (não corrigido)**: `_tipoRecurso` lê `r.meter_category` (singular) mas a API só
+    retorna `categoria`/`meter_categories` — esse campo nunca existe na resposta, então a classificação de tipo
+    depende só de `consumed_service`/`resource_group_name`/`nome_recurso`, nunca da categoria. Corrigir mudaria
+    a classificação de recursos que hoje só caem nos fallbacks — porta verbatim (`cat` hardcoded como `''`
+    em `tipoRecurso.ts`, com comentário explicando por quê) pra bater com o comportamento atual em produção.
+    **Bug latente preservado**: `_calcHorasLivres` conta dias parciais de início/fim do período como dias
+    completos — pra períodos curtos pode subtrair mais horas do que o total (o `Math.max(1, ...)` no chamador
+    é o único guard). Não corrigido — precisa bater com o legado.
+    **Virtualização real em vez do truque de RAF-chunking**: a tabela de Recursos (`RecursosTable.tsx`) usa
+    `@tanstack/react-virtual` (grid CSS, não `<table>` nativa — cada linha virtualizada é um `<div role="row">`
+    fora da árvore de uma única `<table>`, então alinhamento de coluna só funciona porque cabeçalho e linhas
+    compartilham o mesmo `gridTemplateColumns`; a primeira versão usava `<table>` aninhada por linha e
+    quebrava o alinhamento entre grupos — corrigido antes de testar). `/api/calculadora/recursos` não pagina
+    e ambientes com centenas/milhares de recursos são o caso esperado (o guard-rail do overlay já assume
+    seleções de 500+ recursos como cenário real), então virtualização é necessária, não otimização prematura.
+    **Pico (peak) é lazy** — `carregarPico()` só dispara ao abrir o overlay (`_abrirConfigStep` equivalente),
+    mesclando por `resource_id+unidade` sem re-executar `computeDbTaxas()` (mesmo comportamento do legado:
+    os campos que RN-DB-001 usa não mudam com o pico).
+    **Novo ponto de bridge — `Calculadora.abrirInvoiceExterno(estimativa)`** (adicionado em `calculadora.js`,
+    não existia antes): como o React mantém seu próprio estado (não escreve em `_recursos`/`_selecionados` do
+    legado), `abrirInvoice()` — que só lê a variável de closure `_estimativa`, sem receber parâmetro — não tinha
+    como ser alimentada de fora. A nova função é um wrapper de uma linha (`_estimativa = estimativa; return
+    abrirInvoice();`), mesmo padrão já usado por `gerarPDFSalvo(e)` pra Estimativas. O botão "Visualizar
+    Estimativa" do overlay React monta o objeto localmente (`buildEstimativa()`, mesmo shape de
+    `_atualizarEstimativa()`) e entrega pronto.
+    **Pegadinha real encontrada e corrigida — 4 modais do `calculadora.js` ficariam inacessíveis fora da tela
+    Calculadora**: `Calculadora.init()` injeta TODO o HTML da Calculadora (`_html()`) como filho de
+    `#view-calculadora`. Antes desta fase, `#view-calculadora` podia ficar visível (usuário navegando pra lá),
+    então modais como `#cinv-modal`, `#cpurge-modal`, `#cdiag-modal`, `#crecon-modal` apareciam normalmente.
+    Com `'calculadora'` migrada pro React, `#view-calculadora` fica `display:none` **permanentemente** — um
+    filho `position:fixed` não escapa de um ancestral `display:none` (mesma causa raiz já documentada pro
+    `#cinv-preview-modal`). Isso quebraria silenciosamente os botões "Diagnóstico"/"Limpar Dados" que a tela
+    de Coleta Azure legada (Fase B, ainda não migrada) chama via `_ensureCalcIniciado()` → `Calculadora.
+    abrirDiagnostico()`/`abrirPurge()`. Corrigido adicionando o mesmo fix de reparentar pro `document.body` em
+    `abrirInvoice()`, `abrirPurge()`, `abrirDiagnostico()` e `abrirReconciliacao()` — confirmado via Playwright
+    que os dois primeiros (chamados de fora da Calculadora) continuam abrindo visíveis após a migração.
+    **Gap conhecido e deliberado**: o botão "Reconciliar" (abre `#crecon-modal` com o breakdown completo por
+    charge_type) não tem trigger na tela React — vivia só dentro do HTML injetado por `Calculadora.init()`,
+    que a tela React nunca chama. A busca em background de reconciliação (`GET /api/calculadora/reconciliacao`)
+    e o rodapé com nota de charge_types ocultos também não foram portados nesta fase (só o endpoint/tipo
+    `Reconciliacao` existem em `api/calculadora.ts`, não usados ainda). Avaliar se vale adicionar um botão que
+    chama `Calculadora.abrirReconciliacao()` via bridge (já reparenta certo) quando fizer sentido — mesmo
+    padrão de "Gerar PDF"/"Visualizar Estimativa".
+    **Multiselect novo, não reaproveita `CmsSelect.tsx`**: `CmsSelect.tsx` (usado em Reservas) é single-select
+    (radio, pending→commit). Assinatura/RG da Calculadora são multi-select (checkbox, `Todos`/`Limpar`/`OK ✓`) —
+    `frontend/src/components/CmsMultiSelect.tsx` reaproveita as mesmas classes CSS `.cms-*` mas com semântica de
+    checkbox e cascata pai→filho pra RGs gerenciados (marcar `RG-WORKSPACE` auto-marca `DATABRICKS-RG-*`/`MC_*`
+    filhos, dentro do estado *pending* — só confirma ao clicar OK).
+  - Coleta Azure Fase B (wizard, monitor ao vivo, testar/coletar agora) e Portal Público continuam pendentes
+    indefinidamente — únicas partes do sistema ainda 100% vanilla, a serem retomadas quando fizer sentido.
 - **Ainda não coberto**: o botão de importação em massa de projetos (`btn-import-projetos`, modal legado) continua
   funcionando, mas não dispara refresh automático da tabela React após importar — só atualiza navegando pra
   outra view e voltando (React Query refaz o fetch ao remontar). Vale resolver quando migrar o fluxo de import.

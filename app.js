@@ -535,7 +535,7 @@ let allAcoes = [];
 // C:\Users\jorge\.claude\plans\magical-gliding-gem.md. showView() monta o
 // bundle React em #react-root em vez de ativar a antiga #view-<nome>
 // (que fica no HTML vazia, sem conteúdo, até a migração terminar de vez).
-const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard']);
+const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora']);
 
 // ── VIEW ROUTING ──────────────────────────────
 function showView(view) {
@@ -579,8 +579,8 @@ function showView(view) {
     else btn.setAttribute('onclick', 'openModal()');
   }
 
-  if (view === 'calculadora' && typeof Calculadora !== 'undefined') Calculadora.init();
-  // 'projetos', 'reservas', 'acoes', 'coleta', 'estimativas' e 'dashboard' migradas — a view React carrega os próprios dados (React Query)
+  // 'projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard' e
+  // 'calculadora' migradas — a view React carrega os próprios dados (React Query)
 }
 
 function openModal() {

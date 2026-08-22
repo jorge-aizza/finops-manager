@@ -7,6 +7,7 @@ import AcoesView from './views/AcoesView'
 import ColetaView from './views/ColetaView'
 import EstimativasView from './views/EstimativasView'
 import DashboardView from './views/DashboardView'
+import CalculadoraView from './views/CalculadoraView'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } },
@@ -20,6 +21,7 @@ const VIEWS: Record<string, ComponentType> = {
   coleta: ColetaView,
   estimativas: EstimativasView,
   dashboard: DashboardView,
+  calculadora: CalculadoraView,
 }
 
 export default function App() {

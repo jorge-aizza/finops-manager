@@ -3006,11 +3006,25 @@ const Calculadora = (() => {
 
   // ── Export CSV ───────────────────────────────────────────────────
   // ── Invoice / Estimativa ─────────────────────────────────────────
+  // Entrada externa pro bridge com a tela React da Calculadora (Fase A) —
+  // o React mantém seu próprio estado (não escreve em _recursos/_selecionados
+  // do legado), então em vez de tentar sincronizar os dois, a tela React monta
+  // o objeto _estimativa (mesmo shape que _atualizarEstimativa() monta aqui)
+  // e entrega pronto — igual ao padrão já usado por gerarPDFSalvo(e).
+  function abrirInvoiceExterno(estimativa) {
+    _estimativa = estimativa;
+    return abrirInvoice();
+  }
+
   async function abrirInvoice() {
     if (!_estimativa || !_estimativa.resultados) { _toast('Calcule a estimativa primeiro.', 'error'); return; }
 
     const modal = document.getElementById('cinv-modal');
     if (!modal) return;
+    // #view-calculadora fica display:none quando a tela migrada (React) está
+    // ativa — um filho position:fixed não escapa de um ancestral com
+    // display:none, mesmo fix já aplicado em _abrirPreviewModal().
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
 
     // Preencher data padrão
     const hoje = new Date().toISOString().slice(0, 10);
@@ -3619,6 +3633,10 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   async function abrirPurge() {
     const modal = document.getElementById('cpurge-modal');
     if (!modal) return;
+    // Reparenta pro <body> — pode ser acionado de fora da tela Calculadora
+    // (painel legado de Coleta Azure), onde #view-calculadora está
+    // display:none (mesmo fix de _abrirPreviewModal/abrirInvoice).
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
 
     // Mostra modal imediatamente com spinner
     document.getElementById('cpurge-result').style.display  = 'none';
@@ -3747,6 +3765,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   function abrirReconciliacao() {
     const modal = document.getElementById('crecon-modal');
     if (!modal) return;
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
     modal.style.display = 'flex';
     _renderReconciliacao();
   }
@@ -3933,6 +3952,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
 
   async function abrirDiagnostico() {
     const modal = document.getElementById('cdiag-modal');
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
     modal.style.display = 'flex';
     const tbody = document.getElementById('cdiag-tbody');
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--text-muted);">Carregando dados...</td></tr>';
@@ -4986,7 +5006,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
            abrirDiagnostico, fecharDiagnostico, _diagFiltrar,
            _diagCache, _forcarRefreshCache,
            _hlToggle, _hlChange, _hlSalvarPadrao, _hlLimparPadrao,
-           abrirInvoice, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
+           abrirInvoice, abrirInvoiceExterno, fecharInvoice, gerarInvoicePDF, gerarPDFSalvo,
            fecharPreviewModal, voltarParaConfirmacao, imprimirEstimativa,
            _abrirConfigStep, _fecharConfigStep, _ovAplicarHoras, _ovImpostoChange, _ovCondChange,
            _ovGerarEstimativa, _ovCarregarMais,

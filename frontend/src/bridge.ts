@@ -59,7 +59,11 @@ declare global {
   // acesso correto é `typeof Calculadora !== 'undefined'` / `Calculadora.x`,
   // NUNCA `window.Calculadora` (sempre undefined) — mesmo padrão de app.js.
   // eslint-disable-next-line no-var
-  var Calculadora: { init: (opts?: unknown) => void; gerarPDFSalvo: (estimativa: unknown) => void } | undefined
+  var Calculadora: {
+    init: (opts?: unknown) => void
+    gerarPDFSalvo: (estimativa: unknown) => void
+    abrirInvoiceExterno: (estimativa: unknown) => void
+  } | undefined
 }
 
 window.__reactBridge = { mount, unmount, setDashboardTab }
