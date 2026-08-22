@@ -8,11 +8,17 @@ import type { PortalConfig } from './types/portal'
 
 vi.mock('./api/portal')
 
+// PublicCalculadoraView (fluxo de consulta/estimativa em si) tem seus
+// próprios testes — aqui só interessa SE ela monta, não o que tem dentro.
+vi.mock('./views/PublicCalculadoraView', () => ({
+  default: ({ cfg }: { cfg: PortalConfig }) => <div data-testid="public-calc">calculadora — {cfg.titulo}</div>,
+}))
+
 function makeConfig(overrides: Partial<PortalConfig> = {}): PortalConfig {
   return {
     titulo: 'Portal FinOps Vivo', descricao: 'Estime seus custos Azure.',
     dominios_aceitos: [], taxa_imposto: 18.65, taxa_cond: 13, taxa_gordura: 0,
-    horario_livre: { ativo: false, inicio: '09:00', fim: '18:00', dias: [1, 2, 3, 4, 5] },
+    horario_livre: { ativo: false, inicio: '09:00', fim: '18:00', dias: [1, 2, 3, 4, 5], inicio_sab: '09:00', fim_sab: '18:00', inicio_dom: '09:00', fim_dom: '18:00' },
     solicitar_identificacao: false, permitir_selecao_periodo: true, permitir_selecao_recursos: true,
     ...overrides,
   }
@@ -32,7 +38,6 @@ beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
   document.documentElement.removeAttribute('data-theme')
-  window.Calculadora = { init: vi.fn() }
 })
 
 describe('PortalApp', () => {
@@ -48,19 +53,17 @@ describe('PortalApp', () => {
     expect(await screen.findByText('Portal temporariamente indisponível')).toBeInTheDocument()
   });
 
-  it('sem identificação exigida: abre a calculadora direto (chama Calculadora.init)', async () => {
+  it('sem identificação exigida: abre a calculadora direto', async () => {
     vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ solicitar_identificacao: false }))
     renderWithClient()
-    await waitFor(() => expect(window.Calculadora!.init).toHaveBeenCalledWith(
-      expect.objectContaining({ apiBase: '/api/public/calculadora', publico: true }),
-    ))
+    expect(await screen.findByTestId('public-calc')).toBeInTheDocument()
   });
 
-  it('com identificação exigida: mostra o modal e não chama Calculadora.init até identificar', async () => {
+  it('com identificação exigida: mostra o modal e não abre a calculadora até identificar', async () => {
     vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ solicitar_identificacao: true }))
     renderWithClient()
     expect(await screen.findByText('Identificação')).toBeInTheDocument()
-    expect(window.Calculadora!.init).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('public-calc')).not.toBeInTheDocument()
   });
 
   it('preenche nome/email, identifica e então abre a calculadora', async () => {
@@ -75,7 +78,7 @@ describe('PortalApp', () => {
     await user.click(screen.getByRole('button', { name: 'Confirmar e acessar' }))
 
     await waitFor(() => expect(portalApi.identificar).toHaveBeenCalledWith('Ana Souza', 'ana@empresa.com'))
-    await waitFor(() => expect(window.Calculadora!.init).toHaveBeenCalled())
+    expect(await screen.findByTestId('public-calc')).toBeInTheDocument()
     expect(screen.getByText('Ana Souza')).toBeInTheDocument()
   });
 
@@ -97,7 +100,7 @@ describe('PortalApp', () => {
     const user = userEvent.setup()
     vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig())
     renderWithClient()
-    await waitFor(() => expect(window.Calculadora!.init).toHaveBeenCalled())
+    await screen.findByTestId('public-calc')
 
     const themeBtn = screen.getByTitle('Modo claro')
     await user.click(themeBtn)
@@ -110,7 +113,7 @@ describe('PortalApp', () => {
     vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ solicitar_identificacao: true }))
     renderWithClient()
 
-    await waitFor(() => expect(window.Calculadora!.init).toHaveBeenCalled())
+    await screen.findByTestId('public-calc')
     expect(screen.queryByText('Identificação')).not.toBeInTheDocument()
     expect(screen.getByText('Carlos')).toBeInTheDocument()
   });

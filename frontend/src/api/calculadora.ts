@@ -11,7 +11,10 @@ export const listSubscriptions = () =>
 export const listResourceGroups = (subscriptionIds: string[]) =>
   apiFetch<ResourceGroupOption[]>('GET', '/calculadora/resource-groups?subscription_id=' + encodeURIComponent(subscriptionIds.join(',')))
 
-const RECURSO_NUM_FIELDS: (keyof RecursoBilling)[] = [
+// Exportado para reuso em api/calculadoraPublica.ts — mesmo shape de linha,
+// mesma necessidade de normalização (colunas NUMERIC do Postgres voltam como
+// string via `pg`; ver frontend/src/api/normalize.ts).
+export const RECURSO_NUM_FIELDS: (keyof RecursoBilling)[] = [
   'taxa_cambio', 'custo_hora_billing', 'taxa_hora_rate', 'custo_uom_billing', 'custo_uom_usd',
   'dias_ativos', 'total_billing', 'total_usd', 'total_qty', 'custo_mes_billing', 'custo_dia_billing',
   'custo_dia_usd', 'custo_hora_usd', 'total_upq_brl', 'total_upq_usd', 'horas_reais', 'soma_h_driver',

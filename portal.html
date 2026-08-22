@@ -322,14 +322,14 @@
 </head>
 <body class="portal-mode">
 
-<!-- Chrome (cabeçalho, identificação, tema, hero, estados) — migrado pra
-     React (Fase A). A calculadora em si continua 100% calculadora.js legado:
-     PortalApp.tsx chama Calculadora.init({apiBase, publico:true, defaultConfig})
-     dentro de #view-calculadora, renderizado por ela mesma. -->
+<!-- Portal Público inteiro migrado pra React — chrome (Fase A) + fluxo de
+     consulta/estimativa (Fase B, PublicCalculadoraView.tsx, mesmo motor da
+     Calculadora autenticada com API/config públicas). calculadora.js não é
+     mais carregado aqui — só o app autenticado (index.html) ainda usa (Purge/
+     Diagnóstico da tela Coleta Azure, Fase B daquela tela, não desta). -->
 <div id="portal-root"></div>
 
 <link rel="stylesheet" href="/react-app/react-app.css">
-<script src="/calculadora.js"></script>
 <script type="module" src="/react-app/portal-app.js"></script>
 </body>
 </html>

@@ -4,6 +4,25 @@ import { listProjetos } from '../api/projetos'
 import { createEstimativa } from '../api/estimativas'
 import { buildPdfHtml } from '../lib/buildPdfHtml'
 import type { EstimativaCalculada, Periodo } from '../types/calculadora'
+import type { Estimativa, EstimativaInput } from '../types/estimativa'
+
+// Projeto mínimo consumido por este modal — reaproveitado tanto pelo
+// endpoint privado (Projeto, com `diretoria`) quanto pelo público
+// (ProjetoPublico, sem `diretoria`); os usos de `diretoria` abaixo já
+// checam presença antes de exibir.
+interface ProjetoOption {
+  id: number
+  nome: string
+  diretoria?: string | null
+  descricao: string | null
+}
+
+export interface InvoiceModalApi {
+  listProjetos: () => Promise<ProjetoOption[]>
+  createEstimativa: (input: EstimativaInput) => Promise<Estimativa>
+}
+
+const defaultApi: InvoiceModalApi = { listProjetos, createEstimativa }
 
 function brl(v: number): string {
   return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -21,15 +40,20 @@ interface InvoiceModalProps {
   periodos: Periodo[]
   onClose: () => void
   onGerado: (html: string, title: string) => void
+  api?: InvoiceModalApi
+  defaultResp?: string
+  defaultEmail?: string
 }
 
-export default function InvoiceModal({ estimativa, periodos, onClose, onGerado }: InvoiceModalProps) {
-  const projetosQuery = useQuery({ queryKey: ['projetos'], queryFn: listProjetos })
+export default function InvoiceModal({
+  estimativa, periodos, onClose, onGerado, api = defaultApi, defaultResp = '', defaultEmail = '',
+}: InvoiceModalProps) {
+  const projetosQuery = useQuery({ queryKey: ['projetos', api === defaultApi ? 'privada' : 'publica'], queryFn: api.listProjetos })
   const [projetoId, setProjetoId] = useState('')
   const [titulo, setTitulo] = useState('')
   const [data, setData] = useState(() => new Date().toISOString().slice(0, 10))
-  const [resp, setResp] = useState('')
-  const [email, setEmail] = useState('')
+  const [resp, setResp] = useState(defaultResp)
+  const [email, setEmail] = useState(defaultEmail)
   const [obs, setObs] = useState('')
   const [erro, setErro] = useState('')
 
@@ -70,7 +94,7 @@ export default function InvoiceModal({ estimativa, periodos, onClose, onGerado }
     const dataValid = new Date(new Date(data + 'T12:00:00').getTime() + VALIDADE_DIAS * 86400000).toLocaleDateString('pt-BR')
     const invoiceNum = 'EST-' + Date.now().toString().slice(-6)
 
-    createEstimativa({
+    api.createEstimativa({
       projeto_id: projetoId ? Number(projetoId) : null,
       projeto_nome: nomeProjeto,
       numero: invoiceNum,

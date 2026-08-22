@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getPortalConfig, identificar } from './api/portal'
+import PublicCalculadoraView from './views/PublicCalculadoraView'
 import type { PortalIdentSessao } from './types/portal'
 
 const LS_THEME = 'finops-theme'
@@ -25,12 +26,10 @@ export default function PortalApp() {
   const [ident, setIdent] = useState<PortalIdentSessao | null>(() => getIdentSessao())
   const [light, setLight] = useState(isLightTheme)
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null)
-  const calcIniciado = useRef(false)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  // Toast — calculadora.js legado chama window.showToast via _toast() (bare
-  // identifier, mesmo padrão de Calculadora). Precisa existir antes de
-  // Calculadora.init() ser chamado.
+  // Toast global — InvoiceModal (Fase B) chama window.showToast?.() ao gerar
+  // uma estimativa, mesmo padrão do bundle autenticado.
   useEffect(() => {
     window.showToast = (msg, type) => {
       clearTimeout(toastTimer.current)
@@ -52,30 +51,6 @@ export default function PortalApp() {
   const pedirIdent = !!cfg && (cfg.solicitar_identificacao || dominios.length > 0)
   const podeAbrirCalculadora = !!cfg && (!pedirIdent || !!ident)
 
-  // Igual a _abrirCalculadora() do portal.html legado — chama uma vez só
-  // quando config + identificação (se exigida) estão prontas.
-  useEffect(() => {
-    if (!podeAbrirCalculadora || !cfg || calcIniciado.current) return
-    if (typeof Calculadora === 'undefined') {
-      console.error('portal-app: calculadora.js não carregado')
-      return
-    }
-    calcIniciado.current = true
-    Calculadora.init({
-      apiBase: '/api/public/calculadora',
-      publico: true,
-      defaultConfig: {
-        taxa_imposto: cfg.taxa_imposto ?? 18.65,
-        taxa_cond: cfg.taxa_cond ?? 13.0,
-        taxa_gordura: cfg.taxa_gordura ?? 0,
-        horario_livre: cfg.horario_livre || { ativo: false, inicio: '09:00', fim: '18:00', dias: [1, 2, 3, 4, 5] },
-        permitir_selecao_periodo: !!cfg.permitir_selecao_periodo,
-        permitir_selecao_recursos: !!cfg.permitir_selecao_recursos,
-      },
-    })
-    document.getElementById('view-calculadora')?.classList.add('active')
-  }, [podeAbrirCalculadora, cfg])
-
   function handleIdentificado(s: PortalIdentSessao) {
     sessionStorage.setItem(SS_IDENT, JSON.stringify(s))
     setIdent(s)
@@ -84,10 +59,6 @@ export default function PortalApp() {
   function handleTrocarIdentificacao() {
     sessionStorage.removeItem(SS_IDENT)
     setIdent(null)
-    calcIniciado.current = false
-    document.getElementById('view-calculadora')?.classList.remove('active')
-    const wrap = document.getElementById('portal-calc-wrap')
-    if (wrap) wrap.style.display = 'none'
   }
 
   const titulo = cfg?.titulo || 'Portal de Serviço'
@@ -169,9 +140,7 @@ export default function PortalApp() {
         </div>
       )}
 
-      <div className="portal-calc-wrap" id="portal-calc-wrap" style={{ display: podeAbrirCalculadora ? 'block' : 'none' }}>
-        <div id="view-calculadora" />
-      </div>
+      {podeAbrirCalculadora && cfg && <PublicCalculadoraView cfg={cfg} ident={ident} />}
 
       {toast && <div id="toast" className={'toast show ' + toast.type}>{toast.msg}</div>}
     </>

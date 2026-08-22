@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getRecursos, listResourceGroups, listSubscriptions, sortRgsComFilhos } from '../api/calculadora'
 import { computeDbTaxas } from '../lib/calcEstimado'
 import { tipoRecurso } from '../lib/tipoRecurso'
-import type { RecursoBilling, RecursosQuery } from '../types/calculadora'
+import type { RecursoBilling, RecursosQuery, ResourceGroupOption, SubscriptionOption } from '../types/calculadora'
 
 export function recursoKey(r: RecursoBilling): string {
   return (r.resource_id || '') + '||' + (r.categoria || '') + '||' + (r.meter_categories || '') + '||' + (r.unidade || '')
@@ -13,17 +13,34 @@ function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-export function useCalculadora() {
+// Injetável — Portal Público Fase B reusa o mesmo hook com as funções de
+// api/calculadoraPublica.ts (endpoints /api/public/calculadora/*, filtrados
+// no servidor por portalCfg) em vez das privadas. Mesmo shape de retorno nos
+// dois casos, então nenhuma lógica abaixo precisa saber qual API está ativa.
+export interface CalculadoraApi {
+  listSubscriptions: () => Promise<SubscriptionOption[]>
+  listResourceGroups: (subscriptionIds: string[]) => Promise<ResourceGroupOption[]>
+  getRecursos: (q: RecursosQuery) => Promise<RecursoBilling[]>
+}
+
+const defaultApi: CalculadoraApi = { listSubscriptions, listResourceGroups, getRecursos }
+
+// `apiKey` distingue o cache do React Query entre a instância privada e a
+// pública do hook (ambas usam as mesmas chaves 'calc-subs'/'calc-rgs' — sem
+// isso, funções não são serializáveis numa queryKey e não dá pra usar `api`
+// diretamente na chave). Na prática nunca coexistem no mesmo QueryClient
+// (bundles/páginas separados), mas o parâmetro deixa isso explícito.
+export function useCalculadora(api: CalculadoraApi = defaultApi, apiKey = 'privada') {
   // ── Subscription / RG selection ──
-  const subsQuery = useQuery({ queryKey: ['calc-subs'], queryFn: listSubscriptions })
+  const subsQuery = useQuery({ queryKey: ['calc-subs', apiKey], queryFn: api.listSubscriptions })
   const [subsSel, setSubsSel] = useState<string[]>([])
   const [rgsSel, setRgsSel] = useState<string[]>([])
   const [dataInicio, setDataInicio] = useState('')
   const [dataFim, setDataFim] = useState('')
 
   const rgQuery = useQuery({
-    queryKey: ['calc-rgs', subsSel],
-    queryFn: () => listResourceGroups(subsSel),
+    queryKey: ['calc-rgs', apiKey, subsSel],
+    queryFn: () => api.listResourceGroups(subsSel),
     enabled: subsSel.length > 0,
   })
   const rgOptions = useMemo(() => sortRgsComFilhos(rgQuery.data || []), [rgQuery.data])
@@ -69,7 +86,7 @@ export function useCalculadora() {
     const q: RecursosQuery = { subscription_id: subsSel, resource_group: rgsSel, data_inicio: dataInicio, data_fim: dataFim }
     setUltimaQuery(q)
     try {
-      const data = await getRecursos(q)
+      const data = await api.getRecursos(q)
       setRecursos(data)
       setSelecionados({})
     } catch (e) {
@@ -77,7 +94,7 @@ export function useCalculadora() {
     } finally {
       setLoading(false)
     }
-  }, [subsSel, rgsSel, dataInicio, dataFim])
+  }, [api, subsSel, rgsSel, dataInicio, dataFim])
 
   // Lazy pico — buscado uma vez ao abrir o overlay Configurar Estimativa,
   // mesclado por resource_id+unidade (não reexecuta _dbComputeTaxas).
@@ -85,7 +102,7 @@ export function useCalculadora() {
     if (picoCarregado || !ultimaQuery || !recursos.length) { setPicoCarregado(true); return }
     setPicoLoading(true)
     try {
-      const data = await getRecursos({ ...ultimaQuery, pico: true })
+      const data = await api.getRecursos({ ...ultimaQuery, pico: true })
       const picoMap = new Map(data.map((r) => [r.resource_id + '|' + (r.unidade || ''), r]))
       setRecursos((prev) => prev.map((r) => {
         const p = picoMap.get(r.resource_id + '|' + (r.unidade || ''))
@@ -103,7 +120,7 @@ export function useCalculadora() {
     }
     setPicoCarregado(true)
     setPicoLoading(false)
-  }, [picoCarregado, ultimaQuery, recursos.length])
+  }, [api, picoCarregado, ultimaQuery, recursos.length])
 
   // RN-DB-001 — computado uma vez por busca (não a cada merge de pico, já
   // que os campos usados por _dbComputeTaxas não mudam com o pico).

@@ -6,12 +6,7 @@
 // identificação, exatamente como _abrirCalculadora() fazia no portal.html
 // legado.
 
-export interface HorarioLivreConfig {
-  ativo: boolean
-  inicio: string
-  fim: string
-  dias: number[]
-}
+import type { HorarioLivre } from './calculadora'
 
 export interface PortalConfig {
   titulo: string | null
@@ -20,7 +15,11 @@ export interface PortalConfig {
   taxa_imposto: number
   taxa_cond: number
   taxa_gordura: number
-  horario_livre: HorarioLivreConfig
+  // Mesmo shape de HorarioLivre (calculadora.ts) — a config do portal
+  // SEMPRE inclui inicio_sab/fim_sab/inicio_dom/fim_dom (admin configura
+  // horário de fim de semana separado do de dias úteis; ver
+  // #portal-cfg-hl-ini-sab/fim-sab em app.js).
+  horario_livre: HorarioLivre
   solicitar_identificacao: boolean
   permitir_selecao_periodo: boolean
   permitir_selecao_recursos: boolean

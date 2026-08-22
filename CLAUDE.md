@@ -288,17 +288,72 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     `subsSel`/`rgsSel`/`dataInicio`/`dataFim` do `useCalculadora()` — mesmo padrão já usado por `detalheQuery`/
     `servicoQuery`. Novo botão "🔍 Reconciliar" na toolbar principal da `CalculadoraView` (não existia link
     algum antes — o trigger original vivia só dentro do HTML nunca exibido do `#view-calculadora`).
-  - `portal` (`frontend/src/PortalApp.tsx`) — **Fase A: só o "chrome"**, decisão explícita do usuário dado que
-    portar a calculadora pública inteira seria 40-60% do esforço de uma tela nova (o React `CalculadoraView.tsx`
-    autenticado não tem nenhuma noção de `_modoPublico`/`_defaultConfig`, e portar isso é trabalho real, não um
-    prop a mais). Cobre: cabeçalho (marca/tema/ajuda/badge "Público"), modal de identificação (nome+e-mail,
-    validação de domínio, efeito de tingimento roxo do mascote via canvas — portado verbatim), toggle de tema
-    (mesma chave `localStorage 'finops-theme'` do app autenticado), hero, estados de carregando/inativo. **A
-    calculadora em si continua 100% `calculadora.js` legado** — `PortalApp.tsx` chama
-    `Calculadora.init({apiBase:'/api/public/calculadora', publico:true, defaultConfig})` dentro de
-    `#view-calculadora` (que ela mesma renderiza), exatamente como `_abrirCalculadora()` fazia no `portal.html`
-    antigo. Fase B (calculadora pública real em React) fica pendente indefinidamente, junto com Coleta Azure
-    Fase B — únicas partes do sistema ainda parcialmente vanilla.
+  - `portal` (`frontend/src/PortalApp.tsx` + `frontend/src/views/PublicCalculadoraView.tsx`) — **Fase A (chrome)**
+    cobre: cabeçalho (marca/tema/ajuda/badge "Público"), modal de identificação (nome+e-mail, validação de
+    domínio, efeito de tingimento roxo do mascote via canvas — portado verbatim), toggle de tema (mesma chave
+    `localStorage 'finops-theme'` do app autenticado), hero, estados de carregando/inativo.
+    **Fase B (calculadora pública em si)** — reaproveita o mesmo motor da Calculadora autenticada
+    (`useCalculadora`, `ConfigurarEstimativaOverlay`, `InvoiceModal`, `RecursosTable`) em vez de reimplementar
+    uma tela nova do zero:
+    - `useCalculadora(api, apiKey)` (`frontend/src/hooks/useCalculadora.ts`) ganhou um parâmetro `api`
+      injetável (`CalculadoraApi = {listSubscriptions, listResourceGroups, getRecursos}`, default = as funções
+      privadas de `api/calculadora.ts`) e um `apiKey` string só pra diferenciar a chave de cache do React Query
+      entre instância privada/pública (funções não são serializáveis numa `queryKey`). `InvoiceModal` ganhou o
+      mesmo padrão (`InvoiceModalApi = {listProjetos, createEstimativa}`) mais `defaultResp`/`defaultEmail`
+      opcionais (pré-preenchidos com a identificação do portal, ainda editáveis).
+    - `frontend/src/api/calculadoraPublica.ts` — funções espelhando `api/calculadora.ts` mas contra
+      `/api/public/calculadora/*` (que no servidor delegam pros MESMOS handlers privados de `/recursos` e
+      `/estimar`, só validando subscription/RG contra `portalCfg` antes — mesmo shape de resposta, reaproveita
+      `RECURSO_NUM_FIELDS` exportado de `api/calculadora.ts` pra normalização). `ProjetoPublico` (sem
+      `diretoria`, campo que `GET /api/public/calculadora/projetos` não retorna) é aceito por `InvoiceModal`
+      via um `ProjetoOption` mais permissivo (`diretoria?`), sem duplicar o componente.
+    - `ConfigurarEstimativaOverlay` ganhou uma prop opcional `publicConfig: PublicTaxConfig`
+      (`{imposto, cond, horarioLivre}`) — quando presente: Imposto/Condomínio vêm travados com o valor da
+      config do admin (input `disabled`, ícone 🔒), Horário Livre trava do mesmo jeito (checkbox/dias/horários
+      desabilitados, nota "⚙ Configurado pelo administrador"), coluna Gordura some inteira (nunca existiu no
+      fluxo público) e as taxas **não** são persistidas em `localStorage` (sessão anônima — não faz sentido
+      "lembrar" preferência entre visitantes diferentes de um terminal compartilhado; o fluxo autenticado
+      continua persistindo normalmente).
+    - `RecursosTable` ganhou uma prop `locked?: boolean` — quando `permitir_selecao_recursos=false` na config
+      do portal, os checkboxes ficam desabilitados (não escondidos) e `PublicCalculadoraView` auto-marca todos
+      os recursos assim que a busca retorna (mesmo padrão de `_aplicarRestricoesPortal()`/`buscarRecursos()` no
+      legado). `permitir_selecao_periodo=false` funciona sem código extra no hook — `commitSubs()` já
+      pré-preenche os últimos 30 dias com dados ao confirmar a assinatura; `PublicCalculadoraView` só desabilita
+      visualmente os `<input type="date">`, sem alterar a lógica de preenchimento.
+    - **Achado real — `taxa_imposto`/`taxa_cond`/`horario_livre` chegam SEMPRE travados na prática, nunca
+      "livres"**: a documentação original do legado (`_carregarTaxas()`) descrevia um branch onde o público
+      edita livremente se o admin "não configurou" o campo (valor `null`/`undefined`). Mas
+      `GET /api/public/calculadora/config` (server.js) usa desestruturação com default (`taxa_imposto = 18.65`,
+      etc.) sobre `req.portalCfg` — e `POST /api/admin/portal-config` sempre grava um número concreto ao
+      salvar (nunca `null`). Na prática, o branch "livre" só seria alcançável antes da primeira vez que o admin
+      salva a config do portal (portal nem estaria `ativo` ainda) — inatingível em uso real. `PublicTaxConfig`
+      foi construído refletindo isso: sempre travado (`imposto: cfg.taxa_imposto`, sem tentar modelar um `null`
+      que o servidor não emite hoje).
+    - **Pegadinha real encontrada e corrigida — `PortalConfig.horario_livre` tinha tipo incompleto**: o tipo
+      `HorarioLivreConfig` (pré-existente, Fase A) só declarava `{ativo, inicio, fim, dias}`, mas a config real
+      do portal SEMPRE inclui `inicio_sab`/`fim_sab`/`inicio_dom`/`fim_dom` — o admin configura um horário de
+      fim de semana separado do de dias úteis (`#portal-cfg-hl-ini-sab`/`fim-sab` em app.js, gravado por
+      `POST /api/admin/portal-config`). Confirmado contra o servidor local rodando: `GET /api/public/calculadora/config`
+      retorna os 4 campos. Um primeiro rascunho desta fase presumiu (incorretamente, sem checar o servidor real)
+      que esses campos nunca existiam e sobrescrevia sáb/dom com os valores de dia útil ao montar
+      `PublicTaxConfig` — descartando silenciosamente a configuração real do admin pros fins de semana.
+      Corrigido substituindo `HorarioLivreConfig` por um reexport do `HorarioLivre` de `types/calculadora.ts`
+      (mesmo shape, já usado por `calcHorasLivres`) e repassando `cfg.horario_livre` direto, sem reconstrução.
+    - **Regressão real encontrada e corrigida nesta fase**: a Fase B da Calculadora autenticada (commit
+      anterior) removeu `abrirInvoice()`/`_buildPDFHtml()` de `calculadora.js` e reescreveu `_ovGerarEstimativa()`
+      (o handler do botão "Visualizar Estimativa" dentro do HTML injetado por `_html()`) pra só mostrar um toast
+      de erro — sob a premissa de que esse botão só vivia dentro do `#view-calculadora` legado, permanentemente
+      `display:none` no app autenticado (React é dono da tela agora). Essa premissa é FALSA para o Portal
+      Público: `PortalApp.tsx` ainda chamava `Calculadora.init()` e tornava `#view-calculadora` **visível**
+      (`.active`) dentro do portal — então esse mesmo botão, no fluxo público, era o único caminho real de
+      gerar uma estimativa, e ficou quebrado (toast de erro) desde aquele commit até esta fase. A causa raiz:
+      avaliar "código morto" a partir só da perspectiva do app autenticado, sem considerar que o Portal
+      Público reusa o mesmo HTML/JS injetado por `_html()`. Corrigido substituindo o widget legado inteiro por
+      `PublicCalculadoraView.tsx` — não por restaurar o código antigo.
+    - `calculadora.js` **não é mais carregado em `portal.html`** — `<script src="/calculadora.js">` removido;
+      só o app autenticado (`index.html`) ainda precisa dele (Purge/Diagnóstico da tela Coleta Azure, que
+      permanece legada até sua própria Fase B). A declaração ambiente `var Calculadora` em `bridge.ts` foi
+      removida — sem nenhum código React restante referenciando o identificador solto `Calculadora`.
     **Diferença arquitetural de todas as telas anteriores**: `portal.html` é uma página standalone servida sem
     autenticação — não é uma view dentro do shell `index.html`/`app.js`/`#react-root`/`MIGRATED_VIEWS`. Decisão
     explícita do usuário: **bundle Vite separado**, não reaproveita o bundle autenticado (`react-app.js`).
@@ -313,13 +368,16 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     mesmo reset global, hoje ~0 bytes) — os dois HTMLs referenciam o mesmo `react-app.css`; tentar nomear CSS
     por entry de origem esbarrou num tipo instável do `assetFileNames` nesta versão do Vite/Rollup, não vale a
     complexidade dado que não há CSS real pra diferenciar ainda.
-    `portal.html` (produção, raiz do repo) manteve **inalterados**: o `<style>` inline inteiro (cabeçalho,
-    modal de identificação, hero, `body.portal-mode` overrides que escondem Por Data/Por Serviço/import no
-    widget legado), a pré-pintura de tema, e `<script src="/calculadora.js">`. Só o `<body>` mudou: todo o HTML
-    estático + o script de orquestração (~250 linhas: `initPortal`/identificação/badge/tema) viraram
-    `<div id="portal-root">` + `<script type="module" src="/react-app/portal-app.js">` — `PortalApp.tsx`
-    reaproveita as mesmas classes CSS já existentes (`.portal-header`, `.ident-card`, `.portal-hero` etc.),
-    igual ao padrão já estabelecido pro app autenticado (herda `styles.css`, não reimplementa design system).
+    `portal.html` (produção, raiz do repo) manteve **inalterados** desde a Fase A: o `<style>` inline inteiro
+    (cabeçalho, modal de identificação, hero — os overrides `body.portal-mode` que escondiam Por Data/Por
+    Serviço/import no widget legado ficaram órfãos depois da Fase B, mas inofensivos: nada no HTML atual usa
+    esses seletores), e a pré-pintura de tema. Só o `<body>` mudou: todo o HTML estático + o script de
+    orquestração (~250 linhas: `initPortal`/identificação/badge/tema) viraram `<div id="portal-root">` +
+    `<script type="module" src="/react-app/portal-app.js">` — `PortalApp.tsx` reaproveita as mesmas classes CSS
+    já existentes (`.portal-header`, `.ident-card`, `.portal-hero` etc.), igual ao padrão já estabelecido pro
+    app autenticado (herda `styles.css`, não reimplementa design system). `<script src="/calculadora.js">`
+    existiu na Fase A (calculadora pública ainda legada) e foi removido na Fase B (ver acima) — não faz mais
+    parte de `portal.html`.
     **Pegadinha real encontrada e corrigida — `portal-main.tsx` esquecia o `QueryClientProvider`**: os testes
     Vitest (mockando `QueryClientProvider` manualmente no arquivo de teste) passavam mesmo com esse bug real —
     só apareceu ao testar contra o servidor de verdade via Playwright (`"No QueryClient set, use
@@ -873,12 +931,11 @@ assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Pri
 
 ### Portal Público
 `portal.html` — calculadora Azure pública, sem login. Serve `/portal.html` diretamente via `express.static`.
-**Chrome (cabeçalho/identificação/tema/hero/estados) migrado pra React em `frontend/src/PortalApp.tsx`**
-(Fase A — ver `## Frontend React` acima); `portal.html` hoje só tem `<head>`/CSS inline + `<body class="portal-mode">`
-com `<div id="portal-root">` + `<script src="/calculadora.js">` + `<script type="module" src="/react-app/portal-app.js">`
-(bundle Vite **separado** do app autenticado). A calculadora em si (o widget dentro de `#view-calculadora`)
-continua 100% `calculadora.js` legado — `PortalApp.tsx` só chama `Calculadora.init({apiBase:'/api/public/calculadora',
-publico:true, defaultConfig})`, igual ao `_abrirCalculadora()` antigo.
+**Migrado inteiramente pra React** (Fase A: chrome em `frontend/src/PortalApp.tsx`; Fase B: fluxo de
+consulta/estimativa em si em `frontend/src/views/PublicCalculadoraView.tsx` — ver `## Frontend React` acima
+pros detalhes de cada fase); `portal.html` hoje só tem `<head>`/CSS inline + `<body class="portal-mode">` com
+`<div id="portal-root">` + `<script type="module" src="/react-app/portal-app.js">` (bundle Vite **separado**
+do app autenticado) — `calculadora.js` não é mais carregado aqui.
 
 **Ativação:** admin habilita via Configurações → Portal Público → toggle Ativar + Salvar. Config armazenada em `portal_config` (key=`'config'`).
 
@@ -887,7 +944,7 @@ publico:true, defaultConfig})`, igual ao `_abrirCalculadora()` antigo.
 - `PortalApp.tsx`'s `toggleTheme()` alterna `data-theme` + salva em `localStorage 'finops-theme'` (substituiu `_portalToggleTheme()`)
 - Tema compartilhado com o app autenticado — preferência persiste entre portal e sistema principal
 - Header roxo (`#6d28d9`) mantém elementos brancos no tema claro via `[data-theme="light"] .portal-header { background: #6d28d9 }`
-- Classe `.crcard-ov` adicionada nos cards do overlay Configurar Estimativa (`calculadora.js`) para permitir sobrescrita via CSS no tema claro
+- Classe `.crcard-ov` nos cards do overlay Configurar Estimativa (`ConfigurarEstimativaOverlay.tsx`, compartilhado entre Calculadora autenticada e Portal Público) permite sobrescrita via CSS no tema claro
 
 **Middleware `_portalMiddleware`:** lê `portal_config`, bloqueia com 403 se `ativo=false`. Injeta `req.portalCfg` para os handlers seguintes.
 

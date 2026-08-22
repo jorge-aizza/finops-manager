@@ -23,40 +23,62 @@ const DIAS_SEMANA = [
 
 const LOTE = 100
 
+// Portal Público Fase B — porta de _aplicarRestricoesPortal()/_carregarTaxas()
+// (calculadora.js): admin pode travar imposto/condomínio/horário livre com
+// valores fixos (campo não-null na config), ou deixar o público editar
+// livremente (campo null/undefined). Gordura sempre oculta no portal —
+// nunca fez parte do fluxo público, só do autenticado.
+export interface PublicTaxConfig {
+  imposto: number | null
+  cond: number | null
+  horarioLivre: HorarioLivre | null
+}
+
 interface Props {
   calc: UseCalculadoraReturn
   taxaBrl: number
   onClose: () => void
   onVisualizarEstimativa: (estimativa: EstimativaCalculada, periodos: Periodo[]) => void
+  publicConfig?: PublicTaxConfig
 }
 
-export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, onVisualizarEstimativa }: Props) {
+export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, onVisualizarEstimativa, publicConfig }: Props) {
   const [modo, setModo] = useState<'horas' | 'periodo'>('horas')
   const [periodos, setPeriodos] = useState<Periodo[]>([])
   const [iniData, setIniData] = useState('')
   const [iniHora, setIniHora] = useState('00:00')
   const [fimData, setFimData] = useState('')
   const [fimHora, setFimHora] = useState('00:00')
-  const [horarioLivre, setHorarioLivre] = useState<HorarioLivre>(defaultHorarioLivre())
-  const [pctImposto, setPctImposto] = useState(TAXA_IMP_DEF)
-  const [pctCond, setPctCond] = useState(TAXA_COND_DEF)
+  const [horarioLivre, setHorarioLivre] = useState<HorarioLivre>(() => publicConfig?.horarioLivre || defaultHorarioLivre())
+  const [pctImposto, setPctImposto] = useState(() => publicConfig ? (publicConfig.imposto ?? TAXA_IMP_DEF) : TAXA_IMP_DEF)
+  const [pctCond, setPctCond] = useState(() => publicConfig ? (publicConfig.cond ?? TAXA_COND_DEF) : TAXA_COND_DEF)
   const [pctGordura, setPctGordura] = useState(TAXA_GORD_DEF)
   const [visiveis, setVisiveis] = useState(LOTE)
 
+  const impostoTravado = !!publicConfig && publicConfig.imposto != null
+  const condTravado = !!publicConfig && publicConfig.cond != null
+  const horarioLivreTravado = !!publicConfig?.horarioLivre
+
+  // Portal público não persiste taxas em localStorage (sessão anônima, sem
+  // sentido "lembrar" entre visitantes diferentes de um terminal compartilhado)
+  // — só o fluxo autenticado usa esse comportamento.
   useEffect(() => {
+    if (publicConfig) return
     const si = localStorage.getItem(LS_IMP)
     const sc = localStorage.getItem(LS_COND)
     const sg = localStorage.getItem(LS_GORD)
     setPctImposto(si !== null ? parseFloat(si) : TAXA_IMP_DEF)
     setPctCond(sc !== null ? parseFloat(sc) : TAXA_COND_DEF)
     setPctGordura(sg !== null ? parseFloat(sg) : TAXA_GORD_DEF)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
+    if (publicConfig) return
     localStorage.setItem(LS_IMP, String(pctImposto))
     localStorage.setItem(LS_COND, String(pctCond))
     localStorage.setItem(LS_GORD, String(pctGordura))
-  }, [pctImposto, pctCond, pctGordura])
+  }, [publicConfig, pctImposto, pctCond, pctGordura])
 
   const vIni = iniData ? `${iniData}T${iniHora}` : ''
   const vFim = fimData ? `${fimData}T${fimHora}` : ''
@@ -208,15 +230,19 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
 
             <div className="crcard-ov" style={{ background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 12, padding: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                <input type="checkbox" checked={horarioLivre.ativo} onChange={(e) => setHorarioLivre((h) => ({ ...h, ativo: e.target.checked }))} />
+                <input type="checkbox" checked={horarioLivre.ativo} disabled={horarioLivreTravado}
+                  onChange={(e) => setHorarioLivre((h) => ({ ...h, ativo: e.target.checked }))} />
                 <span style={{ fontSize: 12, fontWeight: 700 }}>Horário Livre (desconta horas fora do expediente)</span>
               </div>
+              {horarioLivreTravado && (
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 8 }}>⚙ Configurado pelo administrador</div>
+              )}
               {horarioLivre.ativo && (
                 <>
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
                     {DIAS_SEMANA.map((d) => (
-                      <label key={d.v} style={{ fontSize: 10, display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}>
-                        <input type="checkbox" checked={horarioLivre.dias.includes(d.v)}
+                      <label key={d.v} style={{ fontSize: 10, display: 'flex', alignItems: 'center', gap: 3, cursor: horarioLivreTravado ? 'default' : 'pointer', opacity: horarioLivreTravado && !horarioLivre.dias.includes(d.v) ? 0.4 : 1 }}>
+                        <input type="checkbox" checked={horarioLivre.dias.includes(d.v)} disabled={horarioLivreTravado}
                           onChange={(e) => setHorarioLivre((h) => ({ ...h, dias: e.target.checked ? [...h.dias, d.v] : h.dias.filter((x) => x !== d.v) }))} />
                         {d.label}
                       </label>
@@ -224,9 +250,9 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
                   </div>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 }}>
                     <span style={{ color: 'var(--text-muted)' }}>Dias úteis:</span>
-                    <input type="time" className="ci" value={horarioLivre.inicio} onChange={(e) => setHorarioLivre((h) => ({ ...h, inicio: e.target.value }))} style={{ height: 26, fontSize: 11 }} />
+                    <input type="time" className="ci" value={horarioLivre.inicio} disabled={horarioLivreTravado} onChange={(e) => setHorarioLivre((h) => ({ ...h, inicio: e.target.value }))} style={{ height: 26, fontSize: 11 }} />
                     <span>→</span>
-                    <input type="time" className="ci" value={horarioLivre.fim} onChange={(e) => setHorarioLivre((h) => ({ ...h, fim: e.target.value }))} style={{ height: 26, fontSize: 11 }} />
+                    <input type="time" className="ci" value={horarioLivre.fim} disabled={horarioLivreTravado} onChange={(e) => setHorarioLivre((h) => ({ ...h, fim: e.target.value }))} style={{ height: 26, fontSize: 11 }} />
                   </div>
                 </>
               )}
@@ -234,19 +260,25 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
 
             <div className="crcard-ov" style={{ background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 12, padding: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 10 }}>Taxas Adicionais</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: publicConfig ? '1fr 1fr' : '1fr 1fr 1fr', gap: 8 }}>
                 <div>
-                  <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Imposto %</label>
-                  <input type="number" step={0.01} className="ci" value={pctImposto} onChange={(e) => setPctImposto(parseFloat(e.target.value) || 0)} />
+                  <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Imposto %{impostoTravado && ' 🔒'}</label>
+                  <input type="number" step={0.01} className="ci" value={pctImposto} disabled={impostoTravado}
+                    title={impostoTravado ? 'Configurado pelo administrador' : ''}
+                    onChange={(e) => setPctImposto(parseFloat(e.target.value) || 0)} />
                 </div>
                 <div>
-                  <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Condomínio %</label>
-                  <input type="number" step={0.01} className="ci" value={pctCond} onChange={(e) => setPctCond(parseFloat(e.target.value) || 0)} />
+                  <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Condomínio %{condTravado && ' 🔒'}</label>
+                  <input type="number" step={0.01} className="ci" value={pctCond} disabled={condTravado}
+                    title={condTravado ? 'Configurado pelo administrador' : ''}
+                    onChange={(e) => setPctCond(parseFloat(e.target.value) || 0)} />
                 </div>
-                <div>
-                  <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Gordura %</label>
-                  <input type="number" step={0.01} className="ci" value={pctGordura} onChange={(e) => setPctGordura(parseFloat(e.target.value) || 0)} />
-                </div>
+                {!publicConfig && (
+                  <div>
+                    <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Gordura %</label>
+                    <input type="number" step={0.01} className="ci" value={pctGordura} onChange={(e) => setPctGordura(parseFloat(e.target.value) || 0)} />
+                  </div>
+                )}
               </div>
             </div>
 

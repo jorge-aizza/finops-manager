@@ -28,6 +28,10 @@ interface RecursosTableProps {
   onToggleGrupo: (baseId: string) => void
   onCheck: (rid: string, checked: boolean) => void
   onCheckGrupo: (baseId: string, checked: boolean) => void
+  // Portal Público sem permissão de seleção de recursos (permitir_selecao_recursos=false)
+  // — todos os recursos já vêm pré-selecionados e os checkboxes ficam
+  // desabilitados (não escondidos), igual a _aplicarRestricoesPortal() no legado.
+  locked?: boolean
 }
 
 // Porta de _renderRecursos/_htmlFilhaRow (calculadora.js) — em vez do truque
@@ -37,7 +41,7 @@ interface RecursosTableProps {
 // com centenas/milhares de recursos são o caso esperado, não a exceção.
 export default function RecursosTable({
   grupos, selecionados, expandedGroups, dbTaxaMap, taxaBrl,
-  onToggleGrupo, onCheck, onCheckGrupo,
+  onToggleGrupo, onCheck, onCheckGrupo, locked = false,
 }: RecursosTableProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -104,7 +108,7 @@ export default function RecursosTable({
                   <div role="row" style={{ display: 'grid', gridTemplateColumns: COLS, background: 'var(--bg-hover)', cursor: 'pointer' }} onClick={() => onToggleGrupo(g.baseId)}>
                     <div style={{ textAlign: 'center', padding: '8px 4px' }} onClick={(e) => e.stopPropagation()}>
                       <input
-                        type="checkbox" checked={todosSel}
+                        type="checkbox" checked={todosSel} disabled={locked}
                         ref={(el) => { if (el) el.indeterminate = algumSel && !todosSel }}
                         onChange={(e) => onCheckGrupo(g.baseId, e.target.checked)}
                       />
@@ -125,12 +129,12 @@ export default function RecursosTable({
                 ) : (
                   <FilhaRow r={g.filhas[0]} temMultiplos={false} rg={rg} nome={nome} isBRL={isBRL} taxaBrl={taxaBrl}
                     selected={!!selecionados[recursoKey(g.filhas[0])]} dbInfo={dbTaxaMap.get((g.filhas[0].resource_group_name || '').toLowerCase()) || null}
-                    onCheck={onCheck} />
+                    onCheck={onCheck} locked={locked} />
                 )}
                 {temMultiplos && exp && g.filhas.map((r) => (
                   <FilhaRow key={recursoKey(r)} r={r} temMultiplos rg={rg} nome={nome} isBRL={isBRL} taxaBrl={taxaBrl}
                     selected={!!selecionados[recursoKey(r)]} dbInfo={dbTaxaMap.get((r.resource_group_name || '').toLowerCase()) || null}
-                    onCheck={onCheck} />
+                    onCheck={onCheck} locked={locked} />
                 ))}
               </div>
             )
@@ -141,9 +145,10 @@ export default function RecursosTable({
   )
 }
 
-function FilhaRow({ r, temMultiplos, rg, nome, isBRL, taxaBrl, selected, dbInfo, onCheck }: {
+function FilhaRow({ r, temMultiplos, rg, nome, isBRL, taxaBrl, selected, dbInfo, onCheck, locked }: {
   r: RecursoBilling; temMultiplos: boolean; rg: string; nome: string; isBRL: boolean
   taxaBrl: number; selected: boolean; dbInfo: DbTaxaInfo | null; onCheck: (rid: string, checked: boolean) => void
+  locked?: boolean
 }) {
   const rid = recursoKey(r)
   const totBrl = isBRL ? (Number(r.total_billing) || 0) : (Number(r.total_billing) || 0) * taxaBrl
@@ -152,7 +157,7 @@ function FilhaRow({ r, temMultiplos, rg, nome, isBRL, taxaBrl, selected, dbInfo,
   return (
     <div role="row" style={{ display: 'grid', gridTemplateColumns: COLS, background: selected ? 'rgba(147,51,234,.04)' : undefined, borderLeft: isMkt ? '2px solid rgba(255,140,66,.4)' : undefined }}>
       <div style={{ textAlign: 'center', padding: '8px 4px' }}>
-        <input type="checkbox" checked={selected} onChange={(e) => onCheck(rid, e.target.checked)} />
+        <input type="checkbox" checked={selected} disabled={locked} onChange={(e) => onCheck(rid, e.target.checked)} />
       </div>
       <div style={{ overflow: 'hidden', padding: '8px 10px', paddingLeft: temMultiplos ? 28 : 10 }}>
         <div style={{ fontSize: temMultiplos ? 11 : 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: temMultiplos ? 'var(--text-dim)' : 'var(--text)' }}
