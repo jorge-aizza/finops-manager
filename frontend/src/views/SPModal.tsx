@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { createSP, updateSP } from '../api/coleta'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { createSP, listarSubsPreview, listarSubsSP, updateSP } from '../api/coleta'
+import CheckboxSearchList from '../components/CheckboxSearchList'
 import type { ModoColeta, ServicePrincipal, ServicePrincipalInput } from '../types/coleta'
 
 interface FormState {
@@ -41,12 +42,31 @@ interface SPModalProps {
   onClose: () => void
 }
 
-// Só o CRUD básico (Fase A) — sem o seletor de subscriptions (modo_coleta
-// "subscription" exige subscription_ids, que depende de buscar assinaturas
-// reais na Azure via testarSP/spBuscarSubs — Fase B).
+// Fase B — CRUD (Fase A) + seletor de subscriptions ao vivo pra modo_coleta
+// "subscription" (porta de spBuscarSubs/app.js:4898+). SP existente: busca
+// via a própria SP salva (listarSubsSP). SP nova: precisa das credenciais já
+// preenchidas no formulário (listarSubsPreview, sem precisar salvar antes —
+// mesmo endpoint que o wizard usa pra pré-visualizar).
 export default function SPModal({ sp, onClose }: SPModalProps) {
   const queryClient = useQueryClient()
   const [form, setForm] = useState<FormState>(() => (sp ? fromSP(sp) : emptyForm()))
+  const [selectedSubs, setSelectedSubs] = useState<Set<string>>(
+    () => new Set((sp?.subscription_ids || '').split(',').map((s) => s.trim()).filter(Boolean)),
+  )
+
+  const subsQuery = useQuery({
+    queryKey: sp ? ['sp-modal-subs', sp.id] : ['sp-modal-subs-preview', form.tenant_id, form.client_id, form.client_secret],
+    queryFn: () => (sp
+      ? listarSubsSP(sp.id)
+      : listarSubsPreview({ tenant_id: form.tenant_id, client_id: form.client_id, client_secret: form.client_secret })),
+    enabled: form.modo_coleta === 'subscription' && (!!sp || !!(form.tenant_id && form.client_id && form.client_secret)),
+    retry: false,
+  })
+  const subItems = (subsQuery.data?.subs || []).map((s) => ({ id: s.subscriptionId, label: s.nome }))
+
+  function toggleSub(id: string, checked: boolean) {
+    setSelectedSubs((prev) => { const n = new Set(prev); if (checked) n.add(id); else n.delete(id); return n })
+  }
 
   const saveMutation = useMutation({
     mutationFn: (input: ServicePrincipalInput) => (sp ? updateSP(sp.id, input) : createSP(input)),
@@ -76,7 +96,7 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
       modo_coleta: form.modo_coleta,
       billing_account_id: form.modo_coleta === 'billing_profile' ? form.billing_account_id : null,
       billing_profile_id: form.modo_coleta === 'billing_profile' ? form.billing_profile_id : null,
-      subscription_ids: sp?.subscription_ids ?? null, // preservado — seleção via wizard (Fase B)
+      subscription_ids: form.modo_coleta === 'subscription' ? ([...selectedSubs].join(',') || null) : (sp?.subscription_ids ?? null),
       ativo: form.ativo,
       dia_execucao: sp?.dia_execucao ?? 5,
       granularidade_dias: sp?.granularidade_dias ?? 7,
@@ -133,9 +153,21 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
                 </div>
               </>
             ) : (
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 0' }}>
-                Seleção de Subscriptions é feita pelo wizard de coleta (ainda não migrado) — a seleção já
-                salva neste SP é preservada ao editar os outros campos aqui.
+              <div className="form-group">
+                <label>Subscriptions *</label>
+                {!sp && !(form.tenant_id && form.client_id && form.client_secret) && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '8px 0' }}>
+                    Preencha Tenant ID, Client ID e Client Secret acima pra listar as assinaturas disponíveis.
+                  </div>
+                )}
+                {(sp || (form.tenant_id && form.client_id && form.client_secret)) && (
+                  <CheckboxSearchList
+                    items={subItems} selected={selectedSubs} onToggle={toggleSub}
+                    onSelectAll={(c) => setSelectedSubs(c ? new Set(subItems.map((i) => i.id)) : new Set())}
+                    loading={subsQuery.isLoading}
+                    emptyText={subsQuery.isError ? 'Não foi possível listar — verifique as credenciais.' : 'Nenhuma assinatura encontrada.'}
+                  />
+                )}
               </div>
             )}
             <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

@@ -114,9 +114,56 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     detalhe por subscription), Histórico de Execuções (abas API/Storage/Manual — a aba Manual usa
     `GET /api/azure-costs/imports`, endpoint diferente do `GET /api/azure-coleta/historico` das outras duas)
     e Pendentes (lista + exclusão apenas — não existe criação fora do wizard, que é Fase B).
-    **Deliberadamente fora do escopo (Fase B, não iniciada)**: wizard de 4 passos, monitor de coleta ao vivo
-    (polling `_coletaPolling`), botões "Testar SP"/"Testar Storage"/"Coletar agora" — todos dependem de
-    chamadas reais à API da Azure, não migrados até haver necessidade real de exercitá-los via automação.
+    **Fase B** — wizard de 4 passos, monitor de coleta ao vivo, botões "Testar SP"/"Testar Storage"/"Coletar
+    agora" e o seletor de subscriptions ao vivo do modal de SP. Tudo isso depende de chamadas reais à API da
+    Azure (`_managementGetToken`/`_storageGetToken`/ARM), que não há credencial disponível pra exercitar neste
+    ambiente — verificado até onde dá sem Azure real: `tsc -b`, `vite build`, e 22 testes novos (Vitest,
+    mockando `api/coleta.ts`) cobrindo navegação de passos, construção de payload, bloqueio quando já há coleta
+    em execução, e o ciclo de vida do monitor. Os botões que chamam a Azure de verdade (Testar SP/Storage,
+    Iniciar Coleta, Coletar agora) precisam de verificação manual do usuário com credenciais reais — não
+    reivindicado como testado E2E aqui, diferente das fases anteriores desta sessão.
+    - `frontend/src/components/CheckboxSearchList.tsx` — lista com busca + "Selecionar todos", usada pelo
+      wizard (assinaturas/RGs) e pelo seletor de subscriptions do `SPModal.tsx`. Diferente de
+      `CmsMultiSelect.tsx` (dropdown pending→commit): aqui a seleção é sempre visível, sem "OK" pra confirmar —
+      mais adequado a uma etapa de wizard de tela cheia do que a um filtro compacto de toolbar.
+    - `frontend/src/views/WizardColetaModal.tsx` — porta de `#modal-wizard-coleta`/`_wizard*` (app.js:5206-5764):
+      Assinaturas → Resource Groups → Período → Confirmar+Agendamento. Modo `billing_profile` pode escolher
+      entre esse escopo (pula direto pro período) ou "Assinaturas específicas" (mesmo fluxo do modo
+      `subscription`). RGs de múltiplas assinaturas com o mesmo nome são deduplicados por nome (o corpo de
+      `coletar-api` aceita só uma lista plana de nomes, não pares assinatura+RG). Antes de iniciar, revalida
+      `GET /azure-coleta/status` (`em_execucao`) pra evitar corrida com outra coleta já rodando — o servidor
+      também rejeita com 409, mas a checagem client-side dá um erro mais claro antes de gastar a chamada.
+    - `frontend/src/views/AgendamentoModal.tsx` — porta simplificada de `#modal-editar-agend` (app.js:4126+):
+      edita hora/dias da coleta recorrente e oferece "Coletar agora" (janela rolante de
+      `hoje − granularidade_dias`). **Decisão deliberada**: não porta o seletor de assinaturas ao vivo próprio
+      desse modal (`agendBuscarSubs`/`_agendRenderSubs` no legado) — mudar o ESCOPO de assinaturas/RGs é feito
+      pelo wizard ("Iniciar Coleta"), que já cobre isso; duplicar o picker aqui fragmentaria onde o escopo é
+      editado em vez de simplificar. Este modal foca só em agendamento + coleta pontual com o escopo já salvo.
+    - `frontend/src/components/ColetaMonitor.tsx` — porta de `#coleta-monitor`/`loadColetaStatus()`/
+      `_coletaPolling`: card de progresso ao vivo (fase, sub atual, chunk, inseridos/atualizados/erros, log,
+      circuit breaker) via `useQuery` com `refetchInterval` dinâmico (3s enquanto `em_execucao`, 20s ocioso —
+      detecta coletas disparadas pelo agendador sem precisar de ação do usuário nesta aba, sem manter polling
+      rápido o tempo todo). Fica em "estado final" colorido após terminar até o usuário clicar "Fechar" — mesmo
+      padrão do legado. Renderiza `null` quando não há `progresso` (nunca rodou nada nesta instância do
+      servidor) — não polui a tela pra quem nunca mexeu em coleta.
+    - `frontend/src/views/DiagAgendadorModal.tsx` — porta de `diagAgendador()` (app.js:4356): dump read-only de
+      por que cada SP/Storage "deveria rodar" ou não segundo o agendador. Só consulta Postgres (sem Azure) —
+      **verificado end-to-end viável sem credenciais Azure**, mas não exercitado nesta fase por falta de sessão
+      autenticada no ambiente (endpoint exige `authMiddleware`).
+    - `SPModal.tsx` ganhou o seletor de subscriptions ao vivo (`modo_coleta='subscription'`) que a Fase A
+      deixou de fora deliberadamente: SP existente busca via `listarSubsSP`; SP nova precisa das credenciais já
+      preenchidas no formulário pra usar `listarSubsPreview` (mesmo endpoint que o wizard usa, sem precisar
+      salvar antes). Ao salvar, `subscription_ids` passa a refletir a seleção do picker em vez de preservar o
+      valor antigo verbatim (Fase A só preservava, nunca editava).
+    - **Deliberadamente fora do escopo mesmo na Fase B**: as ações por-célula da grade de Cobertura
+      (`_coberturaColetarAgora`/`_coberturaAgendarPendente` no legado — "▶ Agora" e "Agendar Pendente" direto
+      num mês/assinatura da grade) permanecem read-only em `CoberturaGrid.tsx`; o mesmo resultado (coletar um
+      escopo específico) já é alcançável via "Iniciar Coleta" no wizard. O seletor de granularidade "Livre"
+      (data customizada) do modal de SP legado não foi portado — `SPModal.tsx` mantém o default de 7 dias já
+      existente na Fase A. `GET /api/azure-coleta/agendamentos` não tem chamador nem no legado nem aqui
+      (aparenta ser código morto do lado do servidor) — não portado. Purge/Diagnóstico (`abrirPurgeAzure()`/
+      `abrirDiagnosticoAzure()`, ainda bridgeados pra `calculadora.js` via `_ensureCalcIniciado()`) também
+      seguem fora — ver nota na seção "Calculadora Fase B" acima sobre por que continuam ali por enquanto.
     Pegadinha real evitada em `frontend/src/api/coleta.ts` (`setStorageAtivo`): a rota `PUT /api/azure-coleta/storages/:id`
     não tem PATCH parcial — o handler grava **todos** os campos do body, inclusive como `null` os que faltarem.
     Um toggle ingênuo (`PUT {ativo}`) zeraria `nome`/`storage_account`/etc. — `setStorageAtivo` reenvia a linha

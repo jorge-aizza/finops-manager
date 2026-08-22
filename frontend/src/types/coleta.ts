@@ -1,6 +1,8 @@
-// Contrato de server.js — Fase A da Coleta Azure (CRUD + relatórios).
-// Wizard de 4 passos, monitor de coleta ao vivo e botões "Testar"/"Coletar
-// agora" (chamadas reais à Azure) ficam pra Fase B — ver plano de migração.
+// Contrato de server.js — Coleta Azure. Fase A cobriu CRUD + relatórios.
+// Fase B (abaixo) cobre o wizard de 4 passos, o monitor de coleta ao vivo e
+// os botões "Testar"/"Coletar agora" — todos dependentes de chamadas reais
+// à API da Azure, verificados contra o servidor local (build/tipos/CRUD)
+// mas não contra credenciais Azure reais (sem acesso a elas neste ambiente).
 
 export type ModoColeta = 'billing_profile' | 'subscription'
 
@@ -112,4 +114,122 @@ export interface Pendente {
   data_fim: string
   descricao: string | null
   criado_em: string
+}
+
+// ── Fase B ────────────────────────────────────────────────────────
+
+export interface SubscriptionPreview {
+  subscriptionId: string
+  nome: string
+}
+
+export interface RGPreview {
+  subscriptionId: string
+  name: string
+}
+
+export interface TesteResultado {
+  ok: boolean
+  msg: string
+}
+
+export interface TestarSPResponse {
+  ok: boolean
+  message: string
+  results: { management: TesteResultado; storage: TesteResultado }
+}
+
+export interface TestarStorageResponse {
+  ok: boolean
+  total: number
+  totalSizeMB: string
+  preview: { name: string; sizeMB: string; lastModified: string }[]
+}
+
+export type MetricColeta = 'ActualCost' | 'AmortizedCost'
+
+export interface ColetarAPIInput {
+  modo: ModoColeta
+  data_inicio: string
+  data_fim: string
+  metric: MetricColeta
+  billing_account_id?: string
+  billing_profile_id?: string
+  subscription_ids?: string[]
+  resource_groups?: string[]
+}
+
+export interface ColetaProgresso {
+  tipo: 'api' | 'storage'
+  fase: string
+  sub_atual?: string
+  chunk_atual?: number
+  chunk_total?: number
+  chunk_idx?: number
+  ins: number
+  upd: number
+  err: number
+  sub_idx?: number
+  sub_total?: number
+  log: { ts: string; msg: string }[]
+}
+
+export interface ColetaStatus {
+  em_execucao: boolean
+  cancelando: boolean
+  progresso: ColetaProgresso | null
+  ultimo: HistoricoItem | null
+  ultimo_api: HistoricoItem | null
+  ultimo_storage: HistoricoItem | null
+  agendador_ativo: boolean
+  circuit_breaker: { state: string; failures: number; open_until: string | null }
+}
+
+export interface AgendamentoSPInput {
+  hora_execucao: number | null
+  dias_semana: string | null
+  auto_coleta: boolean
+}
+
+export interface AgendamentoStorageInput {
+  hora_execucao: number | null
+  dias_semana: string | null
+}
+
+export interface DiagAgendadorSP {
+  id: number
+  nome: string
+  ativo: boolean
+  auto_coleta: boolean
+  modo_coleta: ModoColeta
+  hora_execucao: number | null
+  dias_semana: string | null
+  tem_subs: boolean
+  tem_billing: boolean
+  proxima_coleta: string | null
+  agora_pg: string
+  deveria_rodar: boolean
+}
+
+export interface DiagAgendadorStorage {
+  id: number
+  nome: string
+  ativo: boolean
+  hora_execucao: number | null
+  dias_semana: string | null
+  auto_coleta_horas: number | null
+  tem_storage: boolean
+  proxima_coleta: string | null
+  agora_pg: string
+  deveria_rodar: boolean
+}
+
+export interface DiagAgendador {
+  agora_node: string
+  agora_node_local: string
+  tz_process: string
+  coleta_em_execucao: boolean
+  agendador_ativo: boolean
+  api_sps: DiagAgendadorSP[]
+  storage_sps: DiagAgendadorStorage[]
 }

@@ -1,14 +1,18 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  deleteHistorico, deletePendente, deleteSP, deleteStorage,
+  deleteHistorico, deletePendente, deleteSP, deleteStorage, executarStorage,
   getCoberturaMeses, getHistorico, getImports, listPendentes, listSPs, listStorages,
-  setSPAtivo, setSPPadrao, setStorageAtivo,
+  setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
 } from '../api/coleta'
 import type { HistoricoItem, ImportItem, ServicePrincipal, StorageConfig } from '../types/coleta'
 import CoberturaGrid from '../components/CoberturaGrid'
+import ColetaMonitor from '../components/ColetaMonitor'
 import SPModal from './SPModal'
 import StorageModal from './StorageModal'
+import WizardColetaModal from './WizardColetaModal'
+import AgendamentoModal from './AgendamentoModal'
+import DiagAgendadorModal from './DiagAgendadorModal'
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return '—'
@@ -67,6 +71,16 @@ export default function ColetaView() {
     deleteSPMutation.mutate(sp.id)
   }
 
+  const [wizardSP, setWizardSP] = useState<ServicePrincipal | null>(null)
+  const [agendamentoSP, setAgendamentoSP] = useState<ServicePrincipal | null>(null)
+  const [diagOpen, setDiagOpen] = useState(false)
+
+  const testarSPMutation = useMutation({
+    mutationFn: (id: number) => testarSP(id),
+    onSuccess: (r) => window.showToast?.(r.message.replace(/\n/g, ' · '), r.results.management.ok ? 'success' : 'warn'),
+    onError: (e: Error) => window.showToast?.('Erro ao testar: ' + e.message, 'error'),
+  })
+
   // ── Storage Accounts ──
   const storagesQuery = useQuery({ queryKey: ['coleta-storages'], queryFn: listStorages })
   const [storageModalOpen, setStorageModalOpen] = useState(false)
@@ -90,6 +104,20 @@ export default function ColetaView() {
     if (!confirm(`Excluir o Storage Account "${s.nome}"? Esta ação não pode ser desfeita.`)) return
     deleteStorageMutation.mutate(s.id)
   }
+
+  const testarStorageMutation = useMutation({
+    mutationFn: (id: number) => testarStorage(id),
+    onSuccess: (r) => window.showToast?.(`${r.total} arquivo(s) encontrado(s) (${r.totalSizeMB} MB).`, 'success'),
+    onError: (e: Error) => window.showToast?.('Erro ao testar: ' + e.message, 'error'),
+  })
+  const executarStorageMutation = useMutation({
+    mutationFn: (id: number) => executarStorage(id),
+    onSuccess: (r) => {
+      window.showToast?.(r.message, 'success')
+      queryClient.invalidateQueries({ queryKey: ['coleta-status'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao executar: ' + e.message, 'error'),
+  })
 
   // ── Histórico ──
   const [histTab, setHistTab] = useState<HistTab>('api')
@@ -116,6 +144,8 @@ export default function ColetaView() {
         <div className="page-title">Coleta de Custos Azure</div>
         <div className="view-hero-sub">Service Principals, Storage Accounts, cobertura de dados e histórico de execuções</div>
       </div>
+
+      <ColetaMonitor />
 
       {/* ── Cobertura por Mês ── */}
       <div className="stat-card" style={{ padding: '16px 20px' }}>
@@ -159,9 +189,14 @@ export default function ColetaView() {
       <div className="card">
         <div className="card-header">
           <span className="card-title">Service Principals</span>
-          <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingSP(null); setSpModalOpen(true) }}>
-            Novo SP
-          </button>
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDiagOpen(true)}>
+              🔍 Diagnóstico do Agendador
+            </button>
+            <button className="btn-primary" onClick={() => { setEditingSP(null); setSpModalOpen(true) }}>
+              Novo SP
+            </button>
+          </div>
         </div>
         <div className="table-wrapper">
           <table className="data-table">
@@ -189,6 +224,9 @@ export default function ColetaView() {
                   </td>
                   <td>
                     <div className="table-actions">
+                      <button className="btn-icon" title="Testar credenciais" disabled={testarSPMutation.isPending} onClick={() => testarSPMutation.mutate(sp.id)}>🔌</button>
+                      <button className="btn-icon" title="Iniciar Coleta" onClick={() => setWizardSP(sp)}>▶</button>
+                      <button className="btn-icon" title="Agendamento" onClick={() => setAgendamentoSP(sp)}>⏰</button>
                       {!sp.is_padrao && (
                         <button className="btn-icon" title="Definir como padrão" onClick={() => padraoSPMutation.mutate(sp.id)}>★</button>
                       )}
@@ -204,9 +242,6 @@ export default function ColetaView() {
               ))}
             </tbody>
           </table>
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '8px 4px 0' }}>
-          Testar credenciais e coletar agora ainda estão na tela antiga — essa parte depende de chamadas reais à Azure e migra numa próxima fase.
         </div>
       </div>
 
@@ -242,6 +277,8 @@ export default function ColetaView() {
                   </td>
                   <td>
                     <div className="table-actions">
+                      <button className="btn-icon" title="Testar acesso" disabled={testarStorageMutation.isPending} onClick={() => testarStorageMutation.mutate(s.id)}>🔌</button>
+                      <button className="btn-icon" title="Executar agora" disabled={executarStorageMutation.isPending} onClick={() => executarStorageMutation.mutate(s.id)}>▶</button>
                       <button className="btn-icon" title="Editar" onClick={() => { setEditingStorage(s); setStorageModalOpen(true) }}>
                         <svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" /></svg>
                       </button>
@@ -341,6 +378,9 @@ export default function ColetaView() {
 
       {spModalOpen && <SPModal sp={editingSP} onClose={() => setSpModalOpen(false)} />}
       {storageModalOpen && <StorageModal storage={editingStorage} onClose={() => setStorageModalOpen(false)} />}
+      {wizardSP && <WizardColetaModal sp={wizardSP} onClose={() => setWizardSP(null)} />}
+      {agendamentoSP && <AgendamentoModal sp={agendamentoSP} onClose={() => setAgendamentoSP(null)} />}
+      {diagOpen && <DiagAgendadorModal onClose={() => setDiagOpen(false)} />}
     </div>
   )
 }

@@ -60,6 +60,11 @@ beforeEach(() => {
   vi.mocked(coletaApi.getHistorico).mockResolvedValue(mockHistorico)
   vi.mocked(coletaApi.getImports).mockResolvedValue([])
   vi.mocked(coletaApi.listPendentes).mockResolvedValue(mockPendentes)
+  vi.mocked(coletaApi.getColetaStatus).mockResolvedValue({
+    em_execucao: false, cancelando: false, progresso: null, ultimo: null, ultimo_api: null, ultimo_storage: null,
+    agendador_ativo: true, circuit_breaker: { state: 'closed', failures: 0, open_until: null },
+  })
+  window.showToast = vi.fn()
 })
 
 describe('ColetaView', () => {
@@ -118,5 +123,64 @@ describe('ColetaView', () => {
     await user.click(within(row).getByTitle('Excluir'))
 
     await waitFor(() => expect(coletaApi.deleteStorage).toHaveBeenCalledWith(1))
+  });
+
+  it('"Testar credenciais" chama testarSP e mostra o resultado num toast', async () => {
+    const user = userEvent.setup()
+    vi.mocked(coletaApi.testarSP).mockResolvedValue({
+      ok: true, message: 'Azure Management API ✅\nAzure Storage ✅',
+      results: { management: { ok: true, msg: 'Azure Management API ✅' }, storage: { ok: true, msg: 'Azure Storage ✅' } },
+    })
+    renderWithClient()
+    const row = (await screen.findByText('PADRÃO')).closest('tr')!
+
+    await user.click(within(row).getByTitle('Testar credenciais'))
+
+    await waitFor(() => expect(coletaApi.testarSP).toHaveBeenCalledWith(1))
+    expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('Azure Management API'), 'success')
+  });
+
+  it('"Testar acesso" (Storage) chama testarStorage e mostra o total de arquivos', async () => {
+    const user = userEvent.setup()
+    vi.mocked(coletaApi.testarStorage).mockResolvedValue({ ok: true, total: 42, totalSizeMB: '12.3', preview: [] })
+    renderWithClient()
+    const row = (await screen.findByText('Storage Principal')).closest('tr')!
+
+    await user.click(within(row).getByTitle('Testar acesso'))
+
+    await waitFor(() => expect(coletaApi.testarStorage).toHaveBeenCalledWith(1))
+    expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('42'), 'success')
+  });
+
+  it('"Executar agora" (Storage) chama executarStorage', async () => {
+    const user = userEvent.setup()
+    vi.mocked(coletaApi.executarStorage).mockResolvedValue({ ok: true, message: 'Coleta Storage iniciada' })
+    renderWithClient()
+    const row = (await screen.findByText('Storage Principal')).closest('tr')!
+
+    await user.click(within(row).getByTitle('Executar agora'))
+
+    await waitFor(() => expect(coletaApi.executarStorage).toHaveBeenCalledWith(1))
+  });
+
+  it('"Iniciar Coleta" abre o wizard, "Agendamento" abre o modal de agendamento, "Diagnóstico" abre o painel', async () => {
+    const user = userEvent.setup()
+    vi.mocked(coletaApi.getDiagAgendador).mockResolvedValue({
+      agora_node: '', agora_node_local: '', tz_process: '', coleta_em_execucao: false, agendador_ativo: true,
+      api_sps: [], storage_sps: [],
+    })
+    renderWithClient()
+    const row = (await screen.findByText('PADRÃO')).closest('tr')!
+
+    await user.click(within(row).getByTitle('Iniciar Coleta'))
+    expect(await screen.findByText('Nova Coleta via API — SP Produção')).toBeInTheDocument()
+    await user.click(screen.getByText('✕'))
+
+    await user.click(within(row).getByTitle('Agendamento'))
+    expect(await screen.findByText('Agendamento — SP Produção')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Cancelar' }))
+
+    await user.click(screen.getByRole('button', { name: '🔍 Diagnóstico do Agendador' }))
+    expect(await screen.findByText('Nenhuma SP')).toBeInTheDocument()
   });
 });

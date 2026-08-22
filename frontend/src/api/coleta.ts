@@ -1,8 +1,10 @@
 import { apiFetch } from './client'
 import { numFields } from './normalize'
 import type {
-  CoberturaMes, HistoricoItem, ImportItem, Pendente,
+  AgendamentoSPInput, AgendamentoStorageInput, ColetaStatus, ColetarAPIInput,
+  CoberturaMes, DiagAgendador, HistoricoItem, ImportItem, Pendente, RGPreview,
   ServicePrincipal, ServicePrincipalInput, StorageConfig, StorageConfigInput,
+  SubscriptionPreview, TestarSPResponse, TestarStorageResponse,
 } from '../types/coleta'
 
 // ── Service Principals ──────────────────────────────────────────
@@ -26,6 +28,53 @@ export const setSPAtivo = (id: number, ativo: boolean) =>
 
 export const setSPPadrao = (id: number) =>
   apiFetch<{ ok: boolean }>('PATCH', '/azure-coleta/sps/' + id + '/padrao')
+
+// ── Fase B — testes/coleta ao vivo (chamadas reais à Azure) ────────
+export const testarSP = (id: number) =>
+  apiFetch<TestarSPResponse>('POST', '/azure-coleta/sps/' + id + '/testar', undefined, 40000)
+
+export const testarStorage = (id: number) =>
+  apiFetch<TestarStorageResponse>('POST', '/azure-coleta/storages/' + id + '/testar', undefined, 40000)
+
+export const executarStorage = (id: number) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/storages/' + id + '/executar')
+
+export const coletarAPI = (spId: number, input: ColetarAPIInput) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/sps/' + spId + '/coletar-api', input, 20000)
+
+export const cancelarColeta = () =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/cancelar')
+
+export const getColetaStatus = () => apiFetch<ColetaStatus>('GET', '/azure-coleta/status')
+
+// Wizard — listagem de subscriptions/RGs ao vivo (fallback pro cache local
+// no servidor se a Azure não responder — ver server.js). Timeout maior:
+// listar-rgs busca todas as subs em paralelo, pode levar bem mais que 30s.
+export const listarSubsSP = (id: number) =>
+  apiFetch<{ subs: SubscriptionPreview[]; fonte: string }>('POST', '/azure-coleta/sps/' + id + '/listar-subs', undefined, 40000)
+
+export const listarSubsPreview = (creds: { tenant_id: string; client_id: string; client_secret: string }) =>
+  apiFetch<{ subs: SubscriptionPreview[]; fonte: string }>('POST', '/azure-coleta/listar-subs-preview', creds, 40000)
+
+export const listarRGsSP = (id: number, subscriptionIds: string[]) =>
+  apiFetch<{ rgs: RGPreview[]; fonte: string }>('POST', '/azure-coleta/sps/' + id + '/listar-rgs', { subscription_ids: subscriptionIds }, 120000)
+
+export const patchSPSubscriptions = (id: number, subscriptionIds: string[]) =>
+  apiFetch<{ ok: boolean }>('PATCH', '/azure-coleta/sps/' + id, { subscription_ids: subscriptionIds.join(',') || null })
+
+export const salvarAgendamentoSP = (id: number, input: AgendamentoSPInput) =>
+  apiFetch<{ ok: boolean; sp: unknown }>('PUT', '/azure-coleta/sps/' + id + '/agendamento', input)
+
+export const excluirAgendamentoSP = (id: number) =>
+  apiFetch<{ ok: boolean }>('PUT', '/azure-coleta/sps/' + id + '/agendamento', { hora_execucao: null, dias_semana: null, auto_coleta: false })
+
+export const salvarAgendamentoStorage = (id: number, input: AgendamentoStorageInput) =>
+  apiFetch<{ ok: boolean; storage: unknown }>('PUT', '/azure-coleta/storages/' + id + '/agendamento', input)
+
+export const excluirAgendamentoStorage = (id: number) =>
+  apiFetch<{ ok: boolean }>('PUT', '/azure-coleta/storages/' + id + '/agendamento', { hora_execucao: null, dias_semana: null })
+
+export const getDiagAgendador = () => apiFetch<DiagAgendador>('GET', '/azure-coleta/diag-agendador')
 
 // ── Storage Accounts ────────────────────────────────────────────
 const STORAGE_NUM_FIELDS: (keyof StorageConfig)[] = ['sp_id']
