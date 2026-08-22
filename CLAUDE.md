@@ -26,7 +26,7 @@ server.js               (~6 500 lines)  All API routes, auth, DB init, middlewar
 app.js                  (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
 calculadora.js          (~5 600 lines)  Azure cost calculator — self-contained IIFE
 index.html              (~3 650 lines)  SPA shell — all views toggled by showView()
-portal.html             (~640 lines)    Portal público — calculadora sem autenticação (serve /portal.html)
+portal.html             (~335 lines)    Portal público — chrome migrado pra React (PortalApp.tsx); calculadora em si ainda legada
 styles.css              (~1 650 lines)  Dark/light-mode CSS, Vivo purple theme
 encrypt-env.js          (139 lines)     AES-256-GCM .env encryption utility
 favicon.svg                             App icon (SVG)
@@ -261,8 +261,49 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     `frontend/src/components/CmsMultiSelect.tsx` reaproveita as mesmas classes CSS `.cms-*` mas com semântica de
     checkbox e cascata pai→filho pra RGs gerenciados (marcar `RG-WORKSPACE` auto-marca `DATABRICKS-RG-*`/`MC_*`
     filhos, dentro do estado *pending* — só confirma ao clicar OK).
-  - Coleta Azure Fase B (wizard, monitor ao vivo, testar/coletar agora) e Portal Público continuam pendentes
-    indefinidamente — únicas partes do sistema ainda 100% vanilla, a serem retomadas quando fizer sentido.
+  - `portal` (`frontend/src/PortalApp.tsx`) — **Fase A: só o "chrome"**, decisão explícita do usuário dado que
+    portar a calculadora pública inteira seria 40-60% do esforço de uma tela nova (o React `CalculadoraView.tsx`
+    autenticado não tem nenhuma noção de `_modoPublico`/`_defaultConfig`, e portar isso é trabalho real, não um
+    prop a mais). Cobre: cabeçalho (marca/tema/ajuda/badge "Público"), modal de identificação (nome+e-mail,
+    validação de domínio, efeito de tingimento roxo do mascote via canvas — portado verbatim), toggle de tema
+    (mesma chave `localStorage 'finops-theme'` do app autenticado), hero, estados de carregando/inativo. **A
+    calculadora em si continua 100% `calculadora.js` legado** — `PortalApp.tsx` chama
+    `Calculadora.init({apiBase:'/api/public/calculadora', publico:true, defaultConfig})` dentro de
+    `#view-calculadora` (que ela mesma renderiza), exatamente como `_abrirCalculadora()` fazia no `portal.html`
+    antigo. Fase B (calculadora pública real em React) fica pendente indefinidamente, junto com Coleta Azure
+    Fase B — únicas partes do sistema ainda parcialmente vanilla.
+    **Diferença arquitetural de todas as telas anteriores**: `portal.html` é uma página standalone servida sem
+    autenticação — não é uma view dentro do shell `index.html`/`app.js`/`#react-root`/`MIGRATED_VIEWS`. Decisão
+    explícita do usuário: **bundle Vite separado**, não reaproveita o bundle autenticado (`react-app.js`).
+    `frontend/vite.config.ts` ganhou `rollupOptions.input` com dois entries nomeados (`main` → `index.html`,
+    `portal` → `portal.html`, ambos dentro de `frontend/`, arquivos **dev-only** que espelham o padrão já
+    existente do `frontend/index.html`) — `entryFileNames` vira uma função (`chunk.name==='portal' ?
+    'portal-app.js' : 'react-app.js'`) em vez de string fixa. Rollup extrai automaticamente as dependências
+    compartilhadas (React/ReactDOM/TanStack Query) num chunk comum (`chunks/client-*.js`, importado via ES
+    module por ambos os entries) — `portal-app.js` sozinho tem ~10 KB, não ~190 KB; usuários anônimos não
+    baixam o código das 7 telas internas (confirmado via Playwright: `window.__reactBridge`, que só
+    `bridge.ts` cria, não existe no portal). CSS não é diferenciada por entry (os dois bundles só importam o
+    mesmo reset global, hoje ~0 bytes) — os dois HTMLs referenciam o mesmo `react-app.css`; tentar nomear CSS
+    por entry de origem esbarrou num tipo instável do `assetFileNames` nesta versão do Vite/Rollup, não vale a
+    complexidade dado que não há CSS real pra diferenciar ainda.
+    `portal.html` (produção, raiz do repo) manteve **inalterados**: o `<style>` inline inteiro (cabeçalho,
+    modal de identificação, hero, `body.portal-mode` overrides que escondem Por Data/Por Serviço/import no
+    widget legado), a pré-pintura de tema, e `<script src="/calculadora.js">`. Só o `<body>` mudou: todo o HTML
+    estático + o script de orquestração (~250 linhas: `initPortal`/identificação/badge/tema) viraram
+    `<div id="portal-root">` + `<script type="module" src="/react-app/portal-app.js">` — `PortalApp.tsx`
+    reaproveita as mesmas classes CSS já existentes (`.portal-header`, `.ident-card`, `.portal-hero` etc.),
+    igual ao padrão já estabelecido pro app autenticado (herda `styles.css`, não reimplementa design system).
+    **Pegadinha real encontrada e corrigida — `portal-main.tsx` esquecia o `QueryClientProvider`**: os testes
+    Vitest (mockando `QueryClientProvider` manualmente no arquivo de teste) passavam mesmo com esse bug real —
+    só apareceu ao testar contra o servidor de verdade via Playwright (`"No QueryClient set, use
+    QueryClientProvider to set one"`, portal inteiro em branco). Corrigido adicionando o mesmo
+    `QueryClient`/`QueryClientProvider` que `App.tsx` já usa pro bundle principal. Lição: um componente que só
+    é exercitado via testes que já fornecem o Provider nunca prova que o *entry point real* monta esse Provider
+    — vale sempre confirmar isso especificamente no passo de verificação via browser real.
+    **Toast do `calculadora.js` legado precisa de `window.showToast` existir antes de `Calculadora.init()`** —
+    `_toast()` (calculadora.js) chama `showToast` como identificador global solto (`typeof showToast ===
+    'function'`), então `PortalApp.tsx` atribui `window.showToast = ...` num `useEffect` que roda antes do
+    `useEffect` que chama `Calculadora.init()` (React executa effects na ordem em que aparecem no componente).
 - **Ainda não coberto**: o botão de importação em massa de projetos (`btn-import-projetos`, modal legado) continua
   funcionando, mas não dispara refresh automático da tabela React após importar — só atualiza navegando pra
   outra view e voltando (React Query refaz o fetch ao remontar). Vale resolver quando migrar o fluxo de import.
@@ -805,23 +846,30 @@ assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Pri
 
 ### Portal Público
 `portal.html` — calculadora Azure pública, sem login. Serve `/portal.html` diretamente via `express.static`.
+**Chrome (cabeçalho/identificação/tema/hero/estados) migrado pra React em `frontend/src/PortalApp.tsx`**
+(Fase A — ver `## Frontend React` acima); `portal.html` hoje só tem `<head>`/CSS inline + `<body class="portal-mode">`
+com `<div id="portal-root">` + `<script src="/calculadora.js">` + `<script type="module" src="/react-app/portal-app.js">`
+(bundle Vite **separado** do app autenticado). A calculadora em si (o widget dentro de `#view-calculadora`)
+continua 100% `calculadora.js` legado — `PortalApp.tsx` só chama `Calculadora.init({apiBase:'/api/public/calculadora',
+publico:true, defaultConfig})`, igual ao `_abrirCalculadora()` antigo.
 
 **Ativação:** admin habilita via Configurações → Portal Público → toggle Ativar + Salvar. Config armazenada em `portal_config` (key=`'config'`).
 
 **Tema claro/escuro:** `portal.html` suporta alternância de tema via botão sol/lua no header.
-- Inline script antes do primeiro render lê `localStorage 'finops-theme'` e aplica `data-theme="light"` no `<html>` antes do paint (evita flash)
-- `_portalToggleTheme()` alterna `data-theme` + salva em `localStorage 'finops-theme'`
+- Inline script antes do primeiro render lê `localStorage 'finops-theme'` e aplica `data-theme="light"` no `<html>` antes do paint (evita flash) — continua no `<head>` do `portal.html`, não migrou (é pre-paint, precisa rodar antes do React montar)
+- `PortalApp.tsx`'s `toggleTheme()` alterna `data-theme` + salva em `localStorage 'finops-theme'` (substituiu `_portalToggleTheme()`)
 - Tema compartilhado com o app autenticado — preferência persiste entre portal e sistema principal
 - Header roxo (`#6d28d9`) mantém elementos brancos no tema claro via `[data-theme="light"] .portal-header { background: #6d28d9 }`
 - Classe `.crcard-ov` adicionada nos cards do overlay Configurar Estimativa (`calculadora.js`) para permitir sobrescrita via CSS no tema claro
 
 **Middleware `_portalMiddleware`:** lê `portal_config`, bloqueia com 403 se `ativo=false`. Injeta `req.portalCfg` para os handlers seguintes.
 
-**Identificação de usuário (opcional):**
+**Identificação de usuário (opcional)** — modal em `PortalApp.tsx` (`IdentModal`), substituiu `_mostrarModalIdent()`/`submitIdentificacao()`:
 - `solicitar_identificacao=true` OU `dominios_aceitos` não vazio → exibe modal de nome+email antes da calculadora
 - `POST /api/public/calculadora/identificar` valida domínio e registra em `portal_acessos`
 - Sessão armazenada em `sessionStorage 'portal_ident'` — sem JWT, sem cookies
-- ⚠️ XSS: `verAcessosPortal()` em `app.js:2647` renderiza `r.nome` e `r.ip` sem escape em `innerHTML` — fix pendente
+- React já escapa `nome`/`email` automaticamente ao renderizar (JSX, não `innerHTML`) — o badge do usuário não tem o risco de XSS que a versão antiga tinha
+- ⚠️ XSS: `verAcessosPortal()` em `app.js:2647` (tela **admin**, autenticada — não faz parte do Portal Público) renderiza `r.nome` e `r.ip` sem escape em `innerHTML` — fix pendente, fora do escopo desta migração
 
 **Filtragem de dados:**
 - `subscription_ids[]` — apenas essas subs são expostas no portal
