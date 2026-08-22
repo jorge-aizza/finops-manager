@@ -2061,6 +2061,11 @@
         </div>
         <!-- ═══════════════════════════════════ -->
 
+        <!-- Ponto de montagem do bundle React — migração incremental tela por
+             tela (ver plano em C:\Users\jorge\.claude\plans\magical-gliding-gem.md).
+             Controlado por showView()/MIGRATED_VIEWS em app.js + window.__reactBridge. -->
+        <div id="react-root" class="view"></div>
+
       </div>
     </main>
   </div>
@@ -3942,5 +3947,10 @@ document.addEventListener('keydown', function(e) {
 
   <!-- Azure import file input — usado pela view-coleta -->
   <input type="file" id="cfile" accept=".csv,.parquet,.zip" multiple style="display:none">
+
+  <!-- Bundle React — migração incremental (frontend/, buildado em frontend/dist,
+       servido pelo Express em /react-app). Nomes fixos, sem hash (vite.config.ts). -->
+  <link rel="stylesheet" href="/react-app/react-app.css">
+  <script type="module" src="/react-app/react-app.js"></script>
 </body>
 </html>

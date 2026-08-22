@@ -160,8 +160,14 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 // ─── STATIC FILES ────────────────────────────────────────────────────────────
 // Bloqueia acesso direto a arquivos sensíveis antes de servir estáticos
 const _SENSITIVE = /^\/?(server\.js|encrypt-env\.js|package(-lock)?\.json|\.env(\.\w+)?|\.finops_setup|CLAUDE\.md|README\.md|.*\.sql$|.*\.key$|.*\.enc$)/i;
+// frontend/ (fonte + config do bundle React em migração) fica bloqueado por
+// padrão — só frontend/dist (o bundle já compilado) é servido, via a rota
+// dedicada /react-app abaixo. Sem isso, package.json/tsconfig.json etc. do
+// frontend ficariam publicamente acessíveis (não batem com o regex acima,
+// que só cobre nomes de arquivo na raiz do projeto).
+const _FRONTEND_SRC = /^\/frontend\/(?!dist\/)/i;
 app.use((req, res, next) => {
-  if (_SENSITIVE.test(req.path) || req.path.includes('node_modules')) {
+  if (_SENSITIVE.test(req.path) || req.path.includes('node_modules') || _FRONTEND_SRC.test(req.path)) {
     return res.status(403).end();
   }
   next();
@@ -177,6 +183,10 @@ app.use((req, res, next) => {
   }
   next();
 });
+// Bundle React — migração incremental tela por tela (ver plano em
+// C:\Users\jorge\.claude\plans\magical-gliding-gem.md). Nomes de arquivo
+// fixos (react-app.js/.css), sem hash — configurado em frontend/vite.config.ts.
+app.use('/react-app', express.static(path.join(__dirname, 'frontend', 'dist')));
 app.use(express.static(path.join(__dirname), { index: 'index.html', etag: true, lastModified: true }));
 
 // ─── DB ──────────────────────────────────────────────────────────────────────

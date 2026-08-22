@@ -283,7 +283,7 @@ function enterApp() {
   if (fab) fab.style.display = 'flex';
   updateSidebarUser();
   checkDbStatus();
-  loadDashboard();
+  showView('dashboard'); // dashboard é 'view active' estática no HTML mas migrada — precisa passar pela ponte React, não só chamar loadDashboard() direto
   clearInterval(_dbStatusInterval);
   _dbStatusInterval = setInterval(checkDbStatus, 30000);
   setTimeout(() => setRefreshInterval(10), 600); // auto 10 min refresh
@@ -531,6 +531,12 @@ function logout(pedirConfirmacao = true) {
 let currentView = 'dashboard';
 let allAcoes = [];
 
+// Telas já migradas para React (frontend/) — ver plano em
+// C:\Users\jorge\.claude\plans\magical-gliding-gem.md. showView() monta o
+// bundle React em #react-root em vez de ativar a antiga #view-<nome>
+// (que fica no HTML vazia, sem conteúdo, até a migração terminar de vez).
+const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard']);
+
 // ── VIEW ROUTING ──────────────────────────────
 function showView(view) {
   document.querySelector('.sidebar')?.classList.remove('open');
@@ -540,7 +546,14 @@ function showView(view) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.querySelectorAll('.nav-group-header').forEach(n => n.classList.remove('active'));
-  document.getElementById('view-' + view).classList.add('active');
+  const _migrated = MIGRATED_VIEWS.has(view);
+  if (_migrated) {
+    document.getElementById('react-root').classList.add('active');
+    window.__reactBridge?.mount(view);
+  } else {
+    window.__reactBridge?.unmount();
+    document.getElementById('view-' + view).classList.add('active');
+  }
   const _navEl = document.querySelector(`[data-view="${view}"]`);
   if (_navEl) {
     _navEl.classList.add('active');
@@ -554,23 +567,20 @@ function showView(view) {
 
   const btn = document.getElementById('top-action-btn');
   const btnImport = document.getElementById('btn-import-projetos');
-  btn.style.display = (['dashboard', 'calculadora', 'estimativas', 'coleta'].includes(view)) ? 'none' : 'flex';
+  // Telas migradas têm seu próprio botão "Novo" dentro da view React —
+  // o botão do topo (fluxo de modal legado) fica oculto pra não duplicar.
+  btn.style.display = (_migrated || ['dashboard', 'calculadora', 'estimativas', 'coleta'].includes(view)) ? 'none' : 'flex';
   btnImport.style.display = (view === 'projetos') ? 'flex' : 'none';
   btn.textContent = '';
-  if (!['dashboard', 'estimativas'].includes(view)) {
+  if (!_migrated && !['dashboard', 'estimativas'].includes(view)) {
     const labels = { projetos: 'Novo Projeto', acoes: 'Nova Ação', reservas: 'Nova Reserva' };
     btn.innerHTML = `<svg viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> ${labels[view] || 'Novo'}`;
     if (view === 'reservas') btn.setAttribute('onclick', 'openReservaModal()');
     else btn.setAttribute('onclick', 'openModal()');
   }
 
-  if (view === 'dashboard') loadDashboard();
-  if (view === 'projetos') loadProjetos();
-  if (view === 'acoes') loadAcoes();
   if (view === 'calculadora' && typeof Calculadora !== 'undefined') Calculadora.init();
-  if (view === 'estimativas') loadEstimativas();
-  if (view === 'reservas') loadReservas();
-  if (view === 'coleta') loadColeta();
+  // 'projetos', 'reservas', 'acoes', 'coleta', 'estimativas' e 'dashboard' migradas — a view React carrega os próprios dados (React Query)
 }
 
 function openModal() {
@@ -1716,8 +1726,10 @@ function showDashTab(tab) {
 }
 
 function switchDashTab(tab) {
-  document.querySelectorAll('.dash-panel').forEach(p => p.classList.remove('active'));
-  document.getElementById('dash-panel-' + tab)?.classList.add('active');
+  // Dashboard migrada — os '.dash-panel' antigos não existem mais no DOM;
+  // a troca de aba agora é um estado React, avisado via canal próprio da
+  // ponte (não usa mount()/showView(), que só remontariam a mesma view).
+  window.__reactBridge?.setDashboardTab?.(tab);
 }
 
 // ── HELPERS ───────────────────────────────────

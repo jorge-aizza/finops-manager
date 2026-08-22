@@ -33,6 +33,7 @@ favicon.svg                             App icon (SVG)
 mascote.png                             Vivo mascot used in login screen (not tracked by git — keep locally)
 .finops_setup                           AES-256-CBC encrypted setup config — do not delete
 uploads_tmp/                            Multer temp dir — CSVs deleted automatically after import
+frontend/                               React + Vite — migração incremental tela por tela (ver ## Frontend React abaixo)
 ```
 
 **Documentação (v2.4):**
@@ -58,6 +59,155 @@ normalizar_resource_group.sql  resource_group_name case normalisation
 ```
 
 ---
+
+## Frontend React — migração incremental (strangler fig)
+
+Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plano completo em
+`C:\Users\jorge\.claude\plans\magical-gliding-gem.md`. Resumo do que já existe:
+
+- **Stack**: Vite + React + TypeScript, sem SSR (SPA pura — o sistema é 100% autenticado). TanStack Query
+  pra chamadas de API. Vitest + Testing Library pros testes (`npm run test --prefix frontend`).
+- **`frontend/`** é um projeto Node separado (seu próprio `package.json`/`node_modules`) — nada aí interfere
+  no `server.js`/`app.js`/`calculadora.js` legados.
+- **Build**: `npm run frontend:build` (raiz) → `frontend/dist/react-app.js` + `.css` (nomes fixos, sem hash —
+  `frontend/vite.config.ts`). `server.js` serve isso em `/react-app/*`; bloqueia `/frontend/*` (fonte) exceto
+  `frontend/dist/*` — sem isso, `frontend/package.json` etc. ficariam publicamente acessíveis.
+- **Ponte com o shell legado**: `index.html` tem `<div id="react-root" class="view">` como mais uma `.view`
+  (mesmo CSS `display:none`/`.active` das demais). `showView()` (app.js) tem `MIGRATED_VIEWS` — pra view
+  migrada, ativa `#react-root` e chama `window.__reactBridge.mount(view)` (exposto por `frontend/src/bridge.ts`)
+  em vez de ativar a antiga `#view-<nome>` (que fica no HTML vazia até a migração terminar).
+- **Auth compartilhada, sem duplicar login**: login/logout continuam 100% no `app.js`. O cliente de API do
+  React (`frontend/src/api/client.ts`) lê o mesmo `sessionStorage`/`localStorage` `'finops_token'` (mesma
+  prioridade do `api()`/`_api()` legados) e chama `window.logout(false)` em 401 — reaproveita, não reimplementa.
+- **CSS**: o bundle React **não** porta o design system — herda `styles.css` (já carregado globalmente pelo
+  shell) e usa as classes existentes (`.btn-primary`, `.data-table`, `.modal`, `.form-group`...) direto.
+- **Dev**: `npm run dev:all` (raiz) sobe Express (porta 3000) + Vite dev server juntos via `concurrently`;
+  proxy do Vite encaminha `/api/*` pro Express (`frontend/vite.config.ts`).
+- **Migrado até agora**:
+  - `projetos` (`frontend/src/views/ProjetosView.tsx`) — CRUD completo, endpoints `/api/projetos` inalterados.
+    Corrigido de passagem: a tabela legada lia `p.created_at` (campo que não existe — a coluna real é
+    `criado_em`), então a coluna "Criado em" nunca funcionou; a versão React usa o campo certo.
+  - `reservas` (`frontend/src/views/ReservasView.tsx` + `ReservaModal.tsx`) — CRUD completo, endpoints
+    `/api/reservas` inalterados. Porta fiel de `_RSV_SCOPE_CONFIG`/`_RSV_TIPOS`/`_RSV_DEFAULT_SCOPE`
+    (`frontend/src/config/reservaScopes.ts`) e do dropdown de busca CMS pra Subscription/Resource Group Azure
+    (`frontend/src/components/CmsSelect.tsx`, reaproveitado pelos dois campos) — mesmo padrão pending→commit
+    do original (`rsvToggleDrop`/`rsvConfirmDrop`). RG agora recarrega via `useQuery` chaveada pela subscription
+    committed (React Query cuida do refetch — não precisa mais do `_loadRsvRGs()` imperativo). Auto-cálculo
+    Prazo→Vencimento portado de `onRsvPrazoChange()`.
+  - `acoes` (`frontend/src/views/AcoesView.tsx` + `AcaoModal.tsx`) — CRUD completo, endpoints `/api/acoes`
+    inalterados. As 24 colunas de retorno mensal (`atual_janeiro..dezembro`, `proximo_janeiro..dezembro`) viram
+    um componente `MonthGrid` (`frontend/src/components/MonthGrid.tsx`) reaproveitado pros dois blocos —
+    porta fiel do "replicar valor" (`replicarTodos`/`toggleChipAuto`/`selecionarTodosChips`/`replicarSelecionados`
+    em app.js). Igual ao original, `retorno_ano_atual`/`retorno_proximo_ano` **não são recalculados pelo
+    servidor** — o cliente soma os 12 meses antes de cada save (`AcaoModal.handleSubmit`); se um campo novo
+    de retorno for adicionado, essa soma precisa ser atualizada nos dois lugares (server.js não valida).
+    Simplificação: a tela de detalhe somente-leitura (`viewAcao()`) não foi portada — "ver" e "editar" abrem
+    o mesmo modal (o de edição já mostra tudo); avaliar se vale portar o read-only quando fizer sentido.
+  - `coleta` (`frontend/src/views/ColetaView.tsx`) — **Fase A apenas** (CRUD + relatórios), escopo reduzido
+    escolhido explicitamente pelo usuário dado o tamanho real da tela legada (~90-110 campos, 7 modais,
+    wizard de 4 passos, chamadas ao vivo à Azure). Cobre: Service Principals (`SPModal.tsx` — CRUD básico:
+    nome/tenant/client/secret/expiração/modo de coleta/billing account+profile/ativo; preserva
+    `subscription_ids` existente sem editar), Storage Accounts (`StorageModal.tsx` — CRUD básico: nome/storage
+    account/container/prefixo/prefixo do price list/SP vinculado/ativo), Cobertura por Mês
+    (`frontend/src/components/CoberturaGrid.tsx` — porta fiel de `loadCoberturaMeses()`: agrega por
+    YYYY-MM → 12 células/ano, cor por `maxDiasSub/diasNoMes` com mês atual sempre azul, clique expande
+    detalhe por subscription), Histórico de Execuções (abas API/Storage/Manual — a aba Manual usa
+    `GET /api/azure-costs/imports`, endpoint diferente do `GET /api/azure-coleta/historico` das outras duas)
+    e Pendentes (lista + exclusão apenas — não existe criação fora do wizard, que é Fase B).
+    **Deliberadamente fora do escopo (Fase B, não iniciada)**: wizard de 4 passos, monitor de coleta ao vivo
+    (polling `_coletaPolling`), botões "Testar SP"/"Testar Storage"/"Coletar agora" — todos dependem de
+    chamadas reais à API da Azure, não migrados até haver necessidade real de exercitá-los via automação.
+    Pegadinha real evitada em `frontend/src/api/coleta.ts` (`setStorageAtivo`): a rota `PUT /api/azure-coleta/storages/:id`
+    não tem PATCH parcial — o handler grava **todos** os campos do body, inclusive como `null` os que faltarem.
+    Um toggle ingênuo (`PUT {ativo}`) zeraria `nome`/`storage_account`/etc. — `setStorageAtivo` reenvia a linha
+    inteira já carregada no cliente com só o `ativo` trocado, sem precisar mudar `server.js`. Confirmado via
+    Playwright que o campo `storage_account` sobrevive ao toggle.
+  - `estimativas` (`frontend/src/views/EstimativasView.tsx`) — tela **read/manage-only**: listar, buscar/filtrar
+    por projeto, aprovar/reprovar/resetar status, ver detalhe (metadados + até 150 linhas de `recursos`, igual
+    ao limite do legado), excluir, gerar PDF. **Não existe criação nesta tela** — estimativas só nascem como
+    efeito colateral do fluxo "Gerar Invoice" da Calculadora (`calculadora.js`, ainda não migrada), que faz
+    `POST /api/estimativas` fire-and-forget. Endpoints `/api/estimativas` inalterados. `GET /api/estimativas`
+    (lista) **não retorna `recursos`** (JSONB grande) — só `GET /api/estimativas/:id` (detalhe) traz o array
+    completo; a view usa `useQuery` separada por id, buscada só quando o modal de detalhe abre.
+    **"Gerar PDF" continua chamando o `calculadora.js` legado, deliberadamente não portado** — `_buildPDFHtml`
+    é um gerador de HTML/print de ~350 linhas, sem dependência de framework, compartilhado por dois call sites
+    (o "Gerar Invoice" ao vivo da Calculadora e este botão); portar agora, antes da Calculadora ser migrada,
+    criaria duas implementações de PDF divergentes. Quando a Calculadora for migrada (próxima fase depois de
+    Dashboard), esse é o momento certo de portar `_buildPDFHtml`/`_abrirPreviewModal` de vez para os dois
+    call sites juntos.
+    **Pegadinha real encontrada e corrigida — `window.Calculadora` é sempre `undefined`**: `calculadora.js`
+    declara `const Calculadora = (() => {...})()` no escopo top-level de um `<script>` clássico. Bindings
+    `const`/`let` de script top-level **nunca** viram propriedade de `window` (só `var`/`function` declarations
+    viram) — mas continuam resolvíveis como identificador global "solto" via escopo léxico, inclusive de dentro
+    de um `<script type="module">` (módulos compartilham o global lexical environment do realm). O acesso
+    correto — mesmo padrão já usado em `app.js` (`typeof Calculadora !== 'undefined'`) — é referenciar
+    `Calculadora` como identificador solto, nunca `window.Calculadora`/`globalThis.Calculadora` (ambos sempre
+    `undefined`). Corrigido com uma declaração ambiente `declare global { var Calculadora: {...} | undefined }`
+    em `frontend/src/bridge.ts`. Confirmado via Playwright: antes da correção `#cinv-preview-modal` chegava a
+    ser criado (via `Calculadora.init()` funcionando por sorte, já que o `typeof` guard também usava a forma
+    certa) mas a chamada de `gerarPDFSalvo` nunca era localizada; depois, o preview abre normalmente.
+    Nota pro implementador da view: `#cinv-preview-modal` alterna visibilidade via `style.display='flex'/'none'`
+    diretamente, **não** via classe `.open` — não assumir o padrão `.modal-overlay.open` de outros modais do
+    sistema ao inspecionar/testar esse modal específico.
+  - `dashboard` (`frontend/src/views/DashboardView.tsx`) — agregação 100% client-side sobre `listAcoes()` +
+    `listEstimativas()` (já existentes, nenhum endpoint novo). O `GET /api/dashboard` que existe em `server.js`
+    é **código morto** — nunca foi chamado por nenhum client, nem legado nem React; não usado aqui.
+    `GET /api/projetos` também é buscado pelo `loadDashboard()` legado mas nunca usado — omitido no port.
+    **Duas sub-abas (Ações/Estimativas) puxadas pelo sub-nav da sidebar sem re-passar por `showView()`** —
+    diferente de toda outra tela migrada (que é sempre um único painel). O sub-nav legado (`#nav-sub-acoes`/
+    `#nav-sub-estimativas`, dentro do grupo `#nav-group-dashboard`) chama `showDashTab(tab)` → `showView('dashboard')`
+    (remonta a mesma view, ok) → `switchDashTab(tab)`, que antes manipulava `.dash-panel` diretamente — reescrito
+    pra chamar `window.__reactBridge.setDashboardTab(tab)`, um canal **separado** de `mount`/`unmount` em
+    `bridge.ts` (`setDashboardTabListener`/`currentDashboardTab`, default `'acoes'`) — necessário porque duas
+    telas trocando de aba sem trocar de "view" não cabe no par mount(view)/unmount() genérico usado pelas
+    outras 5 telas.
+    **Pegadinha real corrigida — dashboard não montava a versão React no login**: diferente das outras views,
+    `#view-dashboard` já nasce com `class="view active"` **estática no HTML**, e `enterApp()` chamava
+    `loadDashboard()` **direto** (nunca passava por `showView()`) — então o bridge React nunca era montado no
+    login/reload de sessão, e o usuário via a tela antiga (vazia, já que o legado não foi deletado do HTML)
+    em vez do dashboard novo. Corrigido trocando essa chamada por `showView('dashboard')` em `enterApp()`
+    (dois call sites: login fresco e restauração de sessão — ambos passam pela mesma função). Confirmado via
+    Playwright: dashboard React monta automaticamente pós-login sem precisar clicar em nada.
+    **Filtro de cloud reimplementado como estado local, corrigindo um bug real de estado global "preso"**:
+    o legado usava `_activeCloud`, uma variável de módulo nunca resetada — uma vez clicado um card de cloud,
+    o filtro ficava aplicado silenciosamente pra sempre (inclusive em reloads futuros do dashboard via
+    auto-refresh), escondendo ações de outras clouds sem indicação visível clara. Provável causa raiz do
+    relato antigo do usuário "ações de FinOps não aparece mais no Dashboard" (nunca confirmado, sem
+    reprodução). Na versão React, `activeCloud` é `useState` do componente — reseta sozinho sempre que
+    `DashboardView` desmonta (navegar pra outra tela e voltar já limpa o filtro).
+    Ícones de cloud (AWS/Azure/GCP/Oracle/Multicloud, SVG inline) portados verbatim pra
+    `frontend/src/config/cloudIcons.ts`, renderizados via `dangerouslySetInnerHTML` (conteúdo estático, não
+    é input de usuário). "Ver detalhes" numa linha de ação reaproveita o `AcaoModal` já existente da migração
+    de Ações FinOps (mesmo padrão "ver = editar" já adotado lá) — sem duplicar formulário.
+    E2E via Playwright rodou **sem nenhuma ação cadastrada no banco local** (dataset real vazio) — fluxos de
+    filtro de cloud e "Ver detalhes" não puderam ser exercitados contra dados reais (ambos ficaram "[skip]" no
+    script, removido depois); cobertura desses dois fluxos específicos vem só dos testes Vitest com dados
+    mockados. Login automático pro dashboard, troca de aba via sidebar, e navegação "Ver todas →" pra
+    Estimativas foram confirmados via Playwright contra o servidor real.
+    **Outra pegadinha real encontrada e corrigida (não específica desta tela — grep pegou em 5 arquivos)**:
+    `valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 })` sem `maximumFractionDigits: 2` deixa o
+    `Intl.NumberFormat` livre pra mostrar até 3 casas decimais quando o número de origem tem mais precisão
+    (ex: `1941.361` vira `"1.941,361"` em vez de `"1.941,36"`) — só não aparecia nos dados de teste porque
+    eram valores redondos. Encontrado testando com Playwright contra um registro real (`estimado_brl` calculado
+    pela Calculadora tem várias casas decimais). Corrigido adicionando `maximumFractionDigits: 2` em todo
+    lugar que formata moeda: `EstimativasView.tsx`, `ReservasView.tsx`, `AcoesView.tsx`, `MonthGrid.tsx`,
+    `ColetaView.tsx` (contadores inteiros como `registros`/`linhas` não precisavam do fix — só têm o problema
+    valores com casas decimais).
+- **Pegadinha real encontrada (corrigida em `frontend/src/api/normalize.ts`)**: colunas `NUMERIC` do Postgres
+  voltam como **string** via `pg` (ex: `"416.67"`, não `416.67`), nunca como `number`. `valor.toLocaleString('pt-BR',...)`
+  numa string ignora o locale (usa `String.prototype.toLocaleString`, que só devolve o texto cru) e
+  `soma += valor` vira concatenação em vez de soma. `numFields()` normaliza pra `number` na borda da API
+  (`api/reservas.ts`, `api/acoes.ts`) logo após o fetch — qualquer view nova com campo monetário/numérico
+  precisa listar esses campos ali antes de fazer conta ou formatar como moeda. Achado testando de verdade
+  com Playwright (a tabela mostrava "R$ 2400.00" em vez de "R$ 2.400,00") — os testes unitários (Vitest) não
+  pegam isso porque mockam a API já com `number` de mentirinha.
+- **Ordem planejada pras próximas**: Calculadora (por último — RN-006/007/DB-001, pico, PDF; mais arriscada)
+  → Portal público.
+  Coleta Azure Fase B (wizard, monitor ao vivo, testar/coletar agora) fica pendente indefinidamente,
+  a ser retomada quando fizer sentido — não faz parte da sequência acima.
+- **Ainda não coberto**: o botão de importação em massa de projetos (`btn-import-projetos`, modal legado) continua
+  funcionando, mas não dispara refresh automático da tabela React após importar — só atualiza navegando pra
+  outra view e voltando (React Query refaz o fetch ao remontar). Vale resolver quando migrar o fluxo de import.
 
 ## Architecture
 

@@ -1,0 +1,5 @@
+/* Sem estilos próprios de propósito — este bundle roda dentro do shell
+   legado (index.html), que já carrega styles.css globalmente. Reaproveita
+   as variáveis (--bg, --accent, --text, --border...) e classes existentes
+   (.btn-primary, .data-table, .modal, .stat-card...) em vez de redefini-las
+   aqui. Ver C:\Users\jorge\.claude\plans\magical-gliding-gem.md. */
