@@ -126,6 +126,24 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
       wizard (assinaturas/RGs) e pelo seletor de subscriptions do `SPModal.tsx`. Diferente de
       `CmsMultiSelect.tsx` (dropdown pending→commit): aqui a seleção é sempre visível, sem "OK" pra confirmar —
       mais adequado a uma etapa de wizard de tela cheia do que a um filtro compacto de toolbar.
+      **Bug real reportado pelo usuário e reproduzido/corrigido numa validação seguinte**: os checkboxes
+      apareciam "andando" pra direita conforme o texto da linha ficava mais curto (`[FINOPS] - RESERVA01` com
+      checkbox colado à esquerda, `CONNECTIVITY` com checkbox quase no fim da linha). Causa: `.form-group
+      input { width:100% }` (styles.css) cascateia pra QUALQUER `<input>` dentro de um `.form-group` ancestral
+      (`SPModal.tsx` envolve este componente com `<div className="form-group">`) — o checkbox (sem classe
+      própria) herdava `width:100%`, virando um box invisível gigante que absorve todo o espaço sobrando na
+      linha flex (confirmado via `getBoundingClientRect()`: a largura do checkbox variava de ~270 a ~360px
+      dependendo do texto ao lado); o quadradinho visível renderiza em algum ponto dentro desse box invisível,
+      daí a aparência de "deriva" horizontal. Reproduzido isoladamente (HTML estático + Playwright, comparando
+      antes/depois) antes de aplicar a correção, pra confirmar a causa raiz sem depender de login. Corrigido
+      com `style={{width:'auto', flexShrink:0}}` no `<input>` — mesmo padrão já usado (e agora confirmado
+      como necessário) nos checkboxes "Ativo" de `SPModal.tsx`/`StorageModal.tsx`. Aplicado defensivamente
+      também nos radios/checkboxes "soltos" (sem classe própria) de `WizardColetaModal.tsx`, `AgendamentoModal.tsx`,
+      `ExpurgoModal.tsx` e `ConfigurarEstimativaOverlay.tsx` — mesmo risco latente se algum dia ficarem dentro
+      de um `.form-group`. `CmsMultiSelect.tsx`/`CmsSelect.tsx` **não precisaram do fix**: seus checkboxes já
+      usam a classe `.cms-option`, que tem uma regra própria em styles.css (`.cms-option input[type=checkbox]
+      { width:14px; ... }`) com especificidade maior que `.form-group input` — proteção já existente, só
+      confirmada aqui.
     - `frontend/src/views/WizardColetaModal.tsx` — porta de `#modal-wizard-coleta`/`_wizard*` (app.js:5206-5764):
       Assinaturas → Resource Groups → Período → Confirmar+Agendamento. Modo `billing_profile` pode escolher
       entre esse escopo (pula direto pro período) ou "Assinaturas específicas" (mesmo fluxo do modo

@@ -106,15 +106,15 @@ export default function ExpurgoModal({ onClose }: Props) {
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Escopo do expurgo</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'rgba(255,255,255,.02)' }}>
-              <input type="radio" name="purge-tipo" aria-label="Por período" checked={modo === 'periodo'} onChange={() => { setModo('periodo'); setPreview(null) }} />
+              <input type="radio" name="purge-tipo" aria-label="Por período" checked={modo === 'periodo'} onChange={() => { setModo('periodo'); setPreview(null) }} style={{ width: 'auto', flexShrink: 0 }} />
               <div><div style={{ fontSize: 13, color: 'var(--text)', fontWeight: 500 }}>Por período</div><div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Remove todos os registros dentro de um intervalo de datas</div></div>
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'rgba(255,255,255,.02)' }}>
-              <input type="radio" name="purge-tipo" aria-label="Por arquivo importado" checked={modo === 'arquivo'} onChange={() => { setModo('arquivo'); setPreview(null) }} />
+              <input type="radio" name="purge-tipo" aria-label="Por arquivo importado" checked={modo === 'arquivo'} onChange={() => { setModo('arquivo'); setPreview(null) }} style={{ width: 'auto', flexShrink: 0 }} />
               <div><div style={{ fontSize: 13, color: 'var(--text)', fontWeight: 500 }}>Por arquivo importado</div><div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Remove apenas registros de um CSV/Parquet específico</div></div>
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '8px 10px', borderRadius: 8, border: '1px solid rgba(255,77,106,.3)', background: 'rgba(255,77,106,.04)' }}>
-              <input type="radio" name="purge-tipo" aria-label="Todos os dados" checked={modo === 'tudo'} onChange={() => { setModo('tudo'); setPreview(null) }} />
+              <input type="radio" name="purge-tipo" aria-label="Todos os dados" checked={modo === 'tudo'} onChange={() => { setModo('tudo'); setPreview(null) }} style={{ width: 'auto', flexShrink: 0 }} />
               <div><div style={{ fontSize: 13, color: 'var(--danger)', fontWeight: 500 }}>Todos os dados</div><div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Apaga toda a base de custos — requer reimportação completa</div></div>
             </label>
           </div>

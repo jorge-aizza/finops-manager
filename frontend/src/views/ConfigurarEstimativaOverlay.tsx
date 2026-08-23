@@ -238,7 +238,7 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
             <div className="crcard-ov" style={{ background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 12, padding: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                 <input type="checkbox" checked={horarioLivre.ativo} disabled={horarioLivreTravado}
-                  onChange={(e) => setHorarioLivre((h) => ({ ...h, ativo: e.target.checked }))} />
+                  onChange={(e) => setHorarioLivre((h) => ({ ...h, ativo: e.target.checked }))} style={{ width: 'auto', flexShrink: 0 }} />
                 <span style={{ fontSize: 12, fontWeight: 700 }}>Horário Livre (desconta horas fora do expediente)</span>
               </div>
               {horarioLivreTravado && (
@@ -250,7 +250,7 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
                     {DIAS_SEMANA.map((d) => (
                       <label key={d.v} style={{ fontSize: 10, display: 'flex', alignItems: 'center', gap: 3, cursor: horarioLivreTravado ? 'default' : 'pointer', opacity: horarioLivreTravado && !horarioLivre.dias.includes(d.v) ? 0.4 : 1 }}>
                         <input type="checkbox" checked={horarioLivre.dias.includes(d.v)} disabled={horarioLivreTravado}
-                          onChange={(e) => setHorarioLivre((h) => ({ ...h, dias: e.target.checked ? [...h.dias, d.v] : h.dias.filter((x) => x !== d.v) }))} />
+                          onChange={(e) => setHorarioLivre((h) => ({ ...h, dias: e.target.checked ? [...h.dias, d.v] : h.dias.filter((x) => x !== d.v) }))} style={{ width: 'auto', flexShrink: 0 }} />
                         {d.label}
                       </label>
                     ))}

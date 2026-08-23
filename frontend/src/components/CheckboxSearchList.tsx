@@ -51,7 +51,13 @@ export default function CheckboxSearchList({
         )}
         {!loading && filtrados.map((item) => (
           <label key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', fontSize: 12, borderBottom: '1px solid var(--border)', cursor: 'pointer' }}>
-            <input type="checkbox" checked={selected.has(item.id)} onChange={(e) => onToggle(item.id, e.target.checked)} />
+            {/* width:'auto' é obrigatório aqui — `.form-group input { width:100% }` (styles.css) cascateia
+                pra qualquer <input> dentro de um .form-group ancestral (ex: SPModal.tsx envolve este
+                componente com <div className="form-group">), inflando o checkbox pra ocupar o espaço
+                sobrando na linha flex — o quadradinho visível fica preso num box invisível gigante e
+                "deriva" horizontalmente conforme o tamanho do texto ao lado. Bug real reportado pelo
+                usuário (SPModal — seletor de Subscriptions). */}
+            <input type="checkbox" checked={selected.has(item.id)} onChange={(e) => onToggle(item.id, e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
             <span>
               {item.label}
               {item.sublabel && <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 11 }}>{item.sublabel}</span>}

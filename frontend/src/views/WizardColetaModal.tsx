@@ -216,11 +216,11 @@ export default function WizardColetaModal({ sp, onClose }: Props) {
                 <label>Tipo de Custo</label>
                 <div style={{ display: 'flex', gap: 14, marginTop: 6 }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
-                    <input type="radio" name="wizard-metric" checked={metric === 'ActualCost'} onChange={() => setMetric('ActualCost')} />
+                    <input type="radio" name="wizard-metric" checked={metric === 'ActualCost'} onChange={() => setMetric('ActualCost')} style={{ width: 'auto', flexShrink: 0 }} />
                     Actual Cost
                   </label>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
-                    <input type="radio" name="wizard-metric" checked={metric === 'AmortizedCost'} onChange={() => setMetric('AmortizedCost')} />
+                    <input type="radio" name="wizard-metric" checked={metric === 'AmortizedCost'} onChange={() => setMetric('AmortizedCost')} style={{ width: 'auto', flexShrink: 0 }} />
                     Amortized Cost
                   </label>
                 </div>
@@ -238,7 +238,7 @@ export default function WizardColetaModal({ sp, onClose }: Props) {
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                <input type="checkbox" checked={schedAtivo} onChange={(e) => setSchedAtivo(e.target.checked)} />
+                <input type="checkbox" checked={schedAtivo} onChange={(e) => setSchedAtivo(e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
                 <span style={{ fontSize: 12, fontWeight: 700 }}>Agendar execução recorrente com este mesmo escopo</span>
               </div>
               {schedAtivo && (
@@ -246,7 +246,7 @@ export default function WizardColetaModal({ sp, onClose }: Props) {
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
                     {DIAS_SEMANA.map((d) => (
                       <label key={d.v} style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}>
-                        <input type="checkbox" checked={schedDias.has(d.v)} onChange={(e) => toggleDia(d.v, e.target.checked)} />
+                        <input type="checkbox" checked={schedDias.has(d.v)} onChange={(e) => toggleDia(d.v, e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
                         {d.label}
                       </label>
                     ))}

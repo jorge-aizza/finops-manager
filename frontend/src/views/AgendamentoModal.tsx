@@ -108,7 +108,7 @@ export default function AgendamentoModal({ sp, onClose }: Props) {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-            <input type="checkbox" checked={ativo} onChange={(e) => setAtivo(e.target.checked)} />
+            <input type="checkbox" checked={ativo} onChange={(e) => setAtivo(e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
             <span style={{ fontSize: 13, fontWeight: 700 }}>Coleta automática recorrente</span>
           </div>
           {ativo && (
@@ -116,7 +116,7 @@ export default function AgendamentoModal({ sp, onClose }: Props) {
               <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
                 {DIAS_SEMANA.map((d) => (
                   <label key={d.v} style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={dias.has(d.v)} onChange={(e) => toggleDia(d.v, e.target.checked)} />
+                    <input type="checkbox" checked={dias.has(d.v)} onChange={(e) => toggleDia(d.v, e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
                     {d.label}
                   </label>
                 ))}
