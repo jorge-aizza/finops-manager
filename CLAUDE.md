@@ -76,6 +76,20 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
   (mesmo CSS `display:none`/`.active` das demais). `showView()` (app.js) tem `MIGRATED_VIEWS` — pra view
   migrada, ativa `#react-root` e chama `window.__reactBridge.mount(view)` (exposto por `frontend/src/bridge.ts`)
   em vez de ativar a antiga `#view-<nome>` (que fica no HTML vazia até a migração terminar).
+  **Bug real reportado pelo usuário e corrigido — Dashboard (ou qualquer view) em branco na primeira
+  entrada**: `app.js` é `<script src="app.js">` clássico (bloqueia o parsing, executa na hora); `react-app.js`
+  é `<script type="module">`, sempre adiado pro fim do parsing do documento (equivalente a `defer`) — executa
+  bem depois. A IIFE de restauração de sessão no fim de `app.js` chama `enterApp()` → `showView('dashboard')`
+  **assim que o script carrega**, sem esperar nenhum evento — se isso acontece antes de `react-app.js` rodar
+  (típico: usuário já logado abrindo a aba de novo), `window.__reactBridge` ainda não existe e
+  `window.__reactBridge?.mount(view)` era um no-op silencioso — a view escolhida se perdia pra sempre e
+  `#react-root` ficava em branco (só a *primeira* navegação após o load era afetada; a partir daí o bridge já
+  existe, por isso "só na primeira vez"). Corrigido com fila de um item: `showView()` guarda
+  `window.__reactBridgeQueuedView = view` quando o bridge ainda não existe; `bridge.ts` drena essa fila
+  (chama `mount()` com o valor guardado) assim que inicializa. Comportamento comprovado empiricamente com uma
+  reprodução isolada (dois `<script>` — um clássico, um `type="module"` — replicando a mesma ordem real de
+  carregamento): sem a fila, `mount()` nunca era chamado (array de chamadas vazio); com a fila, `mount()` era
+  chamado corretamente assim que o módulo carregava.
 - **Auth compartilhada, sem duplicar login**: login/logout continuam 100% no `app.js`. O cliente de API do
   React (`frontend/src/api/client.ts`) lê o mesmo `sessionStorage`/`localStorage` `'finops_token'` (mesma
   prioridade do `api()`/`_api()` legados) e chama `window.logout(false)` em 401 — reaproveita, não reimplementa.

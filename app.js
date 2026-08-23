@@ -549,7 +549,20 @@ function showView(view) {
   const _migrated = MIGRATED_VIEWS.has(view);
   if (_migrated) {
     document.getElementById('react-root').classList.add('active');
-    window.__reactBridge?.mount(view);
+    // react-app.js é <script type="module">, sempre executado depois que o
+    // parsing do documento termina (igual a `defer`) — mais tarde que este
+    // <script src="app.js"> clássico. Se showView() roda antes disso (ex:
+    // restauração automática de sessão, que dispara enterApp() assim que o
+    // script carrega, sem esperar nenhum evento), window.__reactBridge ainda
+    // não existe e `?.mount()` vira um no-op silencioso — a view escolhida
+    // se perde e #react-root fica em branco pra sempre (só a PRIMEIRA
+    // navegação depois do load é afetada; a partir daí o bridge já existe).
+    // Enfileira nesse caso — bridge.ts drena a fila assim que inicializa.
+    if (window.__reactBridge) {
+      window.__reactBridge.mount(view);
+    } else {
+      window.__reactBridgeQueuedView = view;
+    }
   } else {
     window.__reactBridge?.unmount();
     document.getElementById('view-' + view).classList.add('active');

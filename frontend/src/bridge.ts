@@ -59,6 +59,7 @@ async function refresh(): Promise<void> {
 declare global {
   interface Window {
     __reactBridge: { mount: typeof mount; unmount: typeof unmount; setDashboardTab: typeof setDashboardTab; refresh: typeof refresh }
+    __reactBridgeQueuedView?: string
     currentUser?: { nome?: string; email?: string; perfil?: string } | null
     logout?: (pedirConfirmacao?: boolean) => void
     showToast?: (msg: string, type?: 'success' | 'error' | 'warn') => void
@@ -70,3 +71,18 @@ declare global {
 }
 
 window.__reactBridge = { mount, unmount, setDashboardTab, refresh }
+
+// Bug real: `react-app.js` (<script type="module">) só executa depois que o
+// parsing do documento termina — mais tarde que o <script src="app.js">
+// clássico. Se app.js chamar showView() antes disso (restauração automática
+// de sessão dispara enterApp() assim que o script carrega, sem esperar
+// nenhum evento), `window.__reactBridge` ainda não existia no momento da
+// chamada — app.js enfileira o nome da view em `window.__reactBridgeQueuedView`
+// nesse caso (ver showView() em app.js). Drena essa fila assim que o bridge
+// fica pronto, senão a primeira tela após login/restauração de sessão
+// (tipicamente o Dashboard) ficava em branco pra sempre — só uma navegação
+// manual seguinte "descobria" o bridge já pronto.
+if (window.__reactBridgeQueuedView) {
+  mount(window.__reactBridgeQueuedView)
+  window.__reactBridgeQueuedView = undefined
+}
