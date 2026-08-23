@@ -17,11 +17,30 @@ interface MonthCell {
   rows: CoberturaMes[]
 }
 
-function cellColor(pct: number, isCurrentMonth: boolean): string {
-  if (isCurrentMonth) return 'var(--blue, #4da6ff)'
-  if (pct >= 95) return 'var(--green, #22c55e)'
-  if (pct >= 70) return 'var(--orange, #ff8c42)'
-  return 'var(--danger, #ff4d6a)'
+// rgb (não var(--x)) de propósito: o valor precisa virar `rgba(r,g,b,alpha)` —
+// concatenar um sufixo de alpha hex numa string `var(--x, #hex)` (como a
+// versão anterior fazia) gera um valor de CSS inválido (`var(...)22`), que o
+// browser descarta por inteiro — a grade inteira ficava sem nenhuma cor de
+// fundo/borda, só o texto (que usava a var sem sufixo) ficava colorido.
+// Mesmos tons já usados em --green/--orange/--danger/--blue (styles.css).
+const STATUS = {
+  green: { hex: '#22c55e', rgb: '34,197,94' },
+  orange: { hex: '#ff8c42', rgb: '255,140,66' },
+  red: { hex: '#ff4d6a', rgb: '255,77,106' },
+  blue: { hex: '#4da6ff', rgb: '77,166,255' },
+}
+
+function cellStatus(pct: number, isCurrentMonth: boolean) {
+  if (isCurrentMonth) return STATUS.blue
+  if (pct >= 95) return STATUS.green
+  if (pct >= 70) return STATUS.orange
+  return STATUS.red
+}
+
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k'
+  return String(n)
 }
 
 interface CoberturaGridProps {
@@ -35,6 +54,7 @@ interface CoberturaGridProps {
 
 export default function CoberturaGrid({ data, onColetarAgora, onAgendarPendente }: CoberturaGridProps) {
   const [selected, setSelected] = useState<string | null>(null) // 'YYYY-MM'
+  const [hovered, setHovered] = useState<string | null>(null) // 'YYYY-MM'
 
   const porAno = useMemo(() => {
     const porMes = new Map<string, CoberturaMes[]>()
@@ -82,28 +102,60 @@ export default function CoberturaGrid({ data, onColetarAgora, onAgendarPendente 
             {meses.map((cell, i) => {
               const key = `${ano}-${String(i + 1).padStart(2, '0')}`
               const isCurrentMonth = key === mesAtualKey
+              const isSelected = selected === key
+              const isHovered = hovered === key
+              const status = cell ? cellStatus(cell.pct, isCurrentMonth) : null
               return (
                 <div
                   key={i}
-                  onClick={() => cell && setSelected(selected === key ? null : key)}
-                  title={cell ? `${cell.pct}% de cobertura — ${cell.totalReg.toLocaleString('pt-BR')} registros` : 'Sem dados'}
+                  onClick={() => cell && setSelected(isSelected ? null : key)}
+                  onMouseEnter={() => cell && setHovered(key)}
+                  onMouseLeave={() => setHovered(null)}
+                  title={
+                    cell
+                      ? `${cell.pct}% de cobertura — ${cell.totalReg.toLocaleString('pt-BR')} registros`
+                      : `${MESES_LABEL[i]}/${ano} — sem dados`
+                  }
                   style={{
-                    textAlign: 'center', fontSize: 10, padding: '6px 2px', borderRadius: 5,
+                    textAlign: 'center', fontSize: 10, padding: '7px 2px', borderRadius: 6,
                     cursor: cell ? 'pointer' : 'default',
-                    background: cell ? cellColor(cell.pct, isCurrentMonth) + '22' : 'var(--bg-hover)',
-                    color: cell ? cellColor(cell.pct, isCurrentMonth) : 'var(--text-muted)',
-                    border: '1px solid ' + (cell ? cellColor(cell.pct, isCurrentMonth) + '55' : 'var(--border)'),
-                    fontWeight: selected === key ? 700 : 500,
+                    background: status ? `rgba(${status.rgb},.18)` : 'var(--bg-hover)',
+                    color: status ? status.hex : 'var(--text-muted)',
+                    border: '1px solid ' + (status ? `rgba(${status.rgb},.45)` : 'var(--border)'),
+                    boxShadow: isSelected && status ? `0 0 0 2px rgba(${status.rgb},.5)` : 'none',
+                    opacity: cell && !isHovered ? 1 : cell ? 0.72 : 0.55,
+                    fontWeight: isSelected ? 700 : 600,
+                    transition: 'opacity .15s, box-shadow .15s',
                   }}
                 >
                   <div>{MESES_LABEL[i]}</div>
-                  {cell && <div style={{ fontSize: 9, marginTop: 1 }}>{cell.pct}%</div>}
+                  <div style={{ fontSize: 9, marginTop: 2, opacity: cell ? 0.85 : 0.6 }}>
+                    {cell ? fmtNum(cell.totalReg) : '—'}
+                  </div>
+                  <div style={{ fontSize: 9, fontWeight: 700, marginTop: 1 }}>{cell ? `${cell.pct}%` : '—'}</div>
                 </div>
               )
             })}
           </div>
         </div>
       ))}
+
+      <div style={{ display: 'flex', gap: 14, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        {[
+          { s: STATUS.green, label: '≥95%' },
+          { s: STATUS.orange, label: '70–94%' },
+          { s: STATUS.red, label: '<70%' },
+          { s: STATUS.blue, label: 'Mês atual' },
+        ].map(({ s, label }) => (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <div style={{ width: 10, height: 10, borderRadius: 3, background: `rgba(${s.rgb},.3)`, border: `1px solid rgba(${s.rgb},.6)` }} />
+            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{label}</span>
+          </div>
+        ))}
+        <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          % = dias com dados ÷ dias do mês · Clique num mês para ver detalhe por subscription
+        </span>
+      </div>
 
       {selected && (
         <div style={{ marginTop: 12, padding: 12, background: 'var(--bg-hover)', borderRadius: 8, border: '1px solid var(--border)' }}>

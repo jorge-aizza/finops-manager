@@ -207,6 +207,27 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
       `onColetarAgora`/`onAgendarPendente`; `ColetaView.tsx` implementa a resolução de SP (`_coberturaGetSP`
       portado: SP ativa preferindo `is_padrao` pra "Coletar Agora", exigindo também `auto_coleta=true` pra
       "Agendar Pendente"), o `confirm()` com o mesmo texto do legado, e as chamadas a `coletarAPI`/`criarPendente`.
+    - **Design da grade de Cobertura corrigido — bug real reportado pelo usuário (as células ficaram sem cor
+      de fundo/borda desde a migração, só o texto do %/mês continuava colorido)**: `cellColor()` retornava uma
+      string `var(--green, #22c55e)` e o componente concatenava um sufixo de alfa hex direto nela
+      (`cellColor(...) + '22'` pro background, `+ '55'` pra borda) — prática que funciona quando a cor de base
+      é um literal `#RRGGBB` (vira um `#RRGGBBAA` válido de 8 dígitos, padrão já usado em `ReservasView.tsx`/
+      `AcoesView.tsx`/`EstimativasView.tsx`/`ColetaView.tsx` sem problema, confirmado por grep), mas quebra
+      quando a cor de base é um `var(...)`: `var(--green, #22c55e)22` não é um token de cor válido em CSS (o
+      `var()` já é seu próprio token, "22" vira um token numérico solto colado nele) — o browser descarta a
+      declaração inteira. Confirmado empiricamente com uma reprodução isolada (HTML estático + Playwright,
+      `getComputedStyle` antes/depois): o background computava pra `rgba(0,0,0,0)` (totalmente transparente,
+      exatamente o "washed-out" reportado) e a borda "herdava" a cor do texto por acidente (`border-color`
+      cai pra `currentColor` quando a declaração de `border` é rejeitada por inteiro) — nenhuma das duas
+      nunca teve alfa de verdade. Corrigido trocando `cellColor()` por `cellStatus()`, que retorna
+      `{hex, rgb}` (mesmos tons de `--green/--orange/--danger/--blue`) — background e borda agora usam
+      `rgba(r,g,b,alpha)` literal. Aproveitado pra também restaurar, como no legado
+      (`loadCoberturaMeses()`, app.js), a 3ª linha por célula com o total de registros formatado (`fmtNum`:
+      "3.6k"/"1.2M") e a legenda de cores abaixo da grade (`≥95%`/`70–94%`/`<70%`/`Mês atual` + texto
+      explicativo) — nenhuma das duas existia na versão React antes desta correção. Tooltip/texto do %
+      mantidos idênticos ao que já existia (testado por `ColetaView.test.tsx`) — não portado o rótulo "atual"
+      do legado pro mês corrente (troca `pct%` por "atual" só nesse mês), pra não quebrar esse teste existente
+      sem necessidade; é uma nuance comportamental à parte do bug de design relatado.
     - **Granularidade "Livre" portada em `SPModal.tsx`** — select 7/15/30/Livre; no modo Livre mostra um
       range de datas e calcula `granularidade_dias` a partir da diferença (`+1`, inclusivo) ao salvar, com
       validação de range inválido. **Bug real encontrado e corrigido pelo próprio teste**: o handler de troca
