@@ -37,6 +37,15 @@ function fromSP(sp: ServicePrincipal): FormState {
   }
 }
 
+function fmtDate(d: Date): string { return d.toISOString().slice(0, 10) }
+
+const GRAN_FIXAS = ['7', '15', '30']
+
+function diasEntre(de: string, ate: string): number {
+  if (!de || !ate) return 0
+  return Math.round((new Date(ate).getTime() - new Date(de).getTime()) / 86400000) + 1
+}
+
 interface SPModalProps {
   sp: ServicePrincipal | null
   onClose: () => void
@@ -53,6 +62,29 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
   const [selectedSubs, setSelectedSubs] = useState<Set<string>>(
     () => new Set((sp?.subscription_ids || '').split(',').map((s) => s.trim()).filter(Boolean)),
   )
+
+  // Granularidade de coleta (7/15/30/Livre) — porta de spGranToggle/
+  // spGranCalcDias/_getGran/_setGran (app.js:4970-5046). "Livre" deixa o
+  // usuário escolher um intervalo de datas em vez de um preset; o valor
+  // salvo é sempre um inteiro de dias (diff das datas + 1 no modo Livre).
+  const granInicial = sp?.granularidade_dias ?? 7
+  const [granModo, setGranModo] = useState<'fixa' | 'livre'>(GRAN_FIXAS.includes(String(granInicial)) ? 'fixa' : 'livre')
+  const [granFixa, setGranFixa] = useState(GRAN_FIXAS.includes(String(granInicial)) ? String(granInicial) : '7')
+  const [granAte, setGranAte] = useState(() => {
+    const ate = new Date(); ate.setDate(ate.getDate() - 1)
+    return fmtDate(ate)
+  })
+  const [granDe, setGranDe] = useState(() => {
+    const ate = new Date(); ate.setDate(ate.getDate() - 1)
+    const de = new Date(ate); de.setDate(de.getDate() - (granInicial - 1))
+    return fmtDate(de)
+  })
+  const granDiasLivre = diasEntre(granDe, granAte)
+
+  function handleGranModoChange(v: string) {
+    if (v === '0') { setGranModo('livre'); return }
+    setGranModo('fixa'); setGranFixa(v)
+  }
 
   const subsQuery = useQuery({
     queryKey: sp ? ['sp-modal-subs', sp.id] : ['sp-modal-subs-preview', form.tenant_id, form.client_id, form.client_secret],
@@ -88,6 +120,10 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
       window.showToast?.('Informe Billing Account ID e Billing Profile ID.', 'error')
       return
     }
+    if (granModo === 'livre' && granDiasLivre < 1) {
+      window.showToast?.('Data fim deve ser após data início na granularidade.', 'error')
+      return
+    }
     const input: ServicePrincipalInput = {
       nome: form.nome,
       tenant_id: form.tenant_id,
@@ -99,7 +135,7 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
       subscription_ids: form.modo_coleta === 'subscription' ? ([...selectedSubs].join(',') || null) : (sp?.subscription_ids ?? null),
       ativo: form.ativo,
       dia_execucao: sp?.dia_execucao ?? 5,
-      granularidade_dias: sp?.granularidade_dias ?? 7,
+      granularidade_dias: granModo === 'fixa' ? parseInt(granFixa, 10) : Math.max(1, granDiasLivre),
     }
     if (form.client_secret) input.client_secret = form.client_secret
     saveMutation.mutate(input)
@@ -170,6 +206,29 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
                 )}
               </div>
             )}
+            <div className="form-group">
+              <label htmlFor="sp-granularidade">Granularidade de coleta</label>
+              <select id="sp-granularidade" value={granModo === 'livre' ? '0' : granFixa} onChange={(e) => handleGranModoChange(e.target.value)}>
+                <option value="7">7 dias</option>
+                <option value="15">15 dias</option>
+                <option value="30">30 dias</option>
+                <option value="0">Livre (escolher período)</option>
+              </select>
+              {granModo === 'livre' && (
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input type="date" value={granDe} onChange={(e) => setGranDe(e.target.value)} style={{ flex: 1 }} />
+                    <span style={{ color: 'var(--text-muted)' }}>→</span>
+                    <input type="date" value={granAte} onChange={(e) => setGranAte(e.target.value)} style={{ flex: 1 }} />
+                  </div>
+                  <div style={{ fontSize: 11, color: granDiasLivre < 1 ? 'var(--danger)' : 'var(--accent)' }}>
+                    {granDiasLivre < 1
+                      ? '⚠ Data fim deve ser após data início'
+                      : `${granDiasLivre} dia${granDiasLivre !== 1 ? 's' : ''} selecionado${granDiasLivre !== 1 ? 's' : ''}`}
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input id="sp-ativo" type="checkbox" checked={form.ativo} onChange={(e) => setForm({ ...form, ativo: e.target.checked })} style={{ width: 'auto' }} />
               <label htmlFor="sp-ativo" style={{ margin: 0 }}>Ativo</label>

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  deleteHistorico, deletePendente, deleteSP, deleteStorage, executarStorage,
+  coletarAPI, criarPendente, deleteHistorico, deletePendente, deleteSP, deleteStorage, executarStorage,
   getCoberturaMeses, getHistorico, getImports, listPendentes, listSPs, listStorages,
   setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
 } from '../api/coleta'
@@ -13,6 +13,8 @@ import StorageModal from './StorageModal'
 import WizardColetaModal from './WizardColetaModal'
 import AgendamentoModal from './AgendamentoModal'
 import DiagAgendadorModal from './DiagAgendadorModal'
+import ExpurgoModal from './ExpurgoModal'
+import DiagnosticoModal from './DiagnosticoModal'
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return '—'
@@ -46,6 +48,56 @@ export default function ColetaView() {
   const [spModalOpen, setSpModalOpen] = useState(false)
   const [editingSP, setEditingSP] = useState<ServicePrincipal | null>(null)
 
+  // ── Ações por-célula da grade de Cobertura — porta de
+  // _coberturaColetarAgora/_coberturaAgendarPendente/_coberturaGetSP (app.js) ──
+  const coberturaColetarMutation = useMutation({
+    mutationFn: (input: { spId: number; subId: string; inicio: string; fim: string }) =>
+      coletarAPI(input.spId, { modo: 'subscription', data_inicio: input.inicio, data_fim: input.fim, subscription_ids: [input.subId], resource_groups: [], metric: 'ActualCost' }),
+    onSuccess: () => {
+      window.showToast?.('Coleta iniciada.', 'success')
+      queryClient.invalidateQueries({ queryKey: ['coleta-status'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao iniciar coleta: ' + e.message, 'error'),
+  })
+  const coberturaAgendarMutation = useMutation({
+    mutationFn: (input: { spId: number; subId: string; subName: string; inicio: string; fim: string; desc: string }) =>
+      criarPendente({ sp_id: input.spId, subscription_id: input.subId, sub_name: input.subName, data_inicio: input.inicio, data_fim: input.fim, descricao: input.desc }),
+    onSuccess: (_r, vars) => {
+      window.showToast?.(`Agendado: ${vars.desc} — será coletado na próxima execução.`, 'success')
+      queryClient.invalidateQueries({ queryKey: ['coleta-pendentes'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao agendar: ' + e.message, 'error'),
+  })
+
+  function mesKeyToRange(mesKey: string): { inicio: string; fim: string } {
+    const [ano, mes] = mesKey.split('-').map(Number)
+    const inicio = `${ano}-${String(mes).padStart(2, '0')}-01`
+    const fim = new Date(ano, mes, 0).toISOString().slice(0, 10)
+    return { inicio, fim }
+  }
+
+  function handleCoberturaColetarAgora(mesKey: string, subId: string, subName: string) {
+    const sps = (spsQuery.data || []).filter((s) => s.ativo)
+    const sp = sps.find((s) => s.is_padrao) || sps[0]
+    if (!sp) { window.showToast?.('Nenhuma SP ativa configurada.', 'error'); return }
+    const { inicio, fim } = mesKeyToRange(mesKey)
+    const [ano, mes] = mesKey.split('-')
+    const desc = `${subName} — ${mes}/${ano}`
+    if (!confirm(`Iniciar coleta imediata:\n\n${desc}\n\nUsando SP: ${sp.nome}\nPeríodo: ${inicio} → ${fim}`)) return
+    coberturaColetarMutation.mutate({ spId: sp.id, subId, inicio, fim })
+  }
+
+  function handleCoberturaAgendarPendente(mesKey: string, subId: string, subName: string) {
+    const sps = (spsQuery.data || []).filter((s) => s.ativo && s.auto_coleta)
+    const sp = sps.find((s) => s.is_padrao) || sps[0]
+    if (!sp) { window.showToast?.('Nenhuma SP com agendamento ativo. Configure o agendamento primeiro.', 'error'); return }
+    const { inicio, fim } = mesKeyToRange(mesKey)
+    const [ano, mes] = mesKey.split('-')
+    const desc = `${subName} — ${mes}/${ano}`
+    if (!confirm(`Incluir no próximo agendamento (uma única vez):\n\n${desc}\n\nSP: ${sp.nome}\nPeríodo: ${inicio} → ${fim}\n\nEste item será removido automaticamente após a coleta.`)) return
+    coberturaAgendarMutation.mutate({ spId: sp.id, subId, subName, inicio, fim, desc })
+  }
+
   const deleteSPMutation = useMutation({
     mutationFn: (id: number) => deleteSP(id),
     onSuccess: () => {
@@ -74,6 +126,8 @@ export default function ColetaView() {
   const [wizardSP, setWizardSP] = useState<ServicePrincipal | null>(null)
   const [agendamentoSP, setAgendamentoSP] = useState<ServicePrincipal | null>(null)
   const [diagOpen, setDiagOpen] = useState(false)
+  const [expurgoOpen, setExpurgoOpen] = useState(false)
+  const [diagnosticoOpen, setDiagnosticoOpen] = useState(false)
 
   const testarSPMutation = useMutation({
     mutationFn: (id: number) => testarSP(id),
@@ -164,7 +218,11 @@ export default function ColetaView() {
         {coberturaQuery.isLoading ? (
           <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>Carregando...</div>
         ) : (
-          <CoberturaGrid data={coberturaQuery.data || []} />
+          <CoberturaGrid
+            data={coberturaQuery.data || []}
+            onColetarAgora={handleCoberturaColetarAgora}
+            onAgendarPendente={handleCoberturaAgendarPendente}
+          />
         )}
 
         {(pendentesQuery.data?.length ?? 0) > 0 && (
@@ -312,6 +370,16 @@ export default function ColetaView() {
                 Limpar
               </button>
             )}
+            {histTab === 'manual' && (
+              <>
+                <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDiagnosticoOpen(true)}>
+                  🔍 Diagnóstico
+                </button>
+                <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px', borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => setExpurgoOpen(true)}>
+                  🗑 Limpar Dados
+                </button>
+              </>
+            )}
           </div>
         </div>
         <div className="table-wrapper">
@@ -381,6 +449,8 @@ export default function ColetaView() {
       {wizardSP && <WizardColetaModal sp={wizardSP} onClose={() => setWizardSP(null)} />}
       {agendamentoSP && <AgendamentoModal sp={agendamentoSP} onClose={() => setAgendamentoSP(null)} />}
       {diagOpen && <DiagAgendadorModal onClose={() => setDiagOpen(false)} />}
+      {expurgoOpen && <ExpurgoModal onClose={() => setExpurgoOpen(false)} />}
+      {diagnosticoOpen && <DiagnosticoModal onClose={() => setDiagnosticoOpen(false)} />}
     </div>
   )
 }

@@ -1,8 +1,8 @@
 import { apiFetch } from './client'
 import { numFields } from './normalize'
 import type {
-  AgendamentoSPInput, AgendamentoStorageInput, ColetaStatus, ColetarAPIInput,
-  CoberturaMes, DiagAgendador, HistoricoItem, ImportItem, Pendente, RGPreview,
+  AgendamentoSPInput, AgendamentoStorageInput, AzureResumo, ColetaStatus, ColetarAPIInput,
+  CoberturaMes, DiagAgendador, DiagnosticoLinha, HistoricoItem, ImportItem, Pendente, PurgeResult, RGPreview,
   ServicePrincipal, ServicePrincipalInput, StorageConfig, StorageConfigInput,
   SubscriptionPreview, TestarSPResponse, TestarStorageResponse,
 } from '../types/coleta'
@@ -76,6 +76,28 @@ export const excluirAgendamentoStorage = (id: number) =>
 
 export const getDiagAgendador = () => apiFetch<DiagAgendador>('GET', '/azure-coleta/diag-agendador')
 
+// ── Expurgo / Diagnóstico de azure_costs ────────────────────────────
+export const getAzureResumo = () => apiFetch<AzureResumo>('GET', '/azure-costs/resumo')
+
+export const getPurgePreview = (params: { data_inicio?: string; data_fim?: string; arquivo?: string }) => {
+  const q = new URLSearchParams()
+  if (params.data_inicio) q.set('data_inicio', params.data_inicio)
+  if (params.data_fim) q.set('data_fim', params.data_fim)
+  if (params.arquivo) q.set('arquivo', params.arquivo)
+  return apiFetch<{ total: number }>('GET', '/azure-costs/purge/preview?' + q.toString())
+}
+
+export const executarPurge = (params: { data_inicio?: string; data_fim?: string; arquivo?: string }) => {
+  const q = new URLSearchParams()
+  if (params.data_inicio) q.set('data_inicio', params.data_inicio)
+  if (params.data_fim) q.set('data_fim', params.data_fim)
+  if (params.arquivo) q.set('arquivo', params.arquivo)
+  const qs = q.toString()
+  return apiFetch<PurgeResult>('DELETE', '/azure-costs/purge' + (qs ? '?' + qs : ''), undefined, 60000)
+}
+
+export const getDiagnostico = () => apiFetch<DiagnosticoLinha[]>('GET', '/calculadora/diagnostico', undefined, 60000)
+
 // ── Storage Accounts ────────────────────────────────────────────
 const STORAGE_NUM_FIELDS: (keyof StorageConfig)[] = ['sp_id']
 const normalizeStorage = (s: StorageConfig) => numFields(s, STORAGE_NUM_FIELDS)
@@ -117,6 +139,9 @@ export const getCoberturaMeses = (force = false) =>
 
 // ── Pendentes ────────────────────────────────────────────────────
 export const listPendentes = () => apiFetch<Pendente[]>('GET', '/azure-coleta/pendentes')
+
+export const criarPendente = (input: { sp_id: number; subscription_id: string; sub_name: string; data_inicio: string; data_fim: string; descricao: string }) =>
+  apiFetch<{ ok: boolean }>('POST', '/azure-coleta/pendentes', input)
 
 export const deletePendente = (id: number) =>
   apiFetch<{ ok: boolean }>('DELETE', '/azure-coleta/pendentes/' + id)

@@ -26,9 +26,14 @@ function cellColor(pct: number, isCurrentMonth: boolean): string {
 
 interface CoberturaGridProps {
   data: CoberturaMes[]
+  // Porta de _coberturaColetarAgora/_coberturaAgendarPendente (app.js) — ações
+  // por-linha na tabela de detalhe (mesKey formato 'YYYY-MM', subId = subscription_id).
+  // Omitidas → colunas de ação não aparecem (uso em contextos read-only).
+  onColetarAgora?: (mesKey: string, subId: string, subName: string) => void
+  onAgendarPendente?: (mesKey: string, subId: string, subName: string) => void
 }
 
-export default function CoberturaGrid({ data }: CoberturaGridProps) {
+export default function CoberturaGrid({ data, onColetarAgora, onAgendarPendente }: CoberturaGridProps) {
   const [selected, setSelected] = useState<string | null>(null) // 'YYYY-MM'
 
   const porAno = useMemo(() => {
@@ -112,6 +117,7 @@ export default function CoberturaGrid({ data }: CoberturaGridProps) {
                 <th style={{ textAlign: 'right' }}>Registros</th>
                 <th style={{ textAlign: 'right' }}>Dias com dados</th>
                 <th>Última importação</th>
+                {(onColetarAgora || onAgendarPendente) && <th>Ações</th>}
               </tr>
             </thead>
             <tbody>
@@ -121,6 +127,20 @@ export default function CoberturaGrid({ data }: CoberturaGridProps) {
                   <td style={{ textAlign: 'right' }}>{r.registros.toLocaleString('pt-BR')}</td>
                   <td style={{ textAlign: 'right' }}>{r.dias_com_dados} / {r.dias_no_mes}</td>
                   <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{r.ultima_importacao || '—'}</td>
+                  {(onColetarAgora || onAgendarPendente) && (
+                    <td>
+                      <div className="table-actions">
+                        {onColetarAgora && (
+                          <button className="btn-icon" title="Coletar agora este mês/assinatura"
+                            onClick={() => onColetarAgora(selected!, r.subscription_id, r.subscription_name || r.subscription_id)}>▶</button>
+                        )}
+                        {onAgendarPendente && (
+                          <button className="btn-icon" title="Incluir no próximo agendamento"
+                            onClick={() => onAgendarPendente(selected!, r.subscription_id, r.subscription_name || r.subscription_id)}>📅</button>
+                        )}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

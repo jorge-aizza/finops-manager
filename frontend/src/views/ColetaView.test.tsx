@@ -54,6 +54,7 @@ function renderWithClient() {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks()
   vi.mocked(coletaApi.listSPs).mockResolvedValue(mockSPs)
   vi.mocked(coletaApi.listStorages).mockResolvedValue(mockStorages)
   vi.mocked(coletaApi.getCoberturaMeses).mockResolvedValue(mockCobertura)
@@ -182,5 +183,42 @@ describe('ColetaView', () => {
 
     await user.click(screen.getByRole('button', { name: '🔍 Diagnóstico do Agendador' }))
     expect(await screen.findByText('Nenhuma SP')).toBeInTheDocument()
+  });
+
+  it('ação "▶" na grade de Cobertura pede confirmação e chama coletarAPI escopado pro mês/assinatura', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.mocked(coletaApi.coletarAPI).mockResolvedValue({ ok: true, message: 'Coleta iniciada' })
+    renderWithClient()
+
+    const cell = await screen.findByTitle('65% de cobertura — 1.200 registros')
+    await user.click(cell)
+    await user.click(await screen.findByTitle('Coletar agora este mês/assinatura'))
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('Sub Principal'))
+    await waitFor(() => expect(coletaApi.coletarAPI).toHaveBeenCalledWith(1, expect.objectContaining({
+      modo: 'subscription', subscription_ids: ['sub-1'], data_inicio: '2026-08-01', data_fim: '2026-08-31',
+    })))
+  });
+
+  it('ação "📅" na grade de Cobertura chama criarPendente e cancela se o usuário não confirmar', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    renderWithClient()
+
+    const cell = await screen.findByTitle('65% de cobertura — 1.200 registros')
+    await user.click(cell)
+    await user.click(await screen.findByTitle('Incluir no próximo agendamento'))
+
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(coletaApi.criarPendente).not.toHaveBeenCalled()
+
+    confirmSpy.mockReturnValue(true)
+    vi.mocked(coletaApi.criarPendente).mockResolvedValue({ ok: true })
+    await user.click(screen.getByTitle('Incluir no próximo agendamento'))
+
+    await waitFor(() => expect(coletaApi.criarPendente).toHaveBeenCalledWith(expect.objectContaining({
+      sp_id: 1, subscription_id: 'sub-1', sub_name: 'Sub Principal', data_inicio: '2026-08-01', data_fim: '2026-08-31',
+    })))
   });
 });

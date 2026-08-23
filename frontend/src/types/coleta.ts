@@ -224,6 +224,47 @@ export interface DiagAgendadorStorage {
   deveria_rodar: boolean
 }
 
+// ── Expurgo / Diagnóstico de azure_costs — porta de Purge/Diagnóstico
+// (calculadora.js). Vive conceitualmente na tela Coleta Azure (Import
+// Manual) — mesmo lugar de onde os botões legados abrirPurgeAzure()/
+// abrirDiagnosticoAzure() eram acionados.
+
+export interface AzureResumoMes {
+  mes: string
+  registros: number
+  total_billing: number
+}
+
+export interface AzureResumo {
+  resumo: {
+    total: number
+    data_inicio: string | null
+    data_fim: string | null
+    total_billing: number | null
+    moeda: string | null
+  }
+  por_mes: AzureResumoMes[]
+}
+
+export interface PurgeResult {
+  message: string
+  removidos: number
+}
+
+export interface DiagnosticoLinha {
+  meter_category: string
+  meter_sub_category: string | null
+  consumed_service: string | null
+  charge_type: string | null
+  unit_of_measure: string | null
+  pricing_model: string | null
+  publisher_type: string | null
+  recursos: number
+  linhas: number
+  total_billing: number
+  moeda: string | null
+}
+
 export interface DiagAgendador {
   agora_node: string
   agora_node_local: string

@@ -155,15 +155,34 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
       preenchidas no formulário pra usar `listarSubsPreview` (mesmo endpoint que o wizard usa, sem precisar
       salvar antes). Ao salvar, `subscription_ids` passa a refletir a seleção do picker em vez de preservar o
       valor antigo verbatim (Fase A só preservava, nunca editava).
-    - **Deliberadamente fora do escopo mesmo na Fase B**: as ações por-célula da grade de Cobertura
-      (`_coberturaColetarAgora`/`_coberturaAgendarPendente` no legado — "▶ Agora" e "Agendar Pendente" direto
-      num mês/assinatura da grade) permanecem read-only em `CoberturaGrid.tsx`; o mesmo resultado (coletar um
-      escopo específico) já é alcançável via "Iniciar Coleta" no wizard. O seletor de granularidade "Livre"
-      (data customizada) do modal de SP legado não foi portado — `SPModal.tsx` mantém o default de 7 dias já
-      existente na Fase A. `GET /api/azure-coleta/agendamentos` não tem chamador nem no legado nem aqui
-      (aparenta ser código morto do lado do servidor) — não portado. Purge/Diagnóstico (`abrirPurgeAzure()`/
-      `abrirDiagnosticoAzure()`, ainda bridgeados pra `calculadora.js` via `_ensureCalcIniciado()`) também
-      seguem fora — ver nota na seção "Calculadora Fase B" acima sobre por que continuam ali por enquanto.
+    - **Purge/Diagnóstico portados nesta rodada (`ExpurgoModal.tsx`/`DiagnosticoModal.tsx`)** — descoberta real
+      que motivou a mudança: `abrirPurgeAzure()`/`abrirDiagnosticoAzure()` (app.js) só eram acionados pelos
+      botões "Diagnóstico"/"Limpar Dados" dentro de `#view-coleta` (index.html) — e `'coleta'` já estava em
+      `MIGRATED_VIEWS` desde a Fase A daquela tela. Ou seja, essas duas features ficaram **completamente
+      inacessíveis no app** desde que a Fase A da Coleta Azure foi ao ar (React passou a ser dono de
+      `#view-coleta`, tornando-o `display:none` permanente) — não uma regressão desta sessão, mas um bug
+      real pré-existente só agora corrigido. `ExpurgoModal.tsx` porta `abrirPurge()`/`verificarPurge()`/
+      `executarPurge()`/`_purgeOnModo()` (fluxo período/arquivo/tudo, preview antes de habilitar "Confirmar",
+      mais um `window.confirm()` novo antes de executar — o legado não tinha esse segundo gate, só o preview;
+      adicionado por ser uma operação destrutiva em `azure_costs`, mesmo padrão já usado pelos outros deletes
+      de `ColetaView.tsx`). `DiagnosticoModal.tsx` porta `abrirDiagnostico()`/`_diagFiltrar()` (busca livre +
+      filtro por charge_type/unit_of_measure sobre `GET /calculadora/diagnostico`). As funções e o HTML dos
+      dois modais foram removidos de `calculadora.js` (dead code confirmado — grep não encontra mais nenhuma
+      referência); o export da API pública do IIFE foi atualizado. `abrirDiagnosticoAzure()`/`abrirPurgeAzure()`
+      em `app.js` e os botões correspondentes em `index.html` **não foram removidos** (ficam dentro do bloco
+      gigante de `#view-coleta`, já morto por inteiro — não vale isolar essas poucas linhas sem limpar o resto).
+    - **Ações por-célula da grade de Cobertura portadas** — `CoberturaGrid.tsx` ganhou props opcionais
+      `onColetarAgora`/`onAgendarPendente`; `ColetaView.tsx` implementa a resolução de SP (`_coberturaGetSP`
+      portado: SP ativa preferindo `is_padrao` pra "Coletar Agora", exigindo também `auto_coleta=true` pra
+      "Agendar Pendente"), o `confirm()` com o mesmo texto do legado, e as chamadas a `coletarAPI`/`criarPendente`.
+    - **Granularidade "Livre" portada em `SPModal.tsx`** — select 7/15/30/Livre; no modo Livre mostra um
+      range de datas e calcula `granularidade_dias` a partir da diferença (`+1`, inclusivo) ao salvar, com
+      validação de range inválido. **Bug real encontrado e corrigido pelo próprio teste**: o handler de troca
+      de modo comparava `v === 'livre'`, mas o `<select>` emite o valor da `<option>` (`'0'`), nunca a string
+      `'livre'` — a comparação nunca era verdadeira e o modo Livre não abria o picker de datas. Corrigido pra
+      `v === '0'`.
+    - `GET /api/azure-coleta/agendamentos` não tem chamador nem no legado nem aqui (aparenta ser código morto
+      do lado do servidor) — não portado.
     Pegadinha real evitada em `frontend/src/api/coleta.ts` (`setStorageAtivo`): a rota `PUT /api/azure-coleta/storages/:id`
     não tem PATCH parcial — o handler grava **todos** os campos do body, inclusive como `null` os que faltarem.
     Um toggle ingênuo (`PUT {ativo}`) zeraria `nome`/`storage_account`/etc. — `setStorageAtivo` reenvia a linha
@@ -397,9 +416,15 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
       avaliar "código morto" a partir só da perspectiva do app autenticado, sem considerar que o Portal
       Público reusa o mesmo HTML/JS injetado por `_html()`. Corrigido substituindo o widget legado inteiro por
       `PublicCalculadoraView.tsx` — não por restaurar o código antigo.
-    - `calculadora.js` **não é mais carregado em `portal.html`** — `<script src="/calculadora.js">` removido;
-      só o app autenticado (`index.html`) ainda precisa dele (Purge/Diagnóstico da tela Coleta Azure, que
-      permanece legada até sua própria Fase B). A declaração ambiente `var Calculadora` em `bridge.ts` foi
+    - `calculadora.js` **não é mais carregado em `portal.html`** — `<script src="/calculadora.js">` removido.
+      **Atualização**: a frase original aqui dizia que `index.html` "ainda precisa dele" pra Purge/Diagnóstico —
+      isso deixou de ser verdade quando essas duas features foram portadas pra React na Fase B da Coleta Azure
+      (ver `## Frontend React` → `coleta`). Levantamento após essa remoção: **todo** `Calculadora.` restante em
+      `app.js` hoje é código morto (dentro do `#view-coleta` legado, já inteiro inatingível desde que `'coleta'`
+      entrou em `MIGRATED_VIEWS`, ou o branch `calculadora` de `manualRefresh()`, que chama
+      `Calculadora.buscarRecursos()` sobre o DOM invisível de `#view-calculadora`) — `index.html` provavelmente
+      não precisa mais de `<script src="calculadora.js">` nenhum, mas isso não foi confirmado/removido ainda
+      (achado reportado ao usuário, não executado sem pedido explícito). A declaração ambiente `var Calculadora` em `bridge.ts` foi
       removida — sem nenhum código React restante referenciando o identificador solto `Calculadora`.
     **Diferença arquitetural de todas as telas anteriores**: `portal.html` é uma página standalone servida sem
     autenticação — não é uma view dentro do shell `index.html`/`app.js`/`#react-root`/`MIGRATED_VIEWS`. Decisão

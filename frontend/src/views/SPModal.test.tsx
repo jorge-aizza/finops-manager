@@ -77,3 +77,35 @@ describe('SPModal — seletor de subscriptions (modo_coleta=subscription)', () =
     ))
   });
 });
+
+describe('SPModal — granularidade de coleta (7/15/30/Livre)', () => {
+  it('default de uma SP nova é 7 dias (preset fixo, sem picker de datas)', async () => {
+    renderWithClient(null)
+    expect(screen.getByLabelText('Granularidade de coleta')).toHaveValue('7')
+    expect(screen.queryByText(/dia.*selecionado/)).not.toBeInTheDocument()
+  });
+
+  it('SP existente com granularidade fora dos presets (ex: 4) abre no modo Livre', () => {
+    renderWithClient({ ...spSubscription, granularidade_dias: 4 })
+    expect(screen.getByLabelText('Granularidade de coleta')).toHaveValue('0')
+    expect(screen.getByText('4 dias selecionados')).toBeInTheDocument()
+  });
+
+  it('escolher "Livre" mostra o picker de datas e calcula os dias salvos ao submeter', async () => {
+    const user = userEvent.setup()
+    vi.mocked(coletaApi.listarSubsSP).mockResolvedValue({ subs: [], fonte: 'tenant' })
+    vi.mocked(coletaApi.updateSP).mockResolvedValue({ ok: true })
+    renderWithClient(spSubscription)
+
+    await user.selectOptions(screen.getByLabelText('Granularidade de coleta'), '0')
+    const [deInput, ateInput] = screen.getAllByDisplayValue(/^\d{4}-\d{2}-\d{2}$/)
+    await user.clear(deInput); await user.type(deInput, '2026-08-01')
+    await user.clear(ateInput); await user.type(ateInput, '2026-08-10')
+
+    expect(screen.getByText('10 dias selecionados')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Salvar' }))
+
+    await waitFor(() => expect(coletaApi.updateSP).toHaveBeenCalledWith(5, expect.objectContaining({ granularidade_dias: 10 })))
+  });
+});
