@@ -33,6 +33,19 @@ const STATUS_CLASS: Record<string, string> = {
   Planejado: 'status-planejado', 'Em Andamento': 'status-andamento', Concluído: 'status-concluido', Cancelado: 'status-cancelado',
 }
 
+const EST_STATUS_COLOR: Record<string, string> = {
+  Aprovado: '#22c55e', 'Nao Aprovado': '#ff4d6a', Pendente: '#ff8c42',
+}
+
+function EstStatusBadge({ status }: { status: string }) {
+  const c = EST_STATUS_COLOR[status] || EST_STATUS_COLOR.Pendente
+  return (
+    <span style={{ background: c + '22', color: c, border: '1px solid ' + c + '55', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
+      {status || 'Pendente'}
+    </span>
+  )
+}
+
 export default function DashboardView() {
   const [tab, setTab] = useState<'acoes' | 'estimativas'>('acoes')
   useEffect(() => setDashboardTabListener((t) => setTab(t === 'estimativas' ? 'estimativas' : 'acoes')), [])
@@ -108,6 +121,11 @@ export default function DashboardView() {
     }
     return [...m.entries()].sort((a, b) => b[1] - a[1])
   }
+
+  const estimativasRecentes = useMemo(
+    () => [...estimativas].sort((a, b) => new Date(b.data_estimativa || b.criado_em).getTime() - new Date(a.data_estimativa || a.criado_em).getTime()),
+    [estimativas],
+  )
 
   const estAprov = estimativas.filter((e) => e.status === 'Aprovado')
   const estNaoAprov = estimativas.filter((e) => e.status === 'Nao Aprovado')
@@ -324,6 +342,47 @@ export default function DashboardView() {
               </div>
               <div className="stat-value yellow">{estimativasQuery.isLoading ? '—' : formatCurrency(somaPend)}</div>
               <div className="stat-sub">{estPend.length} estimativa{estPend.length !== 1 ? 's' : ''}</div>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">
+                <svg viewBox="0 0 16 16" fill="none" width={16} height={16} style={{ verticalAlign: -3, marginRight: 4 }}><path d="M2 8s2.7-5 6-5 6 5 6 5-2.7 5-6 5-6-5-6-5z" stroke="currentColor" strokeWidth={1.5} /><circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth={1.5} /></svg>
+                Estimativas Recentes
+              </span>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 12px' }} onClick={() => window.showView?.('estimativas')}>Ver todas →</button>
+                <span className="badge">{estimativasRecentes.length}</span>
+              </div>
+            </div>
+            <div className="table-wrapper">
+              <table className="data-table">
+                <thead>
+                  <tr><th>Número</th><th>Projeto</th><th>Título</th><th>Responsável</th><th style={{ textAlign: 'right' }}>Total Final</th><th>Status</th><th>Data</th></tr>
+                </thead>
+                <tbody>
+                  {estimativasQuery.isLoading && <tr><td colSpan={7} className="empty-state">Carregando...</td></tr>}
+                  {!estimativasQuery.isLoading && estimativasRecentes.length === 0 && (
+                    <tr><td colSpan={7} className="empty-state">Nenhuma estimativa cadastrada</td></tr>
+                  )}
+                  {estimativasRecentes.map((e) => (
+                    <tr key={e.id}>
+                      <td>
+                        <button className="finops-id" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, font: 'inherit' }} onClick={() => window.showView?.('estimativas')}>
+                          {e.numero}
+                        </button>
+                      </td>
+                      <td style={{ color: 'var(--text-muted)' }}>{e.projeto_nome || '—'}</td>
+                      <td style={{ fontWeight: 500 }}>{e.titulo}</td>
+                      <td>{e.responsavel || '—'}</td>
+                      <td style={{ textAlign: 'right', color: 'var(--accent)' }}>{formatCurrency(e.total_final)}</td>
+                      <td><EstStatusBadge status={e.status} /></td>
+                      <td style={{ color: 'var(--text-muted)' }}>{formatDate(e.data_estimativa)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 

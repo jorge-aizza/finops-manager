@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -125,5 +125,24 @@ describe('DashboardView', () => {
 
     await user.click(screen.getAllByTitle('Ver detalhes')[0])
     expect(await screen.findByDisplayValue('Rightsizing VMs')).toBeInTheDocument()
+  });
+
+  // Aba Estimativas ganhou uma tabela item-a-item ("Estimativas Recentes"), no
+  // mesmo padrão visual (.card/.card-header/.badge/.data-table) da tabela
+  // "Ações Recentes" da aba Ações — antes só havia os cards de totais agregados.
+  it('mostra a tabela "Estimativas Recentes" com uma linha por estimativa', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('Rightsizing VMs')
+    window.__reactBridge.setDashboardTab('estimativas')
+
+    const card = (await screen.findByText('Estimativas Recentes')).closest<HTMLElement>('.card')!
+    expect(within(card).getByText('3')).toBeInTheDocument() // badge de contagem
+    expect(within(card).getAllByText('EST-1').length).toBe(3)
+    expect(within(card).getByText('Aprovado')).toBeInTheDocument()
+    expect(within(card).getByText('Pendente')).toBeInTheDocument()
+
+    await user.click(within(card).getAllByText('EST-1')[0])
+    expect(window.showView).toHaveBeenCalledWith('estimativas')
   });
 });

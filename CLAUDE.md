@@ -365,6 +365,17 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     script, removido depois); cobertura desses dois fluxos específicos vem só dos testes Vitest com dados
     mockados. Login automático pro dashboard, troca de aba via sidebar, e navegação "Ver todas →" pra
     Estimativas foram confirmados via Playwright contra o servidor real.
+    **Card "Estimativas Recentes" adicionado a pedido do usuário** — a aba Estimativas só tinha os 3 cards de
+    totais agregados + "Detalhamento por Projeto" (somas por projeto, sem linha por estimativa); a aba Ações
+    já tinha uma tabela item-a-item ("Ações Recentes") desde o início. Novo card segue o mesmo padrão visual
+    (`.card`/`.card-header`/`.card-title`/`.badge`/`.data-table`, mesma paleta de `StatusBadge` já usada em
+    `EstimativasView.tsx`) — colunas Número/Projeto/Título/Responsável/Total Final/Status/Data, ordenado por
+    `data_estimativa` mais recente primeiro, sem paginação (mesmo padrão de "Ações Recentes", que também
+    lista tudo sem cap). Clicar no número da estimativa ou em "Ver todas →" navega pra tela completa
+    (`window.showView('estimativas')`) — nenhum modal de detalhe próprio aqui, ao contrário de "Ações
+    Recentes" (que abre `AcaoModal` inline): `EstimativaDetalheModal` vive dentro de `EstimativasView.tsx`
+    (não exportado) e tem lógica própria de geração de PDF/mutation de status que não fazia sentido duplicar
+    numa tela pensada como resumo/prévia — decisão deliberada de manter a interação pesada só na tela cheia.
     **Outra pegadinha real encontrada e corrigida (não específica desta tela — grep pegou em 5 arquivos)**:
     `valor.toLocaleString('pt-BR', { minimumFractionDigits: 2 })` sem `maximumFractionDigits: 2` deixa o
     `Intl.NumberFormat` livre pra mostrar até 3 casas decimais quando o número de origem tem mais precisão
