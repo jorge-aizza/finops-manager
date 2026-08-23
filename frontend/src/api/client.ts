@@ -8,11 +8,14 @@
 // de auth: sessionStorage tem prioridade sobre localStorage, mesma chave
 // 'finops_token'.
 
-const API_BASE = window.location.origin + '/api'
+export const API_BASE = window.location.origin + '/api'
 
 export class ApiError extends Error {}
 
-function getToken(): string | null {
+// Exportado — uploadImportFile() (api/coleta.ts) precisa montar o próprio
+// fetch com FormData (multipart), incompatível com o Content-Type:
+// application/json fixo do apiFetch abaixo.
+export function getToken(): string | null {
   return sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token')
 }
 

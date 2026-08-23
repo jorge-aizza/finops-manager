@@ -183,6 +183,31 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
       `v === '0'`.
     - `GET /api/azure-coleta/agendamentos` não tem chamador nem no legado nem aqui (aparenta ser código morto
       do lado do servidor) — não portado.
+    - **Import Manual (upload CSV/Parquet/ZIP) portado — mesma causa raiz do bug do Purge/Diagnóstico, achado
+      numa rodada seguinte enquanto investigava o fix do botão "Atualizar"**: a ÚNICA lógica funcional de
+      upload (`_setupImport()`, listener de `change` em `#cfile`, o `fetch` real pra
+      `POST /api/azure-costs/import`) vivia em `calculadora.js`, registrada por `Calculadora.init()` — chamada
+      só por `_ensureCalcIniciado()`, só acionada pelo botão "Selecionar Arquivos" dentro de `#view-coleta`.
+      O listener equivalente em `app.js` (`loadColeta()`, dentro do também-nunca-executado — `loadColeta()` só
+      roda via `switchSettingsTab('coleta')`, e nenhuma aba de Configurações chama isso mais) era só uma barra
+      de progresso decorativa (setInterval falso, nunca chega a 100%), não fazia upload de verdade. Ou seja,
+      **a importação manual de custos Azure estava 100% inacessível** — pior que Purge/Diagnóstico, já que é
+      o único caminho de ingestão pra quem não tem credenciais de API Azure configuradas (a coleta automática
+      via wizard não serve de substituto nesse caso). `frontend/src/components/ImportManualPanel.tsx` porta
+      `_setupImport()`/`_aguardarImport()` fielmente: validação de extensão (.csv/.parquet/.zip) client-side,
+      loop sequencial por arquivo com `POST /azure-costs/import` (multipart) → polling de
+      `GET /azure-costs/import-status` a cada 900ms até `status !== 'running'`, tratamento de 409 (import já
+      em andamento — espera 4s e tenta de novo, mesmo arquivo) e 401 (chama `window.logout`), barra de
+      progresso real (não decorativa) baseada em `linhas`/`inseridos+atualizados+erros` do job, resumo final e
+      tabela de erros detalhados (`erros_det`, antes um modal separado `_abrirImportErros()` — aqui é só uma
+      seção expansível "Ver N erro(s)" dentro do próprio card, sem duplicar UI de modal).
+      `frontend/src/api/client.ts` exportou `getToken`/`API_BASE` (antes privados) — o upload precisa montar
+      seu próprio `fetch` com `FormData` (multipart), incompatível com o `Content-Type: application/json` fixo
+      e o timeout de 30s do `apiFetch()` normal (arquivos de até 2 GB; `server.js` desabilita timeout de
+      propósito nessa rota). Renderizado como um novo card `📥 Importação Manual` em `ColetaView.tsx`, entre
+      Storage Accounts e Histórico de Execuções — a estrutura de 3 abas do legado (`#ctab-panel-api/storage/
+      manual`, alternadas por `switchColetaTab()`) não foi replicada; SPs/Storages já são listados como
+      cards/tabelas com botões de ação, então a importação manual entra como mais um card no mesmo padrão.
     Pegadinha real evitada em `frontend/src/api/coleta.ts` (`setStorageAtivo`): a rota `PUT /api/azure-coleta/storages/:id`
     não tem PATCH parcial — o handler grava **todos** os campos do body, inclusive como `null` os que faltarem.
     Um toggle ingênuo (`PUT {ativo}`) zeraria `nome`/`storage_account`/etc. — `setStorageAtivo` reenvia a linha

@@ -8,6 +8,7 @@ import {
 import type { HistoricoItem, ImportItem, ServicePrincipal, StorageConfig } from '../types/coleta'
 import CoberturaGrid from '../components/CoberturaGrid'
 import ColetaMonitor from '../components/ColetaMonitor'
+import ImportManualPanel from '../components/ImportManualPanel'
 import SPModal from './SPModal'
 import StorageModal from './StorageModal'
 import WizardColetaModal from './WizardColetaModal'
@@ -351,6 +352,8 @@ export default function ColetaView() {
           </table>
         </div>
       </div>
+
+      <ImportManualPanel />
 
       {/* ── Histórico de Execuções ── */}
       <div className="card">

@@ -64,6 +64,8 @@ declare global {
     showToast?: (msg: string, type?: 'success' | 'error' | 'warn') => void
     exportarExcel?: () => void
     showView?: (view: string) => void
+    suspendInactivityTimer?: () => void
+    resumeInactivityTimer?: () => void
   }
 }
 

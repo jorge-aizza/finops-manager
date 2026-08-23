@@ -265,6 +265,32 @@ export interface DiagnosticoLinha {
   moeda: string | null
 }
 
+// ── Import Manual (upload CSV/Parquet/ZIP) ──────────────────────────
+export interface ImportErroDet {
+  linha?: number
+  msg?: string
+  cost_date?: string
+  subscription_id?: string
+  resource_id?: string
+}
+
+export interface ImportJob {
+  id: string
+  arquivo: string
+  idx: number
+  total: number
+  status: 'running' | 'done' | 'error'
+  linhas: number
+  inseridos: number
+  atualizados: number
+  erros: number
+  erros_det: ImportErroDet[]
+  subArquivo: string | null
+  erro: string | null
+  iniciado: number
+  concluido: number | null
+}
+
 export interface DiagAgendador {
   agora_node: string
   agora_node_local: string

@@ -1,8 +1,8 @@
-import { apiFetch } from './client'
+import { API_BASE, ApiError, apiFetch, getToken } from './client'
 import { numFields } from './normalize'
 import type {
   AgendamentoSPInput, AgendamentoStorageInput, AzureResumo, ColetaStatus, ColetarAPIInput,
-  CoberturaMes, DiagAgendador, DiagnosticoLinha, HistoricoItem, ImportItem, Pendente, PurgeResult, RGPreview,
+  CoberturaMes, DiagAgendador, DiagnosticoLinha, HistoricoItem, ImportItem, ImportJob, Pendente, PurgeResult, RGPreview,
   ServicePrincipal, ServicePrincipalInput, StorageConfig, StorageConfigInput,
   SubscriptionPreview, TestarSPResponse, TestarStorageResponse,
 } from '../types/coleta'
@@ -97,6 +97,48 @@ export const executarPurge = (params: { data_inicio?: string; data_fim?: string;
 }
 
 export const getDiagnostico = () => apiFetch<DiagnosticoLinha[]>('GET', '/calculadora/diagnostico', undefined, 60000)
+
+// ── Import Manual (upload CSV/Parquet/ZIP) ──────────────────────────
+// GET /azure-costs/import-status não exige auth no servidor (progresso não é
+// sensível) — apiFetch normal serve, o header Authorization opcional é ignorado.
+export const getImportStatus = () => apiFetch<{ job: ImportJob | null }>('GET', '/azure-costs/import-status')
+
+export type UploadOutcome =
+  | { kind: 'accepted'; jobId: string; arquivo: string }
+  | { kind: 'conflict'; message: string }
+
+// Upload multipart — não usa apiFetch (Content-Type fixo application/json,
+// incompatível com FormData) nem seu timeout de 30s (arquivos de até 2 GB,
+// server.js desabilita timeout de propósito — req.setTimeout(0)). Espelha o
+// tratamento de 401 do apiFetch (window.logout) e trata 409 (import já em
+// andamento em outra aba/usuário) como resultado, não exceção — o chamador
+// decide esperar e tentar de novo, igual ao legado.
+export async function uploadImportFile(file: File, idx: number, total: number): Promise<UploadOutcome> {
+  const fd = new FormData()
+  fd.append('arquivo', file)
+  fd.append('idx', String(idx))
+  fd.append('total', String(total))
+  const token = getToken()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = 'Bearer ' + token
+
+  const res = await fetch(API_BASE + '/azure-costs/import', { method: 'POST', headers, body: fd })
+
+  if (res.status === 401) {
+    window.logout?.(false)
+    throw new ApiError('Sessão expirada')
+  }
+  if (res.status === 409) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    return { kind: 'conflict', message: data.error || 'Uma importação já está em andamento. Aguarde a conclusão.' }
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    throw new ApiError(data.error || `Erro HTTP ${res.status}`)
+  }
+  const data = await res.json() as { jobId: string; arquivo: string }
+  return { kind: 'accepted', jobId: data.jobId, arquivo: data.arquivo }
+}
 
 // ── Storage Accounts ────────────────────────────────────────────
 const STORAGE_NUM_FIELDS: (keyof StorageConfig)[] = ['sp_id']
