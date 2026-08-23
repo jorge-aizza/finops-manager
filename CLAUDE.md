@@ -330,12 +330,6 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     Nota pro implementador da view: `#cinv-preview-modal` alterna visibilidade via `style.display='flex'/'none'`
     diretamente, **não** via classe `.open` — não assumir o padrão `.modal-overlay.open` de outros modais do
     sistema ao inspecionar/testar esse modal específico.
-    **Tabela sem card wrapper, corrigido a pedido do usuário**: diferente de `AcoesView.tsx` (`.card` >
-    `.card-header` com `.card-title`+`.badge` > `.table-wrapper`), a tabela de `EstimativasView.tsx` estava solta
-    dentro de só um `.table-wrapper`, sem o cartão/título/contador ao redor — pedido explícito do usuário foi
-    "deixar parecido com Ações FinOps". Corrigido envolvendo a mesma tabela (sem mudar nenhuma coluna/linha/
-    lógica) num `.card`/`.card-header` com título "Estimativas" + `.badge` com `{all.length}` (contagem total,
-    não filtrada — mesmo padrão do badge de `AcoesView.tsx`).
   - `dashboard` (`frontend/src/views/DashboardView.tsx`) — agregação 100% client-side sobre `listAcoes()` +
     `listEstimativas()` (já existentes, nenhum endpoint novo). O `GET /api/dashboard` que existe em `server.js`
     é **código morto** — nunca foi chamado por nenhum client, nem legado nem React; não usado aqui.
