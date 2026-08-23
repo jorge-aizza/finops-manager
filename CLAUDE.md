@@ -1321,6 +1321,12 @@ background-attachment: fixed;
 - `.currency`, `.months-table .positive` → `var(--accent)`
 - `.btn-primary`, `.cbtn-go`, `.cms-btn-ok` → `color: #ffffff`
 - `.toast.success` → accent background, **white** text (`#ffffff`)
+- `.finops-id` (ID FinOps / Número da Estimativa, dentro de `<td>`) → `var(--accent)`. **Bug real reportado
+  pelo usuário e corrigido**: sozinha, a classe (1 classe) perdia em especificidade CSS pra `.data-table td`
+  (1 classe + 1 elemento, define `var(--text-dim)`) e, no tema claro, pra `[data-theme="light"] table tbody td`
+  (1 atributo + 3 elementos, define `#374151`) — o ID/Número renderizava cinza/dim em vez de roxo, nos dois
+  temas. Corrigido com `.data-table .finops-id { color: var(--accent) }` (2 classes, especificidade maior que
+  as duas regras concorrentes) — ver `.data-table td` em `styles.css`. Confirmado via `getComputedStyle`.
 
 **Compatibility CSS aliases** (in `:root` — do not remove):
 - `--surface` → `rgba(22,4,38,.82)` — used by inline styles in index.html

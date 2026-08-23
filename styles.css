@@ -755,6 +755,16 @@ body {
   vertical-align: middle;
 }
 
+/* Bug real: `.data-table td` (1 classe + 1 elemento) e, no tema claro,
+   `[data-theme="light"] table tbody td` (1 atributo + 3 elementos) tinham
+   mais especificidade que uma classe sozinha (`.finops-id`, 1 classe) — o ID
+   FinOps/Número da Estimativa renderizava na cor padrão da célula (cinza) em
+   vez do roxo var(--accent) pretendido, em toda tabela e nos dois temas
+   (Ações, Estimativas, Dashboard). `.data-table .finops-id` (2 classes) tem
+   especificidade maior que as duas regras acima, então volta a ganhar —
+   confirmado via getComputedStyle antes/depois (cinza/dim → roxo nos dois temas). */
+.data-table .finops-id { color: var(--accent); }
+
 .data-table tr:last-child td { border-bottom: none; }
 
 .data-table tr:hover td {
