@@ -124,65 +124,71 @@ export default function EstimativasView() {
         </div>
       )}
 
-      <div className="table-wrapper">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Número</th><th>Projeto</th><th>Título</th><th>Responsável</th>
-              <th style={{ textAlign: 'right' }}>Total Final</th><th>Data</th><th>Validade</th><th>Status</th><th>Ações</th>
-            </tr>
-          </thead>
-          <tbody>
-            {estimativasQuery.isLoading && <tr><td colSpan={9} className="empty-state">Carregando...</td></tr>}
-            {!estimativasQuery.isLoading && filtered.length === 0 && (
-              <tr><td colSpan={9} className="empty-state">Nenhuma estimativa encontrada</td></tr>
-            )}
-            {filtered.map((e) => {
-              const validade = calcValidade(e.data_estimativa, e.validade_dias)
-              return (
-                <tr key={e.id}>
-                  <td className="finops-id">{e.numero}</td>
-                  <td>{e.projeto_nome || '—'}</td>
-                  <td>{e.titulo}</td>
-                  <td>{e.responsavel || '—'}</td>
-                  <td style={{ textAlign: 'right' }}>{formatBRL(e.total_final)}</td>
-                  <td>{formatData(e.data_estimativa)}</td>
-                  <td>
-                    <span style={{ color: validade.ativa ? 'var(--green)' : 'var(--danger)', fontSize: 11 }}>
-                      {validade.ativa ? 'Ativa' : 'Expirada'}
-                    </span>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{validade.texto}</div>
-                  </td>
-                  <td>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-                      <StatusBadge status={e.status} />
-                      <div className="table-actions">
-                        <button
-                          className="btn-icon" title="Aprovar" disabled={e.status === 'Aprovado'}
-                          onClick={() => statusMutation.mutate({ id: e.id, status: 'Aprovado' })}
-                        >✓</button>
-                        <button
-                          className="btn-icon" title="Não Aprovar" disabled={e.status === 'Nao Aprovado'}
-                          onClick={() => statusMutation.mutate({ id: e.id, status: 'Nao Aprovado' })}
-                        >✗</button>
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">Estimativas</span>
+          <span className="badge">{all.length}</span>
+        </div>
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Número</th><th>Projeto</th><th>Título</th><th>Responsável</th>
+                <th style={{ textAlign: 'right' }}>Total Final</th><th>Data</th><th>Validade</th><th>Status</th><th>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {estimativasQuery.isLoading && <tr><td colSpan={9} className="empty-state">Carregando...</td></tr>}
+              {!estimativasQuery.isLoading && filtered.length === 0 && (
+                <tr><td colSpan={9} className="empty-state">Nenhuma estimativa encontrada</td></tr>
+              )}
+              {filtered.map((e) => {
+                const validade = calcValidade(e.data_estimativa, e.validade_dias)
+                return (
+                  <tr key={e.id}>
+                    <td className="finops-id">{e.numero}</td>
+                    <td>{e.projeto_nome || '—'}</td>
+                    <td>{e.titulo}</td>
+                    <td>{e.responsavel || '—'}</td>
+                    <td style={{ textAlign: 'right' }}>{formatBRL(e.total_final)}</td>
+                    <td>{formatData(e.data_estimativa)}</td>
+                    <td>
+                      <span style={{ color: validade.ativa ? 'var(--green)' : 'var(--danger)', fontSize: 11 }}>
+                        {validade.ativa ? 'Ativa' : 'Expirada'}
+                      </span>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{validade.texto}</div>
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                        <StatusBadge status={e.status} />
+                        <div className="table-actions">
+                          <button
+                            className="btn-icon" title="Aprovar" disabled={e.status === 'Aprovado'}
+                            onClick={() => statusMutation.mutate({ id: e.id, status: 'Aprovado' })}
+                          >✓</button>
+                          <button
+                            className="btn-icon" title="Não Aprovar" disabled={e.status === 'Nao Aprovado'}
+                            onClick={() => statusMutation.mutate({ id: e.id, status: 'Nao Aprovado' })}
+                          >✗</button>
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="table-actions">
-                      <button className="btn-icon" title="Ver detalhes" onClick={() => setDetalheId(e.id)}>
-                        <svg viewBox="0 0 16 16" fill="none"><path d="M1 8s2.7-5 7-5 7 5 7 5-2.7 5-7 5-7-5-7-5z" stroke="currentColor" strokeWidth={1.5} /><circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth={1.5} /></svg>
-                      </button>
-                      <button className="btn-icon delete" title="Excluir" onClick={() => handleDelete(e)}>
-                        <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+                    </td>
+                    <td>
+                      <div className="table-actions">
+                        <button className="btn-icon" title="Ver detalhes" onClick={() => setDetalheId(e.id)}>
+                          <svg viewBox="0 0 16 16" fill="none"><path d="M1 8s2.7-5 7-5 7 5 7 5-2.7 5-7 5-7-5-7-5z" stroke="currentColor" strokeWidth={1.5} /><circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth={1.5} /></svg>
+                        </button>
+                        <button className="btn-icon delete" title="Excluir" onClick={() => handleDelete(e)}>
+                          <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {detalheId != null && (
