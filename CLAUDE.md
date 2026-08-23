@@ -178,6 +178,22 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
       rápido o tempo todo). Fica em "estado final" colorido após terminar até o usuário clicar "Fechar" — mesmo
       padrão do legado. Renderiza `null` quando não há `progresso` (nunca rodou nada nesta instância do
       servidor) — não polui a tela pra quem nunca mexeu em coleta.
+      **Bug real reportado pelo usuário e corrigido — "Fechar" não durava, o card reaparecia a cada F5/nova
+      entrada no sistema**: o "fechado" vivia só num `useState(false)` — perdido a cada remount do componente
+      (trocar de view e voltar, reload, login/sessão restaurada), enquanto `GET /azure-coleta/status` continua
+      devolvendo o mesmo job já concluído (`ultimo_api`/`ultimo_storage`) até uma coleta nova rodar de verdade.
+      Corrigido persistindo em `localStorage` (`coleta_monitor_dismissed`) a chave `${tipo}:${id}` do job
+      fechado (tipo+id do `HistoricoItem`, nunca só um boolean) — ao montar, o componente compara essa chave
+      contra o job atual; um job novo (id diferente) sempre reabre o card mesmo com um fechamento antigo
+      persistido, sem precisar limpar a chave manualmente. O efeito existente "nova coleta começou → reabre o
+      monitor mesmo se a anterior tinha sido fechada" (`wasRunning` ref) também limpa a chave persistida,
+      redundante com a comparação por id mas mantido por clareza.
+      **Segundo bug real, achado ao ler o mesmo screenshot do usuário — todo log da coleta aparecia com
+      `[Invalid Date]` no lugar do horário**: `_coletaProgresso.log.push({ ts: new Date().toISOString().slice(11,19), ... })`
+      (server.js) grava `ts` já como string `"HH:MM:SS"`, não uma data completa — o legado (`app.js`) sempre
+      renderizou `${l.ts}` direto. O componente React envolvia isso em `new Date(l.ts).toLocaleTimeString('pt-BR')`,
+      e `new Date("14:32:07")` é `Invalid Date` (não é um formato de data reconhecido pelo construtor `Date`).
+      Corrigido removendo o `new Date(...)` — renderiza `l.ts` como veio do servidor, igual ao legado.
     - `frontend/src/views/DiagAgendadorModal.tsx` — porta de `diagAgendador()` (app.js:4356): dump read-only de
       por que cada SP/Storage "deveria rodar" ou não segundo o agendador. Só consulta Postgres (sem Azure) —
       **verificado end-to-end viável sem credenciais Azure**, mas não exercitado nesta fase por falta de sessão

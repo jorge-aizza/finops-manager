@@ -9,6 +9,12 @@ const STATUS_COLOR: Record<string, string> = {
   concluido: '#22c55e', cancelado: '#ff8c42', erro: '#ff4d6a',
 }
 
+// Persistido em localStorage (não só useState) — sem isso o "Fechar" só durava até o
+// próximo remount do componente (trocar de tela e voltar, F5, ou login/sessão restaurada
+// de novo), já que `status.ultimo_api`/`ultimo_storage` continuam vindos do servidor até
+// uma coleta nova rodar. Chave inclui o tipo pra nunca colidir id de job 'api' com 'storage'.
+const DISMISS_KEY = 'coleta_monitor_dismissed'
+
 // Porta de #coleta-monitor + loadColetaStatus()/_coletaPolling (app.js) —
 // card de progresso ao vivo de uma coleta em execução (via API oficial ou
 // Storage). Poll leve (20s) quando ocioso pra detectar coletas disparadas
@@ -17,7 +23,7 @@ const STATUS_COLOR: Record<string, string> = {
 // até o usuário fechar — mesmo padrão do legado.
 export default function ColetaMonitor() {
   const queryClient = useQueryClient()
-  const [dismissed, setDismissed] = useState(false)
+  const [dismissedKey, setDismissedKey] = useState<string | null>(() => localStorage.getItem(DISMISS_KEY))
   const wasRunning = useRef(false)
 
   const statusQuery = useQuery({
@@ -41,7 +47,10 @@ export default function ColetaMonitor() {
 
   // Nova coleta começou — reabre o monitor mesmo se o usuário tinha fechado a anterior.
   useEffect(() => {
-    if (emExecucao && !wasRunning.current) setDismissed(false)
+    if (emExecucao && !wasRunning.current) {
+      setDismissedKey(null)
+      localStorage.removeItem(DISMISS_KEY)
+    }
     wasRunning.current = emExecucao
   }, [emExecucao])
 
@@ -55,11 +64,21 @@ export default function ColetaMonitor() {
     prevEmExecucao.current = emExecucao
   }, [emExecucao, queryClient])
 
-  if (!progresso || (dismissed && !emExecucao)) return null
+  const ultimoRelevante = progresso ? (progresso.tipo === 'storage' ? status?.ultimo_storage : status?.ultimo_api) : null
+  const thisKey = ultimoRelevante ? `${progresso!.tipo}:${ultimoRelevante.id}` : null
+  const isDismissed = !emExecucao && thisKey !== null && thisKey === dismissedKey
 
-  const ultimoRelevante = progresso.tipo === 'storage' ? status?.ultimo_storage : status?.ultimo_api
+  if (!progresso || isDismissed) return null
+
   const statusFinal = !emExecucao ? ultimoRelevante?.status : null
   const corBorda = emExecucao ? 'var(--accent)' : (statusFinal ? STATUS_COLOR[statusFinal] || 'var(--border)' : 'var(--border)')
+
+  function handleFechar() {
+    if (thisKey) {
+      localStorage.setItem(DISMISS_KEY, thisKey)
+      setDismissedKey(thisKey)
+    }
+  }
 
   return (
     <div className="stat-card" style={{ padding: '16px 20px', borderColor: corBorda, borderWidth: 2 }}>
@@ -76,7 +95,7 @@ export default function ColetaMonitor() {
             </button>
           )}
           {!emExecucao && (
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDismissed(true)}>Fechar</button>
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={handleFechar}>Fechar</button>
           )}
         </div>
       </div>
@@ -114,7 +133,7 @@ export default function ColetaMonitor() {
       {progresso.log?.length > 0 && (
         <div style={{ maxHeight: 140, overflowY: 'auto', background: 'var(--bg)', borderRadius: 6, padding: '6px 10px', fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: 'var(--text-muted)' }}>
           {progresso.log.map((l, i) => (
-            <div key={i}>[{new Date(l.ts).toLocaleTimeString('pt-BR')}] {l.msg}</div>
+            <div key={i}>[{l.ts}] {l.msg}</div>
           ))}
         </div>
       )}
