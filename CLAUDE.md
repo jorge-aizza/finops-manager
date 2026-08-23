@@ -419,13 +419,17 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     - `calculadora.js` **não é mais carregado em `portal.html`** — `<script src="/calculadora.js">` removido.
       **Atualização**: a frase original aqui dizia que `index.html` "ainda precisa dele" pra Purge/Diagnóstico —
       isso deixou de ser verdade quando essas duas features foram portadas pra React na Fase B da Coleta Azure
-      (ver `## Frontend React` → `coleta`). Levantamento após essa remoção: **todo** `Calculadora.` restante em
-      `app.js` hoje é código morto (dentro do `#view-coleta` legado, já inteiro inatingível desde que `'coleta'`
-      entrou em `MIGRATED_VIEWS`, ou o branch `calculadora` de `manualRefresh()`, que chama
-      `Calculadora.buscarRecursos()` sobre o DOM invisível de `#view-calculadora`) — `index.html` provavelmente
-      não precisa mais de `<script src="calculadora.js">` nenhum, mas isso não foi confirmado/removido ainda
-      (achado reportado ao usuário, não executado sem pedido explícito). A declaração ambiente `var Calculadora` em `bridge.ts` foi
-      removida — sem nenhum código React restante referenciando o identificador solto `Calculadora`.
+      (ver `## Frontend React` → `coleta`). **`<script src="calculadora.js">` removido de `index.html`** numa
+      passada seguinte: com Purge/Diagnóstico portados e o branch `calculadora` de `manualRefresh()` também
+      corrigido (ver "Auto-refresh" abaixo — não chama mais `Calculadora.buscarRecursos()`), sobrava só
+      `abrirDiagnosticoAzure()`/`abrirPurgeAzure()`/`_ensureCalcIniciado()` (app.js) e o botão "Gerar PDF" de
+      `gerarPDFEstimativaSalva()` (guardado por `typeof Calculadora !== 'undefined'`, já degradava pro toast de
+      erro) — todos só alcançáveis a partir de HTML dentro de `#view-coleta`/`#view-estimativas`, ambos
+      permanentemente `display:none` desde que migraram. `calculadora.js` (arquivo) não foi deletado — só
+      parou de ser carregado; `app.js` não foi tocado (esses wrappers dead ficam junto do resto do bloco
+      `#view-coleta`, mesmo raciocínio de não isolar limpeza parcial já usado antes). A declaração ambiente
+      `var Calculadora` em `bridge.ts` foi removida — sem nenhum código React restante referenciando o
+      identificador solto `Calculadora`.
     **Diferença arquitetural de todas as telas anteriores**: `portal.html` é uma página standalone servida sem
     autenticação — não é uma view dentro do shell `index.html`/`app.js`/`#react-root`/`MIGRATED_VIEWS`. Decisão
     explícita do usuário: **bundle Vite separado**, não reaproveita o bundle autenticado (`react-app.js`).
@@ -1212,7 +1216,8 @@ Bell icon opens `#notif-panel`. Light theme: `rgba(110, 30, 170, 0.95)` (medium 
 ### Auto-refresh
 `setRefreshInterval(minutes)` — covers dashboard, projetos, ações, estimativas, reservas, coleta, and calculadora views. Countdown shown in FAB button. Timer stored in `_refreshTimer` + `_countdownTimer`, both cleared on logout and before recreation.
 
-`manualRefresh()` — `try/catch/finally` wrapping all views; errors shown as error toast. `calculadora` view calls `Calculadora.buscarRecursos()` to re-run the current search.
+`manualRefresh()` — since all 7 views it knows about are `MIGRATED_VIEWS` (React), it calls `window.__reactBridge.refresh()` when `currentView` is one of them, instead of the old per-view `loadDashboard()`/`loadProjetos()`/etc. calls.
+**Real bug found and fixed**: those old per-view calls used to manipulate DOM inside `#view-<nome>`, which has been permanently `display:none` since each view migrated — every branch had quietly become a no-op (the "Atualizar" button and the auto-refresh countdown did nothing for any screen). `frontend/src/bridge.ts` gained `setRefreshHandler`/`refresh()` (same registration pattern as `setViewListener`); `App.tsx` registers `() => queryClient.invalidateQueries()` once — since only the currently-mounted view's queries are "active", invalidating the whole cache correctly refreshes just what's on screen without needing a per-view handler.
 
 ### Interval lifecycle (app.js)
 All recurring timers have named references and are cleared on logout:

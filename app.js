@@ -1471,13 +1471,14 @@ async function manualRefresh() {
   const icon = document.getElementById('refresh-icon');
   if (icon) icon.classList.add('spinning');
   try {
-    if      (currentView === 'dashboard')   await loadDashboard();
-    else if (currentView === 'projetos')    await loadProjetos();
-    else if (currentView === 'acoes')       await loadAcoes();
-    else if (currentView === 'estimativas') await loadEstimativas();
-    else if (currentView === 'reservas')    await loadReservas();
-    else if (currentView === 'coleta')      await loadColeta();
-    else if (currentView === 'calculadora') { if (typeof Calculadora !== 'undefined') Calculadora.buscarRecursos(); }
+    // Todas as 7 views que este botão conhece já são MIGRATED_VIEWS (React) —
+    // window.__reactBridge.refresh() invalida as queries da tela React
+    // montada no momento. As chamadas antigas (loadDashboard()/loadProjetos()/
+    // etc.) manipulavam DOM de #view-<nome>, permanentemente display:none
+    // desde que cada tela migrou — eram no-ops silenciosos.
+    if (MIGRATED_VIEWS.has(currentView) && window.__reactBridge) {
+      await window.__reactBridge.refresh();
+    }
   } catch(e) {
     console.error('[manualRefresh]', e);
     showToast('Erro ao atualizar: ' + (e.message || e), 'error');

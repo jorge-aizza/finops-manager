@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { setViewListener } from './bridge'
+import { setRefreshHandler, setViewListener } from './bridge'
 import ProjetosView from './views/ProjetosView'
 import ReservasView from './views/ReservasView'
 import AcoesView from './views/AcoesView'
@@ -29,6 +29,10 @@ export default function App() {
 
   useEffect(() => {
     setViewListener(setView)
+    // Botão "Atualizar"/countdown de auto-refresh (app.js, manualRefresh()) —
+    // invalida tudo; só as queries ativas (da view montada no momento) de
+    // fato refazem a chamada de rede, então isso vale pra qualquer tela.
+    setRefreshHandler(() => queryClient.invalidateQueries())
   }, [])
 
   const ViewComponent = view ? VIEWS[view] : undefined
