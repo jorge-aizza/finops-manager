@@ -120,6 +120,24 @@ describe('CalculadoraView', () => {
     expect(within(totalsCard).getByText('R$ 1.895,76')).toBeInTheDocument()
   });
 
+  it('overlay Configurar Estimativa escapa via portal do overflow:hidden do container raiz da view', async () => {
+    // Bug real: CalculadoraView.tsx tem overflow:hidden no container raiz —
+    // sem portal, o modal ficava recortado, cobrindo só a área de conteúdo
+    // (não sidebar/topbar) e, dependendo da posição, escondendo o rodapé de
+    // dropdowns internos. Confirma que o modal escapou pra document.body.
+    const user = userEvent.setup()
+    const { container } = renderWithClient()
+    await selecionarSubEBuscar(user)
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[checkboxes.length - 1])
+    await user.click(screen.getByRole('button', { name: 'Estimar' }))
+
+    const overlayHeader = await screen.findByText(/Configurar Estimativa —/)
+    expect(container.contains(overlayHeader)).toBe(false)
+    expect(document.body.contains(overlayHeader)).toBe(true)
+  });
+
   it('filtro de texto esconde recursos que não combinam', async () => {
     const user = userEvent.setup()
     renderWithClient()

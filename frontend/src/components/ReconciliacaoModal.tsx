@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getReconciliacao } from '../api/calculadora'
 
@@ -43,7 +44,10 @@ export default function ReconciliacaoModal({ subscriptionIds, resourceGroups, da
   const moedas = query.data?.por_moeda || []
   const multiMoeda = moedas.length > 1 || (moedas.length === 1 && moedas[0].moeda !== 'BRL')
 
-  return (
+  // Portal pro <body> — mesmo fix de ConfigurarEstimativaOverlay.tsx: sem
+  // isso, este modal fica recortado pelo overflow:hidden do container raiz
+  // de CalculadoraView.tsx.
+  return createPortal(
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" style={{ width: 'min(96vw, 560px)' }}>
         <div className="modal-header">
@@ -133,6 +137,7 @@ export default function ReconciliacaoModal({ subscriptionIds, resourceGroups, da
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

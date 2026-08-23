@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { useCmsDropdownPosition } from '../hooks/useCmsDropdownPosition'
 
 // Porta fiel do dropdown de busca "CMS" (.cms-wrap) usado pra Subscription/
 // Resource Group na Reserva Azure (app.js: rsvToggleDrop/_buildRsvCmsOptions/
@@ -33,10 +35,15 @@ export default function CmsSelect({
   const [search, setSearch] = useState('')
   const [pending, setPending] = useState<CmsOption>({ value, label })
   const wrapRef = useRef<HTMLDivElement>(null)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  const pos = useCmsDropdownPosition(open, wrapRef)
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      if (wrapRef.current?.contains(target)) return
+      if (dropdownRef.current?.contains(target)) return
+      setOpen(false)
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
@@ -75,8 +82,8 @@ export default function CmsSelect({
           <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" />
         </svg>
       </div>
-      {open && (
-        <div className="cms-dropdown">
+      {open && pos && createPortal(
+        <div className="cms-dropdown" ref={dropdownRef} style={{ position: 'fixed', top: pos.top, left: pos.left, right: 'auto', width: pos.width }}>
           <div className="cms-search-wrap">
             <input
               className="cms-search"
@@ -109,7 +116,8 @@ export default function CmsSelect({
               OK ✓
             </button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

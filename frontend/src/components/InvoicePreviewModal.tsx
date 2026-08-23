@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 
 // Porta de _abrirPreviewModal/fecharPreviewModal/voltarParaConfirmacao/
 // imprimirEstimativa (calculadora.js) — visualizador do documento gerado por
@@ -34,7 +35,10 @@ export default function InvoicePreviewModal({ html, title, onClose, onVoltar }: 
     frameRef.current?.contentWindow?.print()
   }
 
-  return (
+  // Portal pro <body> — mesmo fix de ConfigurarEstimativaOverlay.tsx: sem
+  // isso, este modal fica recortado pelo overflow:hidden do container raiz
+  // de CalculadoraView.tsx.
+  return createPortal(
     <div style={{ display: 'flex', position: 'fixed', inset: 0, zIndex: 9999, flexDirection: 'column', background: '#f0f2f5' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 20px', background: 'rgba(255,255,255,.92)', borderBottom: '1px solid #e5e7eb', flexShrink: 0, backdropFilter: 'blur(16px)' }}>
         {onVoltar && (
@@ -71,6 +75,7 @@ export default function InvoicePreviewModal({ html, title, onClose, onVoltar }: 
           Use <strong style={{ color: '#374151' }}>Imprimir / Salvar PDF</strong> para exportar &nbsp;·&nbsp; Pressione <strong style={{ color: '#374151' }}>Ctrl+P</strong> para imprimir direto
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

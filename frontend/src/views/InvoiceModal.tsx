@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import { listProjetos } from '../api/projetos'
 import { createEstimativa } from '../api/estimativas'
@@ -133,7 +134,10 @@ export default function InvoiceModal({
     onGerado(html, (titulo.trim() || 'Estimativa') + ' · ' + invoiceNum)
   }
 
-  return (
+  // Portal pro <body> — mesmo fix de ConfigurarEstimativaOverlay.tsx: sem
+  // isso, este modal fica recortado pelo overflow:hidden do container raiz
+  // de CalculadoraView.tsx.
+  return createPortal(
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" style={{ width: 'min(96vw, 680px)' }}>
         <div className="modal-header">
@@ -277,6 +281,7 @@ export default function InvoiceModal({
           <button className="btn-primary" onClick={submit}>Visualizar Estimativa</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

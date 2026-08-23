@@ -379,6 +379,26 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     `subsSel`/`rgsSel`/`dataInicio`/`dataFim` do `useCalculadora()` — mesmo padrão já usado por `detalheQuery`/
     `servicoQuery`. Novo botão "🔍 Reconciliar" na toolbar principal da `CalculadoraView` (não existia link
     algum antes — o trigger original vivia só dentro do HTML nunca exibido do `#view-calculadora`).
+    **Bug real reportado pelo usuário e corrigido numa validação seguinte — dropdowns e modais recortados por
+    `overflow:hidden`**: `CalculadoraView.tsx` tem `overflow:hidden` no `<div>` raiz (necessário pro layout
+    flex-column com corpo rolável internamente). `position:absolute`/`position:fixed` continuam sendo
+    recortados por QUALQUER ancestral com `overflow != visible` — não só o ancestral posicionado mais próximo —
+    a menos que o elemento seja movido pra outro ponto da árvore DOM (portal). Dois sintomas reais:
+    (1) `CmsMultiSelect.tsx`/`CmsSelect.tsx` (dropdown `.cms-dropdown`, `position:absolute`) tinham o rodapé
+    (botão "OK ✓") cortado/inacessível ao abrir o seletor de Assinatura ou Resource Group — usuário marcava os
+    checkboxes mas não conseguia confirmar a seleção, travando o fluxo logo no primeiro passo; (2) os 4 modais
+    renderizados de dentro de `CalculadoraView.tsx` (`ConfigurarEstimativaOverlay.tsx`, `InvoiceModal.tsx`,
+    `InvoicePreviewModal.tsx`, `ReconciliacaoModal.tsx`, todos `.modal-overlay`/`position:fixed`) ficavam
+    visíveis só dentro da área de conteúdo (não cobriam sidebar/topbar) por estarem aninhados dentro desse
+    mesmo container. Corrigido com `createPortal(..., document.body)` nos 5 componentes — novo hook
+    `frontend/src/hooks/useCmsDropdownPosition.ts` calcula a posição do trigger via `getBoundingClientRect()`
+    (recalculada em scroll/resize enquanto aberto) pros dois dropdowns; os modais só precisaram do portal em
+    si, já que `.modal-overlay` usa `inset:0` (não depende da posição de um trigger). Outside-click-to-close
+    ajustado nos dois componentes de dropdown pra checar cliques dentro do dropdown PORTALADO também (senão
+    fecharia imediatamente ao clicar em qualquer opção, já que o clique não estaria mais "contido" no
+    `wrapRef` depois do portal). Verificado que nenhuma outra `view` migrada tem esse `overflow:hidden` no
+    próprio container raiz (só `CalculadoraView.tsx`) — os modais das outras telas (Coleta Azure, Reservas,
+    etc.) não têm esse problema específico, então não foram portados por precaução.
   - `portal` (`frontend/src/PortalApp.tsx` + `frontend/src/views/PublicCalculadoraView.tsx`) — **Fase A (chrome)**
     cobre: cabeçalho (marca/tema/ajuda/badge "Público"), modal de identificação (nome+e-mail, validação de
     domínio, efeito de tingimento roxo do mascote via canvas — portado verbatim), toggle de tema (mesma chave

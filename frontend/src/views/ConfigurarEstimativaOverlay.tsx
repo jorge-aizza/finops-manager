@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { buildEstimativa } from '../lib/buildEstimativa'
 import { calcEstimado } from '../lib/calcEstimado'
 import { calcHorasPeriodo, defaultHorarioLivre } from '../lib/periodo'
@@ -149,7 +150,13 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
     onVisualizarEstimativa(estimativa, periodos)
   }
 
-  return (
+  // Portal pro <body> — CalculadoraView.tsx (único chamador com esse
+  // problema hoje) tem `overflow:hidden` no container raiz, e um
+  // .modal-overlay (position:fixed) continua sendo recortado por QUALQUER
+  // ancestral com overflow != visible, mesmo sendo fixed. Sem o portal, o
+  // overlay ficava visível só dentro da área de conteúdo (não cobria
+  // sidebar/topbar) — visualmente quebrado.
+  return createPortal(
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal modal-wide" style={{ maxWidth: 1200 }}>
         <div className="modal-header">
@@ -315,7 +322,8 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
           <button className="btn-primary" disabled={!estimativa.resultados.length} onClick={visualizarEstimativa}>Visualizar Estimativa</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
