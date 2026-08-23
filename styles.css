@@ -1000,6 +1000,61 @@ body {
 .cms-btn-ok { background: var(--accent); color: #ffffff; border-color: var(--accent); font-weight: 700; }
 .cms-btn-ok:hover { opacity: .85; }
 
+/* ── Calculadora toolbar (filtros/busca/ações) — classes usadas por
+   CalculadoraView/PublicCalculadoraView e vários modais migrados (.ci/.cs/.cl/
+   .cfg/.cbtn-sec/.cbtn-go/.cth/.cbadge/.cspinner). Bug real: essas classes só
+   existiam no <style> injetado pelo próprio calculadora.js (Calculadora.init())
+   — quando o <script src="calculadora.js"> foi removido de index.html/portal.html
+   (Fase B), nenhum lugar mais define essas regras, mas os componentes React já
+   portados continuavam referenciando os mesmos nomes de classe verbatim — toda
+   a toolbar da Calculadora (autenticada e portal público) ficava sem nenhum
+   estilo, caindo pro visual padrão do browser (bordas retas pretas, sem
+   arredondamento, sem hover, sem cor de destaque). Portado aqui pra valer pra
+   sempre, igual ao bloco .cms-* acima. */
+.ci, .cs {
+  height: 34px; padding: 0 10px; border-radius: 6px;
+  border: 1px solid var(--border-light); background: var(--bg); color: var(--text);
+  font-size: 13px; font-family: inherit; width: 100%; outline: none;
+  transition: border-color .15s; box-sizing: border-box;
+}
+.ci:focus, .cs:focus { border-color: var(--accent); }
+.cs:disabled { opacity: .4; cursor: not-allowed; }
+.cl {
+  font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 5px; display: block;
+}
+.cfg { display: flex; flex-direction: column; }
+.cbtn-sec {
+  display: inline-flex; align-items: center; gap: 5px; padding: 0 11px; height: 32px;
+  border-radius: 6px; border: 1px solid var(--border-light); background: transparent;
+  color: var(--text-dim); font-size: 12px; cursor: pointer; transition: all .15s;
+  white-space: nowrap; font-family: inherit;
+}
+.cbtn-sec:hover { border-color: var(--accent); color: var(--accent); }
+.cbtn-sec:disabled { opacity: .4; cursor: not-allowed; }
+.cbtn-sec:disabled:hover { border-color: var(--border-light); color: var(--text-dim); }
+.cbtn-go {
+  display: inline-flex; align-items: center; gap: 6px; padding: 0 16px; height: 34px;
+  border-radius: 6px; border: none; background: var(--accent); color: #ffffff;
+  font-size: 13px; font-weight: 700; cursor: pointer; transition: opacity .15s; white-space: nowrap;
+}
+.cbtn-go:hover { opacity: .85; }
+.cth {
+  padding: 9px 10px; font-size: 10px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-muted); border-bottom: 1px solid var(--border);
+  text-align: left; white-space: nowrap;
+}
+.cbadge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 500;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: rgba(147, 51, 234, .08); color: var(--accent); border: 1px solid rgba(147, 51, 234, .2);
+}
+@keyframes _cspin { to { transform: rotate(360deg); } }
+.cspinner {
+  width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: _cspin .7s linear infinite; display: inline-block; vertical-align: middle;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

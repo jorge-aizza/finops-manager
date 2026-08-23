@@ -95,6 +95,27 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
   prioridade do `api()`/`_api()` legados) e chama `window.logout(false)` em 401 — reaproveita, não reimplementa.
 - **CSS**: o bundle React **não** porta o design system — herda `styles.css` (já carregado globalmente pelo
   shell) e usa as classes existentes (`.btn-primary`, `.data-table`, `.modal`, `.form-group`...) direto.
+  **Bug real reportado pelo usuário e corrigido — toda a toolbar da Calculadora (autenticada e Portal
+  Público) renderizava sem nenhum estilo, bordas retas pretas padrão do browser, sem cor de destaque**:
+  as classes `.ci`/`.cs`/`.cl`/`.cfg`/`.cbtn-sec`/`.cbtn-go`/`.cth`/`.cbadge`/`.cspinner` — usadas por
+  `CalculadoraView.tsx`, `PublicCalculadoraView.tsx`, `ConfigurarEstimativaOverlay.tsx`, `InvoiceModal.tsx`,
+  `InvoicePreviewModal.tsx`, `WizardColetaModal.tsx`, `AgendamentoModal.tsx`, `ExpurgoModal.tsx`,
+  `DiagnosticoModal.tsx`, `CheckboxSearchList.tsx`, `RecursosTable.tsx`, `DetalheDiarioTable.tsx`,
+  `PorServicoTable.tsx` (8+ arquivos, confirmado por grep) — nunca existiram em `styles.css`. Elas só
+  existiam no `<style>` que o próprio `calculadora.js` injetava dentro de `_html()`, ativo só enquanto
+  `Calculadora.init()` rodava; quando `<script src="calculadora.js">` foi removido de `index.html`/
+  `portal.html` (ver "Calculadora Fase B" abaixo), essas regras pararam de existir em qualquer lugar, mas
+  os componentes React (escritos ANTES dessa remoção, copiando os mesmos nomes de classe do HTML legado
+  verbatim) continuaram referenciando os mesmos nomes de classe — nunca foi um bug de remoção acidental,
+  foi um gap desde a Fase A da Calculadora: essas classes nunca estiveram em `styles.css`, só funcionavam
+  visualmente enquanto o script antigo ainda carregava em paralelo. `.cms-*` (dropdown Assinatura/RG) foi a
+  exceção — já tinha sido portado pra `styles.css` desde a migração de Reservas, por isso só os dropdowns
+  continuavam com alguma aparência de estilo nos relatos do usuário, e o resto (inputs, botões, cabeçalhos de
+  tabela) parecia completamente "cru". Corrigido portando essas classes verbatim pra `styles.css` (mesmo
+  bloco `.cms-*`) — como todas usam `var(--bg)`/`var(--border-light)`/`var(--accent)` etc. (tokens já
+  theme-aware), funcionam em claro/escuro sem overrides extras. Confirmado visualmente com uma reprodução
+  HTML estática + Playwright (claro e escuro) antes de reportar — não só type-check/build, já que é uma
+  mudança 100% visual sem teste automatizado que a cubra.
 - **Dev**: `npm run dev:all` (raiz) sobe Express (porta 3000) + Vite dev server juntos via `concurrently`;
   proxy do Vite encaminha `/api/*` pro Express (`frontend/vite.config.ts`).
 - **Migrado até agora**:
