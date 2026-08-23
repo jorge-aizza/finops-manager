@@ -469,6 +469,12 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     `subsSel`/`rgsSel`/`dataInicio`/`dataFim` do `useCalculadora()` — mesmo padrão já usado por `detalheQuery`/
     `servicoQuery`. Novo botão "🔍 Reconciliar" na toolbar principal da `CalculadoraView` (não existia link
     algum antes — o trigger original vivia só dentro do HTML nunca exibido do `#view-calculadora`).
+    **Botão removido a pedido do usuário durante a limpeza visual da toolbar** (`CalculadoraView.tsx` — o
+    `useState` `reconOpen` e a renderização condicional de `ReconciliacaoModal` também saíram junto, já que
+    nada mais os aciona). `ReconciliacaoModal.tsx` **não foi apagado** — decisão deliberada de manter só o
+    componente sem nenhum jeito de abri-lo pela UI, mais fácil de restaurar (só recolocar o botão) se a
+    feature voltar a ser necessária. `PublicCalculadoraView.tsx` nunca teve esse botão (fora do escopo
+    público desde a Fase B), então não precisou de nenhuma mudança.
     **Bug real reportado pelo usuário e corrigido numa validação seguinte — dropdowns e modais recortados por
     `overflow:hidden`**: `CalculadoraView.tsx` tem `overflow:hidden` no `<div>` raiz (necessário pro layout
     flex-column com corpo rolável internamente). `position:absolute`/`position:fixed` continuam sendo

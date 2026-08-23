@@ -183,22 +183,9 @@ describe('CalculadoraView', () => {
     expect(screen.queryByText('Gerar Estimativa')).not.toBeInTheDocument()
   });
 
-  it('botão Reconciliar abre o ReconciliacaoModal com dados reais (não depende de busca legada)', async () => {
-    const user = userEvent.setup()
-    vi.mocked(calcApi.getReconciliacao).mockResolvedValue({
-      por_tipo: [{ charge_type: 'Usage', linhas: 10, total: 1000, excluido: false }],
-      por_moeda: [{ moeda: 'BRL', total: 1000 }],
-      total_bruto: 1000, total_excluido: 0, total_sistema: 1000,
-    })
+  it('não mostra mais o botão Reconciliar (removido a pedido do usuário)', async () => {
     renderWithClient()
-    await selecionarSubEBuscar(user)
-
-    await user.click(screen.getByRole('button', { name: '🔍 Reconciliar' }))
-
-    const modal = (await screen.findByText('Reconciliação de Valores')).closest<HTMLElement>('.modal')!
-    expect(await within(modal).findByText('Usage')).toBeInTheDocument()
-    expect(calcApi.getReconciliacao).toHaveBeenCalledWith(
-      expect.objectContaining({ subscription_id: ['sub-1'], resource_group: ['RG-PROD'] }),
-    )
+    await selecionarSubEBuscar(userEvent.setup())
+    expect(screen.queryByRole('button', { name: '🔍 Reconciliar' })).not.toBeInTheDocument()
   });
 });
