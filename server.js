@@ -58,6 +58,7 @@ const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
 const crypto   = require('crypto');
 const fs       = require('fs');
+const jwksRsa  = require('jwks-rsa');
 
 const JWT_SECRET  = process.env.JWT_SECRET  || 'finops-secret-2024';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '8h';
@@ -571,16 +572,141 @@ app.post('/api/auth/ad', dbMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── ENTRA ID (OAuth 2.0 authorization-code flow) ────────────────────────────
+// _entraStates: state (CSRF) → { criadoEm } — gerado em /entra/url, validado uma
+// vez em /auth/callback e removido (ou expira em 10 min sem uso).
+// _entraHandoffs: código de handoff de uso único → { token, user, criadoEm } —
+// evita colocar o JWT na URL do redirect final (query string fica em histórico
+// do navegador, logs de proxy, Referer). O SPA troca esse código por
+// { token, user } via GET /api/auth/entra/consume, um fetch comum, não a
+// navegação de página inteira que o callback do OAuth exige.
+const _entraStates   = new Map();
+const _entraHandoffs = new Map();
+const _ENTRA_STATE_TTL_MS   = 10 * 60 * 1000;
+const _ENTRA_HANDOFF_TTL_MS = 60 * 1000;
+function _entraCleanup() {
+  const now = Date.now();
+  for (const [k, v] of _entraStates)   if (now - v.criadoEm > _ENTRA_STATE_TTL_MS)   _entraStates.delete(k);
+  for (const [k, v] of _entraHandoffs) if (now - v.criadoEm > _ENTRA_HANDOFF_TTL_MS) _entraHandoffs.delete(k);
+}
+
 app.get('/api/auth/entra/url', async (req, res) => {
   try {
     const cfg = await pool.query("SELECT config FROM integracoes WHERE tipo = 'entra' AND ativo = true");
     if (!cfg.rows.length) return res.status(400).json({ error: 'Entra ID nao configurado' });
     const c = cfg.rows[0].config;
+    _entraCleanup();
+    const state = crypto.randomBytes(24).toString('hex');
+    _entraStates.set(state, { criadoEm: Date.now() });
     const url = 'https://login.microsoftonline.com/' + c.tenant_id + '/oauth2/v2.0/authorize?' +
-      'client_id=' + c.client_id + '&response_type=code' +
-      '&redirect_uri=' + encodeURIComponent(c.redirect_uri) + '&scope=openid+profile+email';
+      'client_id=' + encodeURIComponent(c.client_id) + '&response_type=code' +
+      '&redirect_uri=' + encodeURIComponent(c.redirect_uri) + '&scope=openid+profile+email' +
+      '&state=' + state;
     res.json({ url });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /auth/callback — redirect_uri configurado no app registration do Entra ID
+// (fora do prefixo /api/: é alvo de navegação de página inteira feita pelo
+// browser após o login no Microsoft, nunca um fetch/XHR do SPA). Troca o
+// authorization code por tokens, valida a assinatura do id_token contra o JWKS
+// do tenant, mapeia grupos pra perfil (mesmo padrão de POST /api/auth/ad) e
+// entrega { token, user } pro SPA via código de handoff de uso único.
+app.get('/auth/callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  const fail = (msg) => res.redirect('/?entra_error=' + encodeURIComponent(msg));
+  if (error) return fail(error_description || error);
+  if (!code || !state) return fail('Resposta inválida do Microsoft Entra ID.');
+
+  _entraCleanup();
+  if (!_entraStates.has(state)) return fail('Sessão de login expirada ou inválida. Tente novamente.');
+  _entraStates.delete(state); // uso único — nunca revalida o mesmo state duas vezes
+
+  try {
+    const cfg = await pool.query("SELECT config FROM integracoes WHERE tipo = 'entra' AND ativo = true");
+    if (!cfg.rows.length) return fail('Entra ID não configurado.');
+    const c = cfg.rows[0].config;
+
+    const tokenRes = await fetch(`https://login.microsoftonline.com/${c.tenant_id}/oauth2/v2.0/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: c.client_id, client_secret: c.client_secret, code,
+        redirect_uri: c.redirect_uri, grant_type: 'authorization_code',
+        scope: 'openid profile email',
+      }),
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || !tokenData.id_token) {
+      console.error('[Entra] Falha na troca de token:', tokenData.error_description || tokenData.error);
+      return fail('Falha ao autenticar com o Microsoft Entra ID.');
+    }
+
+    // Valida a assinatura do id_token contra as chaves públicas do tenant (JWKS) —
+    // nunca confiar num id_token sem verificar assinatura/issuer/audience.
+    const jwksClient = jwksRsa({
+      jwksUri: `https://login.microsoftonline.com/${c.tenant_id}/discovery/v2.0/keys`,
+      cache: true, cacheMaxAge: 24 * 3600 * 1000, rateLimit: true,
+    });
+    const decoded = jwt.decode(tokenData.id_token, { complete: true });
+    if (!decoded?.header?.kid) return fail('Token inválido recebido do Entra ID.');
+    let claims;
+    try {
+      const signingKey = (await jwksClient.getSigningKey(decoded.header.kid)).getPublicKey();
+      claims = jwt.verify(tokenData.id_token, signingKey, {
+        algorithms: ['RS256'],
+        audience: c.client_id,
+        issuer: [`https://login.microsoftonline.com/${c.tenant_id}/v2.0`, `https://sts.windows.net/${c.tenant_id}/`],
+      });
+    } catch (verErr) {
+      console.error('[Entra] id_token com assinatura/claims inválidos:', verErr.message);
+      return fail('Token do Entra ID não pôde ser validado.');
+    }
+
+    const email = (claims.email || claims.preferred_username || '').toLowerCase();
+    const displayName = claims.name || email;
+    if (!email) return fail('Conta Microsoft sem e-mail associado.');
+
+    // Mapeia grupos (Object ID) pra perfil — mesmo padrão de /api/auth/ad. O claim
+    // "groups" só vem no id_token se o app registration no Entra tiver "Add groups
+    // claim" habilitado; contas em muitos grupos disparam "overage" (Microsoft omite
+    // "groups" e devolve "_claim_names"/"hasgroups" em vez disso, exigindo uma chamada
+    // extra ao Microsoft Graph com escopo adicional — não implementado). Em ambos os
+    // casos sem "groups" utilizável, cai no fallback mais seguro: 'reader'.
+    const groups = Array.isArray(claims.groups) ? claims.groups : [];
+    let perfil = 'reader';
+    if (c.grp_admin && groups.includes(c.grp_admin)) perfil = 'admin';
+    else if (c.grp_finops && groups.includes(c.grp_finops)) perfil = 'finops';
+
+    await pool.query(
+      "INSERT INTO usuarios (nome, email, perfil, tipo) VALUES ($1,$2,$3,'entra') ON CONFLICT (email) DO UPDATE SET nome=$1, perfil=$3, ativo=true, atualizado_em=NOW()",
+      [displayName, email, perfil]
+    );
+    const u = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email]);
+    await pool.query('INSERT INTO sessoes (usuario_id, ip, tipo_login) VALUES ($1,$2,$3)', [u.rows[0].id, req.ip, 'entra']);
+
+    const token = jwt.sign({ id: u.rows[0].id, nome: displayName, email, perfil }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+    const user  = { id: u.rows[0].id, nome: displayName, email, perfil };
+
+    const handoff = crypto.randomBytes(24).toString('hex');
+    _entraHandoffs.set(handoff, { token, user, criadoEm: Date.now() });
+    res.redirect('/?entra_handoff=' + handoff);
+  } catch (err) {
+    console.error('[Entra] Erro no callback:', err);
+    fail('Erro interno ao autenticar com o Entra ID.');
+  }
+});
+
+// GET /api/auth/entra/consume — troca o código de handoff de uso único (gerado por
+// /auth/callback) pelo { token, user } real. O SPA chama isso uma vez ao detectar
+// ?entra_handoff= na query string após o redirect do Microsoft.
+app.get('/api/auth/entra/consume', (req, res) => {
+  const { code } = req.query;
+  _entraCleanup();
+  const entry = code && _entraHandoffs.get(code);
+  if (!entry) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+  _entraHandoffs.delete(code); // uso único
+  res.json({ token: entry.token, user: entry.user });
 });
 
 app.post('/api/auth/ad/test', authMiddleware, adminMiddleware, async (req, res) => {
@@ -671,13 +797,16 @@ app.get('/api/permissoes', authMiddleware, async (req, res) => {
 });
 
 // ─── INTEGRACOES ─────────────────────────────────────────────────────────────
-app.get('/api/integrations', authMiddleware, async (req, res) => {
+// adminMiddleware (2026-08-24): config inclui client_secret (Entra) e credenciais de bind
+// (AD) — antes só exigia authMiddleware, então qualquer usuário autenticado podia ler
+// esses segredos em texto puro via GET, ou reescrever a configuração via POST.
+app.get('/api/integrations', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     res.json((await pool.query('SELECT tipo, config, ativo FROM integracoes')).rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/integrations/:tipo', authMiddleware, async (req, res) => {
+app.post('/api/integrations/:tipo', authMiddleware, adminMiddleware, async (req, res) => {
   const { config, ativo } = req.body;
   try {
     await pool.query(
