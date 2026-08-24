@@ -37,6 +37,27 @@ describe('sortRgsComFilhos', () => {
     expect(out[1].parent_rg).toBe('RG-ADBX-DAUD-BRSOUTH-001-DEV')
   })
 
+  // Validação com dados reais de uma segunda subscription ("Test"): o mesmo problema de
+  // grafia acontece para RGs gerenciados de AKS (MC_*), não só Databricks — confirma que o
+  // fix é genérico (não específico de um managed_type) e generaliza pra novas cargas/
+  // assinaturas, já que _resolveParentRgs (server.js) sempre devolve parent_rg em UPPERCASE
+  // pros 2 tipos gerenciados, independente de como o RG pai está realmente gravado.
+  it('casa pai/filho em RG gerenciado do tipo AKS (MC_*) com a mesma divergência de grafia', () => {
+    const rgs = [
+      makeRg({ resource_group_name: 'rg-aks-channels-pdv-brsouth-test' }),
+      makeRg({
+        resource_group_name: 'MC_RG-AKS-CHANNELS-PDV-BRSOUTH-TEST_AKS-CHANNELS-PDV-TEST_BRAZILSOUTH',
+        managed_type: 'aks',
+        parent_rg: 'RG-AKS-CHANNELS-PDV-BRSOUTH-TEST',
+      }),
+    ]
+    const out = sortRgsComFilhos(rgs)
+    expect(out.map((r) => r.resource_group_name)).toEqual([
+      'rg-aks-channels-pdv-brsouth-test',
+      'MC_RG-AKS-CHANNELS-PDV-BRSOUTH-TEST_AKS-CHANNELS-PDV-TEST_BRAZILSOUTH',
+    ])
+  })
+
   // Bug real corrigido: quando o RG pai resolvido pelo servidor não está presente na lista
   // atual (filtro de resource_groups[] do Portal Público liberou só o filho; ou o pai não
   // tem billing direto, então nunca aparece na lista de RGs distintos), o item deve virar
