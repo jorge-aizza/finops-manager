@@ -499,6 +499,17 @@ function dbMiddleware(req, res, next) {
   next();
 }
 
+// Substitui `res.status(500).json({ error: err.message })` nos ~90 catches genéricos do
+// arquivo — err.message costuma ser um erro cru do Postgres (nome de tabela/coluna/
+// constraint), útil pra depurar mas não pra devolver pro cliente (inclusive em rotas
+// públicas sem autenticação). Loga o erro completo no servidor, devolve mensagem genérica.
+// NÃO usar nos poucos catches que já tratam um código de erro específico (ex: 23505 —
+// "Email ja cadastrado") com uma mensagem amigável própria; usar só no fallback deles.
+function _dbErr(res, err, status = 500) {
+  console.error(err);
+  res.status(status).json({ error: 'Erro interno do servidor.' });
+}
+
 // Restringe a admins autenticados — usar após authMiddleware
 function adminMiddleware(req, res, next) {
   if (req.user?.perfil !== 'admin') return res.status(403).json({ error: 'Acesso negado' });
@@ -569,7 +580,7 @@ app.post('/api/auth/ad', dbMiddleware, async (req, res) => {
         });
       });
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── ENTRA ID (OAuth 2.0 authorization-code flow) ────────────────────────────
@@ -603,7 +614,7 @@ app.get('/api/auth/entra/url', async (req, res) => {
       '&redirect_uri=' + encodeURIComponent(c.redirect_uri) + '&scope=openid+profile+email' +
       '&state=' + state;
     res.json({ url });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // GET /auth/callback — redirect_uri configurado no app registration do Entra ID
@@ -719,14 +730,14 @@ app.post('/api/auth/ad/test', authMiddleware, adminMiddleware, async (req, res) 
       if (err) return res.status(400).json({ ok: false, error: err.message });
       res.json({ ok: true, message: 'Conexao com Active Directory bem-sucedida!' });
     });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  } catch (err) { console.error(err); res.status(500).json({ ok: false, error: 'Erro interno do servidor.' }); }
 });
 
 // ─── USUARIOS ────────────────────────────────────────────────────────────────
 app.get('/api/usuarios', authMiddleware, async (req, res) => {
   try {
     res.json((await pool.query('SELECT id, nome, email, perfil, tipo, ativo, ultimo_login, criado_em FROM usuarios ORDER BY nome')).rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.post('/api/usuarios', authMiddleware, adminMiddleware, async (req, res) => {
@@ -741,7 +752,7 @@ app.post('/api/usuarios', authMiddleware, adminMiddleware, async (req, res) => {
     res.status(201).json(r.rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Email ja cadastrado' });
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -766,7 +777,7 @@ app.put('/api/usuarios/:id', authMiddleware, adminMiddleware, async (req, res) =
     res.json(r.rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Email ja cadastrado' });
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -776,14 +787,14 @@ app.patch('/api/usuarios/:id/ativo', authMiddleware, adminMiddleware, async (req
   try {
     await pool.query('UPDATE usuarios SET ativo=$1, atualizado_em=NOW() WHERE id=$2', [ativo, req.params.id]);
     res.json({ id: req.params.id, ativo });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.delete('/api/usuarios/:id', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM usuarios WHERE id = $1', [req.params.id]);
     res.json({ message: 'Usuario removido' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.get('/api/permissoes', authMiddleware, async (req, res) => {
@@ -793,7 +804,7 @@ app.get('/api/permissoes', authMiddleware, async (req, res) => {
       FROM permissoes p JOIN perfis pf ON pf.id = p.perfil_id ORDER BY pf.nome, p.recurso
     `);
     res.json(r.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── INTEGRACOES ─────────────────────────────────────────────────────────────
@@ -803,7 +814,7 @@ app.get('/api/permissoes', authMiddleware, async (req, res) => {
 app.get('/api/integrations', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     res.json((await pool.query('SELECT tipo, config, ativo FROM integracoes')).rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.post('/api/integrations/:tipo', authMiddleware, adminMiddleware, async (req, res) => {
@@ -814,7 +825,7 @@ app.post('/api/integrations/:tipo', authMiddleware, adminMiddleware, async (req,
       [JSON.stringify(config), ativo, req.params.tipo]
     );
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── DB CONNECTIONS ──────────────────────────────────────────────────────────
@@ -873,7 +884,7 @@ app.get('/api/db-connections', authMiddleware, async (req, res) => {
     // Never return plaintext passwords — mask them
     const safe = conns.map(c => ({ ...c, senha_enc: '***' }));
     res.json(safe);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // Save connections list (with encrypted passwords)
@@ -925,7 +936,7 @@ app.post('/api/db-connections', authMiddleware, async (req, res) => {
     setup.connections = encrypted;
     writeSetup(setup);
     res.json({ ok: true, total: encrypted.length });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // Apply a connection as active (reconnects pool + updates setup)
@@ -1077,7 +1088,7 @@ app.post('/api/setup/complete', async (req, res) => {
   } catch (err) {
     // Rollback setup file if error
     try { fs.unlinkSync(SETUP_FILE); } catch {}
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -1094,7 +1105,7 @@ app.post('/api/auth/refresh', authMiddleware, dbMiddleware, async (req, res) => 
       { expiresIn: JWT_EXPIRES }
     );
     res.json({ token });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── EXPORT EXCEL ────────────────────────────────────────────────────────────
@@ -1423,13 +1434,13 @@ app.get('/api/diag', authMiddleware, async (req, res) => {
     const tables  = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name");
     const users   = await pool.query("SELECT id, email, perfil, tipo, ativo FROM usuarios");
     res.json({ tables: tables.rows.map(r=>r.table_name), usuarios: users.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── PROJETOS ────────────────────────────────────────────────────────────────
 app.get('/api/projetos', authMiddleware, dbMiddleware, async (_req, res) => {
   try { res.json((await pool.query('SELECT * FROM projetos ORDER BY nome')).rows); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  catch (err) { _dbErr(res, err); }
 });
 
 app.get('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1437,7 +1448,7 @@ app.get('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
     const r = await pool.query('SELECT * FROM projetos WHERE id = $1', [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'Projeto nao encontrado' });
     res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.post('/api/projetos', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1452,7 +1463,7 @@ app.post('/api/projetos', authMiddleware, dbMiddleware, async (req, res) => {
     res.status(201).json(r.rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Projeto com este nome ja existe' });
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -1467,14 +1478,14 @@ app.put('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Projeto nao encontrado' });
     res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.delete('/api/projetos/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM projetos WHERE id = $1', [req.params.id]);
     res.json({ message: 'Projeto removido' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── ACOES ───────────────────────────────────────────────────────────────────
@@ -1596,7 +1607,7 @@ app.get('/api/notificacoes', authMiddleware, dbMiddleware, async (req, res) => {
       return a.diffDias - b.diffDias;
     });
     res.json(notifs);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.get('/api/acoes', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1609,7 +1620,7 @@ app.get('/api/acoes', authMiddleware, dbMiddleware, async (req, res) => {
     if (cloud)      { params.push(cloud);      q += ' AND a.cloud ILIKE $'  + params.length; }
     q += ' ORDER BY a.id_finops';
     res.json((await pool.query(q, params)).rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.get('/api/acoes/:id', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1620,7 +1631,7 @@ app.get('/api/acoes/:id', authMiddleware, dbMiddleware, async (req, res) => {
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Acao nao encontrada' });
     res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.post('/api/acoes', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1636,7 +1647,7 @@ app.post('/api/acoes', authMiddleware, dbMiddleware, async (req, res) => {
     res.status(201).json(r.rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'ID FinOps ja cadastrado' });
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -1652,14 +1663,14 @@ app.put('/api/acoes/:id', authMiddleware, dbMiddleware, async (req, res) => {
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Acao nao encontrada' });
     res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.delete('/api/acoes/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM acoes_finops WHERE id = $1', [req.params.id]);
     res.json({ message: 'Acao removida' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── ESTIMATIVAS ─────────────────────────────────────────────────────────────
@@ -1679,7 +1690,7 @@ app.get('/api/estimativas', authMiddleware, dbMiddleware, async (_req, res) => {
       ORDER BY e.criado_em DESC
     `);
     res.json(r.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.get('/api/estimativas/:id', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1687,7 +1698,7 @@ app.get('/api/estimativas/:id', authMiddleware, dbMiddleware, async (req, res) =
     const r = await pool.query('SELECT * FROM estimativas WHERE id = $1', [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'Não encontrada' });
     res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.post('/api/estimativas', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1712,7 +1723,7 @@ app.post('/api/estimativas', authMiddleware, dbMiddleware, async (req, res) => {
       recursos ? JSON.stringify(recursos) : null
     ]);
     res.status(201).json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.put('/api/estimativas/:id/status', authMiddleware, dbMiddleware, async (req, res) => {
@@ -1726,14 +1737,14 @@ app.put('/api/estimativas/:id/status', authMiddleware, dbMiddleware, async (req,
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Não encontrada' });
     res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.delete('/api/estimativas/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM estimativas WHERE id = $1', [req.params.id]);
     res.json({ message: 'Estimativa removida' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
@@ -1750,7 +1761,7 @@ app.get('/api/dashboard', dbMiddleware, async (_req, res) => {
       total_acoes: parseInt(total.rows[0].count), total_projetos: parseInt(proj.rows[0].count),
       por_status: porStatus.rows, por_cloud: porCloud.rows, totais: totais.rows[0],
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 
@@ -3657,7 +3668,7 @@ app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res)
       circuit_breaker: cbInfo,
       cobertura:      _plCobCache,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── POST /api/price-list/sync ─────────────────────────────────────────────────
@@ -3721,7 +3732,7 @@ app.get('/api/price-list/diag', authMiddleware, dbMiddleware, async (_req, res) 
       amostra_billing: amostraBilling.rows,
       amostra_pl:      amostraPL.rows,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/price-list/schedule ─────────────────────────────────────────────
@@ -3732,7 +3743,7 @@ app.get('/api/price-list/schedule', authMiddleware, dbMiddleware, async (_req, r
     );
     if (!r.rows.length) return res.json({ ativo: false, dia_mes: 28, hora: 2 });
     res.json(JSON.parse(r.rows[0].value));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── POST /api/price-list/schedule ────────────────────────────────────────────
@@ -3749,7 +3760,7 @@ app.post('/api/price-list/schedule', authMiddleware, dbMiddleware, async (req, r
     `, [JSON.stringify(cfg)]);
     console.log(`[PriceList] Agendamento ${ativo ? 'ativado' : 'desativado'}: dia ${dia_mes} às ${hora}h`);
     res.json({ ok: true, ...cfg });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── POST /api/price-list/reset-cb ────────────────────────────────────────────
@@ -3846,13 +3857,13 @@ async function _portalMiddleware(req, res, next) {
     if (!cfg.ativo) return res.status(403).json({ error: 'Portal desativado' });
     req.portalCfg = cfg;
     next();
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 }
 
 // ── GET /api/admin/portal-config ─────────────────────────────────────────────
 app.get('/api/admin/portal-config', authMiddleware, dbMiddleware, async (_req, res) => {
   try { res.json(await _getPortalConfig()); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  catch (e) { _dbErr(res, e); }
 });
 
 // ── POST /api/admin/portal-config ────────────────────────────────────────────
@@ -3879,7 +3890,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
     `, [JSON.stringify(cfg)]);
     console.log(`[Portal] Config atualizada — ativo: ${cfg.ativo}, subs: ${subscription_ids.length}, rgs: ${resource_groups.length}, dominios: ${dominios_aceitos.length}`);
     res.json({ ok: true, ...cfg });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/public/calculadora/projetos ─────────────────────────────────────
@@ -3890,7 +3901,7 @@ app.get('/api/public/calculadora/projetos', _portalMiddleware, dbMiddleware, asy
        FROM projetos WHERE status = 'Ativo' ORDER BY nome`
     );
     res.json(r.rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── POST /api/public/calculadora/estimativas ─────────────────────────────────
@@ -3944,7 +3955,7 @@ app.post('/api/public/calculadora/estimativas', _portalMiddleware, dbMiddleware,
       recursos ? JSON.stringify(recursos) : null
     ]);
     res.status(201).json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ── GET /api/public/calculadora/config ───────────────────────────────────────
@@ -3980,7 +3991,7 @@ app.post('/api/public/calculadora/identificar', _portalMiddleware, async (req, r
     );
     console.log(`[Portal] Acesso identificado — ${nome.trim()} <${email.trim().toLowerCase()}> IP:${ip}`);
     res.json({ ok: true, nome: nome.trim(), email: email.trim().toLowerCase() });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/admin/portal-acessos ────────────────────────────────────────────
@@ -3992,7 +4003,7 @@ app.get('/api/admin/portal-acessos', authMiddleware, dbMiddleware, async (req, r
       [limit]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/public/calculadora/subscriptions ────────────────────────────────
@@ -4019,7 +4030,7 @@ app.get('/api/public/calculadora/subscriptions', _portalMiddleware, async (req, 
       return res.json(rf.rows);
     }
     res.json(r.rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/public/calculadora/resource-groups ──────────────────────────────
@@ -4055,7 +4066,7 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
     const withManaged = r.rows.map(row => ({ ...row, ..._detectManagedRg(row.resource_group_name) }));
     const effSubs = subscription_ids.length ? subscription_ids : [];
     res.json(await _resolveParentRgs(withManaged, effSubs));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/public/calculadora/recursos ─────────────────────────────────────
@@ -4098,7 +4109,7 @@ app.get('/api/public/calculadora/recursos', _portalMiddleware, async (req, res) 
       if (handler) await handler(queryReq, queryRes, () => {});
     };
     await _buildRecursosQuery(req, res);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4134,10 +4145,7 @@ app.get('/api/calculadora/subscriptions', authMiddleware, dbMiddleware, async (_
     }
     console.log(`[Subscriptions] ${rows.length} subs — ${Date.now()-_t0}ms`);
     res.json(rows);
-  } catch (err) {
-    console.error('[Subscriptions]', err.message);
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ── Helper: detecta RGs gerenciados (AKS, Databricks) ────────────────────────
@@ -4334,8 +4342,7 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
     const subs = subscription_id ? subscription_id.split(',').map(s => s.trim()).filter(Boolean) : [];
     res.json(await _resolveParentRgs(withManaged, subs));
   } catch (err) {
-    console.error('[ResourceGroups]', err.message);
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -4400,8 +4407,7 @@ app.get('/api/calculadora/reconciliacao', authMiddleware, dbMiddleware, async (r
       total_sistema:   totalSistema,
     });
   } catch (err) {
-    console.error('[Reconciliacao]', err.message);
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -4785,8 +4791,7 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
     console.log(`[Recursos] ${r.rows.length} recursos — ${Date.now()-_t0}ms`);
     res.json(r.rows);
   } catch (err) {
-    console.error('Erro /api/calculadora/recursos:', err);
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -4815,7 +4820,7 @@ app.get('/api/calculadora/debug-recurso', authMiddleware, dbMiddleware, async (r
                exchange_rate_pricing_to_billing, billing_currency
       ORDER BY resource_id LIMIT 50`, params);
     res.json(r.rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/calculadora/detalhe-diario ──────────────────────────────────────
@@ -4861,8 +4866,7 @@ app.get('/api/calculadora/detalhe-diario', authMiddleware, dbMiddleware, async (
     `, params);
     res.json(r.rows);
   } catch (err) {
-    console.error('Erro /api/calculadora/detalhe-diario:', err);
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -4898,8 +4902,7 @@ app.get('/api/calculadora/por-servico', authMiddleware, dbMiddleware, async (req
     `, params);
     res.json(r.rows);
   } catch (err) {
-    console.error('Erro /api/calculadora/por-servico:', err);
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -4945,8 +4948,7 @@ app.get('/api/calculadora/diagnostico', authMiddleware, dbMiddleware, async (req
     `, params);
     res.json(r.rows);
   } catch (err) {
-    console.error('[Diagnostico]', err.message);
-    res.status(500).json({ error: err.message });
+    _dbErr(res, err);
   }
 });
 
@@ -5068,8 +5070,7 @@ app.get('/api/calculadora/diag-databricks', authMiddleware, dbMiddleware, async 
       }))
     });
   } catch (e) {
-    console.error('Erro /api/calculadora/diag-databricks:', e);
-    res.status(500).json({ error: e.message });
+    _dbErr(res, e);
   }
 });
 
@@ -5109,7 +5110,7 @@ app.get('/api/azure-costs/diag', authMiddleware, dbMiddleware, async (_req, res)
         amostra:       tags.rows[0].amostra_tag ?? null,
       } : null,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── POST /api/azure-costs/refresh-cache — Força rebuild do cache de dropdowns ─
@@ -5121,7 +5122,7 @@ app.post('/api/azure-costs/refresh-cache', authMiddleware, dbMiddleware, async (
       pool.query(`SELECT COUNT(*) AS total FROM azure_rg_cache`),
     ]);
     res.json({ ok: true, subs: parseInt(subs.rows[0].total), rgs: parseInt(rgs.rows[0].total) });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ── GET /api/azure-costs/resumo — Sumário geral para o painel de expurgo
@@ -5150,7 +5151,7 @@ app.get('/api/azure-costs/resumo', authMiddleware, dbMiddleware, async (_req, re
     _resumoCache = payload;
     _resumoCacheTs = now;
     res.json(payload);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ── GET /api/azure-costs/purge/preview — Conta registros antes de apagar
@@ -5164,7 +5165,7 @@ app.get('/api/azure-costs/purge/preview', authMiddleware, dbMiddleware, async (r
     if (data_fim)    { params.push(data_fim);    q += ` AND cost_date <= $${params.length}`; }
     const r = await pool.query(q, params);
     res.json({ total: parseInt(r.rows[0].total) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ── DELETE /api/azure-costs/purge — Expurgo de dados por período ou arquivo
@@ -5204,7 +5205,7 @@ app.delete('/api/azure-costs/purge', authMiddleware, dbMiddleware, async (req, r
       const isDeadlock = err.code === '40P01';
       console.error(`[Azure Purge] Tentativa ${attempt}/${MAX_RETRIES}:`, err.message);
       if (!isDeadlock || attempt === MAX_RETRIES) {
-        return res.status(500).json({ error: err.message });
+        return res.status(500).json({ error: 'Erro interno do servidor.' });
       }
       await new Promise(r => setTimeout(r, 200 * attempt));
     }
@@ -5229,7 +5230,7 @@ app.get('/api/azure-costs/imports', authMiddleware, dbMiddleware, async (_req, r
     _importsCache = r.rows;
     _importsCacheTs = now;
     res.json(r.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ── RESERVAS CLOUD ────────────────────────────────────────────────────────────
@@ -5243,7 +5244,7 @@ app.get('/api/reservas', authMiddleware, dbMiddleware, async (req, res) => {
     q += ` ORDER BY r.data_vencimento ASC`;
     const result = await pool.query(q, params);
     res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.post('/api/reservas', authMiddleware, dbMiddleware, async (req, res) => {
@@ -5265,7 +5266,7 @@ app.post('/api/reservas', authMiddleware, dbMiddleware, async (req, res) => {
        status||'Ativa', observacoes||null, req.user.id]
     );
     res.status(201).json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.put('/api/reservas/:id', authMiddleware, dbMiddleware, async (req, res) => {
@@ -5289,14 +5290,14 @@ app.put('/api/reservas/:id', authMiddleware, dbMiddleware, async (req, res) => {
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Reserva não encontrada' });
     res.json(r.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 app.delete('/api/reservas/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM reservas_cloud WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { _dbErr(res, err); }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -5793,7 +5794,7 @@ app.get('/api/azure-coleta/diag-agendador', authMiddleware, dbMiddleware, async 
       api_sps:           rApi.rows,
       storage_sps:       rStg.rows,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
@@ -5828,7 +5829,7 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
         open_until: _cbAPI.openUntil ? _cbAPI.openUntil.toISOString() : null,
       },
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async (req, res) => {
@@ -5902,7 +5903,7 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
     _coberturaCache = rows;
     _coberturaCacheTs = Date.now();
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.get('/api/azure-coleta/pendentes', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -5915,7 +5916,7 @@ app.get('/api/azure-coleta/pendentes', authMiddleware, dbMiddleware, async (_req
       ORDER BY p.criado_em ASC
     `);
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/pendentes', authMiddleware, dbMiddleware, async (req, res) => {
@@ -5929,7 +5930,7 @@ app.post('/api/azure-coleta/pendentes', authMiddleware, dbMiddleware, async (req
       [sp_id || null, subscription_id || null, sub_name || null, data_inicio, data_fim, descricao || null]
     );
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.delete('/api/azure-coleta/pendentes/:id', authMiddleware, dbMiddleware, async (req, res) => {
@@ -5937,7 +5938,7 @@ app.delete('/api/azure-coleta/pendentes/:id', authMiddleware, dbMiddleware, asyn
     await ensureAzureColetaTable();
     await pool.query(`DELETE FROM azure_coleta_pendentes WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req, res) => {
@@ -5951,7 +5952,7 @@ app.get('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (req,
       ? await pool.query(`${baseSelect} WHERE h.tipo=$1 ORDER BY h.iniciado_em DESC LIMIT 50`, [tipo])
       : await pool.query(`${baseSelect} ORDER BY h.iniciado_em DESC LIMIT 50`);
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.delete('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -5959,7 +5960,7 @@ app.delete('/api/azure-coleta/historico', authMiddleware, dbMiddleware, async (_
     await ensureAzureColetaTable();
     await pool.query(`TRUNCATE TABLE azure_coleta_historico RESTART IDENTITY`);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/historico/:id/validar', authMiddleware, dbMiddleware, async (req, res) => {
@@ -5975,7 +5976,7 @@ app.post('/api/azure-coleta/historico/:id/validar', authMiddleware, dbMiddleware
       `SELECT validacao_status, validacao_json FROM azure_coleta_historico WHERE id=$1`, [id]
     );
     res.json(updated[0] || {});
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -5993,7 +5994,7 @@ app.get('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (_req, res)
       billing_account_id: row.billing_account_id ? _safeDecrypt(row.billing_account_id) : '',
       billing_profile_id: row.billing_profile_id ? _safeDecrypt(row.billing_profile_id) : '',
     })));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res) => {
@@ -6014,7 +6015,7 @@ app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res)
       [nome || 'Nova SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE]
     );
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
@@ -6037,7 +6038,7 @@ app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, r
       [nome || 'SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE, req.params.id]
     );
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // Atualização parcial segura — só altera os campos explicitamente enviados
@@ -6052,7 +6053,7 @@ app.patch('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req,
     vals.push(req.params.id);
     await pool.query(`UPDATE azure_coleta_config SET ${sets.join(',')},atualizado_em=NOW() WHERE id=$${vals.length}`, vals);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/sps/:id/coletar-api', authMiddleware, dbMiddleware, async (req, res) => {
@@ -6077,7 +6078,7 @@ app.patch('/api/azure-coleta/sps/:id/ativo', authMiddleware, dbMiddleware, async
     const { ativo } = req.body;
     await pool.query(`UPDATE azure_coleta_config SET ativo=$1,atualizado_em=NOW() WHERE id=$2`, [!!ativo, req.params.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // Define esta SP como padrão (única por vez) — limpa is_padrao das outras
@@ -6086,14 +6087,14 @@ app.patch('/api/azure-coleta/sps/:id/padrao', authMiddleware, dbMiddleware, asyn
     await pool.query(`UPDATE azure_coleta_config SET is_padrao=false`);
     await pool.query(`UPDATE azure_coleta_config SET is_padrao=true,atualizado_em=NOW() WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.delete('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await pool.query(`DELETE FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/sps/:id/testar', authMiddleware, dbMiddleware, async (req, res) => {
@@ -6127,7 +6128,7 @@ app.post('/api/azure-coleta/sps/:id/testar', authMiddleware, dbMiddleware, async
     const msgs    = [results.management.msg, results.storage.msg].join('\n');
     if (algumOk) res.json({ ok: true, message: msgs, results });
     else         res.status(400).json({ error: msgs, results });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // Lista subscriptions de uma SP (para wizard de coleta)
@@ -6159,7 +6160,7 @@ app.post('/api/azure-coleta/listar-subs-preview', authMiddleware, dbMiddleware, 
     );
     const subs = cached.rows.map(r => ({ subscriptionId: r.subscription_id, nome: r.subscription_name || r.subscription_id }));
     res.json({ subs, fonte: 'cache' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/sps/:id/listar-subs', authMiddleware, dbMiddleware, async (req, res) => {
@@ -6207,7 +6208,7 @@ app.post('/api/azure-coleta/sps/:id/listar-subs', authMiddleware, dbMiddleware, 
       nome: row.subscription_name || row.subscription_id,
     }));
     res.json({ subs, fonte: 'cache' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // Lista Resource Groups de subscriptions selecionadas (para wizard de coleta)
@@ -6249,7 +6250,7 @@ app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, a
       lowerIds
     );
     res.json({ rgs: cached.rows.map(r => ({ subscriptionId: r.subscription_id, name: r.name })), fonte: cached.rowCount > 0 ? 'cache' : 'empty' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -7201,7 +7202,7 @@ app.get('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (_req,
     await ensureAzureColetaTable();
     const r = await pool.query(`SELECT * FROM azure_storage_config ORDER BY id`);
     res.json(r.rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req, res) => {
@@ -7214,7 +7215,7 @@ app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req,
       [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null]
     );
     res.json({ ok: true, id: r.rows[0].id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.put('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
@@ -7225,14 +7226,14 @@ app.put('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (r
       [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
     );
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.delete('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await pool.query(`DELETE FROM azure_storage_config WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/storages/:id/testar', authMiddleware, dbMiddleware, async (req, res) => {
@@ -7251,7 +7252,7 @@ app.post('/api/azure-coleta/storages/:id/testar', authMiddleware, dbMiddleware, 
     const totalSize = blobs.reduce((s, b) => s + b.size, 0);
     res.json({ ok: true, total: blobs.length, totalSizeMB: (totalSize/1048576).toFixed(1),
       preview: blobs.slice(0,10).map(b => ({ name: b.name, sizeMB: (b.size/1048576).toFixed(2), lastModified: b.lastModified })) });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.post('/api/azure-coleta/storages/:id/executar', authMiddleware, dbMiddleware, (req, res) => {
@@ -7278,7 +7279,7 @@ app.put('/api/azure-coleta/storages/:id/agendamento', authMiddleware, dbMiddlewa
       [req.params.id]
     );
     res.json({ ok: true, storage: r.rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.put('/api/azure-coleta/sps/:id/agendamento', authMiddleware, dbMiddleware, async (req, res) => {
@@ -7299,7 +7300,7 @@ app.put('/api/azure-coleta/sps/:id/agendamento', authMiddleware, dbMiddleware, a
       [req.params.id]
     );
     res.json({ ok: true, sp: r.rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.get('/api/azure-coleta/agendamentos', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -7319,7 +7320,7 @@ app.get('/api/azure-coleta/agendamentos', authMiddleware, dbMiddleware, async (_
       `)
     ]);
     res.json([...rStg.rows, ...rApi.rows]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ─── HEALTH CHECK (sem autenticação — para load balancers, PM2, Railway, etc.) ─
