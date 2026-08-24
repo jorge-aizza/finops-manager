@@ -130,7 +130,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
     <div class="cover-subtitle">Regras de Negócio · Módulos · Fluxos de Uso</div>
   </div>
   <div class="cover-bottom">
-    <div class="cover-meta">Versão <strong>v2.4</strong> · Julho 2026</div>
+    <div class="cover-meta">Versão <strong>v2.4</strong> · Agosto 2026</div>
     <div class="cover-badge">Usuário Final</div>
   </div>
 </div>
@@ -268,8 +268,8 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
 
   <div class="subsec">Como importar no FinOps Manager</div>
   <div class="steps">
-    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Navegue para <strong>Azure Costs → Importar</strong> no menu lateral.</p></div></div>
-    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Arraste o arquivo ou clique para selecionar. Arquivos até 2 GB são suportados.</p></div></div>
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Navegue para <strong>Coleta Azure</strong> no menu lateral e localize o card <strong>📥 Importação Manual</strong>.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Selecione o(s) arquivo(s) — CSV, Parquet ou ZIP. Arquivos até 2 GB são suportados.</p></div></div>
     <div class="step"><div class="step-num">3</div><div class="step-body"><p>Clique em <strong>Importar</strong>. O processamento ocorre em background — acompanhe o progresso na barra de status.</p></div></div>
     <div class="step"><div class="step-num">4</div><div class="step-body"><p>Ao concluir, o sistema atualiza automaticamente os dropdowns de assinatura e grupo de recursos.</p></div></div>
   </div>
@@ -301,7 +301,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
   <div class="subsec">Seleção de Grupos de Recursos</div>
   <p>O dropdown de RGs permite selecionar múltiplos grupos simultaneamente. Recursos gerenciados são selecionados automaticamente:</p>
   <ul>
-    <li>Ao selecionar um <strong>Workspace Databricks</strong> (ex: <code>RG-WORKSPACE</code>), os RGs filhos gerenciados (<code>DATABRICKS-RG-*</code>) são marcados automaticamente.</li>
+    <li>Ao selecionar um <strong>Workspace Databricks</strong> (ex: <code>RG-WORKSPACE</code>), os RGs filhos gerenciados (<code>DATABRICKS-RG-*</code>, <code>MANAGED-RG-ADBX-*</code> ou o padrão genérico <code>MANAGED-RG-*</code> — ex: <code>MANAGED-RG-DBW-*</code>) são marcados automaticamente.</li>
     <li>Ao selecionar um <strong>cluster AKS</strong>, o RG da infraestrutura (<code>MC_*</code>) é marcado automaticamente.</li>
     <li>Ao desmarcar o pai, os filhos são desmarcados.</li>
   </ul>
@@ -571,7 +571,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
     <div class="rn-card">
       <div class="rn-card-hdr">RGs Gerenciados (auto-seleção)</div>
       <div class="rn-card-body">
-        <p>Ao selecionar um workspace Databricks, seus RGs filhos (<code>DATABRICKS-RG-*</code>) são marcados automaticamente. O mesmo vale para clusters AKS e seus RGs de infraestrutura (<code>MC_*</code>).</p>
+        <p>Ao selecionar um workspace Databricks, seus RGs filhos (<code>DATABRICKS-RG-*</code>, <code>MANAGED-RG-ADBX-*</code> ou o padrão genérico <code>MANAGED-RG-*</code> — ex: <code>MANAGED-RG-DBW-*</code>) são marcados automaticamente. O mesmo vale para clusters AKS e seus RGs de infraestrutura (<code>MC_*</code>).</p>
       </div>
     </div>
   </div>
@@ -582,7 +582,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
     <table class="doc">
       <thead><tr><th>Stream</th><th>Onde aparece</th><th>Serviço Azure</th><th>Indicador</th></tr></thead>
       <tbody>
-        <tr><td>Infraestrutura (VMs)</td><td>RG gerenciado <code>DATABRICKS-RG-*</code></td><td>Microsoft.Compute (VMs)</td><td>⚡ Cluster/h (azul)</td></tr>
+        <tr><td>Infraestrutura (VMs)</td><td>RG gerenciado <code>DATABRICKS-RG-*</code> / <code>MANAGED-RG-*</code></td><td>Microsoft.Compute (VMs)</td><td>⚡ Cluster/h (azul)</td></tr>
         <tr><td>Software (DBUs)</td><td>RG do workspace (definido pelo usuário)</td><td>Microsoft.Databricks</td><td>⚡ /DBU cobrado (azul)</td></tr>
       </tbody>
     </table>
@@ -592,7 +592,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
 
 <!-- FOOTER -->
 <div class="footer">
-  <p>FinOps Manager — Manual do Usuário · Julho 2026</p>
+  <p>FinOps Manager — Manual do Usuário · Agosto 2026</p>
   <span class="ver">v2.4</span>
 </div>
 
