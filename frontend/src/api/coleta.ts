@@ -197,6 +197,9 @@ export const getHistorico = (tipo?: 'api' | 'storage') =>
 
 export const deleteHistorico = () => apiFetch<{ ok: boolean }>('DELETE', '/azure-coleta/historico')
 
+export const validarHistorico = (id: number) =>
+  apiFetch<{ validacao_status: string; validacao_json: HistoricoItem['validacao_json'] }>('POST', `/azure-coleta/historico/${id}/validar`)
+
 // Aba "Import Manual" do histórico usa uma fonte de dados diferente
 // (importações de CSV/Parquet, não coletas automáticas).
 const IMPORT_NUM_FIELDS: (keyof ImportItem)[] = ['linhas', 'total_billing']

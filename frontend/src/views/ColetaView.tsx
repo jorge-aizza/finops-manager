@@ -16,14 +16,41 @@ import AgendamentoModal from './AgendamentoModal'
 import DiagAgendadorModal from './DiagAgendadorModal'
 import ExpurgoModal from './ExpurgoModal'
 import DiagnosticoModal from './DiagnosticoModal'
+import ColetaLogModal from './ColetaLogModal'
+import ColetaValidacaoModal from './ColetaValidacaoModal'
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return '—'
   return new Date(iso).toLocaleString('pt-BR')
 }
 
+function formatDuracao(iniciado: string, concluido: string | null): string {
+  if (!iniciado || !concluido) return '—'
+  const ms = new Date(concluido).getTime() - new Date(iniciado).getTime()
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+}
+
 const STATUS_COLORS: Record<string, string> = {
   concluido: '#22c55e', cancelado: '#ff8c42', executando: '#ff8c42', erro: '#ff4d6a',
+}
+
+const ORIGEM_BADGE: Record<string, { color: string; bg: string; label: string }> = {
+  agendado: { color: 'var(--green)', bg: 'rgba(34,197,94,.10)', label: '⏰ Agendada' },
+  manual: { color: 'var(--blue)', bg: 'rgba(77,166,255,.10)', label: '👤 Manual' },
+}
+
+const TIPO_BADGE: Record<string, { color: string; bg: string; label: string }> = {
+  price_list: { color: 'var(--orange)', bg: 'rgba(255,140,66,.12)', label: '💲 Price List' },
+  storage: { color: 'var(--blue)', bg: 'rgba(77,166,255,.12)', label: '🗄 Storage' },
+}
+const TIPO_BADGE_DEFAULT = { color: 'var(--accent)', bg: 'rgba(147,51,234,.12)', label: '⚡ API' }
+
+const VALIDACAO_BADGE: Record<string, { color: string; label: string }> = {
+  ok: { color: 'var(--green)', label: '✅ OK' },
+  aviso: { color: 'var(--orange)', label: '⚠ Aviso' },
+  falha: { color: 'var(--danger)', label: '❌ Falha' },
+  inconclusivo: { color: 'var(--text-muted)', label: '— S/dados' },
 }
 
 type HistTab = 'api' | 'storage' | 'manual'
@@ -192,6 +219,9 @@ export default function ColetaView() {
     if (!confirm('Limpar TODO o histórico de execuções? Esta ação não pode ser desfeita.')) return
     limparHistoricoMutation.mutate()
   }
+
+  const [logItem, setLogItem] = useState<HistoricoItem | null>(null)
+  const [validacaoItem, setValidacaoItem] = useState<HistoricoItem | null>(null)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -411,36 +441,69 @@ export default function ColetaView() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Início</th><th>SP</th><th>Status</th>
+                  <th>Início</th><th>SP</th>{histTab === 'storage' && <th>Tipo</th>}<th>Status</th><th>Origem</th>
                   <th style={{ textAlign: 'right' }}>Inseridos</th><th style={{ textAlign: 'right' }}>Atualizados</th><th style={{ textAlign: 'right' }}>Erros</th>
-                  <th>Mensagem</th>
+                  <th>Duração</th><th>Mensagem</th><th style={{ textAlign: 'center' }}>Validação</th><th style={{ textAlign: 'center' }}>Log</th>
                 </tr>
               </thead>
               <tbody>
-                {historicoQuery.isLoading && <tr><td colSpan={7} className="empty-state">Carregando...</td></tr>}
+                {historicoQuery.isLoading && <tr><td colSpan={11} className="empty-state">Carregando...</td></tr>}
                 {!historicoQuery.isLoading && (historicoQuery.data?.length ?? 0) === 0 && (
-                  <tr><td colSpan={7} className="empty-state">Nenhuma execução encontrada</td></tr>
+                  <tr><td colSpan={11} className="empty-state">Nenhuma execução encontrada</td></tr>
                 )}
-                {(historicoQuery.data as HistoricoItem[] | undefined)?.map((h) => (
-                  <tr key={h.id}>
-                    <td style={{ fontSize: 12 }}>{formatDateTime(h.iniciado_em)}</td>
-                    <td style={{ color: 'var(--text-muted)' }}>{h.sp_nome || '—'}</td>
-                    <td>
-                      <span style={{
-                        background: (STATUS_COLORS[h.status] || '#7b6a9e') + '22', color: STATUS_COLORS[h.status] || '#7b6a9e',
-                        border: '1px solid ' + (STATUS_COLORS[h.status] || '#7b6a9e') + '55', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600,
-                      }}>
-                        {h.status}
-                      </span>
-                    </td>
-                    <td style={{ textAlign: 'right' }}>{h.linhas_inseridas.toLocaleString('pt-BR')}</td>
-                    <td style={{ textAlign: 'right' }}>{h.linhas_atualizadas.toLocaleString('pt-BR')}</td>
-                    <td style={{ textAlign: 'right', color: h.linhas_erro > 0 ? 'var(--danger)' : undefined }}>{h.linhas_erro.toLocaleString('pt-BR')}</td>
-                    <td style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.mensagem || ''}>
-                      {h.mensagem || '—'}
-                    </td>
-                  </tr>
-                ))}
+                {(historicoQuery.data as HistoricoItem[] | undefined)?.map((h) => {
+                  const origem = h.origem ? ORIGEM_BADGE[h.origem] : null
+                  const tipoBadge = h.tipo ? (TIPO_BADGE[h.tipo] || TIPO_BADGE_DEFAULT) : TIPO_BADGE_DEFAULT
+                  const temLog = !!h.detalhes?.log?.length
+                  const val = h.validacao_status ? VALIDACAO_BADGE[h.validacao_status] : null
+                  return (
+                    <tr key={h.id}>
+                      <td style={{ fontSize: 12 }}>{formatDateTime(h.iniciado_em)}</td>
+                      <td style={{ color: 'var(--text-muted)' }}>{h.sp_nome || '—'}</td>
+                      {histTab === 'storage' && (
+                        <td>
+                          <span style={{ background: tipoBadge.bg, color: tipoBadge.color, padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 600 }}>
+                            {tipoBadge.label}
+                          </span>
+                        </td>
+                      )}
+                      <td>
+                        <span style={{
+                          background: (STATUS_COLORS[h.status] || '#7b6a9e') + '22', color: STATUS_COLORS[h.status] || '#7b6a9e',
+                          border: '1px solid ' + (STATUS_COLORS[h.status] || '#7b6a9e') + '55', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600,
+                        }}>
+                          {h.status}
+                        </span>
+                      </td>
+                      <td>
+                        {origem ? (
+                          <span style={{ background: origem.bg, color: origem.color, padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 600 }}>{origem.label}</span>
+                        ) : <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>—</span>}
+                      </td>
+                      <td style={{ textAlign: 'right' }}>{h.linhas_inseridas.toLocaleString('pt-BR')}</td>
+                      <td style={{ textAlign: 'right' }}>{h.linhas_atualizadas.toLocaleString('pt-BR')}</td>
+                      <td style={{ textAlign: 'right', color: h.linhas_erro > 0 ? 'var(--danger)' : undefined }}>{h.linhas_erro.toLocaleString('pt-BR')}</td>
+                      <td style={{ fontSize: 11 }}>{formatDuracao(h.iniciado_em, h.concluido_em)}</td>
+                      <td style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.mensagem || ''}>
+                        {h.mensagem || '—'}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {val ? (
+                          <button className="btn-ghost" style={{ fontSize: 10, padding: '2px 8px', borderColor: val.color, color: val.color }} onClick={() => setValidacaoItem(h)}>
+                            {val.label}
+                          </button>
+                        ) : <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>—</span>}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {temLog ? (
+                          <button className="btn-ghost" style={{ fontSize: 10, padding: '2px 8px', borderColor: 'var(--accent)', color: 'var(--accent)' }} title="Ver log passo a passo" onClick={() => setLogItem(h)}>
+                            📋 Log
+                          </button>
+                        ) : <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>—</span>}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           )}
@@ -454,6 +517,8 @@ export default function ColetaView() {
       {diagOpen && <DiagAgendadorModal onClose={() => setDiagOpen(false)} />}
       {expurgoOpen && <ExpurgoModal onClose={() => setExpurgoOpen(false)} />}
       {diagnosticoOpen && <DiagnosticoModal onClose={() => setDiagnosticoOpen(false)} />}
+      {logItem && <ColetaLogModal item={logItem} onClose={() => setLogItem(null)} />}
+      {validacaoItem && <ColetaValidacaoModal item={validacaoItem} onClose={() => setValidacaoItem(null)} />}
     </div>
   )
 }

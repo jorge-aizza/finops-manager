@@ -77,6 +77,18 @@ export interface CoberturaMes {
   total_brl: number
 }
 
+export interface ValidacaoJson {
+  total_registros: number | null
+  custo_total: number | null
+  dias_com_dados: number | null
+  dias_esperados: number | null
+  subs_com_dados: number | null
+  subs_esperadas: number | null
+  subs_sem_dados: string[] | null
+  dias_sem_dados: string[] | null
+  validado_em: string | null
+}
+
 export interface HistoricoItem {
   id: number
   tipo: string | null
@@ -88,9 +100,11 @@ export interface HistoricoItem {
   linhas_atualizadas: number
   linhas_erro: number
   mensagem: string | null
+  detalhes: { log?: { ts: string; msg: string }[] } | null
   periodo_inicio: string | null
   periodo_fim: string | null
   validacao_status: string | null
+  validacao_json: ValidacaoJson | null
   sp_nome: string | null
 }
 

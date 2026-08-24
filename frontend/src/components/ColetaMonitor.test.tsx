@@ -67,8 +67,8 @@ describe('ColetaMonitor', () => {
       progresso: { tipo: 'api', fase: 'Finalizado com sucesso', ins: 500, upd: 10, err: 0, log: [] },
       ultimo_api: {
         id: 1, tipo: 'api', origem: 'api', iniciado_em: '2026-08-22T09:00:00.000Z', concluido_em: '2026-08-22T09:05:00.000Z',
-        status: 'concluido', linhas_inseridas: 500, linhas_atualizadas: 10, linhas_erro: 0, mensagem: null,
-        periodo_inicio: null, periodo_fim: null, validacao_status: null, sp_nome: 'SP Produção',
+        status: 'concluido', linhas_inseridas: 500, linhas_atualizadas: 10, linhas_erro: 0, mensagem: null, detalhes: null,
+        periodo_inicio: null, periodo_fim: null, validacao_status: null, validacao_json: null, sp_nome: 'SP Produção',
       },
     }))
     renderWithClient()
@@ -85,8 +85,8 @@ describe('ColetaMonitor', () => {
 const ultimoApi: HistoricoItem = {
   id: 42, tipo: 'api', origem: 'api', iniciado_em: '2026-08-22T10:00:00.000Z',
   concluido_em: '2026-08-22T10:05:00.000Z', status: 'concluido',
-  linhas_inseridas: 27063, linhas_atualizadas: 0, linhas_erro: 0, mensagem: null,
-  periodo_inicio: '2026-08-22', periodo_fim: '2026-08-22', validacao_status: null, sp_nome: 'SP Produção',
+  linhas_inseridas: 27063, linhas_atualizadas: 0, linhas_erro: 0, mensagem: null, detalhes: null,
+  periodo_inicio: '2026-08-22', periodo_fim: '2026-08-22', validacao_status: null, validacao_json: null, sp_nome: 'SP Produção',
 }
 
 function statusFinalizado(overrides: Partial<ColetaStatus> = {}): ColetaStatus {

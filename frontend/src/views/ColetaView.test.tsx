@@ -35,10 +35,22 @@ const mockCobertura: CoberturaMes[] = [
 
 const mockHistorico: HistoricoItem[] = [
   {
-    id: 1, tipo: 'api', origem: 'api', iniciado_em: '2026-08-20T10:00:00.000Z', concluido_em: '2026-08-20T10:05:00.000Z',
+    id: 1, tipo: 'api', origem: 'manual', iniciado_em: '2026-08-20T10:00:00.000Z', concluido_em: '2026-08-20T10:05:00.000Z',
     status: 'concluido', linhas_inseridas: 100, linhas_atualizadas: 20, linhas_erro: 0,
-    mensagem: null, periodo_inicio: '2026-08-01', periodo_fim: '2026-08-20',
-    validacao_status: null, sp_nome: 'SP Produção',
+    mensagem: null, detalhes: { log: [{ ts: '10:00:00', msg: 'Iniciado' }, { ts: '10:05:00', msg: 'Concluído com sucesso' }] },
+    periodo_inicio: '2026-08-01', periodo_fim: '2026-08-20',
+    validacao_status: 'ok',
+    validacao_json: {
+      total_registros: 5000, custo_total: 12000, dias_com_dados: 20, dias_esperados: 20,
+      subs_com_dados: 1, subs_esperadas: 1, subs_sem_dados: [], dias_sem_dados: [], validado_em: '2026-08-20T10:06:00.000Z',
+    },
+    sp_nome: 'SP Produção',
+  },
+  {
+    id: 2, tipo: 'api', origem: 'agendado', iniciado_em: '2026-08-21T02:00:00.000Z', concluido_em: '2026-08-21T02:00:30.000Z',
+    status: 'concluido', linhas_inseridas: 50, linhas_atualizadas: 5, linhas_erro: 0,
+    mensagem: null, detalhes: null, periodo_inicio: '2026-08-21', periodo_fim: '2026-08-21',
+    validacao_status: null, validacao_json: null, sp_nome: 'SP Produção',
   },
 ]
 
@@ -89,7 +101,7 @@ describe('ColetaView', () => {
 
   it('lista o histórico de execuções (aba API)', async () => {
     renderWithClient()
-    expect(await screen.findByText('concluido')).toBeInTheDocument()
+    expect(await screen.findAllByText('concluido')).toHaveLength(2)
   });
 
   it('cria um novo Service Principal', async () => {
@@ -220,5 +232,50 @@ describe('ColetaView', () => {
     await waitFor(() => expect(coletaApi.criarPendente).toHaveBeenCalledWith(expect.objectContaining({
       sp_id: 1, subscription_id: 'sub-1', sub_name: 'Sub Principal', data_inicio: '2026-08-01', data_fim: '2026-08-31',
     })))
+  });
+
+  // Colunas Origem/Duração/Validação/Log restauradas no Histórico de Execuções —
+  // tinham sido perdidas na migração (achado numa auditoria completa comparando
+  // app.js contra o React), não existia jeito de auditar uma execução passada.
+  describe('Histórico de Execuções — Origem/Duração/Validação/Log', () => {
+    it('mostra badge de Origem e a Duração calculada de cada execução', async () => {
+      renderWithClient()
+
+      expect(await screen.findByText('👤 Manual')).toBeInTheDocument()
+      expect(screen.getByText('⏰ Agendada')).toBeInTheDocument()
+      expect(screen.getByText('5m 0s')).toBeInTheDocument() // linha 1: 10:00:00 → 10:05:00
+      expect(screen.getByText('30s')).toBeInTheDocument() // linha 2: 02:00:00 → 02:00:30
+    });
+
+    it('botão "Log" abre o log passo a passo; sem log mostra "—"', async () => {
+      const user = userEvent.setup()
+      renderWithClient()
+      await screen.findByText('👤 Manual')
+
+      expect(screen.getAllByText('—').length).toBeGreaterThan(0) // linha 2 não tem log/validação
+      await user.click(screen.getByRole('button', { name: '📋 Log' }))
+
+      expect(await screen.findByText('Log da Coleta #1')).toBeInTheDocument()
+      expect(screen.getByText('Iniciado')).toBeInTheDocument()
+      expect(screen.getByText('Concluído com sucesso')).toBeInTheDocument()
+    });
+
+    it('botão "✅ OK" abre a validação com os números registrados', async () => {
+      const user = userEvent.setup()
+      renderWithClient()
+      await screen.findByText('👤 Manual')
+
+      await user.click(screen.getByRole('button', { name: /✅ OK/ }))
+      const modal = (await screen.findByText('Validação — Coleta #1')).closest<HTMLElement>('.modal')!
+      expect(within(modal).getByText('5.000')).toBeInTheDocument() // total_registros
+      expect(within(modal).getByText('20 / 20')).toBeInTheDocument() // dias_com_dados/esperados
+    });
+
+    it('linha sem validação nenhuma não mostra botão de Validação (mesmo comportamento do legado)', async () => {
+      renderWithClient()
+      await screen.findByText('👤 Manual')
+      // linha 2 (id=2) tem validacao_status null — sem botão, só "—" na coluna
+      expect(screen.queryByRole('button', { name: /Validar agora/ })).not.toBeInTheDocument()
+    });
   });
 });

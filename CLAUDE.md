@@ -303,6 +303,20 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     Um toggle ingênuo (`PUT {ativo}`) zeraria `nome`/`storage_account`/etc. — `setStorageAtivo` reenvia a linha
     inteira já carregada no cliente com só o `ativo` trocado, sem precisar mudar `server.js`. Confirmado via
     Playwright que o campo `storage_account` sobrevive ao toggle.
+    **Histórico de Execuções perdeu 5 colunas/recursos na Fase A, achado numa auditoria completa (não
+    reportado pelo usuário — achado por um agente de pesquisa comparando `loadColetaHistorico()`/
+    `verDetalhesColeta()`/`verValidacaoColeta()`/`revalidarColeta()` de `app.js:6159-6438` linha a linha
+    contra `ColetaView.tsx`)**: faltavam **Origem** (badge ⏰ Agendada/👤 Manual), **Duração** (calculada de
+    `iniciado_em`/`concluido_em`), **Validação** (badge ✅ OK/⚠ Aviso/❌ Falha/— S/dados + botão "Revalidar" —
+    `POST /azure-coleta/historico/:id/validar` não tinha nenhum chamador vivo) e **Log** (histórico passo a
+    passo de uma execução JÁ concluída — diferente do log ao vivo de `ColetaMonitor.tsx`, que só existe
+    enquanto a coleta está rodando/acabou de rodar nesta sessão), além do badge **Tipo** (💲 Price List/
+    🗄 Storage/⚡ API) na aba Storage. Sem essas colunas não havia como auditar por que uma coleta antiga
+    trouxe menos/mais dados que o esperado. Todos os campos necessários já vinham do servidor
+    (`h.origem`/`h.detalhes`/`h.validacao_status`/`h.validacao_json` em `GET /azure-coleta/historico`) — só
+    não estavam no tipo `HistoricoItem` nem renderizados. Portado como dois modais novos
+    (`ColetaLogModal.tsx`/`ColetaValidacaoModal.tsx`, mesmo padrão de outros modais de Coleta) mais as 4
+    colunas na tabela principal — nenhum endpoint novo no servidor foi necessário.
   - `estimativas` (`frontend/src/views/EstimativasView.tsx`) — tela **read/manage-only**: listar, buscar/filtrar
     por projeto, aprovar/reprovar/resetar status, ver detalhe (metadados + até 150 linhas de `recursos`, igual
     ao limite do legado), excluir, gerar PDF. **Não existe criação nesta tela** — estimativas só nascem como
