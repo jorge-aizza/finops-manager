@@ -11,11 +11,22 @@ export default function DetalheDiarioTable({ rows }: { rows: DetalheDiarioRow[] 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const grupos = useMemo(() => {
-    const map = new Map<string, { costDate: string; resourceId: string; total: number; subs: DetalheDiarioRow[] }>()
+    const map = new Map<string, { costDate: string; resourceId: string; nomeRecurso: string; resourceType: string; location: string; resourceGroupName: string; subscriptionName: string; total: number; subs: DetalheDiarioRow[] }>()
     const ordem: string[] = []
     for (const row of rows) {
       const k = row.cost_date + '||' + (row.resource_id || '')
-      if (!map.has(k)) { map.set(k, { costDate: row.cost_date, resourceId: row.resource_id || '', total: 0, subs: [] }); ordem.push(k) }
+      if (!map.has(k)) {
+        map.set(k, {
+          costDate: row.cost_date, resourceId: row.resource_id || '',
+          nomeRecurso: row.nome_recurso || row.resource_id || '—',
+          resourceType: row.resource_type || '—',
+          location: row.location || '—',
+          resourceGroupName: row.resource_group_name || '—',
+          subscriptionName: row.subscription_name || '—',
+          total: 0, subs: [],
+        })
+        ordem.push(k)
+      }
       const g = map.get(k)!
       g.total += Number(row.cost) || 0
       g.subs.push(row)
@@ -49,9 +60,7 @@ export default function DetalheDiarioTable({ rows }: { rows: DetalheDiarioRow[] 
         {grupos.map((g) => {
           const open = expanded.has(g.key)
           const dt = g.costDate ? g.costDate.slice(0, 10) : '—'
-          const first = g.subs[0]
-          const nome = first?.resource_id || '—'
-          const nomeShort = nome.length > 60 ? '…' + nome.slice(-50) : nome
+          const nomeShort = g.nomeRecurso.length > 60 ? '…' + g.nomeRecurso.slice(-50) : g.nomeRecurso
           return (
             <Fragment key={g.key}>
               <tr style={{ cursor: 'pointer', borderBottom: '1px solid var(--border)', background: open ? 'rgba(147,51,234,.08)' : undefined }} onClick={() => toggle(g.key)}>
@@ -62,10 +71,10 @@ export default function DetalheDiarioTable({ rows }: { rows: DetalheDiarioRow[] 
                 <td style={{ padding: '8px 10px', fontSize: 11, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   <span title={g.resourceId} style={{ color: 'var(--accent)', fontSize: 11 }}>{nomeShort}</span>
                 </td>
-                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{first?.consumed_service || '—'}</td>
-                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>—</td>
-                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>—</td>
-                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{g.resourceId ? g.resourceId.split('/')[2] || '—' : '—'}</td>
+                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{g.resourceType}</td>
+                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{g.location}</td>
+                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{g.resourceGroupName}</td>
+                <td style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{g.subscriptionName}</td>
                 <td style={{ padding: '8px 10px', fontSize: 12, fontWeight: 700, color: 'var(--accent)', textAlign: 'right', whiteSpace: 'nowrap' }}>{brl(g.total)}</td>
               </tr>
               {open && (
@@ -82,8 +91,8 @@ export default function DetalheDiarioTable({ rows }: { rows: DetalheDiarioRow[] 
                       <tbody>
                         {g.subs.map((s, i) => (
                           <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,.04)' }}>
-                            <td style={{ padding: '5px 10px', fontSize: 11, color: 'var(--text)' }}>{s.consumed_service || '—'}</td>
-                            <td style={{ padding: '5px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{s.meter_name || '—'}</td>
+                            <td style={{ padding: '5px 10px', fontSize: 11, color: 'var(--text)' }}>{s.service_name || '—'}</td>
+                            <td style={{ padding: '5px 10px', fontSize: 11, color: 'var(--text-dim)' }}>{s.meter || '—'}</td>
                             <td style={{ padding: '5px 10px', fontSize: 11, fontWeight: 600, color: 'var(--accent)', textAlign: 'right' }}>{brl(Number(s.cost) || 0)}</td>
                           </tr>
                         ))}

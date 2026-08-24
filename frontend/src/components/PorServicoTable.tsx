@@ -28,9 +28,9 @@ export default function PorServicoTable({ rows }: { rows: PorServicoRow[] }) {
         {rows.map((row, i) => {
           const pct = grand > 0 ? ((Number(row.total_brl) || 0) / grand * 100) : 0
           return (
-            <tr key={row.consumed_service} style={{ borderBottom: '1px solid var(--border)' }}>
+            <tr key={row.service_name} style={{ borderBottom: '1px solid var(--border)' }}>
               <td style={{ padding: '9px 10px', textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>{i + 1}</td>
-              <td style={{ padding: '9px 10px', fontSize: 12, color: 'var(--text)' }}>{row.consumed_service}</td>
+              <td style={{ padding: '9px 10px', fontSize: 12, color: 'var(--text)' }}>{row.service_name}</td>
               <td style={{ padding: '9px 10px', fontSize: 12, color: 'var(--text-dim)', textAlign: 'right' }}>{(Number(row.qtd_recursos) || 0).toLocaleString('pt-BR')}</td>
               <td style={{ padding: '9px 10px', fontSize: 12, color: 'var(--text-dim)', textAlign: 'right' }}>{(Number(row.qtd_rgs) || 0).toLocaleString('pt-BR')}</td>
               <td style={{ padding: '9px 10px', fontSize: 12, fontWeight: 700, color: 'var(--accent)', textAlign: 'right', whiteSpace: 'nowrap' }}>{brl(Number(row.total_brl) || 0)}</td>

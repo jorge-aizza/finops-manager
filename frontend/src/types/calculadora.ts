@@ -97,14 +97,19 @@ export interface Reconciliacao {
 export interface DetalheDiarioRow {
   cost_date: string
   subscription_id: string
+  subscription_name: string | null
   resource_id: string
-  consumed_service: string | null
-  meter_name: string | null
+  nome_recurso: string | null
+  resource_type: string | null
+  location: string | null
+  resource_group_name: string | null
+  service_name: string | null
+  meter: string | null
   cost: number
 }
 
 export interface PorServicoRow {
-  consumed_service: string
+  service_name: string
   qtd_recursos: number
   qtd_rgs: number
   total_brl: number

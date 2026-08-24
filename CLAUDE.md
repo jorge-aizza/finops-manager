@@ -421,6 +421,20 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     **Bug latente preservado**: `_calcHorasLivres` conta dias parciais de início/fim do período como dias
     completos — pra períodos curtos pode subtrair mais horas do que o total (o `Math.max(1, ...)` no chamador
     é o único guard). Não corrigido — precisa bater com o legado.
+    **Bug real encontrado numa auditoria completa (não reportado pelo usuário, achado por dois agentes de
+    pesquisa comparando `calculadora.js` linha a linha contra o React) — visões "Por Data" e "Por Serviço"
+    renderizavam com a maioria das colunas em branco/erradas**: `DetalheDiarioRow`/`PorServicoRow`
+    (`types/calculadora.ts`) declaravam campos (`consumed_service`, `meter_name`) que **não existem** na
+    resposta real de `GET /calculadora/detalhe-diario`/`GET /calculadora/por-servico` (que retornam
+    `nome_recurso`/`resource_type`/`location`/`resource_group_name`/`subscription_name`/`service_name`/`meter`
+    — confirmado lendo o SQL em `server.js` diretamente). Efeito: em "Por Data", Tipo ficava vazio,
+    Localização/Resource Group mostravam `'—'` hardcoded, Assinatura mostrava um fragmento bruto do
+    `resource_id` (`resourceId.split('/')[2]`) em vez do nome; em "Por Serviço", a própria coluna "Serviço"
+    (razão da tabela existir) vinha em branco em toda linha. Nenhum teste cobria essas duas visões antes
+    (`getDetalheDiario`/`getPorServico` eram mockados em `CalculadoraView.test.tsx` mas nunca tinham dados
+    resolvidos nem eram exercitados), por isso passou despercebido. Corrigido os tipos + `DetalheDiarioTable.tsx`/
+    `PorServicoTable.tsx` pros nomes de campo reais; adicionados `DetalheDiarioTable.test.tsx`/
+    `PorServicoTable.test.tsx` (3 testes) cobrindo os dois pela primeira vez.
     **Virtualização real em vez do truque de RAF-chunking**: a tabela de Recursos (`RecursosTable.tsx`) usa
     `@tanstack/react-virtual` (grid CSS, não `<table>` nativa — cada linha virtualizada é um `<div role="row">`
     fora da árvore de uma única `<table>`, então alinhamento de coluna só funciona porque cabeçalho e linhas
