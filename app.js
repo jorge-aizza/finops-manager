@@ -2707,7 +2707,7 @@ async function savePortalConfig() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
       body: JSON.stringify({
-        ativo, titulo, descricao: desc, subscription_ids: subs, dominios_aceitos: dominios,
+        ativo, titulo, descricao: desc, subscription_ids: subs, resource_groups: rgs, dominios_aceitos: dominios,
         taxa_imposto:              parseFloat(document.getElementById('portal-cfg-imposto')?.value)  || 18.65,
         taxa_cond:                 parseFloat(document.getElementById('portal-cfg-cond')?.value)     || 13.00,
         taxa_gordura:              parseFloat(document.getElementById('portal-cfg-gordura')?.value)  || 0,

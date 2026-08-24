@@ -3726,11 +3726,11 @@ app.get('/api/admin/portal-config', authMiddleware, dbMiddleware, async (_req, r
 // ── POST /api/admin/portal-config ────────────────────────────────────────────
 app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { ativo, subscription_ids = [], dominios_aceitos = [], titulo = 'Portal de Serviço', descricao = '',
+    const { ativo, subscription_ids = [], resource_groups = [], dominios_aceitos = [], titulo = 'Portal de Serviço', descricao = '',
             taxa_imposto, taxa_cond, taxa_gordura, horario_livre, solicitar_identificacao,
             permitir_selecao_periodo, permitir_selecao_recursos } = req.body;
     const cfg = {
-      ativo: !!ativo, subscription_ids, dominios_aceitos, titulo, descricao,
+      ativo: !!ativo, subscription_ids, resource_groups, dominios_aceitos, titulo, descricao,
       taxa_imposto:           taxa_imposto  != null ? parseFloat(taxa_imposto)  : 18.65,
       taxa_cond:              taxa_cond     != null ? parseFloat(taxa_cond)     : 13.00,
       taxa_gordura:           taxa_gordura  != null ? parseFloat(taxa_gordura)  : 0,
@@ -3745,7 +3745,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
       VALUES ('config', $1, NOW())
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [JSON.stringify(cfg)]);
-    console.log(`[Portal] Config atualizada — ativo: ${cfg.ativo}, subs: ${subscription_ids.length}, dominios: ${dominios_aceitos.length}`);
+    console.log(`[Portal] Config atualizada — ativo: ${cfg.ativo}, subs: ${subscription_ids.length}, rgs: ${resource_groups.length}, dominios: ${dominios_aceitos.length}`);
     res.json({ ok: true, ...cfg });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
