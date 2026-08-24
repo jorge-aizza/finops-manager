@@ -120,6 +120,35 @@ describe('CalculadoraView', () => {
     expect(within(totalsCard).getByText('R$ 1.895,76')).toBeInTheDocument()
   });
 
+  // Bug real: Horário Livre resetava toda vez que o overlay era reaberto, mesmo
+  // autenticado — só o valor default (`defaultHorarioLivre()`) era usado como
+  // estado inicial, sem ler/escrever em localStorage (diferente das Taxas, que
+  // já persistiam do mesmo jeito). Confirma que ativar Horário Livre, fechar e
+  // reabrir o overlay preserva a escolha.
+  it('Horário Livre persiste em localStorage entre aberturas do overlay', async () => {
+    localStorage.removeItem('finops_horario_livre')
+    const user = userEvent.setup()
+    renderWithClient()
+    await selecionarSubEBuscar(user)
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[checkboxes.length - 1])
+    await user.click(screen.getByRole('button', { name: 'Estimar' }))
+
+    const hlLabel = await screen.findByText('Horário Livre (desconta horas fora do expediente)')
+    const hlCheckbox = hlLabel.parentElement!.querySelector('input[type=checkbox]') as HTMLInputElement
+    expect(hlCheckbox.checked).toBe(false)
+    await user.click(hlCheckbox)
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('finops_horario_livre')!).ativo).toBe(true))
+
+    await user.click(screen.getByRole('button', { name: 'Fechar' }))
+    await user.click(screen.getByRole('button', { name: 'Estimar' }))
+
+    const hlLabel2 = await screen.findByText('Horário Livre (desconta horas fora do expediente)')
+    const hlCheckbox2 = hlLabel2.parentElement!.querySelector('input[type=checkbox]') as HTMLInputElement
+    expect(hlCheckbox2.checked).toBe(true)
+  });
+
   it('overlay Configurar Estimativa escapa via portal do overflow:hidden do container raiz da view', async () => {
     // Bug real: CalculadoraView.tsx tem overflow:hidden no container raiz —
     // sem portal, o modal ficava recortado, cobrindo só a área de conteúdo

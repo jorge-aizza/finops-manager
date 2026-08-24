@@ -449,6 +449,16 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     resolvidos nem eram exercitados), por isso passou despercebido. Corrigido os tipos + `DetalheDiarioTable.tsx`/
     `PorServicoTable.tsx` pros nomes de campo reais; adicionados `DetalheDiarioTable.test.tsx`/
     `PorServicoTable.test.tsx` (3 testes) cobrindo os dois pela primeira vez.
+    **Horário Livre não persistia entre aberturas do overlay, achado na mesma auditoria**: diferente das Taxas
+    (`pctImposto`/`pctCond`/`pctGordura`, que já liam/gravavam em `localStorage` desde a Fase A), o estado
+    inicial de `horarioLivre` só usava `defaultHorarioLivre()` — cada vez que o overlay era reaberto (mesmo
+    autenticado, fora do fluxo público travado por admin), a configuração voltava a `ativo:false`. O legado
+    (`_hlSalvarPadrao`/`_hlCarregar`) tinha botões explícitos "★ Salvar como padrão"/"↺ Restaurar padrão"; a
+    versão React não replicou esses botões — em vez disso, aplicado o mesmo padrão silencioso já usado pelas
+    Taxas (auto-carrega no mount, auto-salva a cada mudança, sem UI extra), consistente com o resto do card,
+    evitando introduzir um padrão de botão que não existe em nenhum outro lugar deste overlay. Chave
+    `localStorage 'finops_horario_livre'` (mesmo nome do legado `_LS_HL`). Teste novo em
+    `CalculadoraView.test.tsx` confirma que ativar Horário Livre, fechar e reabrir o overlay preserva a escolha.
     **Virtualização real em vez do truque de RAF-chunking**: a tabela de Recursos (`RecursosTable.tsx`) usa
     `@tanstack/react-virtual` (grid CSS, não `<table>` nativa — cada linha virtualizada é um `<div role="row">`
     fora da árvore de uma única `<table>`, então alinhamento de coluna só funciona porque cabeçalho e linhas

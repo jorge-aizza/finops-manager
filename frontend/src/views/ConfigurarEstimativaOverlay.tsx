@@ -16,6 +16,7 @@ const TAXA_GORD_DEF = 0
 const LS_IMP = 'finops_taxa_imposto'
 const LS_COND = 'finops_taxa_cond'
 const LS_GORD = 'finops_taxa_gordura'
+const LS_HL = 'finops_horario_livre'
 
 const DIAS_SEMANA = [
   { v: 1, label: 'Seg' }, { v: 2, label: 'Ter' }, { v: 3, label: 'Qua' }, { v: 4, label: 'Qui' },
@@ -80,6 +81,24 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
     localStorage.setItem(LS_COND, String(pctCond))
     localStorage.setItem(LS_GORD, String(pctGordura))
   }, [publicConfig, pctImposto, pctCond, pctGordura])
+
+  // Horário Livre — mesmo padrão de persistência das Taxas acima (auto-carrega/
+  // auto-salva, sem botão "★ Salvar como padrão" explícito do legado): antes
+  // desta correção o Horário Livre resetava a cada abertura do overlay, mesmo
+  // autenticado, porque só o valor default era usado como estado inicial.
+  useEffect(() => {
+    if (publicConfig) return
+    try {
+      const raw = localStorage.getItem(LS_HL)
+      if (raw) setHorarioLivre((h) => ({ ...h, ...JSON.parse(raw) }))
+    } catch { /* localStorage corrompido — mantém o default */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (publicConfig) return
+    localStorage.setItem(LS_HL, JSON.stringify(horarioLivre))
+  }, [publicConfig, horarioLivre])
 
   const vIni = iniData ? `${iniData}T${iniHora}` : ''
   const vFim = fimData ? `${fimData}T${fimHora}` : ''
