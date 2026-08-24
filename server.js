@@ -2055,65 +2055,15 @@ async function ensurePriceListTable() {
         WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = '';
     `).catch(() => {});
 
-    // ── Materialized Views — substituem CTEs pesados na query de recursos ────
-    // Dropadas e recriadas a cada startup para garantir definição atualizada.
-    // Se azure_price_list estiver vazia (pré-sync), as views ficam vazias também —
-    // o LEFT JOIN retorna NULL e a calculadora opera sem PL (comportamento correto).
-    // retail_price_eff: usa unit_price como fallback quando retail_price = 0
-    // (Azure Retail Prices API retorna retail_price=0 para muitos meters regionais).
-    await pq(`DROP MATERIALIZED VIEW IF EXISTS pl_best_mv CASCADE`).catch(() => {});
-    await pq(`
-      CREATE MATERIALIZED VIEW pl_best_mv AS
-        SELECT DISTINCT ON (LOWER(meter_id))
-          LOWER(meter_id) AS meter_id_lower,
-          currency_code,
-          meter_name,
-          meter_category,
-          meter_sub_category,
-          unit_of_measure   AS pl_unit_of_measure,
-          COALESCE(NULLIF(retail_price,0), unit_price, 0)::numeric
-            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
-            AS retail_price_norm,
-          COALESCE(retail_price_brl,0)::numeric
-            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
-            AS retail_price_brl_norm
-        FROM azure_price_list
-        WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = ''
-          AND product_name IS NOT NULL AND product_name <> ''
-          AND COALESCE(NULLIF(retail_price,0), unit_price, 0) < 10000
-        ORDER BY LOWER(meter_id), (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
-    `).catch(() => {});
-    await pq(`
-      CREATE UNIQUE INDEX IF NOT EXISTS pl_best_mv_idx ON pl_best_mv (meter_id_lower);
-    `).catch(() => {});
-
-    await pq(`DROP MATERIALIZED VIEW IF EXISTS pl_sku_mv CASCADE`).catch(() => {});
-    await pq(`
-      CREATE MATERIALIZED VIEW pl_sku_mv AS
-        SELECT DISTINCT ON (LOWER(COALESCE(meter_name,'')), LOWER(COALESCE(meter_category,'')))
-          LOWER(COALESCE(meter_name,''))     AS meter_name_lower,
-          LOWER(COALESCE(meter_category,'')) AS meter_cat_lower,
-          currency_code,
-          meter_name,
-          meter_category,
-          meter_sub_category,
-          unit_of_measure AS pl_unit_of_measure,
-          COALESCE(NULLIF(retail_price,0), unit_price, 0)::numeric
-            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
-            AS retail_price_norm,
-          COALESCE(retail_price_brl,0)::numeric
-            / GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1),1)
-            AS retail_price_brl_norm
-        FROM azure_price_list
-        WHERE type IN ('Consumption','DevTestConsumption') AND reservation_term = ''
-          AND meter_name IS NOT NULL AND meter_name <> ''
-        ORDER BY LOWER(COALESCE(meter_name,'')), LOWER(COALESCE(meter_category,'')),
-                 (type='Consumption') DESC, (arm_region_name='brazilsouth') DESC;
-    `).catch(() => {});
-    await pq(`
-      CREATE UNIQUE INDEX IF NOT EXISTS pl_sku_mv_idx ON pl_sku_mv (meter_name_lower, meter_cat_lower);
-    `).catch(() => {});
-
+    // Nota: as materialized views pl_best_mv/pl_sku_mv (JOIN azure_costs × Price List
+    // pra sugerir desconto/preço de tabela nos cards da Calculadora) foram removidas
+    // daqui — confirmado por auditoria (grep) que nenhuma query em todo o server.js as
+    // lê mais desde que a UI de Price List na Calculadora saiu na v2.1 ("fonte_estimado"
+    // é sempre 'billing' agora). Antes desta limpeza, elas continuavam sendo dropadas e
+    // recriadas a cada startup, e recalculadas (REFRESH MATERIALIZED VIEW CONCURRENTLY)
+    // a cada sync do Price List — trabalho de banco puro desperdício, sem nenhum
+    // consumidor. A tabela azure_price_list em si continua intacta (import/sync/diag
+    // seguem funcionando normalmente).
     _priceListReady = true;
     console.log('[PriceList] Tabela + views prontas ✅');
   } catch (err) {
@@ -2379,23 +2329,6 @@ async function _syncPriceList(requestedCurrency = 'USD') {
       _syncProgress.finished = new Date().toISOString();
       _plCobTs = 0;
       console.log(`[PriceList] ✅ Sync concluído: ${total} registros em ${pages} páginas`);
-
-      // Refresh materialized views após commit — substitui CTEs pesados nas queries
-      console.log('[PriceList] Atualizando materialized views...');
-      try {
-        await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY pl_best_mv');
-        await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY pl_sku_mv');
-        console.log('[PriceList] Views atualizadas ✅');
-      } catch (ve) {
-        // CONCURRENTLY falha se não houver unique index ainda — tenta sem CONCURRENTLY
-        try {
-          await pool.query('REFRESH MATERIALIZED VIEW pl_best_mv');
-          await pool.query('REFRESH MATERIALIZED VIEW pl_sku_mv');
-          console.log('[PriceList] Views atualizadas (sem CONCURRENTLY) ✅');
-        } catch (ve2) {
-          console.warn('[PriceList] Refresh de views falhou (não crítico):', ve2.message);
-        }
-      }
 
       await _gravaMeta(resultKey, { ok: true, total, pages, currency, region: 'all', ts: _syncProgress.finished });
       return { ok: true, total, pages, currency, region: 'all' };
@@ -4410,7 +4343,10 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
                 * GREATEST(COALESCE(NULLIF(REGEXP_REPLACE(unit_of_measure,'[^0-9]','','g'),'')::numeric,1.0),1.0)
               ELSE NULL END) AS pico_h_driver
           FROM azure_costs
-          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-ADBX-%')
+          -- Mesmos 3 padrões de RG gerenciado por Databricks que _detectManagedRg() reconhece
+          -- (DATABRICKS-RG-*, MANAGED-RG-ADBX-*, MANAGED-RG-* genérico — ex: MANAGED-RG-DBW-*
+          -- que a Vivo usa em produção); MANAGED-RG-ADBX-% já é subconjunto de MANAGED-RG-%.
+          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-%')
             ${andCond}
           GROUP BY UPPER(resource_group_name), cost_date
         ) daily_db
@@ -4636,7 +4572,10 @@ app.get('/api/calculadora/recursos', authMiddleware, dbMiddleware, async (req, r
               END
             ) AS max_h
           FROM azure_costs
-          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-ADBX-%')
+          -- Mesmos 3 padrões de RG gerenciado por Databricks que _detectManagedRg() reconhece
+          -- (DATABRICKS-RG-*, MANAGED-RG-ADBX-*, MANAGED-RG-* genérico — ex: MANAGED-RG-DBW-*
+          -- que a Vivo usa em produção); MANAGED-RG-ADBX-% já é subconjunto de MANAGED-RG-%.
+          WHERE (UPPER(resource_group_name) LIKE 'DATABRICKS-RG-%' OR UPPER(resource_group_name) LIKE 'MANAGED-RG-%')
             ${andCond}
           GROUP BY UPPER(resource_group_name), cost_date
         ) daily

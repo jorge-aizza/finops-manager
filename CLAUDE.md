@@ -444,6 +444,11 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     depende só de `consumed_service`/`resource_group_name`/`nome_recurso`, nunca da categoria. Corrigir mudaria
     a classificação de recursos que hoje só caem nos fallbacks — porta verbatim (`cat` hardcoded como `''`
     em `tipoRecurso.ts`, com comentário explicando por quê) pra bater com o comportamento atual em produção.
+    **Atualização — um bug DIFERENTE nessa mesma função foi corrigido a pedido do usuário** (não o do
+    `meter_category` acima, que continua preservado): o padrão de RG Databricks em `tipoRecurso.ts` só
+    reconhecia `databricks-rg-*`/`managed-rg-adbx-*`, igual ao legado, mas incompleto frente aos 3 padrões que
+    `_detectManagedRg()` (server.js) já reconhece — ver detalhes na seção "RN-DB-001" mais abaixo, mesmo bug
+    corrigido em paralelo no cálculo financeiro.
     **Bug latente preservado**: `_calcHorasLivres` conta dias parciais de início/fim do período como dias
     completos — pra períodos curtos pode subtrair mais horas do que o total (o `Math.max(1, ...)` no chamador
     é o único guard). Não corrigido — precisa bater com o legado.
@@ -804,12 +809,17 @@ Schema changes go directly in `initDB()` — must be idempotent.
 - `TRUNCATE TABLE azure_price_list` antes de cada sync (apaga **todas** as moedas — dados BRL importados via CSV são perdidos no próximo sync USD)
 - Key indexes: `LOWER(meter_id)` functional + partial `idx_pricelist_join` + partial `idx_pricelist_sku_svc` (sku+service)
 
-**Materialized views (recriadas a cada startup):**
-- `pl_best_mv` — DISTINCT ON `LOWER(meter_id)`, prioriza `type='Consumption'` e `arm_region_name='brazilsouth'`. Colunas: `meter_id_lower`, `currency_code`, `retail_price_norm`, `retail_price_brl_norm` (÷ fator UoM já aplicado)
-- `pl_sku_mv` — DISTINCT ON `(LOWER(meter_name), LOWER(meter_category))`, mesmos campos. Fallback quando meter_id não casa
-- `REFRESH MATERIALIZED VIEW CONCURRENTLY` disparado após cada sync; fallback sem CONCURRENTLY se o índice único ainda não existir
-- JOIN primário: `pl_best_mv pl ON pl.meter_id_lower = LOWER(base._meter_id)`
-- JOIN fallback: `pl_sku_mv pls ON pl.meter_id_lower IS NULL AND pls.meter_name_lower = LOWER(base.meter_categories) AND pls.meter_cat_lower = LOWER(base.categoria)` — ativa quando meter_id exato não casa; usa `meter_name` + `meter_category` que são os mesmos namespaces do billing export
+**Materialized views `pl_best_mv`/`pl_sku_mv` — removidas (eram infraestrutura morta):** existiam pra um JOIN
+`azure_costs` × Price List que alimentava a UI de desconto/preço de tabela da Calculadora (`📋`, badge `▼%`,
+col1 verde), removida da interface na v2.1 (ver nota abaixo — `fonte_estimado` já era sempre `'billing'`).
+Confirmado por auditoria (grep completo em `server.js`) que **nenhuma query fazia esse JOIN havia tempo** — as
+views continuavam sendo dropadas/recriadas a cada startup e recalculadas (`REFRESH MATERIALIZED VIEW
+CONCURRENTLY`, pode ser caro em price lists grandes) a cada sync, sem nenhum consumidor. CLAUDE.md chegou a
+documentar esse JOIN como se ainda existisse — estava desatualizado. Removida a criação/refresh de
+`ensurePriceListTable()`/`_syncPriceList()`; a tabela `azure_price_list` em si (import/sync/diagnóstico) não
+foi tocada. Bancos que já tinham essas views de execuções anteriores do servidor ficam com elas órfãs (não são
+mais recriadas nem lidas — inofensivo, só ocupam espaço; `DROP MATERIALIZED VIEW IF EXISTS pl_best_mv/pl_sku_mv
+CASCADE` remove manualmente se quiser limpar).
 
 **Endpoints de diagnóstico e gestão:**
 ```
@@ -1092,7 +1102,7 @@ Os dois streams estão em RGs **sem chave de join direta** no billing export. `t
 
 ⚠️ `estimado_DBU = custo_mes_billing / 720 × horas` usa hora de **calendário** (assume 24h/dia). Para all-purpose clusters (24/7) = exato; para job clusters subestima o custo/h real (divide por mais horas que o cluster realmente rodou).
 
-**RN-DB-001 — Databricks cluster rate (workspaces `databricks-rg-*`):**
+**RN-DB-001 — Databricks cluster rate (workspaces `databricks-rg-*` e `managed-rg-*`):**
 
 Clusters Databricks são compostos por driver + N workers que rodam em paralelo. O custo por hora de ambiente ativo é a soma de todos os VMs simultâneos, não de um VM individual.
 
@@ -1111,6 +1121,26 @@ estimado_vm_i = (billing_i / soma_h_driver) × horas_slider
 - Para all-purpose clusters (VMs contínuas), as duas abordagens são equivalentes.
 
 Threshold de validade: `H_driver ≥ 24h AND ids_distintos ≥ 2` — garante que é um workspace real com múltiplos VMs.
+
+**Bug real corrigido — RN-DB-001 nunca disparava para workspaces no padrão genérico `MANAGED-RG-*`**
+(ex: `MANAGED-RG-DBW-*`, que a Vivo usa em produção): `_detectManagedRg()` já reconhecia 3 padrões de RG
+Databricks (`DATABRICKS-RG-*`, `MANAGED-RG-ADBX-*`, `MANAGED-RG-*` genérico — usado pro badge/agrupamento na
+UI), mas o cálculo financeiro em si só checava os 2 primeiros, em 4 lugares: as CTEs `db_daily` (soma_h_driver)
+e `pico_databricks` em `server.js` (`/api/calculadora/recursos`), e as funções espelho no cliente
+`computeDbTaxas()`/`dbInfoParaRecurso()` (`frontend/src/lib/calcEstimado.ts`) — essa última ainda mais restrita
+que o servidor (só `databricks-rg-`, nem o `-adbx-` já reconhecido). Efeito: um workspace `MANAGED-RG-DBW-*`
+aparecia com o badge/rótulo "Databricks" corretos na interface, mas o custo/h caía no fallback de billing médio
+por VM em vez da taxa de cluster — exatamente o erro que a RN-DB-001 existe pra evitar (dividir custo total por
+horas somadas em vez de horas simultâneas subestima a taxa real de um cluster com workers em paralelo).
+Confirmado que **não é regressão da migração React** — a mesma restrição de 2 padrões já existia no
+`_dbComputeTaxas()`/`_dbInfoParaRecurso()` do `calculadora.js` legado (aliás, o legado era ainda mais estreito
+que o server.js: nem o `-adbx-` reconhecia). Corrigido nos 4 lugares: `MANAGED-RG-ADBX-%` é subconjunto de
+`MANAGED-RG-%`, então o SQL simplificou pra só 2 condições (`DATABRICKS-RG-%` OR `MANAGED-RG-%`); no cliente,
+novo helper `isDatabricksRg()` compartilhado pelas duas funções. `frontend/src/lib/tipoRecurso.ts` (chip-bar de
+tipos) tinha a mesma restrição de 2 padrões — herdada fielmente do `_tipoRecurso()` legado (mesma linha,
+`calculadora.js:1385`), então também nunca foi introduzida pela migração, mas foi corrigida a pedido explícito
+do usuário nesta mesma sessão (diferente do bug latente do `meter_category` documentado acima, que continua
+deliberadamente preservado — este aqui o usuário pediu pra corrigir agora).
 
 Por que não usar `SUM(horas_reais)` como denominador (abordagem "blended"):
 - Workers rodam **em paralelo**, não em sequência.
@@ -1141,7 +1171,11 @@ UI — tabela de billing (`_custoHora`):
 - Badge `⚡ DBU` (azul) nos cards de estimativa para linhas de software Databricks (fora de `databricks-rg-*`)
 - Col1 dos cards para linhas DBU: `⚡ DBU/mês*` com tooltip informando taxa unitária `R$/DBU`
 
-**Price List integration:** SQL JOINs com `pl_best_mv` / `pl_sku_mv` ainda existem no banco (campos `retail_price_unit`, `desconto_pct` retornados pela query), mas **toda a UI foi removida na v2.1** — sem ícones `📋`, sem badges `▼%`, sem col1 verde. `fonte_estimado` é sempre `'billing'`. Estimado sempre cinza (billing) ou azul (Databricks) ou laranja (pico).
+**Price List integration:** **toda a UI foi removida na v2.1** — sem ícones `📋`, sem badges `▼%`, sem col1
+verde. `fonte_estimado` é sempre `'billing'`. Estimado sempre cinza (billing) ou azul (Databricks) ou laranja
+(pico). O backend acompanhou essa remoção numa limpeza posterior: as materialized views `pl_best_mv`/`pl_sku_mv`
+que faziam esse JOIN foram removidas de vez (ver "Materialized views" acima) — não existe mais nenhum caminho
+de código que tente juntar `azure_costs` com Price List pra estimativa.
 
 **Pico de billing — Configurar Estimativa (v2.1):**
 

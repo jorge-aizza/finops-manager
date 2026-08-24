@@ -17,7 +17,14 @@ export function tipoRecurso(r: RecursoBilling): string {
   const rg = (r.resource_group_name || '').toLowerCase()
   const nom = (r.nome_recurso || r.resource_id || '').toLowerCase()
 
-  if (svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-') || rg.startsWith('managed-rg-adbx-')) return 'Databricks'
+  // Bug real corrigido a pedido do usuário (não é o bug latente acima — este era só
+  // rg.startsWith('databricks-rg-')/'managed-rg-adbx-', igualzinho ao legado
+  // (calculadora.js:1385), então nunca foi introduzido pela migração): RGs no padrão
+  // genérico MANAGED-RG-* (ex: MANAGED-RG-DBW-*, que a Vivo usa em produção) já eram
+  // reconhecidos como Databricks por _detectManagedRg() (server.js, usado pro badge de
+  // RG) mas caíam fora do chip "Databricks" aqui — iam parar em VMs/Outros. Ampliado pra
+  // 'managed-rg-' (cobre também o -adbx- mais específico) pra bater com _detectManagedRg().
+  if (svc.includes('databricks') || cat.includes('databricks') || rg.startsWith('databricks-rg-') || rg.startsWith('managed-rg-')) return 'Databricks'
   if (svc.includes('containerservice') || cat.includes('kubernetes') || (svc.includes('compute') && (nom.startsWith('aks-') || rg.startsWith('mc_')))) return 'AKS'
   if (nom.startsWith('azurebackup_') || cat.includes('azure backup') || cat.includes('backup vault')) return 'Backup'
   if (cat.includes('virtual machine')) return 'VMs'

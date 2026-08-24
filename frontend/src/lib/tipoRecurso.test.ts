@@ -26,6 +26,19 @@ describe('tipoRecurso — cascata de classificação', () => {
     expect(tipoRecurso(makeRecurso({ resource_group_name: 'databricks-rg-ws1-abc', consumed_service: 'Microsoft.Compute' }))).toBe('Databricks')
   })
 
+  // Bug real corrigido: RGs no padrão genérico MANAGED-RG-* (ex: MANAGED-RG-DBW-*, que a
+  // Vivo usa em produção) já eram reconhecidos como Databricks pelo badge de RG
+  // (_detectManagedRg em server.js), mas caíam fora do chip "Databricks" aqui — o filtro
+  // de tipo e a RN-DB-001 (taxa de cluster) não reconheciam esse padrão, só
+  // databricks-rg-*/managed-rg-adbx-*.
+  it('classifica Databricks pelo padrão genérico MANAGED-RG-* (ex: MANAGED-RG-DBW-*)', () => {
+    expect(tipoRecurso(makeRecurso({ resource_group_name: 'MANAGED-RG-DBW-ws1', consumed_service: 'Microsoft.Compute' }))).toBe('Databricks')
+  })
+
+  it('classifica Databricks por MANAGED-RG-ADBX-* (caso mais específico, já coberto pelo genérico)', () => {
+    expect(tipoRecurso(makeRecurso({ resource_group_name: 'MANAGED-RG-ADBX-ws1-xyz', consumed_service: 'Microsoft.Compute' }))).toBe('Databricks')
+  })
+
   it('Databricks tem prioridade sobre AKS/Compute mesmo se o RG parecer um cluster', () => {
     expect(tipoRecurso(makeRecurso({ resource_group_name: 'databricks-rg-ws1', consumed_service: 'Microsoft.ContainerService' }))).toBe('Databricks')
   })

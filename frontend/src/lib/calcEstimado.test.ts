@@ -170,10 +170,33 @@ describe('computeDbTaxas — RN-DB-001', () => {
     expect(map.get('databricks-rg-ws1')?.valida).toBe(false)
   })
 
-  it('ignora resource groups fora do padrão databricks-rg-*', () => {
+  it('ignora resource groups fora do padrão databricks-rg-*/managed-rg-*', () => {
     const recursos = [makeRecurso({ resource_group_name: 'RG-PROD' })]
     const map = computeDbTaxas(recursos)
     expect(map.size).toBe(0)
+  })
+
+  // Bug real corrigido: RGs no padrão genérico MANAGED-RG-* (ex: MANAGED-RG-DBW-*, que a
+  // Vivo usa em produção) já eram rotulados como Databricks na UI (badge de RG via
+  // _detectManagedRg), mas caíam fora da RN-DB-001 aqui — o cálculo de taxa de cluster
+  // nunca disparava, e o custo/h caía no fallback de billing médio por VM, subestimando
+  // o custo real de clusters com workers em paralelo.
+  it('reconhece o padrão genérico MANAGED-RG-* (ex: MANAGED-RG-DBW-*) pra RN-DB-001', () => {
+    const recursos = [
+      makeRecurso({ resource_id: 'vm-a', resource_group_name: 'MANAGED-RG-DBW-ws1', total_billing: 100, horas_reais: 50, soma_h_driver: 50 }),
+      makeRecurso({ resource_id: 'vm-b', resource_group_name: 'MANAGED-RG-DBW-ws1', total_billing: 200, horas_reais: 50, soma_h_driver: 50 }),
+    ]
+    const map = computeDbTaxas(recursos)
+    const info = map.get('managed-rg-dbw-ws1')
+    expect(info?.valida).toBe(true)
+    expect(info?.taxa).toBeCloseTo(6, 6) // 300/50
+
+    // dbInfoParaRecurso (usado por calcEstimado) faz o mesmo lookup por prefixo —
+    // exercitado indiretamente via calcEstimado, já que não é exportado à parte.
+    const r = makeRecurso({ resource_group_name: 'MANAGED-RG-DBW-ws1', tipo_custo: 'hora', total_billing: 300 })
+    const c = calcEstimado(r, 10, map)
+    expect(c.dbValida).toBe(true)
+    expect(c.taxaEf).toBeCloseTo(6, 6) // bill(300) / hDriver(50)
   })
 
   it('usa maxHoras como fallback quando soma_h_driver não está disponível', () => {

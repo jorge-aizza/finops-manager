@@ -60,9 +60,20 @@ export function calcEstimado(r: RecursoBilling, horas: number, dbTaxaMap: Map<st
   }
 }
 
+// Mesmos 3 padrões de RG gerenciado por Databricks que _detectManagedRg() (server.js)
+// reconhece — DATABRICKS-RG-*, MANAGED-RG-ADBX-* e o genérico MANAGED-RG-* (ex:
+// MANAGED-RG-DBW-*, que a Vivo usa em produção). 'managed-rg-adbx-' já é coberto pelo
+// prefixo mais amplo 'managed-rg-'. Bug real corrigido: antes só 'databricks-rg-' era
+// reconhecido aqui — RGs com o padrão genérico ficavam com o badge correto na UI
+// (via _detectManagedRg), mas caíam no fallback de billing médio por VM em vez da
+// taxa de cluster da RN-DB-001, subestimando o custo/h de clusters paralelos.
+function isDatabricksRg(rgLower: string): boolean {
+  return rgLower.startsWith('databricks-rg-') || rgLower.startsWith('managed-rg-')
+}
+
 function dbInfoParaRecurso(r: RecursoBilling, dbTaxaMap: Map<string, DbTaxaInfo>): DbTaxaInfo | null {
   const rg = (r.resource_group_name || '').toLowerCase()
-  if (!rg.startsWith('databricks-rg-')) return null
+  if (!isDatabricksRg(rg)) return null
   return dbTaxaMap.get(rg) || null
 }
 
@@ -74,7 +85,7 @@ export function computeDbTaxas(recursos: RecursoBilling[], taxaBrl = TAXA_BRL_FA
   const raw = new Map<string, Raw>()
   for (const r of recursos) {
     const rg = (r.resource_group_name || '').toLowerCase()
-    if (!rg.startsWith('databricks-rg-')) continue
+    if (!isDatabricksRg(rg)) continue
     if (r.tipo_custo !== 'hora') continue
     const horasReais = Number(r.horas_reais) || 0
     if (horasReais <= 0) continue
