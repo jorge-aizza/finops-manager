@@ -120,6 +120,34 @@ describe('CalculadoraView', () => {
     expect(within(totalsCard).getByText('R$ 1.895,76')).toBeInTheDocument()
   });
 
+  // Bug real: os cards do overlay tinham perdido praticamente todo o detalhe
+  // por-recurso do legado (badges de categoria/charge_type/serviço, metadados
+  // UoM/Qtd/H.reais/Modelo, e a coluna "Cobrado") — só mostravam nome, RG, um
+  // rótulo de coluna sem valor, horas e o Estimado final.
+  it('card do recurso mostra badges, metadados e a coluna Cobrado (não só o Estimado)', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await selecionarSubEBuscar(user)
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[checkboxes.length - 1])
+    await user.click(screen.getByRole('button', { name: 'Estimar' }))
+
+    const modal = (await screen.findByText(/Configurar Estimativa —/)).closest<HTMLElement>('.modal')!
+    const card = within(modal).getByText('vm-produção-01').closest<HTMLElement>('.crcard-ov')!
+    expect(within(card).getByText('Virtual Machines')).toBeInTheDocument() // badge categoria
+    expect(within(card).getByText('Usage')).toBeInTheDocument() // badge charge_type
+    expect(within(card).getByText('Microsoft.Compute')).toBeInTheDocument() // badge consumed_service
+    expect(within(card).getByText('RG-PROD')).toBeInTheDocument() // badge RG
+    expect(within(card).getByText(/1 Hour/)).toBeInTheDocument() // metadado UoM
+    expect(within(card).getAllByText(/720/).length).toBeGreaterThan(0) // metadado Qtd/H.reais
+    expect(within(card).getByText('OnDemand')).toBeInTheDocument() // metadado Modelo
+    const cobradoLabel = within(card).getByText('Cobrado') // coluna nova
+    expect(cobradoLabel.nextElementSibling).toHaveTextContent('R$ 1.440,00') // custo_hora_billing×720
+    expect(within(card).getByText('Custo/h')).toBeInTheDocument() // label col1
+    expect(within(card).getByText('R$ 2,00')).toBeInTheDocument() // valor col1 (custo_hora_billing)
+  });
+
   // Bug real: Horário Livre resetava toda vez que o overlay era reaberto, mesmo
   // autenticado — só o valor default (`defaultHorarioLivre()`) era usado como
   // estado inicial, sem ler/escrever em localStorage (diferente das Taxas, que

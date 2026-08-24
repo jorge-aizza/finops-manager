@@ -164,6 +164,14 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
     return { ativo, rgsSelSize: rgsSel.size, rgsTotSize: rgsTot.size }
   }, [selKeys, rMap, calc.recursos])
 
+  const managedRgMap = useMemo(() => {
+    const m = new Map<string, ManagedInfo>()
+    for (const rg of calc.rgOptions) {
+      if (rg.managed_type) m.set(rg.resource_group_name.toUpperCase(), rg)
+    }
+    return m
+  }, [calc.rgOptions])
+
   function visualizarEstimativa() {
     if (!estimativa.resultados.length) return
     onVisualizarEstimativa(estimativa, periodos)
@@ -197,7 +205,8 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
                 if (!r) return null
                 const horas = calc.selecionados[rid] || 720
                 const calcR = calcEstimado(r, horas, calc.dbTaxaMap, taxaBrl)
-                return <EstimativaCard key={rid} r={r} horas={horas} calc={calcR} />
+                const managed = managedRgMap.get((r.resource_group_name || '').toUpperCase())
+                return <EstimativaCard key={rid} r={r} horas={horas} calc={calcR} managed={managed} />
               })}
               {visiveis < ordenados.length && <div ref={sentinelRef} style={{ height: 1 }} />}
             </div>
@@ -346,36 +355,160 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
   )
 }
 
-function EstimativaCard({ r, horas, calc }: { r: import('../types/calculadora').RecursoBilling; horas: number; calc: ReturnType<typeof calcEstimado> }) {
-  const { label, color } = col1Label(r, calc)
+type RecursoBilling = import('../types/calculadora').RecursoBilling
+type ManagedInfo = { managed_type: 'databricks' | 'aks' | null; managed_label: string | null } | undefined
+
+function EstimativaCard({ r, horas, calc, managed }: { r: RecursoBilling; horas: number; calc: ReturnType<typeof calcEstimado>; managed: ManagedInfo }) {
+  const col1 = col1Info(r, calc)
+  const rg = r.resource_group_name || ''
+  const ct = r.charge_type || ''
+  const qty = Number(r.total_qty || 0).toLocaleString('pt-BR', { maximumFractionDigits: 4 })
+  const isHora = calc.tipo === 'hora' || calc.tipo === 'dia'
+  const horasReais = Number(r.horas_reais || 0)
+  // Uso parcial: recurso ficou ligado menos de 55% do mês (~400h de 720h)
+  const usoParcial = isHora && horasReais > 0 && horasReais < 400
+  const isDbu = !calc.dbValida && (r.unidade || '').toLowerCase().includes('dbu')
+  const estimadoFinal = calc.estimado
+
+  const rgStyle = managed?.managed_type === 'aks'
+    ? { background: 'rgba(255,140,66,.12)', color: 'var(--orange,#ff8c42)' }
+    : managed?.managed_type === 'databricks'
+      ? { background: 'rgba(147,51,234,.12)', color: 'var(--accent)' }
+      : { background: 'rgba(77,166,255,.08)', color: 'var(--blue,#4da6ff)' }
+  const rgPrefix = managed?.managed_type === 'aks' ? '☸ ' : managed?.managed_type === 'databricks' ? '⚡ ' : ''
+  const rgTitle = managed?.managed_type === 'aks' ? `RG gerenciado pelo AKS — cluster: ${managed.managed_label || ''}`
+    : managed?.managed_type === 'databricks' ? `RG gerenciado pelo Databricks — workspace: ${managed.managed_label || ''}`
+      : rg
+
+  const estimadoBg = calc.tipo === 'mes' ? 'rgba(77,166,255,.10)'
+    : (calc.usaPicoCluster || calc.usaPico) ? 'rgba(255,140,66,.08)'
+      : calc.dbValida ? 'rgba(77,166,255,.10)' : 'var(--bg-card)'
+  const estimadoBorder = calc.tipo === 'mes' ? '2px solid rgba(77,166,255,.40)'
+    : (calc.usaPicoCluster || calc.usaPico) ? '2px solid rgba(255,140,66,.35)'
+      : calc.dbValida ? '2px solid rgba(77,166,255,.40)' : '1px solid var(--accent-glow)'
+  const estimadoColor = calc.tipo === 'mes' ? 'var(--blue,#4da6ff)'
+    : (calc.usaPicoCluster || calc.usaPico) ? 'var(--orange,#ff8c42)'
+      : calc.dbValida ? 'var(--blue,#4da6ff)' : 'var(--text-muted)'
+  const estimadoLbl = (calc.tipo === 'mes' ? '🔒 Infra Fixa' : ((calc.usaPicoCluster || calc.usaPico) ? '⚠ ' : calc.dbValida ? '⚡ ' : '') + 'Estimado')
+    + (calc.tipo === 'periodo' ? ' /mês*' : '')
+
   return (
-    <div className="crcard-ov" style={{ background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 10, padding: 10, display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: 10, alignItems: 'center' }}>
-      <div style={{ overflow: 'hidden' }}>
-        <div style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nome_recurso}</div>
-        <div style={{ fontSize: 10, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.resource_group_name}</div>
-        <div style={{ display: 'flex', gap: 4, marginTop: 3 }}>
-          {calc.dbValida && <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'rgba(77,166,255,.12)', color: 'var(--blue,#4da6ff)' }}>⚡ Databricks</span>}
-        </div>
+    <div className="crcard-ov" style={{ background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 10, padding: '12px 14px' }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }} title={r.resource_id || r.nome_recurso}>
+        {r.nome_recurso}
       </div>
-      <div style={{ textAlign: 'right', fontSize: 10, color }}>{label}</div>
-      <div style={{ textAlign: 'right', fontSize: 11, color: 'var(--text-muted)' }}>{horas}h</div>
-      <div style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, fontWeight: 700, color: calc.usaPico || calc.usaPicoCluster ? 'var(--orange,#ff8c42)' : calc.dbValida ? 'var(--blue,#4da6ff)' : 'var(--text)' }}>
-        {brl(calc.estimado)}
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 8 }}>
+        {r.produto || r.subcategoria || r.regiao || ''}
+      </div>
+
+      {/* Badges: categoria, charge_type, RG (gerenciado-aware), consumed_service, uso parcial, databricks/DBU */}
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 8 }}>
+        {r.categoria && <span style={{ fontSize: 10, background: 'var(--accent-dim)', color: 'var(--text-dim)', borderRadius: 4, padding: '2px 7px' }}>{r.categoria}</span>}
+        {ct && (
+          <span style={{ fontSize: 10, borderRadius: 4, padding: '2px 7px', ...(ct === 'Usage' ? { background: 'rgba(147,51,234,.1)', color: 'var(--accent)' } : { background: 'rgba(77,166,255,.1)', color: 'var(--blue,#4da6ff)' }) }}>
+            {ct}
+          </span>
+        )}
+        {rg && <span style={{ fontSize: 10, borderRadius: 4, padding: '2px 7px', ...rgStyle }} title={rgTitle}>{rgPrefix}{rg}</span>}
+        {r.consumed_service && <span style={{ fontSize: 10, background: 'var(--bg-card)', color: 'var(--text-dim)', borderRadius: 4, padding: '2px 7px', border: '1px solid var(--border)' }}>{r.consumed_service}</span>}
+        {usoParcial && <span style={{ fontSize: 10, background: 'rgba(255,140,66,.15)', color: 'var(--orange,#ff8c42)', borderRadius: 4, padding: '2px 7px' }} title="Recurso ficou ligado menos de 55% do mês no período importado">⚠ Uso parcial</span>}
+        {calc.dbValida && <span style={{ fontSize: 10, background: 'rgba(77,166,255,.12)', color: 'var(--blue,#4da6ff)', borderRadius: 4, padding: '2px 7px' }} title="Custo estimado pela taxa proporcional do workspace Databricks">⚡ Databricks</span>}
+        {isDbu && <span style={{ fontSize: 10, background: 'rgba(77,166,255,.12)', color: 'var(--blue,#4da6ff)', borderRadius: 4, padding: '2px 7px' }} title={`Databricks DBU — cobrança de software (licenciamento de runtime). Taxa: ${brl(calc.custoUomBrl)}/DBU`}>⚡ DBU</span>}
+      </div>
+
+      {/* Metadados: UoM · Qtd · H.reais · Modelo */}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 10, fontSize: 10, color: 'var(--text-muted)' }}>
+        {r.unidade && <span><span style={{ opacity: 0.6 }}>UoM</span> {r.unidade}</span>}
+        {qty !== '0' && <span><span style={{ opacity: 0.6 }}>Qtd</span> {qty}</span>}
+        {isHora && horasReais > 0 && (
+          <span title="Horas reais consumidas no período (qty × fator UoM)">
+            <span style={{ opacity: 0.6 }}>H.reais</span>{' '}
+            <strong style={{ color: usoParcial ? 'var(--orange,#ff8c42)' : 'var(--text)' }}>{Math.round(horasReais).toLocaleString('pt-BR')}h</strong>
+          </span>
+        )}
+        {r.pricing_model && <span><span style={{ opacity: 0.6 }}>Modelo</span> {r.pricing_model}</span>}
+      </div>
+
+      {/* Grid: Custo/h (ou pico/cluster/mês) · Horas · Cobrado · Estimado */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6 }}>
+        <div
+          style={{ textAlign: 'center', borderRadius: 6, padding: '6px 4px', ...(calc.dbValida ? { background: 'rgba(77,166,255,.08)', border: '1px solid rgba(77,166,255,.30)' } : { background: 'var(--bg-card)', border: '1px solid transparent' }) }}
+          title={col1.tooltip}
+        >
+          <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700, color: col1.color, marginBottom: 2 }}>{col1.label}</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, fontWeight: 700, color: calc.dbValida ? 'var(--blue,#4da6ff)' : col1.valueColor }}>
+            {col1.value}<span style={{ fontSize: 9, fontWeight: 400 }}>{col1.suffix}</span>
+          </div>
+          {calc.dbValida && <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 1 }}>billing:&nbsp;{brl(calc.chora)}/h</div>}
+          {calc.custoUomBrl > 0 && (calc.tipo === 'periodo' || calc.tipo === 'mes') && (
+            <div style={{ fontSize: 8, color: 'var(--orange,#ff8c42)', opacity: 0.85, marginTop: 3, fontFamily: "'IBM Plex Mono',monospace", whiteSpace: 'nowrap', borderTop: '1px solid rgba(255,140,66,.12)', paddingTop: 2 }} title="Cost ÷ Qty = taxa real por unidade de medida — auditoria FinOps">
+              {brl(calc.custoUomBrl)}&nbsp;/&nbsp;{(r.unidade || '').replace(/^\d+\s+/, '').trim() || 'un.'}
+            </div>
+          )}
+        </div>
+
+        <div style={{ textAlign: 'center', background: 'var(--bg-card)', borderRadius: 6, padding: '6px 4px' }}>
+          <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '.07em', color: 'var(--text-muted)', marginBottom: 2 }}>{calc.tipo === 'mes' ? 'Modelo' : 'Horas'}</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, fontWeight: 700, color: 'var(--accent)' }}>{calc.tipo === 'mes' ? 'Mensal' : horas + 'h'}</div>
+        </div>
+
+        <div style={{ textAlign: 'center', background: 'var(--bg-card)', borderRadius: 6, padding: '6px 4px' }}>
+          <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '.07em', color: 'var(--text-muted)', marginBottom: 2 }}>Cobrado</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, fontWeight: 600, color: 'var(--text-dim)' }}>{calc.bill > 0 ? brl(calc.bill) : '—'}</div>
+        </div>
+
+        <div style={{ textAlign: 'center', borderRadius: 6, padding: '6px 4px', background: estimadoBg, border: estimadoBorder }}>
+          <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700, color: estimadoColor, marginBottom: 2 }}>{estimadoLbl}</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, fontWeight: 700, color: estimadoColor }}>
+            {brl(estimadoFinal)}{calc.tipo === 'mes' && <span style={{ fontSize: 9, fontWeight: 400 }}>/mês</span>}
+          </div>
+        </div>
       </div>
     </div>
   )
 }
 
-function col1Label(r: import('../types/calculadora').RecursoBilling, c: ReturnType<typeof calcEstimado>): { label: string; color: string } {
-  if (c.tipo === 'reserva') return { label: 'Amort./h 🔒', color: 'var(--blue,#4da6ff)' }
-  if (c.tipo === 'mes') return { label: '🔒 Fixo/mês', color: 'var(--blue,#4da6ff)' }
-  if (c.usaPico && (c.tipo === 'hora' || c.tipo === 'dia')) return { label: c.dbValida ? '⚠ Pico Cluster/h' : '⚠ Pico/h', color: 'var(--orange,#ff8c42)' }
-  if (c.usaPico && c.tipo === 'periodo') return { label: '⚠ Pico/mês*', color: 'var(--orange,#ff8c42)' }
-  if (c.usaPicoCluster) return { label: '⚠ Pico Cluster/h', color: 'var(--orange,#ff8c42)' }
-  if (c.dbValida) return { label: '⚡ Cluster/h', color: 'var(--blue,#4da6ff)' }
-  if (c.tipo === 'periodo' && (r.unidade || '').toLowerCase().includes('dbu')) return { label: '⚡ DBU/mês*', color: 'var(--blue,#4da6ff)' }
-  if (c.tipo === 'periodo') return { label: 'Custo/mês*', color: 'var(--text-muted)' }
-  if (c.tipo === 'dia') return { label: 'Custo/h·dia', color: 'var(--text-muted)' }
-  if (r.usa_amortizado && c.tipo === 'hora' && c.chora > 0) return { label: '⚡ Amort./h', color: 'var(--blue,#4da6ff)' }
-  return { label: 'Custo/h', color: 'var(--text-muted)' }
+interface Col1Info { label: string; valueColor: string; color: string; value: string; suffix: string; tooltip: string }
+
+// Porta fiel da cascata de prioridade col1Lbl/col1Val/col1Tip de _ovRenderRecursos
+// (calculadora.js) — nunca reordenar: cada branch é mutuamente exclusivo e a
+// ordem em si é parte da regra de negócio (reserva/mês sempre vencem pico, etc).
+function col1Info(r: RecursoBilling, c: ReturnType<typeof calcEstimado>): Col1Info {
+  const orange = 'var(--orange,#ff8c42)'
+  const blue = 'var(--blue,#4da6ff)'
+  const muted = 'var(--text-muted)'
+  if (c.tipo === 'reserva') return { label: 'Amort./h 🔒', color: blue, valueColor: blue, value: brl(c.chora), suffix: '/h', tooltip: '' }
+  if (c.tipo === 'mes') return { label: '🔒 Fixo/mês', color: blue, valueColor: blue, value: brl(c.mesBrl), suffix: '/mês', tooltip: 'Custo mensal fixo baseado no billing histórico' }
+  if (c.usaPico && (c.tipo === 'hora' || c.tipo === 'dia')) {
+    const picoData = r.pico_data ? new Date(r.pico_data).toLocaleDateString('pt-BR') : '—'
+    const picoDia = (r.pico_custo_dia || 0) * c.convR
+    const picoH = r.pico_horas_dia || 0
+    const label = c.dbValida ? '⚠ Pico Cluster/h' : '⚠ Pico/h'
+    const tooltip = `Pico: ${picoData} — custo do dia: ${brl(picoDia)}` + (picoH > 0 ? ` em ${picoH.toFixed(1)}h ligado` : '') + ` → ${brl(c.picoBrl)}/h`
+    return { label, color: orange, valueColor: orange, value: brl(c.picoBrl), suffix: '/h', tooltip }
+  }
+  if (c.usaPico && c.tipo === 'periodo') {
+    const picoData = r.pico_data ? new Date(r.pico_data).toLocaleDateString('pt-BR') : '—'
+    const picoDia = (r.pico_custo_dia || 0) * c.convR
+    const tooltip = `Pico: ${picoData} — custo do dia: ${brl(picoDia)} × 30 dias = ${brl(c.picoBrl * 720)}/mês`
+    return { label: '⚠ Pico/mês*', color: orange, valueColor: orange, value: brl(c.picoBrl * 720), suffix: '/mês', tooltip }
+  }
+  if (c.usaPicoCluster) {
+    const pcData = r.pico_cluster_data ? new Date(r.pico_cluster_data).toLocaleDateString('pt-BR') : '—'
+    const pcCusto = (r.pico_cluster_custo_rg || 0) * c.convR
+    const pcHoras = r.pico_cluster_horas_dia || 0
+    const tooltip = `Pico cluster: ${pcData} — custo total RG: ${brl(pcCusto)}` + (pcHoras > 0 ? ` em ${pcHoras.toFixed(1)}h (driver)` : '') + ` → ${brl(c.picoClusterBrl)}/h`
+    return { label: '⚠ Pico Cluster/h', color: orange, valueColor: orange, value: brl(c.picoClusterBrl), suffix: '/h', tooltip }
+  }
+  if (c.dbValida) {
+    const tooltip = `Custo proporcional: billing R$ ${c.bill.toFixed(2)} ÷ ${c.dbInfo!.hDriver}h (uptime cluster) = R$ ${c.taxaEf.toFixed(4)}/h | workspace: R$ ${c.dbInfo!.taxa.toFixed(4)}/h (${c.dbInfo!.recursos} VMs)`
+    return { label: '⚡ Cluster/h', color: blue, valueColor: blue, value: brl(c.taxaEf), suffix: '/h', tooltip }
+  }
+  if (c.tipo === 'periodo' && (r.unidade || '').toLowerCase().includes('dbu')) {
+    return { label: '⚡ DBU/mês*', color: blue, valueColor: blue, value: brl(c.mesBrl), suffix: '/mês', tooltip: `Custo mensal proporcional dos DBUs Databricks (software licensing). Taxa unitária: ${brl(c.custoUomBrl)}/DBU` }
+  }
+  if (c.tipo === 'periodo') return { label: 'Custo/mês*', color: muted, valueColor: 'var(--orange,#ff8c42)', value: brl(c.mesBrl), suffix: '/mês', tooltip: 'Estimativa proporcional ao billing histórico (Cost ÷ Qty)' }
+  if (c.tipo === 'dia') return { label: 'Custo/h·dia', color: muted, valueColor: 'var(--accent)', value: brl(c.chora), suffix: '/h', tooltip: '' }
+  if (r.usa_amortizado && c.tipo === 'hora' && c.chora > 0) return { label: '⚡ Amort./h', color: blue, valueColor: blue, value: brl(c.chora), suffix: '/h', tooltip: 'Custo amortizado: VM coberta por Reserva ou Savings Plan — effective_price × qty ÷ horas = taxa proporcional real' }
+  return { label: 'Custo/h', color: muted, valueColor: 'var(--accent)', value: brl(c.chora), suffix: '/h', tooltip: '' }
 }

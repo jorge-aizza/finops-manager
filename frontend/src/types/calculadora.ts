@@ -69,6 +69,10 @@ export interface RecursoBilling {
   pico_h_driver?: number
   pico_custo_dia?: number
   pico_horas_dia?: number
+  pico_data?: string | null
+  pico_cluster_data?: string | null
+  pico_cluster_custo_rg?: number
+  pico_cluster_horas_dia?: number
 }
 
 export interface RecursosQuery {

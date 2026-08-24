@@ -19,6 +19,7 @@ export const RECURSO_NUM_FIELDS: (keyof RecursoBilling)[] = [
   'dias_ativos', 'total_billing', 'total_usd', 'total_qty', 'custo_mes_billing', 'custo_dia_billing',
   'custo_dia_usd', 'custo_hora_usd', 'total_upq_brl', 'total_upq_usd', 'horas_reais', 'soma_h_driver',
   'custo_hora_pico', 'custo_hora_pico_cluster', 'pico_custo_rg', 'pico_h_driver', 'pico_custo_dia', 'pico_horas_dia',
+  'pico_cluster_custo_rg', 'pico_cluster_horas_dia',
 ]
 
 // Query pesada (sem paginação, timeout de rede maior que o default do

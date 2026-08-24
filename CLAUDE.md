@@ -459,6 +459,26 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     evitando introduzir um padrão de botão que não existe em nenhum outro lugar deste overlay. Chave
     `localStorage 'finops_horario_livre'` (mesmo nome do legado `_LS_HL`). Teste novo em
     `CalculadoraView.test.tsx` confirma que ativar Horário Livre, fechar e reabrir o overlay preserva a escolha.
+    **Cards do overlay tinham perdido praticamente todo o detalhe por-recurso do legado, achado na mesma
+    auditoria comparando `_ovRenderRecursos()` (calculadora.js:3230-3409) linha a linha contra
+    `EstimativaCard`**: o card React só mostrava nome/RG, o RÓTULO da coluna 1 sem nenhum valor numérico (ex:
+    "Custo/h" sem o "R$ 2,00" ao lado), horas e o Estimado final — faltavam os badges (categoria, charge_type
+    colorido Usage/Purchase, RG com estilo/tooltip de RG gerenciado Databricks/AKS, consumed_service, "⚠ Uso
+    parcial" quando o recurso ficou ligado &lt;400h no período, "⚡ Databricks"/"⚡ DBU"), a linha de metadados
+    (UoM · Qtd · H.reais · Modelo de pricing) e a 4ª coluna do grid ("Cobrado" — o valor já faturado de
+    verdade, pra auditar a estimativa contra o billing real). Também faltavam os tooltips ricos do rótulo da
+    coluna 1 (data do pico, custo do dia do pico, taxa do workspace Databricks, etc.) — `RecursoBilling`
+    não tinha `pico_data`/`pico_cluster_data`/`pico_cluster_custo_rg`/`pico_cluster_horas_dia` no tipo TS,
+    apesar de o servidor já retornar esses 4 campos (`server.js:4690-4694`) — só faltavam no tipo e no
+    `RECURSO_NUM_FIELDS` (os dois últimos são `NUMERIC`, precisam de normalização). Reescrito `EstimativaCard`
+    com `col1Info()` (substitui `col1Label()` — porta fiel da cascata de prioridade reserva/mês/pico/pico
+    cluster/Databricks/DBU/período/dia/amortizado, incluindo o VALOR e o tooltip de cada branch, não só o
+    rótulo) e um `managedRgMap` novo (construído de `calc.rgOptions`, que já tem `managed_type`/`managed_label`
+    — reaproveitado, não duplicado). **Não portado**: o agrupamento de cards por Resource Group com cabeçalho
+    próprio (nome do RG + badge + total do RG no período + "% coberto") que existia no legado — é uma mudança
+    estrutural maior (lista deixaria de ser plana), fora do escopo desta correção pontual de detalhe por-card;
+    considerar como um item separado se fizer sentido no futuro. Teste novo em `CalculadoraView.test.tsx`
+    confirma badges/metadados/coluna Cobrado com valores corretos pro card do recurso mockado.
     **Virtualização real em vez do truque de RAF-chunking**: a tabela de Recursos (`RecursosTable.tsx`) usa
     `@tanstack/react-virtual` (grid CSS, não `<table>` nativa — cada linha virtualizada é um `<div role="row">`
     fora da árvore de uma única `<table>`, então alinhamento de coluna só funciona porque cabeçalho e linhas
