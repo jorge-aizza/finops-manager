@@ -411,6 +411,7 @@ Rede e acesso
 [ ] Liberações de firewall outbound para APIs externas (ver seção "APIs Externas")
 
 Operação
+[ ] npm run frontend:build executado com sucesso — frontend/dist/react-app.js e frontend/dist/portal-app.js existem (senão, todas as telas migradas ficam em branco)
 [ ] PM2 ou systemd configurado (auto-restart)
 [ ] /health retorna {"status":"ok"} após deploy
 [ ] Backup automático do banco configurado
@@ -463,6 +464,10 @@ GRANT ALL PRIVILEGES ON DATABASE finops_db TO finops_user;
 # Na pasta do projeto
 cd C:\FinOps
 npm install
+
+# Build do frontend React (obrigatório — sem isso as telas migradas ficam em branco)
+npm run frontend:install
+npm run frontend:build
 ```
 
 ### 3. Criar `.env` e iniciar
@@ -530,6 +535,10 @@ sudo chown -R $USER:$USER /opt/finops
 cd /opt/finops
 npm install --omit=dev
 
+# Build do frontend React (obrigatório — sem isso as telas migradas ficam em branco)
+npm run frontend:install
+npm run frontend:build
+
 # Gerar segredos e criar .env
 JWT=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
 MKEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
@@ -589,12 +598,27 @@ sudo journalctl -u finops -f
 
 ### Dockerfile
 
+Build em dois estágios: o primeiro compila o frontend React (`frontend/`, bundle Vite — precisa do `node_modules`
+completo do Vite/TypeScript, que não deve ir para a imagem final); o segundo monta a imagem de produção só com
+o backend + o resultado já compilado (`frontend/dist/`). **Sem esse build, a aplicação sobe e o login funciona,
+mas todas as telas migradas para React ficam em branco.**
+
 ```dockerfile
+# ── Estágio 1: build do frontend React ──
+FROM node:18-alpine AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+# ── Estágio 2: imagem de produção ──
 FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY . .
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 RUN mkdir -p uploads_tmp
 EXPOSE 3000
 CMD ["node", "server.js"]
@@ -694,9 +718,13 @@ az webapp config appsettings set --resource-group rg-finops --name finops-manage
     PORT="8080" \
     ALLOWED_ORIGIN="https://finops-manager.azurewebsites.net"
 
-# Deploy via ZIP
-zip -r deploy.zip . --exclude="node_modules/*" --exclude=".git/*" \
-  --exclude="uploads_tmp/*" --exclude=".env*"
+# Build do frontend React ANTES de zipar (obrigatório — sem isso as telas migradas ficam em branco)
+npm run frontend:install
+npm run frontend:build
+
+# Deploy via ZIP (mantém frontend/dist, exclui node_modules/src de dev)
+zip -r deploy.zip . --exclude="node_modules/*" --exclude="frontend/node_modules/*" \
+  --exclude="frontend/src/*" --exclude=".git/*" --exclude="uploads_tmp/*" --exclude=".env*"
 az webapp deployment source config-zip \
   --resource-group rg-finops --name finops-manager --src deploy.zip
 ```
@@ -722,6 +750,10 @@ sudo dnf install -y nodejs20 npm
 sudo npm install -g pm2
 mkdir /home/ec2-user/finops && cd /home/ec2-user/finops
 npm install --omit=dev
+
+# Build do frontend React (obrigatório — sem isso as telas migradas ficam em branco)
+npm run frontend:install
+npm run frontend:build
 
 JWT=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
 MKEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
@@ -754,6 +786,8 @@ echo -n "<jwt>" | gcloud secrets create JWT_SECRET --data-file=-
 echo -n "<mkey>" | gcloud secrets create MASTER_KEY --data-file=-
 
 gcloud builds submit --tag gcr.io/SEU_PROJETO/finops-manager
+# usa o Dockerfile do repositório (seção Docker acima) — já builda o frontend React
+# em estágio separado, então nenhum passo extra é necessário aqui.
 
 gcloud run deploy finops-manager \
   --image gcr.io/SEU_PROJETO/finops-manager \
@@ -782,10 +816,12 @@ railway up
 # DATABASE_URL é parseado automaticamente pelo server.js
 ```
 
+> **Build do frontend:** o Nixpacks do Railway só roda `npm install` por padrão — sem o build do React, todas as telas migradas ficam em branco. No painel: **Settings → Build** → defina o Build Command como `npm install && npm run frontend:build`.
+
 ### Render
 
 1. **New → Web Service** → conectar repositório Git
-2. Build: `npm install` | Start: `node server.js`
+2. Build: `npm install && npm run frontend:build` (o build do React é obrigatório — sem ele as telas migradas ficam em branco) | Start: `node server.js`
 3. **New → PostgreSQL** → `DATABASE_URL` injetado automaticamente
 4. Environment Variables: `JWT_SECRET`, `MASTER_KEY`, `ALLOWED_ORIGIN`
 
@@ -801,6 +837,8 @@ fly secrets set \
   ALLOWED_ORIGIN=https://finops-manager.fly.dev
 fly deploy
 ```
+
+> `fly launch`/`fly deploy` usam o Dockerfile do repositório (seção Docker acima) — já builda o frontend React em estágio separado, nenhum passo extra é necessário.
 
 ---
 

@@ -147,7 +147,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
     <div class="cover-subtitle">On-Premises · Cloud IaaS · Cloud PaaS</div>
   </div>
   <div class="cover-bottom">
-    <div class="cover-meta">Versão <strong>v2.4</strong> · Julho 2026</div>
+    <div class="cover-meta">Versão <strong>v2.4</strong> · Agosto 2026</div>
     <div class="cover-badge">Técnico</div>
   </div>
 </div>
@@ -177,21 +177,24 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
     <div class="sec-ttl">Visão Geral e Pré-requisitos</div>
   </div>
 
-  <p>O <strong>FinOps Manager</strong> é uma aplicação Node.js + Express que serve uma SPA (Single-Page Application) vanilla-JS para gestão de custos Azure. Não há build step — os arquivos são servidos diretamente. O backend persiste dados em PostgreSQL (versão 14+).</p>
+  <p>O <strong>FinOps Manager</strong> é uma aplicação Node.js + Express que serve uma SPA para gestão de custos Azure. O backend (server.js/app.js) não tem build step — os arquivos são servidos diretamente. O frontend está em migração incremental (strangler fig) de vanilla-JS para React: a maioria das telas hoje já é React (`frontend/`, bundle Vite), e ESSE bundle <strong>precisa ser compilado antes do deploy</strong> — ver aviso abaixo. O backend persiste dados em PostgreSQL (versão 14+).</p>
 
   <div class="subsec">Arquitetura</div>
   <div class="tbl-wrap">
     <table class="doc">
       <thead><tr><th>Componente</th><th>Tecnologia</th><th>Observação</th></tr></thead>
       <tbody>
-        <tr><td>Backend</td><td>Node.js 18+ / Express 4</td><td>Processo único; sem cluster</td></tr>
-        <tr><td>Frontend</td><td>Vanilla JS (SPA)</td><td>index.html + app.js + calculadora.js + styles.css</td></tr>
+        <tr><td>Backend</td><td>Node.js 18+ / Express 4</td><td>Processo único; sem cluster; sem build step</td></tr>
+        <tr><td>Frontend (shell)</td><td>Vanilla JS</td><td>index.html + app.js + calculadora.js + styles.css — sem build step, servido direto</td></tr>
+        <tr><td>Frontend (telas)</td><td>React + TypeScript + Vite</td><td>frontend/ — <strong>build obrigatório antes do deploy</strong> (gera frontend/dist/*)</td></tr>
         <tr><td>Banco de dados</td><td>PostgreSQL 14+</td><td>Único banco; schema criado automaticamente</td></tr>
         <tr><td>Autenticação</td><td>JWT + bcrypt</td><td>Suporte a AD (LDAP) e Entra ID (OAuth 2.0)</td></tr>
         <tr><td>Arquivos temporários</td><td>uploads_tmp/</td><td>CSVs deletados após importação</td></tr>
       </tbody>
     </table>
   </div>
+
+  <div class="danger"><div class="danger-lbl">Build do frontend é obrigatório</div><p>Todo comando de instalação neste guia (Linux, Windows, Docker, VM, Railway, Render, Azure App Service) precisa rodar <code>npm run frontend:build</code> (na raiz do projeto) além do <code>npm install</code> de sempre. Esse comando compila o React (via Vite) e gera <code>frontend/dist/react-app.js</code>, <code>frontend/dist/react-app.css</code> e <code>frontend/dist/portal-app.js</code> — arquivos que <code>index.html</code>/<code>portal.html</code> carregam via <code>&lt;script type="module" src="/react-app/react-app.js"&gt;</code>. Sem rodar esse build, a aplicação sobe, o login funciona, mas todas as telas migradas (Dashboard, Calculadora, Reservas, Ações, Coleta Azure, Estimativas, Projetos, Portal Público) ficam <strong>em branco</strong> — o navegador tenta baixar um arquivo que não existe (404) e não há erro visível óbvio além do console do browser. <code>frontend/</code> (o código-fonte) tem seu próprio <code>package.json</code>/<code>node_modules</code>, separado do backend — rodar só o <code>npm install</code> da raiz NÃO instala as dependências do frontend nem gera o build.</p></div>
 
   <div class="subsec">Pré-requisitos gerais</div>
   <div class="tbl-wrap">
@@ -261,7 +264,10 @@ sudo useradd -r -s /usr/sbin/nologin -d /opt/finops finops
 sudo git clone https://github.com/seu-org/finops-manager.git /opt/finops
 sudo chown -R finops:finops /opt/finops
 
-sudo -u finops bash -c "cd /opt/finops && npm install --production"</pre>
+sudo -u finops bash -c "cd /opt/finops && npm install --production"
+
+<span class="c"># Build do frontend React (obrigatório — sem isso as telas migradas ficam em branco)</span>
+sudo -u finops bash -c "cd /opt/finops && npm run frontend:install && npm run frontend:build"</pre>
 
   <div class="subsec">4. Configurar variáveis de ambiente</div>
 <pre><span class="c"># Gerar segredos</span>
@@ -366,7 +372,11 @@ sudo certbot --nginx -d finops.suaempresa.com.br</pre>
 <pre><span class="c"># Instalar Git caso não tenha: https://git-scm.com</span>
 git clone https://github.com/seu-org/finops-manager.git C:\finops
 cd C:\finops
-npm install --production</pre>
+npm install --production
+
+<span class="c"># Build do frontend React (obrigatório — sem isso as telas migradas ficam em branco)</span>
+npm run frontend:install
+npm run frontend:build</pre>
 
   <div class="subsec">4. Configurar variáveis de ambiente</div>
 <pre><span class="c"># Gerar segredos (execute 2x — um para cada variável)</span>
@@ -419,13 +429,25 @@ New-NetFirewallRule -DisplayName "FinOps Manager" -Direction Inbound -Protocol T
   <p>A imagem Docker pode ser usada em qualquer provedor cloud (AWS ECS, Azure Container Instances, GCP Cloud Run, Kubernetes) ou em Docker Engine local/on-premises.</p>
 
   <div class="subsec">Dockerfile</div>
-<pre>FROM node:20-alpine
+  <p>Build em dois estágios: o primeiro compila o frontend React (precisa do <code>node_modules</code> completo do Vite/TypeScript, que não deve ir para a imagem final); o segundo monta a imagem de produção só com o backend + o resultado já compilado (<code>frontend/dist/</code>).</p>
+<pre><span class="c"># ── Estágio 1: build do frontend React ──</span>
+FROM node:20-alpine AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+<span class="c"># ── Estágio 2: imagem de produção ──</span>
+FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
 RUN npm install --production
 
 COPY . .
+<span class="c"># Substitui o frontend/ copiado acima (que não tem dist/) pelo build do estágio 1</span>
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 <span class="c"># Diretório para uploads temporários e dados persistentes</span>
 RUN mkdir -p uploads_tmp
@@ -592,7 +614,7 @@ az postgres flexible-server show-connection-string \
     <div class="step"><div class="step-num">2</div><div class="step-body"><p>Clique em <strong>+ New Project → Deploy from GitHub repo</strong> e selecione o repositório <code>finops-manager</code>.</p></div></div>
     <div class="step"><div class="step-num">3</div><div class="step-body"><p>Ainda no projeto, clique em <strong>+ New → Database → PostgreSQL</strong>. O Railway cria o banco e injeta <code>DATABASE_URL</code> automaticamente.</p></div></div>
     <div class="step"><div class="step-num">4</div><div class="step-body"><p>No serviço da aplicação, vá em <strong>Variables</strong> e adicione:<br><code>JWT_SECRET</code>, <code>MASTER_KEY</code>, <code>ALLOWED_ORIGIN</code></p></div></div>
-    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Em <strong>Settings → Deploy</strong>, confirme que o Start Command é <code>node server.js</code>.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Em <strong>Settings → Build</strong>, defina o Build Command como <code>npm install && npm run frontend:build</code> (o Nixpacks do Railway só roda <code>npm install</code> por padrão — sem isso, o frontend React nunca é compilado e todas as telas migradas ficam em branco). Em <strong>Settings → Deploy</strong>, confirme que o Start Command é <code>node server.js</code>.</p></div></div>
     <div class="step"><div class="step-num">6</div><div class="step-body"><p>O Railway fará o primeiro deploy automaticamente. Acesse a URL gerada (ex: <code>finops-manager.up.railway.app</code>).</p></div></div>
     <div class="step"><div class="step-num">7</div><div class="step-body"><p>Para domínio customizado: <strong>Settings → Networking → Custom Domain</strong>.</p></div></div>
   </div>
@@ -612,7 +634,7 @@ az postgres flexible-server show-connection-string \
     <div class="step"><div class="step-num">1</div><div class="step-body"><p>Acesse <strong>render.com</strong> e crie uma conta.</p></div></div>
     <div class="step"><div class="step-num">2</div><div class="step-body"><p>Crie um <strong>PostgreSQL</strong>: New → PostgreSQL. Anote a <em>Internal Database URL</em>.</p></div></div>
     <div class="step"><div class="step-num">3</div><div class="step-body"><p>Crie um <strong>Web Service</strong>: New → Web Service → conecte o repositório GitHub.<br>
-    Build Command: <code>npm install</code><br>
+    Build Command: <code>npm install && npm run frontend:build</code> (compila o frontend React — sem isso as telas migradas ficam em branco)<br>
     Start Command: <code>node server.js</code></p></div></div>
     <div class="step"><div class="step-num">4</div><div class="step-body"><p>Em <strong>Environment</strong>, adicione as variáveis:<br>
     <code>DATABASE_URL</code> = Internal Database URL do passo 2<br>
@@ -663,8 +685,12 @@ az webapp config appsettings set \
     MASTER_KEY="seu-master-key" \
     ALLOWED_ORIGIN="https://finops-manager.azurewebsites.net"
 
-<span class="c"># Fazer deploy via ZIP</span>
-zip -r finops.zip . -x "node_modules/*" -x ".env" -x "uploads_tmp/*" -x ".git/*"
+<span class="c"># Build do frontend React ANTES de zipar (obrigatório — gera frontend/dist/*)</span>
+npm run frontend:install
+npm run frontend:build
+
+<span class="c"># Fazer deploy via ZIP — exclui node_modules (raiz e frontend/), mas mantém frontend/dist</span>
+zip -r finops.zip . -x "node_modules/*" -x "frontend/node_modules/*" -x "frontend/src/*" -x ".env" -x "uploads_tmp/*" -x ".git/*"
 az webapp deploy \
   --resource-group rg-finops \
   --name finops-manager \
@@ -747,6 +773,7 @@ az webapp log tail --resource-group rg-finops --name finops-manager</pre>
     <div class="chk"><div class="chk-box"></div><p>Backup automático configurado (pg_dump ou backup gerenciado do provedor)</p></div>
     <div class="chk"><div class="chk-box"></div><p>Acesso ao banco restrito ao IP/VNET da aplicação</p></div>
     <div class="chk-cat">Aplicação</div>
+    <div class="chk"><div class="chk-box"></div><p><code>npm run frontend:build</code> executado com sucesso — <code>frontend/dist/react-app.js</code> e <code>frontend/dist/portal-app.js</code> existem (senão, todas as telas migradas ficam em branco)</p></div>
     <div class="chk"><div class="chk-box"></div><p>PM2 / systemd / NSSM configurado para reinicialização automática</p></div>
     <div class="chk"><div class="chk-box"></div><p>Diretório <code>uploads_tmp/</code> com permissão de escrita pelo processo Node</p></div>
     <div class="chk"><div class="chk-box"></div><p>Arquivo <code>mascote.png</code> presente na raiz da aplicação</p></div>
@@ -760,6 +787,10 @@ az webapp log tail --resource-group rg-finops --name finops-manager</pre>
 <pre><span class="c"># Verificar sintaxe dos arquivos principais</span>
 node --check server.js
 node --check app.js
+
+<span class="c"># Confirmar que o build do frontend React existe e está sendo servido</span>
+ls -la frontend/dist/react-app.js frontend/dist/portal-app.js
+curl -sI http://localhost:3000/react-app/react-app.js | head -1   <span class="c"># deve ser 200, não 404</span>
 
 <span class="c"># PM2 — monitoramento</span>
 pm2 status
@@ -775,7 +806,7 @@ psql "postgresql://finops_user:senha@localhost:5432/finops_db" -c "\dt"</pre>
 
 <!-- FOOTER -->
 <div class="footer">
-  <p>FinOps Manager — Guia de Implementação · Julho 2026</p>
+  <p>FinOps Manager — Guia de Implementação · Agosto 2026</p>
   <span class="ver">v2.4</span>
 </div>
 

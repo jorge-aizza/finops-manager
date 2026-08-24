@@ -5,11 +5,23 @@ Developer reference for Claude Code. Deployment instructions are in `README.md`.
 ## Commands
 
 ```bash
-npm install          # install dependencies
+npm install          # install backend dependencies
 npm start            # production (node server.js)
 npm run dev          # development (nodemon server.js)
 node --check <file>  # syntax check before running
 ```
+
+**Frontend (React, `frontend/`) — separate Node project, own `package.json`/`node_modules`:**
+```bash
+npm run frontend:install  # npm install --prefix frontend
+npm run frontend:build    # vite build → frontend/dist/react-app.js + .css + portal-app.js
+npm run frontend:test     # npm test --prefix frontend (Vitest)
+npm run dev:all           # Express (3000) + Vite dev server together, via concurrently
+```
+**Production deploys must run `frontend:install` + `frontend:build` before starting the server** — without
+`frontend/dist/*`, the app boots and login works, but every migrated screen (Dashboard, Calculadora, Reservas,
+Ações, Coleta Azure, Estimativas, Projetos, Portal Público) renders blank (404 on the bundle, no obvious error
+outside the browser console). See `README.md`/`docs-implementacao.html` for per-platform build steps.
 
 **Encrypted env:**
 ```bash
@@ -26,7 +38,7 @@ server.js               (~6 500 lines)  All API routes, auth, DB init, middlewar
 app.js                  (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
 calculadora.js          (~5 600 lines)  Azure cost calculator — self-contained IIFE
 index.html              (~3 650 lines)  SPA shell — all views toggled by showView()
-portal.html             (~335 lines)    Portal público — chrome migrado pra React (PortalApp.tsx); calculadora em si ainda legada
+portal.html             (~335 lines)    Portal público — 100% migrado pra React (chrome + calculadora, ver ## Frontend React)
 styles.css              (~1 650 lines)  Dark/light-mode CSS, Vivo purple theme
 encrypt-env.js          (139 lines)     AES-256-GCM .env encryption utility
 favicon.svg                             App icon (SVG)
