@@ -1693,7 +1693,37 @@ async function exportarExcel() {
 }
 
 // ── INIT ──────────────────────────────────────
+// Handoff do login via Entra ID (OAuth): /auth/callback (server.js) redireciona pra
+// '/?entra_handoff=<codigo>' (nunca coloca o JWT na própria URL/histórico) ou
+// '/?entra_error=<msg>' em caso de falha. Tratado antes da restauração normal de
+// sessão — se veio um handoff válido, troca por { token, user } e entra direto.
+async function _consumirEntraHandoff() {
+  const params  = new URLSearchParams(location.search);
+  const handoff = params.get('entra_handoff');
+  const erro    = params.get('entra_error');
+  if (!handoff && !erro) return false;
+  history.replaceState(null, '', location.pathname); // limpa a query string — não sobrevive a um F5
+
+  if (erro) { showLoginError(erro); return false; }
+
+  try {
+    const data = await fetch(API + '/auth/entra/consume?code=' + encodeURIComponent(handoff)).then(r => r.json());
+    if (data.error || !data.token) { showLoginError(data.error || 'Falha ao concluir login com Entra ID.'); return false; }
+    sessionStorage.setItem('finops_token', data.token);
+    sessionStorage.setItem('finops_session', JSON.stringify(data.user));
+    localStorage.setItem('finops_token', data.token);
+    localStorage.setItem('finops_session', JSON.stringify(data.user));
+    currentUser = data.user;
+    enterApp();
+    return true;
+  } catch {
+    showLoginError('Erro ao conectar com o servidor durante o login Entra ID.');
+    return false;
+  }
+}
+
 (async () => {
+  if (await _consumirEntraHandoff()) return;
   const sessFromSS = sessionStorage.getItem('finops_session');
   const tokFromSS  = sessionStorage.getItem('finops_token');
   const sessFromLS = localStorage.getItem('finops_session');
