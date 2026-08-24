@@ -3770,6 +3770,25 @@ app.post('/api/public/calculadora/estimativas', _portalMiddleware, dbMiddleware,
     total_brl, total_final, observacoes, recursos
   } = req.body;
   try {
+    // Valida recursos — só permite resource_ids cujo subscription_id (e RG, se configurado)
+    // sejam permitidos pelo admin do portal (mesma validação de POST /estimar) — sem isso,
+    // qualquer chamada anônima podia gravar uma estimativa fabricada (recursos/totais
+    // arbitrários) direto na mesma tabela lida pelas telas autenticadas de Estimativas/Dashboard.
+    const { subscription_ids: allowedSubs = [], resource_groups: allowedRGs = [] } = req.portalCfg;
+    const recursosArr = Array.isArray(recursos) ? recursos : [];
+    if (!recursosArr.length) return res.status(400).json({ error: 'Nenhum recurso selecionado.' });
+    const ids = recursosArr.map(r => r.resource_id).filter(Boolean);
+    const check = await pool.query(
+      `SELECT DISTINCT resource_id, UPPER(resource_group_name) AS rg FROM azure_costs
+       WHERE resource_id = ANY($1) AND subscription_id = ANY($2)`,
+      [ids, allowedSubs]
+    );
+    const allowedRGsUpper = allowedRGs.map(rg => rg.toUpperCase());
+    const validIds = new Set(
+      check.rows.filter(row => !allowedRGsUpper.length || allowedRGsUpper.includes(row.rg)).map(row => row.resource_id)
+    );
+    if (!ids.length || !ids.every(id => validIds.has(id))) return res.status(403).json({ error: 'Recursos não autorizados para este portal.' });
+
     const r = await pool.query(`
       INSERT INTO estimativas
         (projeto_id, projeto_nome, numero, titulo, responsavel, validade_dias,
@@ -3939,31 +3958,6 @@ app.get('/api/public/calculadora/recursos', _portalMiddleware, async (req, res) 
       if (handler) await handler(queryReq, queryRes, () => {});
     };
     await _buildRecursosQuery(req, res);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── POST /api/public/calculadora/estimar ─────────────────────────────────────
-app.post('/api/public/calculadora/estimar', _portalMiddleware, async (req, res) => {
-  try {
-    const { subscription_ids: allowedSubs } = req.portalCfg;
-    // Valida recursos — só permite resource_ids cujo subscription_id seja permitido
-    const { recursos = [] } = req.body;
-    if (!recursos.length) return res.status(400).json({ error: 'Nenhum recurso selecionado.' });
-    const ids = recursos.map(r => r.resource_id);
-    const check = await pool.query(
-      `SELECT DISTINCT resource_id FROM azure_costs WHERE resource_id = ANY($1) AND subscription_id = ANY($2)`,
-      [ids, allowedSubs]
-    );
-    const validIds = new Set(check.rows.map(r => r.resource_id));
-    req.body.recursos = recursos.filter(r => validIds.has(r.resource_id));
-    if (!req.body.recursos.length) return res.status(403).json({ error: 'Recursos não autorizados para este portal.' });
-
-    // Delega para handler privado
-    const handler = app._router.stack
-      .filter(l => l.route && l.route.path === '/api/calculadora/estimar')
-      .map(l => l.route.stack[l.route.stack.length - 1].handle)[0];
-    if (handler) await handler(req, res, () => {});
-    else res.status(500).json({ error: 'Handler não encontrado' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -4812,180 +4806,6 @@ app.get('/api/calculadora/diagnostico', authMiddleware, dbMiddleware, async (req
     res.json(r.rows);
   } catch (err) {
     console.error('[Diagnostico]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── POST /api/calculadora/estimar ────────────────────────────────────────────
-// Body: { recursos: [{resource_id, horas}], taxa_brl }
-app.post('/api/calculadora/estimar', authMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    const { recursos, taxa_brl = 1, data_inicio, data_fim, subscription_id, resource_group } = req.body;
-    if (!recursos || !recursos.length) return res.status(400).json({ error: 'Nenhum recurso selecionado.' });
-
-    const ids = recursos.map(r => r.resource_id);
-    const params = [ids]; const cond = [`resource_id = ANY($1)`, `cost_in_billing_currency > 0`];
-    if (subscription_id) { cond.push(`subscription_id = $${params.length+1}`); params.push(subscription_id); }
-    if (data_inicio)     { cond.push(`cost_date >= $${params.length+1}`); params.push(data_inicio); }
-    if (data_fim)        { cond.push(`cost_date <= $${params.length+1}`); params.push(data_fim); }
-
-    const r = await pool.query(`
-      SELECT resource_id,
-             COUNT(DISTINCT cost_date)                                        AS dias_ativos,
-             SUM(cost_in_billing_currency)                                    AS total_billing,
-             SUM(cost_in_usd)                                                 AS total_usd,
-             MAX(billing_currency)                                            AS moeda,
-             MAX(exchange_rate_pricing_to_billing)                            AS taxa_cambio,
-             MAX(unit_of_measure)                                             AS unidade,
-             MAX(charge_type)                                                 AS charge_type,
-             MAX(pricing_model)                                               AS pricing_model,
-             MAX(term)                                                        AS term,
-             SUM(quantity)                                                    AS total_qty,
-             SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity,0))
-                                                                              AS total_upq,
-             SUM(COALESCE(NULLIF(effective_price,0), unit_price, 0) * COALESCE(quantity,0)
-                 * COALESCE(exchange_rate_pricing_to_billing,1))              AS total_upq_brl
-      FROM azure_costs
-      WHERE ${cond.join(' AND ')}
-      GROUP BY resource_id
-    `, params);
-
-    // Período em dias da consulta (usado para recursos não-horários)
-    let periodoDias = 30;
-    if (data_inicio && data_fim) {
-      const d1 = new Date(data_inicio + 'T12:00:00');
-      const d2 = new Date(data_fim   + 'T12:00:00');
-      const diff = Math.round((d2 - d1) / 86400000) + 1;
-      if (diff > 0) periodoDias = diff;
-    }
-
-    const mapa = {};
-    r.rows.forEach(row => { mapa[row.resource_id] = row; });
-
-    const resultados = recursos.map(item => {
-      const dados = mapa[item.resource_id];
-      if (!dados) return { resource_id: item.resource_id, erro: 'Sem dados no período', horas: item.horas };
-      const diasAtivos   = parseInt(dados.dias_ativos) || 1;
-      const totalBilling = parseFloat(dados.total_billing) || 0;
-      const totalUsd     = parseFloat(dados.total_usd)     || 0;
-      const totalQty     = parseFloat(dados.total_qty)     || 0;
-      const uom          = (dados.unidade || '').toLowerCase();
-      const chargeType   = (dados.charge_type   || '').trim();
-      const pricingModel = (dados.pricing_model || '').trim();
-      const term         = (dados.term          || '');
-
-      // ── Classificação do tipo de custo (mesma lógica do SELECT /recursos) ──
-      const isReserva = ['Purchase','RoundTrustBill'].includes(chargeType) && pricingModel === 'Reservation';
-      const isHora    = !isReserva && (uom.includes('hour') || uom.includes('hora'));
-      const isDia     = !isReserva && !isHora && uom.includes('day');
-      const tipoCusto = isReserva ? 'reserva' : isHora ? 'hora' : isDia ? 'dia' : 'periodo';
-
-      // ── Fator UoM: "10 Hours" → 10, "1 Hour" → 1 ─────────────────────────
-      const fatorUom  = Math.max(parseInt((uom.match(/\d+/) || ['1'])[0]) || 1, 1);
-
-      // ── effective_price × qty (custo real com descontos aplicados) ──────────
-      const totalUpq    = parseFloat(dados.total_upq)     || 0;
-      const totalUpqBrl = parseFloat(dados.total_upq_brl) || 0;
-
-      const moeda          = dados.moeda || 'USD';
-      const horas          = parseFloat(item.horas) || 0;
-      const dias_estimados = horas / 24;
-      const horasReais     = diasAtivos * 24 || 720;
-
-      let custo_hora_billing, custo_hora_usd;
-
-      if (isReserva) {
-        // RN-002: amortiza pelo term (1y = 8760 h, 3y = 26280 h)
-        const horasTerm = /3\s*(year|ano)/i.test(term) ? 26280.0 : 8760.0;
-        custo_hora_billing = totalBilling / horasTerm;
-        custo_hora_usd     = totalUsd     / horasTerm;
-
-      } else if (isHora) {
-        // RN-001: UoM horária com fator (billing ÷ (qty × fator))
-        //
-        // PRIORIDADE 1: cost_in_billing_currency / (qty × fator)
-        //   → já está na moeda correta (BRL ou USD conforme o contrato)
-        //   → não depende de exchange_rate_pricing_to_billing (que pode ser NULL)
-        //
-        // PRIORIDADE 2: effective_price × exchange_rate / fator
-        //   → usa apenas quando billing = 0 (recurso gratuito / crédito)
-        //   → RISCO: se exchange_rate for NULL → COALESCE usa 1 → resultado em USD
-        //     mesmo em contrato BRL → sub-avalia por ~5,7×
-        //
-        if (totalQty > 0 && totalBilling > 0) {
-          custo_hora_billing = totalBilling / (totalQty * fatorUom);
-          // cost_in_usd: nem sempre presente no export (pode ser NULL/0)
-          custo_hora_usd = totalUsd > 0
-            ? totalUsd / (totalQty * fatorUom)
-            : custo_hora_billing; // proxy: billing como USD quando USD ausente
-        } else if (totalQty > 0 && totalUpqBrl > 0) {
-          // Fallback: effective_price × exchange_rate (cuidado com NULL exchange_rate)
-          custo_hora_billing = totalUpqBrl / (totalQty * fatorUom);
-          custo_hora_usd     = totalUpq    / (totalQty * fatorUom);
-        } else {
-          // Último recurso: divide pelo período real
-          custo_hora_billing = totalBilling / horasReais;
-          custo_hora_usd     = totalUsd     / horasReais;
-        }
-
-      } else if (isDia) {
-        // RN-003: UoM diária → billing ÷ (qty × 24)
-        custo_hora_billing = totalQty > 0
-          ? totalBilling / (totalQty * 24.0)
-          : totalBilling / horasReais;
-        custo_hora_usd = totalQty > 0
-          ? totalUsd / (totalQty * 24.0)
-          : totalUsd / horasReais;
-
-      } else {
-        // RN-004: Storage, Bandwidth, Functions — custo médio do período
-        custo_hora_billing = totalBilling / horasReais;
-        custo_hora_usd     = totalUsd     / horasReais;
-      }
-
-      // RN-005 — Conversão para BRL
-      // Hierarquia da taxa de câmbio:
-      //  1) BRL billing  → custo_hora_billing já é BRL, sem conversão
-      //  2) taxa_cambio do export (exchange_rate_pricing_to_billing > 1)
-      //     → indica conversão real USD→BRL registrada pelo Azure
-      //  3) taxa_brl do usuário (parâmetro do body) → fallback configurável
-      const taxaCambioExport = parseFloat(dados.taxa_cambio || 0);
-      const taxaEfetiva = moeda !== 'BRL' && taxaCambioExport > 1
-        ? taxaCambioExport       // taxa real do Azure Export — mais precisa
-        : parseFloat(taxa_brl);  // taxa configurada pelo usuário (fallback)
-      const custo_hora_brl    = moeda === 'BRL'
-        ? custo_hora_billing
-        : custo_hora_billing * taxaEfetiva;
-      const custo_mes_billing = totalBilling / diasAtivos * 30;
-      const estimativa_billing = custo_hora_billing * horas;
-      const estimativa_usd     = custo_hora_usd     * horas;
-      const estimativa_brl     = custo_hora_brl     * horas;
-
-      return {
-        resource_id:        item.resource_id,
-        horas_estimadas:    horas,
-        dias_estimados:     parseFloat(dias_estimados.toFixed(2)),
-        tipo_custo:         tipoCusto,
-        isHora:             isHora || isDia,
-        custo_hora_billing: parseFloat((custo_hora_billing || 0).toFixed(8)),
-        custo_hora_usd:     parseFloat((custo_hora_usd     || 0).toFixed(8)),
-        custo_hora_brl:     parseFloat((custo_hora_brl     || 0).toFixed(4)),
-        custo_mes_billing:  parseFloat((custo_mes_billing  || 0).toFixed(4)),
-        estimativa_billing: parseFloat((estimativa_billing || 0).toFixed(4)),
-        estimativa_usd:     parseFloat((estimativa_usd     || 0).toFixed(4)),
-        estimativa_brl:     parseFloat((estimativa_brl     || 0).toFixed(2)),
-        moeda,
-        taxa_brl_usada:     parseFloat(taxaEfetiva.toFixed(4)),
-        taxa_origem:        moeda !== 'BRL' ? (taxaCambioExport > 1 ? 'export' : 'usuario') : 'n/a',
-        dias_ativos:        diasAtivos,
-        total_billing:      parseFloat(totalBilling.toFixed(4)),
-      };
-    });
-
-    const totalBrl = resultados.reduce((s, r) => s + (r.estimativa_brl || 0), 0);
-    res.json({ resultados, total_brl: parseFloat(totalBrl.toFixed(2)) });
-  } catch (err) {
-    console.error('Erro /api/calculadora/estimar:', err);
     res.status(500).json({ error: err.message });
   }
 });
