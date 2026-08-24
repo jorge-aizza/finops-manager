@@ -498,6 +498,12 @@ function dbMiddleware(req, res, next) {
   next();
 }
 
+// Restringe a admins autenticados — usar após authMiddleware
+function adminMiddleware(req, res, next) {
+  if (req.user?.perfil !== 'admin') return res.status(403).json({ error: 'Acesso negado' });
+  next();
+}
+
 // ─── AUTH ROUTES ─────────────────────────────────────────────────────────────
 app.post('/api/auth/login', dbMiddleware, async (req, res) => {
   const { email, senha } = req.body;
@@ -577,7 +583,7 @@ app.get('/api/auth/entra/url', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/auth/ad/test', authMiddleware, async (req, res) => {
+app.post('/api/auth/ad/test', authMiddleware, adminMiddleware, async (req, res) => {
   const { server, bind_user, bind_pass } = req.body;
   try {
     const ldap = require('ldapjs');
@@ -597,7 +603,7 @@ app.get('/api/usuarios', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/usuarios', authMiddleware, async (req, res) => {
+app.post('/api/usuarios', authMiddleware, adminMiddleware, async (req, res) => {
   const { nome, email, senha, perfil } = req.body;
   if (!nome || !email || !senha || !perfil) return res.status(400).json({ error: 'Campos obrigatorios faltando' });
   try {
@@ -613,7 +619,7 @@ app.post('/api/usuarios', authMiddleware, async (req, res) => {
   }
 });
 
-app.put('/api/usuarios/:id', authMiddleware, async (req, res) => {
+app.put('/api/usuarios/:id', authMiddleware, adminMiddleware, async (req, res) => {
   const { nome, email, perfil, senha } = req.body;
   if (!nome || !email || !perfil) return res.status(400).json({ error: 'Campos obrigatorios faltando' });
   try {
@@ -638,7 +644,7 @@ app.put('/api/usuarios/:id', authMiddleware, async (req, res) => {
   }
 });
 
-app.patch('/api/usuarios/:id/ativo', authMiddleware, async (req, res) => {
+app.patch('/api/usuarios/:id/ativo', authMiddleware, adminMiddleware, async (req, res) => {
   const { ativo } = req.body;
   if (typeof ativo !== 'boolean') return res.status(400).json({ error: 'Campo ativo deve ser booleano' });
   try {
@@ -647,7 +653,7 @@ app.patch('/api/usuarios/:id/ativo', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/usuarios/:id', authMiddleware, async (req, res) => {
+app.delete('/api/usuarios/:id', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     await pool.query('DELETE FROM usuarios WHERE id = $1', [req.params.id]);
     res.json({ message: 'Usuario removido' });
@@ -3395,8 +3401,7 @@ if (_multer) {
   });
 
   // Status do job de importação em andamento ou último concluído
-  // Sem authMiddleware: progresso não é sensível; evita 401 em imports longos.
-  app.get('/api/azure-costs/import-status', (req, res) => {
+  app.get('/api/azure-costs/import-status', authMiddleware, (req, res) => {
     res.json({ job: _importJob });
   });
 
@@ -3629,9 +3634,7 @@ app.post('/api/price-list/reset-cb', authMiddleware, dbMiddleware, (_req, res) =
 });
 
 // ── GET /api/price-list/import-status ────────────────────────────────────────
-// Sem authMiddleware: dados de progresso não são sensíveis; sem auth o polling
-// sobrevive à expiração do JWT em imports longos (ZIPs com muitas entradas).
-app.get('/api/price-list/import-status', (_req, res) => {
+app.get('/api/price-list/import-status', authMiddleware, (_req, res) => {
   res.json({ importing: _plImporting, ..._plImportProgress, log: _plImportLog.slice(-50) });
 });
 
@@ -3770,6 +3773,14 @@ app.post('/api/public/calculadora/estimativas', _portalMiddleware, dbMiddleware,
     total_brl, total_final, observacoes, recursos
   } = req.body;
   try {
+    // numero é sempre gerado no cliente como 'EST-' + 6 dígitos (InvoiceModal.tsx) — nunca
+    // um campo de texto livre editado pelo usuário. Validar o formato aqui é defesa em
+    // profundidade: fecha a porta a qualquer payload malicioso nesse campo específico
+    // (ele é renderizado sem escape de HTML no PDF gerado — ver buildPdfHtml.ts) sem
+    // depender só do fix client-side, sem quebrar o fluxo legítimo.
+    if (typeof numero !== 'string' || !/^EST-\d{1,10}$/.test(numero))
+      return res.status(400).json({ error: 'Número da estimativa inválido.' });
+
     // Valida recursos — só permite resource_ids cujo subscription_id (e RG, se configurado)
     // sejam permitidos pelo admin do portal (mesma validação de POST /estimar) — sem isso,
     // qualquer chamada anônima podia gravar uma estimativa fabricada (recursos/totais
