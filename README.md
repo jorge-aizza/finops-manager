@@ -263,8 +263,19 @@ sudo certbot --nginx -d seu-dominio.com
 npm install -g pm2
 pm2 start server.js --name finops-manager --max-restarts 10 --restart-delay 5000
 pm2 save
-pm2 startup   # siga o comando impresso para registrar no systemd/launchd/Windows
+pm2 startup   # Linux/Mac — siga o comando impresso para registrar no systemd/launchd
 ```
+
+**Windows — `pm2 startup` não funciona nativamente** (é feito para systemd/launchd). Use o pacote
+`pm2-windows-startup`, que registra `pm2 resurrect` (restaura a lista salva por `pm2 save`) no login do
+Windows via `HKCU\...\Run`:
+```powershell
+npm install -g pm2-windows-startup
+pm2-startup install
+```
+Isso só roda no login do usuário atual (não é um serviço Windows que sobe antes do login) — suficiente para
+uma máquina onde o usuário sempre inicia sessão. Para rodar como serviço Windows de verdade (sobe no boot,
+sem precisar de login), use NSSM em vez de PM2 — ver seção "Windows Service — NSSM" mais abaixo.
 
 **systemd (Linux, alternativa robusta):**
 ```bash
