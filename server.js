@@ -2065,7 +2065,7 @@ async function ensurePriceListTable() {
     // consumidor. A tabela azure_price_list em si continua intacta (import/sync/diag
     // seguem funcionando normalmente).
     _priceListReady = true;
-    console.log('[PriceList] Tabela + views prontas ✅');
+    console.log('[PriceList] Tabela pronta ✅');
   } catch (err) {
     console.warn('[PriceList] Erro ao criar tabela:', err.message);
   }
@@ -5313,6 +5313,8 @@ app.put('/api/reservas/:id', authMiddleware, dbMiddleware, async (req, res) => {
     const { cloud, nome_reserva, tipo_escopo, subscription_id, resource_group_name,
             tipo_recurso, instancia, quantidade, prazo, opcao_pagamento,
             custo_total, custo_mensal, data_inicio, data_vencimento, status, observacoes } = req.body;
+    if (!cloud || !nome_reserva || !tipo_recurso || !data_vencimento)
+      return res.status(400).json({ error: 'cloud, nome_reserva, tipo_recurso e data_vencimento são obrigatórios' });
     const r = await pool.query(
       `UPDATE reservas_cloud SET
          cloud=$1, nome_reserva=$2, tipo_escopo=$3, subscription_id=$4, resource_group_name=$5,
