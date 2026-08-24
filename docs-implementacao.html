@@ -185,7 +185,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
       <thead><tr><th>Componente</th><th>Tecnologia</th><th>Observação</th></tr></thead>
       <tbody>
         <tr><td>Backend</td><td>Node.js 18+ / Express 4</td><td>Processo único; sem cluster; sem build step</td></tr>
-        <tr><td>Frontend (shell)</td><td>Vanilla JS</td><td>index.html + app.js + calculadora.js + styles.css — sem build step, servido direto</td></tr>
+        <tr><td>Frontend (shell)</td><td>Vanilla JS</td><td>index.html + app.js + styles.css — sem build step, servido direto (calculadora.js não é mais carregado por nenhuma página — código morto)</td></tr>
         <tr><td>Frontend (telas)</td><td>React + TypeScript + Vite</td><td>frontend/ — <strong>build obrigatório antes do deploy</strong> (gera frontend/dist/*)</td></tr>
         <tr><td>Banco de dados</td><td>PostgreSQL 14+</td><td>Único banco; schema criado automaticamente</td></tr>
         <tr><td>Autenticação</td><td>JWT + bcrypt</td><td>Suporte a AD (LDAP) e Entra ID (OAuth 2.0)</td></tr>

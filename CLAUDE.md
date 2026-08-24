@@ -1175,7 +1175,10 @@ UI — tabela de billing (`_custoHora`):
 verde. `fonte_estimado` é sempre `'billing'`. Estimado sempre cinza (billing) ou azul (Databricks) ou laranja
 (pico). O backend acompanhou essa remoção numa limpeza posterior: as materialized views `pl_best_mv`/`pl_sku_mv`
 que faziam esse JOIN foram removidas de vez (ver "Materialized views" acima) — não existe mais nenhum caminho
-de código que tente juntar `azure_costs` com Price List pra estimativa.
+de código que tente juntar `azure_costs` com Price List pra estimativa. **Achado tardio (2026-08-24)**: o hero
+do Portal Público (`PortalApp.tsx`) ainda tinha um chip `📋 Price List Azure` sobrevivendo à remoção da v2.1 —
+prometia uma capacidade que o motor não tem mais. Trocado por `📊 Pico de custo do período`, refletindo a
+feature real que substituiu Price List como indicador "inteligente" do card de estimativa.
 
 **Pico de billing — Configurar Estimativa (v2.1):**
 
@@ -1310,9 +1313,28 @@ do app autenticado) — `calculadora.js` não é mais carregado aqui.
 
 **Filtragem de dados:**
 - `subscription_ids[]` — apenas essas subs são expostas no portal
-- `resource_groups[]` — filtro de RG existe na config mas **não é persistido via UI** (bug em `savePortalConfig` app.js:2568 — `rgs` calculado mas não incluído no body do POST); campo sempre retorna `[]`
+- `resource_groups[]` — filtro de RG por subscription. **Bug real corrigido (2026-08-24)**: o campo nunca
+  era persistido — `savePortalConfig()` (app.js) calculava `rgs` a partir do textarea mas não incluía no body
+  do POST (só `subscription_ids`), e `POST /api/admin/portal-config` (server.js) também nunca desestruturava/
+  gravava `resource_groups` do body, mesmo que o cliente enviasse — um fix só do lado do cliente não teria
+  sido suficiente. O read-path (`GET /api/public/calculadora/resource-groups`/`/recursos`) sempre aplicou o
+  filtro corretamente quando o campo tinha dados — só o write-path (os dois lados) estava quebrado. Campo
+  sempre retornava `[]` até esta correção.
 - Recursos: `GET /api/public/calculadora/recursos` valida `subscription_id` do request contra `allowedSubs` da config
-- Estimativa: `POST /api/public/calculadora/estimar` valida `resource_id` contra `azure_costs` + `allowedSubs`
+- Estimativa (salvar): `POST /api/public/calculadora/estimativas` — grava direto na tabela `estimativas` (mesma
+  lida pelas telas autenticadas de Estimativas/Dashboard). **Bug real corrigido (2026-08-24)**: até esta
+  correção não validava nada contra `req.portalCfg` — qualquer chamada anônima (bypassando o `InvoiceModal.tsx`
+  via `curl` direto) podia persistir uma estimativa fabricada (recursos/totais arbitrários, `projeto_id`
+  qualquer) na mesma tabela usada pelas telas internas. Corrigido com a mesma validação de `resource_id`
+  contra `allowedSubs`/`allowedRGs` (via `azure_costs`) que `GET /recursos` já usava — agora exige que **todos**
+  os `resource_id` do payload pertençam ao escopo liberado pelo admin, senão retorna 403.
+- **`POST /api/calculadora/estimar` (privado) e seu delegate `POST /api/public/calculadora/estimar` foram
+  removidos (2026-08-24)** — motor de cálculo mais antigo (nomenclatura RN-001 a RN-005, anterior à
+  RN-006/RN-007/RN-DB-001 atuais), confirmado sem nenhum chamador vivo: o único caller (`calculadora.js:2729`)
+  está num arquivo que não é mais carregado por `index.html` nem `portal.html` desde a migração React. O
+  delegate público era alcançável sem nenhuma autenticação e rodava SQL não-trivial — removido junto por
+  higiene de superfície de ataque, não só limpeza de código morto. O cálculo real hoje é 100% client-side
+  (`frontend/src/lib/calcEstimado.ts`).
 
 **Delegação interna para handler privado:**
 ```javascript
@@ -1331,14 +1353,14 @@ POST /api/public/calculadora/identificar     — registra acesso (nome, email, i
 GET  /api/public/calculadora/subscriptions   — subs permitidas pelo admin
 GET  /api/public/calculadora/resource-groups — RGs filtrados pela config
 GET  /api/public/calculadora/recursos        — delega para handler privado (auth bypassado)
-POST /api/public/calculadora/estimar         — estima custo (valida resource_ids)
+POST /api/public/calculadora/estimativas     — salva estimativa (valida resource_ids contra allowedSubs/RGs)
 GET  /api/public/calculadora/projetos        — projetos com status='Ativo'
 ```
 
 **Endpoints admin (authMiddleware):**
 ```
 GET  /api/admin/portal-config   — lê config atual
-POST /api/admin/portal-config   — salva config (sem resource_groups — ver bug acima)
+POST /api/admin/portal-config   — salva config (inclui resource_groups desde a correção acima)
 GET  /api/admin/portal-acessos  — log de acessos (limit max 500)
 ```
 
