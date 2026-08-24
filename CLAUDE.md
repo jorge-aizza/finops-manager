@@ -748,10 +748,23 @@ Single-process Node.js + Express backend serving a vanilla-JS SPA. No build step
 Three methods — all issue the same JWT payload `{id, nome, email, perfil}`:
 - **Local** — bcrypt password hash stored in `usuarios` table
 - **Active Directory** — LDAP bind via `ldapjs`; email sanitized before filter construction to prevent LDAP injection
-- **Microsoft Entra ID** — OAuth 2.0 redirect flow
+- **Microsoft Entra ID** — `GET /api/auth/entra/url` builds the Microsoft `authorize` redirect URL, but **no callback
+  route exists** (`/auth/callback` — referenced as the `redirect_uri` — has no handler in `server.js`; confirmed via
+  grep, zero matches for `entra/callback` or any authorization-code exchange logic). SSO login is currently
+  non-functional end-to-end: a user redirected to Microsoft has no route to land on afterward. Not fixed as part
+  of the 2026-08-24 security review (implementing the callback/token-exchange/JWT-issuance flow is a real feature,
+  not a bug fix) — flagged for a deliberate decision on whether to build it or remove the button.
 
 Token stored in `sessionStorage` + `localStorage` (fallback).
 `authMiddleware` — verifies `Authorization: Bearer <token>`. Returns 401 on failure.
+`adminMiddleware` — verifies `req.user.perfil === 'admin'`, used after `authMiddleware`. **Added 2026-08-24**:
+`POST/PUT/PATCH/DELETE /api/usuarios/*` and `POST /api/auth/ad/test` only had `authMiddleware` before this —
+any authenticated user (any `perfil`, including the lowest) could self-promote to admin via `PUT` on their own
+id, mint a brand-new admin account via `POST`, or delete/deactivate any user including admins. Same gap let any
+authenticated user make the server LDAP-bind to an arbitrary host with arbitrary credentials via `/ad/test`. Real
+privilege-escalation vulnerability, not theoretical — fixed by gating all 5 routes with `adminMiddleware` (same
+pattern `GET /api/diag` already used). Confirmed only the legacy admin-only "Gerenciar Usuários" panel (`app.js`)
+calls these routes — no self-service profile-edit flow depends on them, so no legitimate use case was broken.
 `dbMiddleware` — returns 503 if pool is null (pre-setup state).
 Rate limiting: 20 req / 15 min on `/api/auth/login` and `/api/auth/ad`.
 
