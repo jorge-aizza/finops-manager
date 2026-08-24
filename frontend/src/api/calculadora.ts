@@ -82,14 +82,37 @@ export const getPorServico = (q: Omit<RecursosQuery, 'pico'>) => {
 // gerenciados (Databricks/AKS) apareçam logo depois do RG pai resolvido,
 // em vez de espalhados em ordem alfabética pura.
 export function sortRgsComFilhos(rgs: ResourceGroupOption[]): ResourceGroupOption[] {
-  const byName = new Map(rgs.map((r) => [r.resource_group_name, r]))
-  const raiz = rgs.filter((r) => !r.parent_rg || !byName.has(r.parent_rg))
+  // Bug real corrigido: nomes de RG do Azure são case-insensitive (a Azure preserva a grafia
+  // original mas nunca trata "RG-X" e "rg-x" como recursos diferentes), mas o `parent_rg`
+  // resolvido pelo servidor (_resolveParentRgs, server.js) às vezes vem numa grafia diferente
+  // da que o RG pai realmente tem em `resource_group_name` — ex: filho resolvido com
+  // `parent_rg: "RG-ADBX-DAUD-BRSOUTH-001-DEV"` (maiúsculo), mas o RG pai real na lista é
+  // `"rg-adbx-daud-brsouth-001-dev"` (minúsculo). Um Map chaveado pelo texto exato nunca batia
+  // nesses casos — o pai (que realmente estava na lista!) nunca era encontrado, e o filho virava
+  // "raiz" incorretamente. Efeito visto pelo usuário: workspaces Databricks distintos (cada um
+  // com seu próprio RG pai, todos presentes na lista) apareciam soltos, sem nenhum agrupamento
+  // visível — ao contrário do esperado (cada RG gerenciado agrupado sob o pai real). Corrigido
+  // casando por UPPERCASE — mesma convenção já usada em outros lugares do app pra comparar RG
+  // (ex: server.js sempre usa UPPER(resource_group_name) nas queries).
+  const byNameUpper = new Map(rgs.map((r) => [r.resource_group_name.toUpperCase(), r]))
+  // Órfãos de verdade (pai realmente ausente da lista — ex: filtro de resource_groups[] do
+  // Portal Público liberou só o filho, ou o pai não tem billing direto e nunca aparece na
+  // lista de RGs distintos) também viram raiz, com parent_rg normalizado pra null — sem isso,
+  // CmsMultiSelect.tsx (via `parentValue: r.parent_rg`) desenharia "↳ " + indentação como se o
+  // item fosse filho de algo sem nenhum pai visível pra associar.
+  const raiz = rgs
+    .map((r) => (r.parent_rg && !byNameUpper.has(r.parent_rg.toUpperCase())) ? { ...r, parent_rg: null } : r)
+    .filter((r) => !r.parent_rg)
     .sort((a, b) => a.resource_group_name.localeCompare(b.resource_group_name))
   const filhosPorPai = new Map<string, ResourceGroupOption[]>()
   for (const r of rgs) {
-    if (r.parent_rg && byName.has(r.parent_rg)) {
-      if (!filhosPorPai.has(r.parent_rg)) filhosPorPai.set(r.parent_rg, [])
-      filhosPorPai.get(r.parent_rg)!.push(r)
+    const pai = r.parent_rg && byNameUpper.get(r.parent_rg.toUpperCase())
+    if (pai) {
+      // Agrupa pela grafia REAL do pai (pai.resource_group_name), não pela grafia do
+      // parent_rg resolvido — é essa grafia real que aparece como chave abaixo, na raiz.
+      const paiKey = pai.resource_group_name
+      if (!filhosPorPai.has(paiKey)) filhosPorPai.set(paiKey, [])
+      filhosPorPai.get(paiKey)!.push(r)
     }
   }
   const out: ResourceGroupOption[] = []
