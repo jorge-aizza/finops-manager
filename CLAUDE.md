@@ -1067,6 +1067,22 @@ periodo  → todos os demais (disco, storage, bandwidth, etc.)
 - Ao desmarcar pai → filhos também desmarcados
 - Funciona em ambos os portais (autenticado e público)
 
+**Bug real corrigido (2026-08-24) — regressão da migração React, reportada pelo usuário com print de
+produção**: `sortRgsComFilhos()` (`frontend/src/api/calculadora.ts`, usada por `useCalculadora()` — logo
+compartilhada pela Calculadora autenticada e pelo `PublicCalculadoraView.tsx`) casava `parent_rg` contra
+`resource_group_name` com um `Map` chaveado pelo texto **exato**, sem normalizar maiúsculas/minúsculas — ao
+contrário do legado `calculadora.js`, que já fazia `parent_rg.toUpperCase() === value.toUpperCase()` (ver
+bullet acima). O servidor às vezes resolve `parent_rg` em maiúsculo (`_resolveParentRgs`, server.js) enquanto
+o RG pai real na lista está em minúsculo (nomes de RG do Azure são case-insensitive, a grafia varia conforme
+como foi criado) — o `Map` nunca batia, o pai (que realmente estava na lista de RGs) nunca era encontrado,
+e o filho virava "raiz" incorretamente. Efeito visto pelo usuário: múltiplos workspaces Databricks distintos
+apareciam soltos no dropdown, cada um com "↳" mas sem nenhum pai visível — como se fossem filhos uns dos
+outros (`CalculadoraView.tsx`/`PublicCalculadoraView.tsx` setam `parentValue: r.parent_rg` sem checar se esse
+pai existe nas opções, então o `CmsMultiSelect.tsx` desenhava a indentação mesmo órfã). Corrigido casando por
+`UPPERCASE`; itens cujo pai realmente não está na lista (ex: filtro `resource_groups[]` do Portal Público
+liberou só o filho) agora têm `parent_rg` normalizado pra `null`, virando raiz de verdade em vez de "filho
+fantasma". Verificado ao vivo contra dados reais da subscription "Development" via Playwright.
+
 **RG gerenciados — `_detectManagedRg(name)` (server.js):**
 - `DATABRICKS-RG-*` → `managed_type: 'databricks'`, `managed_label: workspace` (strip último segmento aleatório)
 - `MANAGED-RG-ADBX-*` → `managed_type: 'databricks'`, `managed_label: workspace` (strip último segmento)
