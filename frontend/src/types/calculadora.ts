@@ -229,3 +229,11 @@ export interface HorarioLivre {
   inicio_dom: string
   fim_dom: string
 }
+
+export interface AzureCostsDiag {
+  azure_costs: { total?: number; com_sub?: number; com_data?: number; com_custo?: number; data_min?: string | null; data_max?: string | null }
+  subs_cache: { total: number | string }
+  rg_cache: { total: number | string }
+  colunas_amostra: string[]
+  amostra_valores: Record<string, unknown> | null
+}

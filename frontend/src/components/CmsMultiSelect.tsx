@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useCmsDropdownPosition } from '../hooks/useCmsDropdownPosition'
 
@@ -23,6 +23,12 @@ interface CmsMultiSelectProps {
   triggerLabel: string
   loading?: boolean
   onChange: (values: string[]) => void
+  // Conteúdo extra mostrado no lugar de "Nenhum resultado" quando `options`
+  // (não `filtered`) está vazio — ou seja, quando não há dados nenhum, não
+  // só quando a busca do usuário não bateu com nada. Usado pelo dropdown de
+  // Assinatura da Calculadora pra mostrar um diagnóstico (porta de
+  // _diagCache()) em vez de só "Nenhum resultado".
+  emptyState?: ReactNode
 }
 
 export default function CmsMultiSelect({
@@ -32,6 +38,7 @@ export default function CmsMultiSelect({
   triggerLabel,
   loading,
   onChange,
+  emptyState,
 }: CmsMultiSelectProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -115,6 +122,8 @@ export default function CmsMultiSelect({
           <div className="cms-options">
             {loading ? (
               <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>
+            ) : options.length === 0 && emptyState ? (
+              emptyState
             ) : filtered.length === 0 ? (
               <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum resultado</div>
             ) : (

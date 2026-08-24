@@ -10,7 +10,10 @@ import type { RecursoBilling, ResourceGroupOption, SubscriptionOption } from '..
 
 vi.mock('../api/calculadora', async () => {
   const actual = await vi.importActual<typeof calcApi>('../api/calculadora')
-  return { ...actual, listSubscriptions: vi.fn(), listResourceGroups: vi.fn(), getRecursos: vi.fn(), getReconciliacao: vi.fn(), getDetalheDiario: vi.fn(), getPorServico: vi.fn() }
+  return {
+    ...actual, listSubscriptions: vi.fn(), listResourceGroups: vi.fn(), getRecursos: vi.fn(), getReconciliacao: vi.fn(),
+    getDetalheDiario: vi.fn(), getPorServico: vi.fn(), diagAzureCosts: vi.fn(), refreshAzureCache: vi.fn(),
+  }
 })
 vi.mock('../api/projetos')
 vi.mock('../api/estimativas')
@@ -146,6 +149,73 @@ describe('CalculadoraView', () => {
     expect(cobradoLabel.nextElementSibling).toHaveTextContent('R$ 1.440,00') // custo_hora_billing×720
     expect(within(card).getByText('Custo/h')).toBeInTheDocument() // label col1
     expect(within(card).getByText('R$ 2,00')).toBeInTheDocument() // valor col1 (custo_hora_billing)
+  });
+
+  // Bug real: o botão "🔍" ao lado do chip "Outros" (diagnóstico dos recursos
+  // não classificados por tipoRecurso.ts) não tinha sido portado — não existia
+  // nenhum jeito de ver POR QUE um recurso caiu em "Outros".
+  it('botão 🔍 do chip "Outros" abre o diagnóstico agrupado por serviço', async () => {
+    const user = userEvent.setup()
+    vi.mocked(calcApi.getRecursos).mockResolvedValueOnce([
+      makeRecurso({}), // classifica como VMs (consumed_service: Microsoft.Compute)
+      makeRecurso({
+        resource_id: 'r2', nome_recurso: 'recurso-misterioso', consumed_service: 'Microsoft.Misterioso',
+        charge_type: 'Usage', pricing_model: 'OnDemand', meter_categories: 'Categoria Desconhecida',
+      }),
+    ])
+    renderWithClient()
+    await selecionarSubEBuscar(user)
+
+    await user.click(await screen.findByRole('button', { name: /🔍/ }))
+
+    const diagModal = (await screen.findByText('🔍 Diagnóstico — Outros (1 recursos)')).closest<HTMLElement>('.modal')!
+    expect(within(diagModal).getByText('Microsoft.Misterioso')).toBeInTheDocument()
+    expect(within(diagModal).getByText('Categoria Desconhecida')).toBeInTheDocument()
+    expect(within(diagModal).getByText(/recurso-misterioso/)).toBeInTheDocument()
+  });
+
+  // Bug real: quando o dropdown de Assinatura vem vazio (0 subscriptions),
+  // não havia nenhum diagnóstico — só "Nenhum resultado", sem dizer se é
+  // banco vazio ou cache desatualizado.
+  it('dropdown de Assinatura sem resultados mostra diagnóstico com botão de rebuild', async () => {
+    const user = userEvent.setup()
+    vi.mocked(calcApi.listSubscriptions).mockResolvedValue([])
+    vi.mocked(calcApi.diagAzureCosts).mockResolvedValue({
+      azure_costs: { total: 500, com_sub: 0, com_data: 500 },
+      subs_cache: { total: 0 }, rg_cache: { total: 0 },
+      colunas_amostra: ['Date', 'Cost'], amostra_valores: null,
+    })
+    renderWithClient()
+
+    await user.click(screen.getByText('— selecione —', { selector: 'span' }))
+
+    expect(await screen.findByText(/subscription_id é nulo em todos/)).toBeInTheDocument()
+    expect(screen.getByText(/Date, Cost/)).toBeInTheDocument()
+
+    vi.mocked(calcApi.refreshAzureCache).mockResolvedValue({ subs: 3 })
+    await user.click(screen.getByRole('button', { name: /Forçar rebuild de cache/ }))
+    await waitFor(() => expect(calcApi.refreshAzureCache).toHaveBeenCalled())
+  });
+
+  // Bug real: o botão "📖 Legenda" (explica os selos/cores dos cards) não
+  // tinha sido portado — nenhum jeito de consultar o que cada indicador
+  // significa sem ler o código-fonte.
+  it('botão "📖 Legenda" abre e fecha o painel explicativo', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await selecionarSubEBuscar(user)
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[checkboxes.length - 1])
+    await user.click(screen.getByRole('button', { name: 'Estimar' }))
+
+    expect(screen.queryByText('Fonte do Preço')).not.toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: /Legenda/ }))
+    expect(screen.getByText('Fonte do Preço')).toBeInTheDocument()
+    expect(screen.getByText(/Cluster\/h/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Legenda/ }))
+    expect(screen.queryByText('Fonte do Preço')).not.toBeInTheDocument()
   });
 
   // Bug real: Horário Livre resetava toda vez que o overlay era reaberto, mesmo

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { buildEstimativa } from '../lib/buildEstimativa'
 import { calcEstimado } from '../lib/calcEstimado'
@@ -56,6 +56,7 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
   const [pctCond, setPctCond] = useState(() => publicConfig ? (publicConfig.cond ?? TAXA_COND_DEF) : TAXA_COND_DEF)
   const [pctGordura, setPctGordura] = useState(TAXA_GORD_DEF)
   const [visiveis, setVisiveis] = useState(LOTE)
+  const [legendaOpen, setLegendaOpen] = useState(false)
 
   const impostoTravado = !!publicConfig && publicConfig.imposto != null
   const condTravado = !!publicConfig && publicConfig.cond != null
@@ -193,6 +194,16 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
         <div className="modal-body" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
           {/* ── Coluna esquerda: recursos ── */}
           <div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: guardrail.ativo ? 0 : 8 }}>
+              <button
+                onClick={() => setLegendaOpen((v) => !v)}
+                title="Mostrar/ocultar legenda"
+                style={{ fontSize: 10, color: 'var(--text-muted)', background: 'transparent', border: '1px solid var(--border)', borderRadius: 6, padding: '2px 8px', cursor: 'pointer', flexShrink: 0 }}
+              >
+                📖 Legenda
+              </button>
+            </div>
+            {legendaOpen && <LegendaPanel />}
             {guardrail.ativo && (
               <div style={{ marginBottom: 12, padding: 10, borderRadius: 8, background: 'rgba(255,140,66,.1)', border: '1px solid rgba(255,140,66,.3)', fontSize: 12, color: 'var(--orange,#ff8c42)' }}>
                 ⚠️ Você selecionou <strong>{selKeys.length.toLocaleString('pt-BR')} recursos</strong> em <strong>{guardrail.rgsSelSize} de {guardrail.rgsTotSize} Resource Groups</strong> carregados
@@ -352,6 +363,62 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
       </div>
     </div>,
     document.body,
+  )
+}
+
+// Porta estática de #cov-legenda (calculadora.js:511-572) — explica os
+// selos/cores dos cards do overlay. Conteúdo fixo, sem dados dinâmicos.
+function LegendaPanel() {
+  const itemStyle: CSSProperties = { display: 'flex', alignItems: 'flex-start', gap: 6 }
+  const textStyle: CSSProperties = { fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.3 }
+  const sectionTitle: CSSProperties = { fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.1em', color: 'var(--text-muted)', marginBottom: 2 }
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 14, padding: 12, background: 'rgba(147,51,234,.05)', border: '1px solid var(--border)', borderRadius: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        <div style={sectionTitle}>Fonte do Preço</div>
+        <div style={itemStyle}>
+          <span style={{ fontSize: 11, flexShrink: 0, marginTop: 1 }}>💰</span>
+          <span style={textStyle}><strong style={{ color: 'var(--accent)' }}>Custo/h</strong> ou <strong style={{ color: 'var(--text-muted)' }}>Custo/mês*</strong> — média do billing histórico. Estimado fica <strong style={{ color: 'var(--text-muted)' }}>cinza</strong>.</span>
+        </div>
+        <div style={itemStyle}>
+          <span style={{ fontSize: 11, flexShrink: 0, marginTop: 1 }}>🔒</span>
+          <span style={textStyle}><strong style={{ color: 'var(--blue,#4da6ff)' }}>Amort./h 🔒</strong> — custo amortizado da reserva (1 ou 3 anos). Estimado = amort./h × horas, permanece fixo.</span>
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        <div style={sectionTitle}>Indicadores</div>
+        <div style={itemStyle}>
+          <span style={{ fontSize: 10, flexShrink: 0, marginTop: 1, opacity: 0.6 }}>⏱</span>
+          <span style={textStyle}><strong style={{ color: 'var(--accent)' }}>H.reais</strong> — horas que o recurso ficou ligado no período (qty × fator UoM). Só aparece para recursos horários.</span>
+        </div>
+        <div style={itemStyle}>
+          <span style={{ fontSize: 10, flexShrink: 0, marginTop: 1 }}>⚠</span>
+          <span style={textStyle}><strong style={{ color: 'var(--orange,#ff8c42)' }}>Uso parcial</strong> — recurso ligado menos de 55% do mês (&lt;400h). Estimativa de mês cheio pode superestimar.</span>
+        </div>
+        <div style={itemStyle}>
+          <span style={{ fontSize: 10, fontWeight: 700, flexShrink: 0, marginTop: 1, color: 'var(--text-muted)' }}>/mês*</span>
+          <span style={textStyle}><strong>/mês*</strong> — storage, bandwidth e similares: sem taxa horária fixa. Estimado = custo mensal × (horas ÷ 720).</span>
+        </div>
+        <div style={{ marginTop: 4, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.1em', color: 'var(--blue,#4da6ff)', marginBottom: 2 }}>⚡ Databricks</div>
+        <div style={itemStyle}>
+          <span style={{ fontSize: 10, flexShrink: 0, marginTop: 1 }}>⚡</span>
+          <span style={textStyle}><strong style={{ color: 'var(--accent)' }}>Cluster/h</strong> — taxa do workspace Databricks: C_total ÷ H_driver. H_driver = soma dos picos diários de horas (abordagem diária), captura múltiplas sessões do cluster.</span>
+        </div>
+        <div style={itemStyle}>
+          <span style={{ fontSize: 10, background: 'rgba(77,166,255,.12)', color: 'var(--blue,#4da6ff)', borderRadius: 4, padding: '1px 5px', flexShrink: 0, marginTop: 1 }}>⚡</span>
+          <span style={textStyle}><strong style={{ color: 'var(--blue,#4da6ff)' }}>Badge azul ⚡</strong> — estimativa proporcional: billing_VM ÷ H_driver × horas. Soma de todas as VMs do RG = taxa_cluster × horas.</span>
+        </div>
+        <div style={{ marginTop: 4, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.1em', color: 'var(--text-muted)', marginBottom: 2 }}>Coluna Estimado</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ width: 10, height: 10, background: 'var(--text-muted)', borderRadius: 2, flexShrink: 0, opacity: 0.5 }} />
+          <span style={{ fontSize: 10, color: 'var(--text-dim)' }}><strong style={{ color: 'var(--text-muted)' }}>Cinza</strong> — baseado no billing histórico</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 12 }}>🔒</span>
+          <span style={{ fontSize: 10, color: 'var(--text-dim)' }}><strong style={{ color: 'var(--blue,#4da6ff)' }}>Cinza 🔒</strong> — reserva: valor amortizado fixo pelo term do contrato</span>
+        </div>
+      </div>
+    </div>
   )
 }
 

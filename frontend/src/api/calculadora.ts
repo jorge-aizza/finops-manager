@@ -1,12 +1,18 @@
 import { apiFetch } from './client'
 import { numFields } from './normalize'
 import type {
-  DetalheDiarioRow, PorServicoRow, Reconciliacao, RecursoBilling,
+  AzureCostsDiag, DetalheDiarioRow, PorServicoRow, Reconciliacao, RecursoBilling,
   RecursosQuery, ResourceGroupOption, SubscriptionOption,
 } from '../types/calculadora'
 
 export const listSubscriptions = () =>
   apiFetch<SubscriptionOption[]>('GET', '/calculadora/subscriptions')
+
+// Porta de _diagCache()/_forcarRefreshCache() (calculadora.js) — exibido no
+// dropdown de Assinatura quando a lista vem vazia, pra diagnosticar se é
+// falta de import ou cache desatualizado.
+export const diagAzureCosts = () => apiFetch<AzureCostsDiag>('GET', '/azure-costs/diag')
+export const refreshAzureCache = () => apiFetch<{ subs: number }>('POST', '/azure-costs/refresh-cache')
 
 export const listResourceGroups = (subscriptionIds: string[]) =>
   apiFetch<ResourceGroupOption[]>('GET', '/calculadora/resource-groups?subscription_id=' + encodeURIComponent(subscriptionIds.join(',')))

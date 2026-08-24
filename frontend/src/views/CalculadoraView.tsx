@@ -10,6 +10,8 @@ import { useCalculadora } from '../hooks/useCalculadora'
 import { tipoColor, tipoRecurso } from '../lib/tipoRecurso'
 import ConfigurarEstimativaOverlay from './ConfigurarEstimativaOverlay'
 import InvoiceModal from './InvoiceModal'
+import DiagOutrosModal from './DiagOutrosModal'
+import SubDiagPanel from '../components/SubDiagPanel'
 import type { EstimativaCalculada, Periodo } from '../types/calculadora'
 
 const TAXA_BRL_FALLBACK = 5.70
@@ -17,6 +19,7 @@ const TAXA_BRL_FALLBACK = 5.70
 export default function CalculadoraView() {
   const calc = useCalculadora()
   const [overlayOpen, setOverlayOpen] = useState(false)
+  const [diagOutrosOpen, setDiagOutrosOpen] = useState(false)
   const [invoiceData, setInvoiceData] = useState<{ estimativa: EstimativaCalculada; periodos: Periodo[] } | null>(null)
   const [preview, setPreview] = useState<{ html: string; title: string } | null>(null)
 
@@ -88,6 +91,7 @@ export default function CalculadoraView() {
             triggerLabel={subLabel}
             loading={calc.subsQuery.isLoading}
             onChange={calc.commitSubs}
+            emptyState={<SubDiagPanel />}
           />
         </div>
         <div className="cfg">
@@ -161,18 +165,32 @@ export default function CalculadoraView() {
               const ativo = calc.filtroTipos.size === 0 || calc.filtroTipos.has(tipo)
               const col = tipoColor(tipo)
               return (
-                <button
-                  key={tipo} onClick={() => calc.toggleTipo(tipo)}
-                  title={`${tipo}: ${cnt} recurso${cnt !== 1 ? 's' : ''}`}
-                  style={{
-                    fontSize: 10, padding: '2px 9px', borderRadius: 10,
-                    border: '1px solid ' + (ativo ? 'var(--accent)' : 'var(--border)'),
-                    background: ativo ? 'rgba(147,51,234,.15)' : 'rgba(255,255,255,.04)',
-                    color: ativo ? col : 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap',
-                  }}
-                >
-                  {tipo} <span style={{ opacity: 0.7 }}>{cnt}</span>
-                </button>
+                <span key={tipo} style={{ display: 'inline-flex', alignItems: 'center' }}>
+                  <button
+                    onClick={() => calc.toggleTipo(tipo)}
+                    title={`${tipo}: ${cnt} recurso${cnt !== 1 ? 's' : ''}`}
+                    style={{
+                      fontSize: 10, padding: '2px 9px', borderRadius: 10,
+                      border: '1px solid ' + (ativo ? 'var(--accent)' : 'var(--border)'),
+                      background: ativo ? 'rgba(147,51,234,.15)' : 'rgba(255,255,255,.04)',
+                      color: ativo ? col : 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {tipo} <span style={{ opacity: 0.7 }}>{cnt}</span>
+                  </button>
+                  {tipo === 'Outros' && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDiagOutrosOpen(true) }}
+                      title="Ver detalhes dos recursos Outros"
+                      style={{
+                        fontSize: 9, padding: '0 4px', borderRadius: 6, border: '1px solid var(--orange,#ff8c42)',
+                        background: 'rgba(255,140,66,.12)', color: 'var(--orange,#ff8c42)', cursor: 'pointer', marginLeft: 2,
+                      }}
+                    >
+                      🔍
+                    </button>
+                  )}
+                </span>
               )
             })}
           </div>
@@ -248,6 +266,13 @@ export default function CalculadoraView() {
 
       {preview && (
         <InvoicePreviewModal html={preview.html} title={preview.title} onClose={() => setPreview(null)} />
+      )}
+
+      {diagOutrosOpen && (
+        <DiagOutrosModal
+          recursos={calc.recursos.filter((r) => tipoRecurso(r) === 'Outros')}
+          onClose={() => setDiagOutrosOpen(false)}
+        />
       )}
     </div>
   )

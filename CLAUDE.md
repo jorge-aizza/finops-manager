@@ -479,6 +479,25 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
     estrutural maior (lista deixaria de ser plana), fora do escopo desta correção pontual de detalhe por-card;
     considerar como um item separado se fizer sentido no futuro. Teste novo em `CalculadoraView.test.tsx`
     confirma badges/metadados/coluna Cobrado com valores corretos pro card do recurso mockado.
+    **Três diagnósticos menores da mesma auditoria, todos autenticado-only (nenhum faz sentido/funciona no
+    Portal Público, que não tem JWT — `/azure-costs/diag` e `/azure-costs/refresh-cache` exigem
+    `authMiddleware`)**:
+    - `DiagOutrosModal.tsx` — porta de `_diagOutros()`: botão 🔍 ao lado do chip "Outros" na chip-bar de tipos,
+      agrupa os recursos não classificados por `consumed_service`+`meter_categories` (campo real — `_tipoRecurso`
+      lê `meter_category`, singular, que nunca existe na resposta; usar o campo real aqui só melhora um
+      diagnóstico read-only, não muda a classificação em si, que continua bug-preservada em `tipoRecurso.ts`).
+    - `SubDiagPanel.tsx` — porta de `_diagCache()`/`_forcarRefreshCache()`: `CmsMultiSelect.tsx` ganhou uma
+      prop opcional `emptyState` (renderizada no lugar de "Nenhum resultado" quando `options.length===0`, não
+      quando é só o filtro de busca que não bateu) — usada pelo dropdown de Assinatura da Calculadora pra
+      mostrar se `azure_costs` está vazia, sem `subscription_id`, ou se é só o cache (`azure_subs_cache`) que
+      precisa de rebuild, com um botão pra forçar isso.
+    - `LegendaPanel` (dentro de `ConfigurarEstimativaOverlay.tsx`) — porta estática do painel 📖 que explica os
+      selos/cores dos cards (Fonte do Preço, H.reais, Uso parcial, /mês*, Databricks, cores do Estimado).
+    **Deliberadamente não portado**: a nota de rodapé automática de Reconciliação (`_atualizarNotaRodape()` —
+    um aviso passivo tipo "⚠ R$X oculto" calculado em background após toda busca) — o botão "Reconciliar" já
+    tinha sido removido a pedido explícito do usuário nesta mesma sessão; adicionar essa nota de volta iria
+    contra esse pedido de simplificar a toolbar. `ReconciliacaoModal.tsx` continua no código (ver nota mais
+    acima), só sem gatilho nenhum na UI.
     **Virtualização real em vez do truque de RAF-chunking**: a tabela de Recursos (`RecursosTable.tsx`) usa
     `@tanstack/react-virtual` (grid CSS, não `<table>` nativa — cada linha virtualizada é um `<div role="row">`
     fora da árvore de uma única `<table>`, então alinhamento de coluna só funciona porque cabeçalho e linhas
@@ -1163,18 +1182,14 @@ assinatura quando 0 resultados — mostra estado de azure_costs, meter_ids e Pri
 
 **End-date calendar:** enabled — user can freely select the end date. `_sincDataFim()` only auto-fills fim if field is currently empty.
 
-**Horas Adicionais (`#chad-card`) — estimativa de custo incremental:**
-- Visível apenas no modo Período, após o primeiro Buscar (oculto no modo Horas)
-- `_horasAdd = { ativo, hExtra, dias }` — config em memória (sessão)
-- Inputs: `#chad-h-extra` (horas extras/dia), `#chad-dias` (dias do projeto)
-- Cálculo: `hTotal = hExtra × dias`; custo por recurso via `_hadCustoRecurso(r, isBRL, taxaBrl)`:
-  - `hora/dia` → `custo_hora_billing × hTotal`
-  - `periodo` → `(custo_mes_billing ÷ 720) × hTotal`
-  - `reserva` → R$ 0 (custo fixo, já pago)
-- Quando ativo: adiciona coluna `⏱ Adicional` (laranja) na tabela + banner de resumo acima da tabela
-- RG multi-meter: subtotal adicional exibido no header do grupo
-- `_hadAtualizarBaseline()` — mostra média h/dia do período billing no card (chamado após busca)
-- `_hadToggle(ativo)` / `_hadChange()` — controles expostos no public API
+**Horas Adicionais — removido antes da migração React, não é uma lacuna de portabilidade:** esta seção
+descrevia `#chad-card`/`_horasAdd`/`_hadToggle`/`_hadCustoRecurso` como se fossem funcionalidade viva de
+`calculadora.js`, mas `git log -S"_hadToggle"` mostra que esse código foi removido por completo no commit
+`c083218` ("perf: reduz tempo de Buscar..."), **antes** do primeiro commit da migração React (`593c8c0`).
+Confirmado por uma auditoria completa (grep zero matches em `calculadora.js` e em todo `frontend/src`) — não
+existe em nenhum dos dois lugares hoje. Não é algo que a migração "esqueceu" de portar; a descrição abaixo
+ficou desatualizada na própria documentação do legado. Não recriar isso a menos que o usuário peça
+explicitamente a funcionalidade de volta.
 
 **Horário Livre (`#chl-card`) — desconto de horas fora do expediente:**
 - Visível apenas no modo Período (oculto no modo Horas)
