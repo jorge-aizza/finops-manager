@@ -4288,6 +4288,27 @@ async function _resolveParentRgs(rows, subs) {
           if (best) parent_rg = best;
         }
       }
+      // Método 6 (substring sem prefixo "DBW-"): achado real — alguns workspaces têm
+      // "DBW-" (Databricks Workspace) no nome do RG gerenciado (ex: DATABRICKS-RG-DBW-DTFN-DEV)
+      // sem que o RG pai real repita esse prefixo (RG-DTFN-BRSOUTH-DEV, sem "DBW-" nenhum) —
+      // diferente do padrão onde pai e filho REPETEM "DBW-" nos dois lados (RG-DBW-X /
+      // MANAGED-RG-DBW-X, já resolvido pelo Método 3 acima). Sem isso, esses caíam sem parent_rg
+      // mesmo com o pai presente e o token restante (ex: "DTFN") identificando só 1 candidato.
+      if (!parent_rg) {
+        const labelUpper = (r.managed_label || '').toUpperCase();
+        if (labelUpper.startsWith('DBW-')) {
+          const semDbw = labelUpper.slice(4);
+          if (semDbw.length >= 4) {
+            let best = null, bestLen = Infinity;
+            for (const rg of normalRgs) {
+              if (rg.includes(semDbw) && rg.length < bestLen) {
+                bestLen = rg.length; best = rg;
+              }
+            }
+            if (best) parent_rg = best;
+          }
+        }
+      }
       // Persiste mapeamento encontrado em azure_ws_cache para acelerar requisições futuras
       if (parent_rg && pool) {
         const wsKey = (r.resource_group_name || '').toUpperCase();
