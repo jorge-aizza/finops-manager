@@ -748,12 +748,38 @@ Single-process Node.js + Express backend serving a vanilla-JS SPA. No build step
 Three methods — all issue the same JWT payload `{id, nome, email, perfil}`:
 - **Local** — bcrypt password hash stored in `usuarios` table
 - **Active Directory** — LDAP bind via `ldapjs`; email sanitized before filter construction to prevent LDAP injection
-- **Microsoft Entra ID** — `GET /api/auth/entra/url` builds the Microsoft `authorize` redirect URL, but **no callback
-  route exists** (`/auth/callback` — referenced as the `redirect_uri` — has no handler in `server.js`; confirmed via
-  grep, zero matches for `entra/callback` or any authorization-code exchange logic). SSO login is currently
-  non-functional end-to-end: a user redirected to Microsoft has no route to land on afterward. Not fixed as part
-  of the 2026-08-24 security review (implementing the callback/token-exchange/JWT-issuance flow is a real feature,
-  not a bug fix) — flagged for a deliberate decision on whether to build it or remove the button.
+- **Microsoft Entra ID** — OAuth 2.0 authorization-code flow, **implemented 2026-08-24** (previously
+  non-functional — `GET /api/auth/entra/url` built the redirect URL but no callback route existed; a user
+  redirected to Microsoft had no route to land on afterward. This was found and left unfixed earlier the same
+  day as part of the security review, then implemented later that day at explicit user request).
+
+  **Flow**: `GET /api/auth/entra/url` generates a random `state` (CSRF, stored in-memory `_entraStates` Map,
+  10 min TTL, single-use) and appends it to the Microsoft `authorize` URL. `GET /auth/callback` (no `/api/`
+  prefix — it's a full-page browser navigation target set as the app registration's `redirect_uri`, never a
+  SPA fetch/XHR) receives `?code=&state=`, validates `state`, exchanges `code` for tokens via
+  `POST https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token`, then **verifies the `id_token`'s
+  RS256 signature** against the tenant's JWKS (`jwks-rsa`, new dependency) with `issuer`/`audience` checks —
+  never trusts an unverified token. Maps the `groups` claim (Object IDs) to `perfil` via `grp_admin`/
+  `grp_finops` from the `integracoes` config (same pattern as the AD flow's `memberOf` mapping; unmatched or
+  missing `groups` claim → `reader`, the safe default). Upserts into `usuarios` (`tipo='entra'`), issues our
+  own JWT, then **hands off to the SPA via a one-time code** (`_entraHandoffs` Map, 60s TTL) instead of putting
+  the JWT directly in the redirect URL — `res.redirect('/?entra_handoff=<code>')`, and the SPA's init IIFE
+  (`app.js`, `_consumirEntraHandoff()`) calls `GET /api/auth/entra/consume?code=` once to retrieve
+  `{token, user}`, exactly like a normal login response, then strips the query string via
+  `history.replaceState`. On any failure, redirects to `/?entra_error=<msg>` instead, surfaced via the same
+  `showLoginError()` used by local/AD login failures.
+
+  **Operational prerequisite the admin must configure in the Entra app registration** (not something this
+  server can do for them): "Add groups claim" under Token configuration — without it, the `id_token` never
+  carries a `groups` claim and every Entra login lands as `reader` regardless of group membership. Accounts
+  belonging to a very large number of groups trigger Microsoft's "groups overage" (`groups` claim replaced by
+  `_claim_names`/`hasgroups`, requiring an extra Microsoft Graph call with additional scope) — **not
+  implemented**; those accounts also fall back to `reader` rather than silently granting elevated access on
+  an unreadable claim.
+
+  **Not rate-limited** — `/auth/callback`/`/api/auth/entra/*` weren't added to the login rate limiter (below);
+  lower priority since a valid `state` (generated server-side, unguessable) is required to reach the token
+  exchange at all, unlike `/api/auth/login`'s open password-guessing surface.
 
 Token stored in `sessionStorage` + `localStorage` (fallback).
 `authMiddleware` — verifies `Authorization: Bearer <token>`. Returns 401 on failure.
@@ -765,6 +791,9 @@ authenticated user make the server LDAP-bind to an arbitrary host with arbitrary
 privilege-escalation vulnerability, not theoretical — fixed by gating all 5 routes with `adminMiddleware` (same
 pattern `GET /api/diag` already used). Confirmed only the legacy admin-only "Gerenciar Usuários" panel (`app.js`)
 calls these routes — no self-service profile-edit flow depends on them, so no legitimate use case was broken.
+Same `adminMiddleware` also applied to `GET/POST /api/integrations` (2026-08-24) — config includes the Entra
+`client_secret` and AD bind credentials; before this, any authenticated user could read those in plaintext via
+`GET` or overwrite the integration config via `POST`.
 `dbMiddleware` — returns 503 if pool is null (pre-setup state).
 Rate limiting: 20 req / 15 min on `/api/auth/login` and `/api/auth/ad`.
 
