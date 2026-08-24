@@ -99,8 +99,6 @@ export const executarPurge = (params: { data_inicio?: string; data_fim?: string;
 export const getDiagnostico = () => apiFetch<DiagnosticoLinha[]>('GET', '/calculadora/diagnostico', undefined, 60000)
 
 // ── Import Manual (upload CSV/Parquet/ZIP) ──────────────────────────
-// GET /azure-costs/import-status não exige auth no servidor (progresso não é
-// sensível) — apiFetch normal serve, o header Authorization opcional é ignorado.
 export const getImportStatus = () => apiFetch<{ job: ImportJob | null }>('GET', '/azure-costs/import-status')
 
 export type UploadOutcome =

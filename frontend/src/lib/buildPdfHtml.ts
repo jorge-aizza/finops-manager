@@ -197,7 +197,7 @@ window.onload=function(){
     <div class="hdr-sub">Estimativa de Custos Azure</div>
   </div>
   <div class="hdr-r">
-    <div class="hdr-num">${p.invoiceNum}</div>
+    <div class="hdr-num">${esc(p.invoiceNum)}</div>
     <div class="hdr-date">Emitido em ${p.dataFmt}</div>
   </div>
 </div>
@@ -250,7 +250,7 @@ ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;borde
   <div class="foot-l">
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="24" height="11" style="opacity:.7"><text x="1" y="28" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="28" fill="#9333ea" letter-spacing="-1">vivo</text></svg>
     <span class="foot-dot"></span>
-    <span>FinOps Manager &middot; ${p.invoiceNum} &middot; ${new Date().toLocaleString('pt-BR')}</span>
+    <span>FinOps Manager &middot; ${esc(p.invoiceNum)} &middot; ${new Date().toLocaleString('pt-BR')}</span>
     <span class="foot-dot"></span>
     <span class="foot-disc">Estimativa sujeita a altera&ccedil;&otilde;es &mdash; n&atilde;o constitui cobran&ccedil;a ou compromisso financeiro formal.</span>
   </div>
