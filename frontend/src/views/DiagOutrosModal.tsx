@@ -35,7 +35,7 @@ export default function DiagOutrosModal({ recursos, onClose }: Props) {
       <div className="modal" style={{ maxWidth: 680 }}>
         <div className="modal-header">
           <span style={{ color: 'var(--orange,#ff8c42)' }}>🔍 Diagnóstico — Outros ({recursos.length} recursos)</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar modal" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 10 }}>

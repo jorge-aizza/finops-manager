@@ -73,7 +73,7 @@ export default function StorageModal({ storage, onClose }: StorageModalProps) {
       <div className="modal">
         <div className="modal-header">
           <span>{storage ? 'Editar Storage Account' : 'Novo Storage Account'}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <form id="storage-form" onSubmit={handleSubmit}>

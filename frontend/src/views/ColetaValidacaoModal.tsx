@@ -49,7 +49,7 @@ export default function ColetaValidacaoModal({ item, onClose }: Props) {
       <div className="modal modal-wide" style={{ maxWidth: 620 }}>
         <div className="modal-header">
           <span>Validação — Coleta #{item.id}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar modal" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           {revalidarMutation.isPending ? (

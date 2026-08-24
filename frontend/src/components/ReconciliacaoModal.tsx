@@ -55,7 +55,7 @@ export default function ReconciliacaoModal({ subscriptionIds, resourceGroups, da
             <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>Azure Cost Management</div>
             <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)', marginTop: 2 }}>Reconciliação de Valores</div>
           </div>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           {!subscriptionIds.length && (

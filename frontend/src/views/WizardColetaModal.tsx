@@ -149,7 +149,7 @@ export default function WizardColetaModal({ sp, onClose }: Props) {
       <div className="modal modal-wide" style={{ maxWidth: 720 }}>
         <div className="modal-header">
           <span>Nova Coleta via API — {sp.nome}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <div style={{ display: 'flex', gap: 6, marginBottom: 18 }}>

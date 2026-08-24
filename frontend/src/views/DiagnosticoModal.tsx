@@ -56,7 +56,7 @@ export default function DiagnosticoModal({ onClose }: Props) {
               Padrões de meter_category · consumed_service · charge_type · unit_of_measure
             </div>
           </div>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
 
         <div style={{ padding: '10px 22px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 10, flexShrink: 0 }}>

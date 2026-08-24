@@ -189,7 +189,7 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
       <div className="modal modal-wide" style={{ maxWidth: 1200 }}>
         <div className="modal-header">
           <span>Configurar Estimativa — {selKeys.length} recurso{selKeys.length !== 1 ? 's' : ''} selecionado{selKeys.length !== 1 ? 's' : ''}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar modal" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
           {/* ── Coluna esquerda: recursos ── */}
@@ -261,7 +261,7 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
                       {periodos.map((p, i) => (
                         <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)' }}>
                           <span>{p.inicio.slice(0, 16).replace('T', ' ')} → {p.fim.slice(0, 16).replace('T', ' ')} ({p.horas}h)</span>
-                          <button onClick={() => removerPeriodo(i)} style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer' }}>✕</button>
+                          <button onClick={() => removerPeriodo(i)} aria-label="Remover período" style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer' }}>✕</button>
                         </div>
                       ))}
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 700, marginTop: 4 }}>

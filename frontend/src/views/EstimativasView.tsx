@@ -248,7 +248,7 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
       <div className="modal modal-wide">
         <div className="modal-header">
           <span>{e?.numero || 'Detalhes da Estimativa'}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar modal" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           {detalheQuery.isLoading && <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>Carregando...</div>}

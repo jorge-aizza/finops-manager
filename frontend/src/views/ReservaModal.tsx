@@ -206,7 +206,7 @@ export default function ReservaModal({ reserva, subscriptions, onClose }: Reserv
       <div className="modal modal-wide">
         <div className="modal-header">
           <span>{reserva ? 'Editar Reserva' : 'Nova Reserva'}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <form id="reserva-form" onSubmit={handleSubmit}>

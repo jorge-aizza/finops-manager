@@ -50,7 +50,7 @@ export default function ColetaLogModal({ item: r, onClose }: Props) {
       <div className="modal modal-wide" style={{ maxWidth: 700 }}>
         <div className="modal-header">
           <span>Log da Coleta #{r.id}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar modal" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 14, padding: '12px 14px', background: 'rgba(147,51,234,.08)', borderRadius: 10, border: '1px solid var(--border)' }}>

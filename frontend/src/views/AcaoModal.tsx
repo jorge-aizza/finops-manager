@@ -143,7 +143,7 @@ export default function AcaoModal({ acao, onClose }: AcaoModalProps) {
       <div className="modal modal-wide">
         <div className="modal-header">
           <span>{acao ? 'Editar Ação FinOps' : 'Nova Ação FinOps'}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <form id="acao-form" onSubmit={handleSubmit}>

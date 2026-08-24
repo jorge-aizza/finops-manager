@@ -79,7 +79,7 @@ export default function ExpurgoModal({ onClose }: Props) {
       <div className="modal" style={{ width: 'min(92vw, 500px)' }}>
         <div className="modal-header">
           <span>🗑 Expurgo de Dados</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <div style={{ background: 'rgba(147,51,234,.07)', border: '1px solid rgba(147,51,234,.2)', borderRadius: 10, padding: '12px 14px', fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>

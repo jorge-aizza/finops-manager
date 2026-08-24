@@ -96,7 +96,7 @@ export default function AgendamentoModal({ sp, onClose }: Props) {
       <div className="modal">
         <div className="modal-header">
           <span>Agendamento — {sp.nome}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>

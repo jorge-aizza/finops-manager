@@ -143,7 +143,7 @@ export default function ProjetosView() {
           <div className="modal">
             <div className="modal-header">
               <span>{editing ? 'Editar Projeto' : 'Novo Projeto'}</span>
-              <button className="modal-close" onClick={() => setModalOpen(false)}>✕</button>
+              <button className="modal-close" aria-label="Fechar" onClick={() => setModalOpen(false)}>✕</button>
             </div>
             <div className="modal-body">
               <form onSubmit={handleSubmit}>

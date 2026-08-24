@@ -16,7 +16,7 @@ export default function DiagAgendadorModal({ onClose }: Props) {
       <div className="modal modal-wide" style={{ maxWidth: 780 }}>
         <div className="modal-header">
           <span>🔍 Diagnóstico do Agendador</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar modal" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           {diagQuery.isLoading && <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>Carregando...</div>}

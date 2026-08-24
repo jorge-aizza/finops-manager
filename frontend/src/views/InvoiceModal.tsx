@@ -142,7 +142,7 @@ export default function InvoiceModal({
       <div className="modal" style={{ width: 'min(96vw, 680px)' }}>
         <div className="modal-header">
           <span>Gerar Estimativa</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <div className="form-group">

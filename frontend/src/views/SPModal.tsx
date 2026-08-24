@@ -146,7 +146,7 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
       <div className="modal">
         <div className="modal-header">
           <span>{sp ? 'Editar Service Principal' : 'Novo Service Principal'}</span>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <form id="sp-form" onSubmit={handleSubmit}>
