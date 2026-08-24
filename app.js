@@ -519,6 +519,14 @@ function logout(pedirConfirmacao = true) {
   clearInterval(_countdownTimer);
   clearInterval(_dbStatusInterval);
   clearInterval(_notifInterval);
+  clearTimeout(_inactivityTimer);
+  clearInterval(_countdownInterval);
+  _warningShown = false;
+  ['mousemove','keydown','click','touchstart','scroll'].forEach(evt =>
+    document.removeEventListener(evt, resetInactivityTimer)
+  );
+  const timeoutModal = document.getElementById('modal-timeout');
+  if (timeoutModal) timeoutModal.style.display = 'none';
   const fab = document.getElementById('refresh-fab');
   if (fab) fab.style.display = 'none';
   document.getElementById('app-shell').style.display = 'none';
