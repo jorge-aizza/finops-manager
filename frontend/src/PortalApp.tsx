@@ -120,7 +120,7 @@ export default function PortalApp() {
         <div className="portal-hero-chips">
           <span className="portal-chip">🔍 Busca por Subscription</span>
           <span className="portal-chip">⏱ Estimativa por horas</span>
-          <span className="portal-chip">📋 Price List Azure</span>
+          <span className="portal-chip">📊 Pico de custo do período</span>
           <span className="portal-chip">📄 Relatório exportável</span>
         </div>
       </section>

@@ -1,10 +1,8 @@
-// Contrato de server.js (/api/public/calculadora/config e /identificar) —
-// Fase A do Portal Público: só o "chrome" (cabeçalho, identificação, tema,
-// hero, estados carregando/inativo). A calculadora em si continua 100%
-// calculadora.js legado — Calculadora.init({apiBase, publico:true,
-// defaultConfig}) é chamado depois que este componente resolve a config e a
-// identificação, exatamente como _abrirCalculadora() fazia no portal.html
-// legado.
+// Contrato de server.js (/api/public/calculadora/config e /identificar).
+// PortalApp.tsx (Fase A) resolve config/identificação e monta o "chrome"
+// (cabeçalho, tema, hero, estados carregando/inativo); a calculadora em si
+// (Fase B) é PublicCalculadoraView.tsx — calculadora.js legado não é mais
+// carregado em portal.html.
 
 import type { HorarioLivre } from './calculadora'
 
