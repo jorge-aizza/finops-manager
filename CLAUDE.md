@@ -1090,12 +1090,22 @@ fantasma". Verificado ao vivo contra dados reais da subscription "Development" v
 - `MC_*` → `managed_type: 'aks'`, `managed_label: cluster`, `managed_region`
 - Retornado nos endpoints de resource-groups; armazenado em `_managedRgMap` no cliente
 
-**`_resolveParentRgs` — cascata de 5 métodos para encontrar o RG pai:**
+**`_resolveParentRgs` — cascata de 6 métodos para encontrar o RG pai:**
 1. **Cache** (`_dbWsCache`) — workspace do billing (`resource_id /workspaces/X`) → pai já conhecido; cobre `databricks-rg-{ws}`, `managed-rg-adbx-{ws}`, `managed-rg-{ws}`
 2. **Exact** — `managed_label` == nome exato de um RG não-gerenciado
 3. **Suffix** — RG normal TERMINA com `-{label}` (ex: `MANAGED-RG-DBW-X` → label=`DBW-X` → pai `RG-DBW-X`); mais confiável que substring
 4. **Prefix** — `label-` é prefixo de um RG normal
 5. **Substring** — `label` aparece em qualquer posição de um RG normal (menor nome vence)
+6. **Substring sem prefixo `DBW-`** — **bug real corrigido (2026-08-24)**, achado pelo usuário com print de
+   3 RGs Databricks aparecendo soltos no dropdown (`DATABRICKS-RG-DBW-DTFN-DEV`,
+   `DATABRICKS-RG-DBW-NFCOM-DEV-*`, `databricks-rg-dbw-convenio86-dev-*`). Diferente do caso do Método 3
+   (onde pai E filho repetem `DBW-` — `RG-DBW-X`/`MANAGED-RG-DBW-X`), nesses 3 casos o RG gerenciado tem
+   `DBW-` no nome (`managed_label` = `DBW-DTFN`) mas o RG pai real (`RG-DTFN-BRSOUTH-DEV`) **não repete**
+   `DBW-` em nenhuma posição — nenhum dos Métodos 2-5 casa a string completa `DBW-DTFN` contra
+   `RG-DTFN-BRSOUTH-DEV`, mesmo com o pai certo presente na lista. Método 6 remove um `DBW-` inicial do
+   label e tenta de novo por substring (mesmo critério "menor RG vence"). Validado contra as 2 subscriptions
+   reais disponíveis (Development + Test): 10 RGs `DBW-*` no total, todos resolvem, 0 ambíguos (nenhum token
+   restante bate em mais de 1 RG normal candidato).
 - Após resolução bem-sucedida: upsert em `azure_ws_cache` → requests subsequentes usam Método 1 (cache, sem heurística)
 - `_refreshAzureCache` usa **upsert** (não DELETE+INSERT) em `azure_ws_cache` — preserva entradas `MANAGED-RG-*` entre refreshes
 - `_dbWsCache` reconstruído por merge (não substituição) — entradas `MANAGED-RG-*` sobrevivem ao refresh do cache de billing
