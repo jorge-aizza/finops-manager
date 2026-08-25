@@ -913,9 +913,16 @@ usava `azure_rg_cache` — ia direto pra um `GROUP BY` completo em `azure_costs`
 requisição, diferente do endpoint privado equivalente, que já tentava o cache primeiro. Reportado pelo
 usuário como demora perceptível ao selecionar a assinatura; medido em ~7-8.5s por requisição. Corrigido
 replicando o padrão cache-first, mantendo os filtros próprios do portal (`subscription_ids`/`resource_groups`
-de `portalCfg`). Resultado: ~18ms. `azure_rg_cache` só tem `resource_group_name_upper` (sem grafia original)
-— o Portal Público agora mostra RGs sempre em maiúsculo quando o cache está quente (igual ao privado já
-fazia); grafia original só sobrevive no fallback a frio.
+de `portalCfg`). Resultado: ~18ms.
+
+**Efeito colateral corrigido em seguida**: como `azure_rg_cache` só tinha `resource_group_name_upper`, tanto
+o Portal Público quanto o endpoint privado (que já usava esse cache antes) passaram a mostrar RGs sempre em
+maiúsculo quando o cache estava quente, perdendo a grafia original. Corrigido com uma coluna nova
+`resource_group_name` em `azure_rg_cache` (populada por `MAX(resource_group_name)` na query que reconstrói o
+cache em `_refreshAzureCache`) — os dois endpoints agora leem
+`COALESCE(resource_group_name, resource_group_name_upper)`, nunca quebrando mesmo antes do próximo refresh
+popular a coluna nova em bancos já em produção. Verificado após o refresh automático: 154 dos 228 RGs da
+subscription Development voltaram a mostrar a grafia original, performance seguiu ~10-15ms.
 
 ### In-memory query caches (server.js)
 Three caches prevent repeated heavy GROUP BY scans on `azure_costs` from concurrent requests:
