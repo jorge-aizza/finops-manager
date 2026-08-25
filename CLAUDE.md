@@ -908,6 +908,15 @@ Subscription and resource-group endpoints fall back to a direct query if cache i
 Reduces dropdown load from ~12 s (full GROUP BY) to < 5 ms (tiny cache table scan).
 On completion, resets `_coberturaCache`, `_resumoCache`, `_importsCache` to force re-query on next request.
 
+**Bug real corrigido (2026-08-24)**: `GET /api/public/calculadora/resource-groups` (Portal Público) nunca
+usava `azure_rg_cache` — ia direto pra um `GROUP BY` completo em `azure_costs` (1.2M+ linhas) em toda
+requisição, diferente do endpoint privado equivalente, que já tentava o cache primeiro. Reportado pelo
+usuário como demora perceptível ao selecionar a assinatura; medido em ~7-8.5s por requisição. Corrigido
+replicando o padrão cache-first, mantendo os filtros próprios do portal (`subscription_ids`/`resource_groups`
+de `portalCfg`). Resultado: ~18ms. `azure_rg_cache` só tem `resource_group_name_upper` (sem grafia original)
+— o Portal Público agora mostra RGs sempre em maiúsculo quando o cache está quente (igual ao privado já
+fazia); grafia original só sobrevive no fallback a frio.
+
 ### In-memory query caches (server.js)
 Three caches prevent repeated heavy GROUP BY scans on `azure_costs` from concurrent requests:
 ```
@@ -1419,7 +1428,7 @@ await handler(req, res, () => {});
 GET  /api/public/calculadora/config          — título, descrição, taxa_imposto, taxa_cond, horario_livre
 POST /api/public/calculadora/identificar     — registra acesso (nome, email, ip)
 GET  /api/public/calculadora/subscriptions   — subs permitidas pelo admin
-GET  /api/public/calculadora/resource-groups — RGs filtrados pela config
+GET  /api/public/calculadora/resource-groups — RGs filtrados pela config (usa azure_rg_cache — ver nota abaixo)
 GET  /api/public/calculadora/recursos        — delega para handler privado (auth bypassado)
 POST /api/public/calculadora/estimativas     — salva estimativa (valida resource_ids contra allowedSubs/RGs)
 GET  /api/public/calculadora/projetos        — projetos com status='Ativo'
