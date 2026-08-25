@@ -6292,7 +6292,7 @@ app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, a
     const lowerIds = subscription_ids.map(id => (id || '').toLowerCase().trim());
     const ph = lowerIds.map((_, i) => `$${i + 1}`).join(',');
     const cached = await pool.query(
-      `SELECT subscription_id, resource_group_name_upper AS name FROM azure_rg_cache WHERE LOWER(subscription_id) IN (${ph}) ORDER BY subscription_id, name`,
+      `SELECT subscription_id, COALESCE(resource_group_name, resource_group_name_upper) AS name FROM azure_rg_cache WHERE LOWER(subscription_id) IN (${ph}) ORDER BY subscription_id, name`,
       lowerIds
     );
     res.json({ rgs: cached.rows.map(r => ({ subscriptionId: r.subscription_id, name: r.name })), fonte: cached.rowCount > 0 ? 'cache' : 'empty' });
