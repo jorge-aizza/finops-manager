@@ -4053,17 +4053,41 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
       cond.push(`UPPER(resource_group_name) = ANY($${params.length+1})`);
       params.push(resource_groups.map(rg => rg.toUpperCase()));
     }
-    const r = await pool.query(`
-      SELECT DISTINCT UPPER(resource_group_name) AS resource_group_name_upper,
-             MAX(resource_group_name) AS resource_group_name,
-             MAX(subscription_id) AS subscription_id
-      FROM azure_costs
-      WHERE ${cond.join(' AND ')} AND resource_group_name IS NOT NULL
-      GROUP BY UPPER(resource_group_name)
-      ORDER BY resource_group_name
-      LIMIT 500
-    `, params);
-    const withManaged = r.rows.map(row => ({ ...row, ..._detectManagedRg(row.resource_group_name) }));
+    // Bug real corrigido: diferente de GET /api/calculadora/resource-groups (privado), que já
+    // tenta azure_rg_cache primeiro, esse endpoint público sempre ia direto pra um GROUP BY
+    // completo em azure_costs (1.2M+ linhas) — reportado pelo usuário como demora perceptível
+    // ao selecionar a assinatura no Portal Público (medido: ~7-8s por requisição). azure_rg_cache
+    // não tem coluna de RG com a grafia original — só resource_group_name_upper — mesma
+    // limitação que o endpoint privado já aceita nesse caminho rápido (retorna sempre
+    // maiúsculo quando o cache está quente; grafia original só no fallback abaixo).
+    let rows = [];
+    try {
+      const cacheCond = [...cond];
+      const cacheParams = [...params];
+      if (resource_groups.length) {
+        cacheCond[cacheCond.length - 1] = `resource_group_name_upper = ANY($${cacheParams.length})`;
+      }
+      const rc = await pool.query(`
+        SELECT resource_group_name_upper AS resource_group_name, subscription_id, moeda
+        FROM azure_rg_cache WHERE ${cacheCond.join(' AND ')}
+        ORDER BY resource_group_name_upper LIMIT 500
+      `, cacheParams);
+      rows = rc.rows;
+    } catch (_) {}
+    if (!rows.length) {
+      const r = await pool.query(`
+        SELECT DISTINCT UPPER(resource_group_name) AS resource_group_name_upper,
+               MAX(resource_group_name) AS resource_group_name,
+               MAX(subscription_id) AS subscription_id
+        FROM azure_costs
+        WHERE ${cond.join(' AND ')} AND resource_group_name IS NOT NULL
+        GROUP BY UPPER(resource_group_name)
+        ORDER BY resource_group_name
+        LIMIT 500
+      `, params);
+      rows = r.rows;
+    }
+    const withManaged = rows.map(row => ({ ...row, ..._detectManagedRg(row.resource_group_name) }));
     const effSubs = subscription_ids.length ? subscription_ids : [];
     res.json(await _resolveParentRgs(withManaged, effSubs));
   } catch (e) { _dbErr(res, e); }
