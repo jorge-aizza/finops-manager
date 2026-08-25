@@ -1948,9 +1948,11 @@ async function _refreshAzureCache() {
       CREATE TABLE IF NOT EXISTS azure_rg_cache (
         subscription_id           VARCHAR(200),
         resource_group_name_upper VARCHAR(500),
+        resource_group_name       VARCHAR(500),
         moeda                     VARCHAR(20),
         PRIMARY KEY (subscription_id, resource_group_name_upper)
       );
+      ALTER TABLE azure_rg_cache ADD COLUMN IF NOT EXISTS resource_group_name VARCHAR(500);
       CREATE TABLE IF NOT EXISTS azure_cobertura_cache (
         mes               VARCHAR(10),
         subscription_id   VARCHAR(200),
@@ -2011,6 +2013,7 @@ async function _refreshAzureCache() {
       _queryParalelo(`
         SELECT subscription_id,
                UPPER(resource_group_name) AS resource_group_name_upper,
+               MAX(resource_group_name)   AS resource_group_name,
                MIN(billing_currency)      AS moeda
         FROM azure_costs
         WHERE subscription_id IS NOT NULL AND subscription_id <> ''
@@ -2075,11 +2078,12 @@ async function _refreshAzureCache() {
       await cw.query('DELETE FROM azure_rg_cache');
       if (rgRows.length) {
         await cw.query(
-          `INSERT INTO azure_rg_cache (subscription_id, resource_group_name_upper, moeda)
-           SELECT * FROM UNNEST($1::text[],$2::text[],$3::text[])`,
+          `INSERT INTO azure_rg_cache (subscription_id, resource_group_name_upper, resource_group_name, moeda)
+           SELECT * FROM UNNEST($1::text[],$2::text[],$3::text[],$4::text[])`,
           [
             rgRows.map(r => r.subscription_id),
             rgRows.map(r => r.resource_group_name_upper),
+            rgRows.map(r => r.resource_group_name || r.resource_group_name_upper),
             rgRows.map(r => r.moeda || null)
           ]
         );
@@ -4056,10 +4060,7 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
     // Bug real corrigido: diferente de GET /api/calculadora/resource-groups (privado), que já
     // tenta azure_rg_cache primeiro, esse endpoint público sempre ia direto pra um GROUP BY
     // completo em azure_costs (1.2M+ linhas) — reportado pelo usuário como demora perceptível
-    // ao selecionar a assinatura no Portal Público (medido: ~7-8s por requisição). azure_rg_cache
-    // não tem coluna de RG com a grafia original — só resource_group_name_upper — mesma
-    // limitação que o endpoint privado já aceita nesse caminho rápido (retorna sempre
-    // maiúsculo quando o cache está quente; grafia original só no fallback abaixo).
+    // ao selecionar a assinatura no Portal Público (medido: ~7-8s por requisição).
     let rows = [];
     try {
       const cacheCond = [...cond];
@@ -4068,7 +4069,7 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
         cacheCond[cacheCond.length - 1] = `resource_group_name_upper = ANY($${cacheParams.length})`;
       }
       const rc = await pool.query(`
-        SELECT resource_group_name_upper AS resource_group_name, subscription_id, moeda
+        SELECT COALESCE(resource_group_name, resource_group_name_upper) AS resource_group_name, subscription_id, moeda
         FROM azure_rg_cache WHERE ${cacheCond.join(' AND ')}
         ORDER BY resource_group_name_upper LIMIT 500
       `, cacheParams);
@@ -4365,7 +4366,7 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
     const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
     let rows = [];
     try {
-      const rc = await pool.query(`SELECT resource_group_name_upper AS resource_group_name, moeda FROM azure_rg_cache ${where} ORDER BY resource_group_name_upper LIMIT 1000`, params);
+      const rc = await pool.query(`SELECT COALESCE(resource_group_name, resource_group_name_upper) AS resource_group_name, moeda FROM azure_rg_cache ${where} ORDER BY resource_group_name_upper LIMIT 1000`, params);
       rows = rc.rows;
     } catch (_) {}
     // Fallback: cache vazio — lê direto
