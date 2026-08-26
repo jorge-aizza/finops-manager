@@ -6557,8 +6557,20 @@ app.delete('/api/databricks-coleta/config/:id', authMiddleware, dbMiddleware, as
   } catch (e) { _dbErr(res, e); }
 });
 
+// System Tables exigidas pela coleta (system.billing.usage/system.billing.list_prices) —
+// no Databricks, o schema `system` inteiro (e cada subschema, como `billing`) precisa ser
+// EXPLICITAMENTE habilitado por um account admin (Catalog Explorer → System Tables), e o
+// Service Principal precisa de USE SCHEMA + SELECT nessas tabelas. Nomes fixos (não vêm do
+// request), então interpolar na query é seguro — não é entrada de usuário.
+const _DBX_REQUIRED_TABLES = ['system.billing.usage', 'system.billing.list_prices'];
+
 // Diagnóstico — a mensagem de erro É o propósito da rota (mesmo padrão de
 // POST /api/azure-coleta/sps/:id/testar), não genericizar com _dbErr aqui.
+// Além de autenticar e validar o SQL Warehouse, testa CADA System Table exigida
+// individualmente — "Testar Conexão" sozinho (SELECT 1) só prova que o warehouse
+// responde, não que o schema `system.billing` está habilitado na conta nem que o
+// Service Principal tem grant nele; sem esse detalhamento, um erro de permissão nas
+// tabelas só apareceria na primeira coleta agendada de verdade, sem diagnóstico claro.
 app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const r = await pool.query(`SELECT * FROM databricks_coleta_config WHERE id=$1`, [req.params.id]);
@@ -6569,7 +6581,26 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
     const secret    = _safeDecrypt(cfg.client_secret);
     const { token } = await _databricksGetToken(accountId, clientId, secret);
     await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, 'SELECT 1');
-    res.json({ ok: true, message: 'Conexão com Databricks OK — autenticação e SQL Warehouse validados.' });
+
+    const tabelas = {};
+    let todasOk = true;
+    for (const tabela of _DBX_REQUIRED_TABLES) {
+      try {
+        await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, `SELECT 1 FROM ${tabela} LIMIT 1`);
+        tabelas[tabela] = { ok: true, message: 'Acessível.' };
+      } catch (eTab) {
+        todasOk = false;
+        tabelas[tabela] = { ok: false, message: eTab.message };
+      }
+    }
+
+    res.json({
+      ok: todasOk,
+      message: todasOk
+        ? 'Conexão com Databricks OK — autenticação, SQL Warehouse e System Tables validados.'
+        : 'Autenticação e SQL Warehouse OK, mas uma ou mais System Tables não estão acessíveis — veja detalhes.',
+      tabelas,
+    });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

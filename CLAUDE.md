@@ -1030,7 +1030,7 @@ PUT    /api/databricks-coleta/config/:id         — atualiza (client_secret opc
 PATCH  /api/databricks-coleta/config/:id/ativo    — ativa/desativa
 PATCH  /api/databricks-coleta/config/:id/padrao   — define como padrão (único por vez)
 DELETE /api/databricks-coleta/config/:id         — exclui
-POST   /api/databricks-coleta/config/:id/testar   — pede token OAuth M2M + roda SELECT 1 no warehouse; erro cru é o propósito da rota (mesmo padrão de POST /api/azure-coleta/sps/:id/testar — não usa `_dbErr`)
+POST   /api/databricks-coleta/config/:id/testar   — pede token OAuth M2M + roda SELECT 1 no warehouse + testa cada System Table exigida individualmente (ver nota abaixo); erro cru é o propósito da rota (mesmo padrão de POST /api/azure-coleta/sps/:id/testar — não usa `_dbErr`)
 POST   /api/databricks-coleta/config/:id/coletar  — gatilho manual (data_inicio/data_fim, formato YYYY-MM-DD)
 GET    /api/databricks-coleta/status              — progresso ao vivo da coleta em execução (polling)
 PUT    /api/databricks-coleta/config/:id/agendamento — hora_execucao/dias_semana/auto_coleta/granularidade_dias (espelha PUT /api/azure-coleta/sps/:id/agendamento)
@@ -1064,6 +1064,34 @@ subscription/RG) + `frontend/src/components/DatabricksColetaMonitor.tsx` (porta 
 `ColetaMonitor.tsx`, sem sub-assinaturas/chunks — a Fase 2 roda tudo num único statement; "Fechar" não é
 persistido em localStorage aqui, diferente do original). Tudo isso dentro do card "Coleta Databricks" em
 `ColetaView.tsx`, entre Service Principals e Storage Accounts.
+
+**"Testar Conexão" verifica as System Tables individualmente, não só `SELECT 1` (2026-08-25)** — pedido do
+usuário antes de seguir pra Fase 3: "garanta se todas as Tables Necessária do Workspace... que tem o Unity
+Catalog está ok." Motivo pelo qual `SELECT 1` sozinho não bastava: no Databricks, o schema `system` inteiro
+(e cada subschema, como `system.billing`) precisa ser **explicitamente habilitado por um account admin**
+(Catalog Explorer → System Tables — não vem habilitado por padrão em nenhuma conta) e o Service Principal
+precisa de `USE SCHEMA` + `SELECT` nas tabelas específicas; nenhuma dessas duas coisas é coberta por um
+`SELECT 1` genérico contra o warehouse, que só prova que a autenticação e o warehouse em si funcionam.
+Corrigido: `POST /api/databricks-coleta/config/:id/testar` agora roda `SELECT 1 FROM <tabela> LIMIT 1` pra
+cada uma de `_DBX_REQUIRED_TABLES` (`system.billing.usage`, `system.billing.list_prices` — nomes fixos no
+servidor, nunca vêm do request, então interpolar na query é seguro) depois do teste de warehouse, retornando
+`{ ok, message, tabelas: { '<nome>': { ok, message } } }` — o `message` de cada tabela é o erro cru do
+Databricks (`TABLE_OR_VIEW_NOT_FOUND` = schema não habilitado na conta; `PERMISSION_DENIED`/`ACCESS_DENIED` =
+falta grant no Service Principal), então o usuário sabe exatamente qual das duas causas é a dele, em vez de
+descobrir só na primeira coleta agendada real. Frontend (`ColetaView.tsx`'s `testarDbxMutation`) mostra o
+resumo por tabela no toast (✅/❌ por nome + mensagem de erro quando falha).
+
+**Esclarecimento sobre "token da API" (2026-08-25)** — o usuário reportou que a tela de configuração pede
+Client ID/Client Secret mas não um "token da API". Isso é esperado no fluxo OAuth M2M implementado: não existe
+um token pra colar manualmente — `client_id`+`client_secret` são as credenciais do Service Principal criado
+no console da conta Databricks (account-level), e `_databricksGetToken` troca essas credenciais por um
+token de acesso automaticamente, a cada execução (mesmo padrão da Coleta Azure — o usuário também nunca cola
+um "token" lá, só tenant/client/secret). Um campo de "token" faria sentido apenas se o método de autenticação
+fosse Personal Access Token (PAT) em vez de OAuth M2M — **não implementado nesta fase**; PAT amarra a
+automação a uma pessoa (mesma razão pela qual a Coleta Azure usa Service Principal, não credencial de
+usuário), então OAuth M2M foi a escolha deliberada desde o plano original desta feature. Se o usuário só tiver
+um PAT disponível (não um Service Principal OAuth de conta), avisar antes de configurar — precisaria de um
+método de auth alternativo não coberto hoje.
 
 **Roteiro (não implementado ainda) — Fase 3**: dashboard (consumo mensal, custo por workspace, custo por SKU,
 usuário, free-tier vs. pago). Precisa de lib de gráficos nova (frontend não tem nenhuma hoje — `recharts`

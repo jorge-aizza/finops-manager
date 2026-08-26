@@ -196,7 +196,12 @@ export default function ColetaView() {
   })
   const testarDbxMutation = useMutation({
     mutationFn: (id: number) => testarDatabricksConfig(id),
-    onSuccess: (r) => window.showToast?.(r.message, 'success'),
+    onSuccess: (r) => {
+      const detalhes = r.tabelas
+        ? ' — ' + Object.entries(r.tabelas).map(([t, v]) => `${v.ok ? '✅' : '❌'} ${t}${v.ok ? '' : ' (' + v.message + ')'}`).join('; ')
+        : ''
+      window.showToast?.(r.message + detalhes, r.ok ? 'success' : 'error')
+    },
     onError: (e: Error) => window.showToast?.('Erro ao testar: ' + e.message, 'error'),
   })
   const [agendamentoDbx, setAgendamentoDbx] = useState<DatabricksConfig | null>(null)

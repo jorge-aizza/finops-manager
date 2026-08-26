@@ -33,9 +33,19 @@ export interface DatabricksConfigInput {
   ativo: boolean
 }
 
+export interface TestarDatabricksTabela {
+  ok: boolean
+  message: string
+}
+
+// tabelas: presente só quando a autenticação/warehouse passaram — cada uma das System
+// Tables exigidas (system.billing.usage/system.billing.list_prices) testada individualmente,
+// pra diferenciar "credencial errada" de "schema system.billing não habilitado na conta" ou
+// "Service Principal sem grant nas tabelas" (mesmo warehouse, causas raiz bem diferentes).
 export interface TestarDatabricksResponse {
   ok: boolean
   message: string
+  tabelas?: Record<string, TestarDatabricksTabela>
 }
 
 // Fase 2 — coleta real + agendamento
