@@ -985,7 +985,7 @@ DELETE /api/azure-coleta/pendentes/:id      — remove pending job
 **SP modal — `saveSP()` pitfall:**
 `sp-dia` element does not exist in the modal HTML — always use `document.getElementById('sp-dia')?.value` (optional chaining). The entire `saveSP()` body is wrapped in try/catch so any future `null.value` errors surface as a toast instead of silent failure.
 
-### Coleta Databricks (Fase 1 — 2026-08-25)
+### Coleta Databricks (Fases 1 e 2 — 2026-08-25)
 **Por quê**: custo por usuário e distinção free-tier vs. pago (ex: `GENIE_FREE_USAGE`) **não existem** e
 **nunca vão existir** em `azure_costs` — confirmado por investigação: Azure Cost Management nunca carrega
 identidade de usuário nem o catálogo de produto interno do Databricks, só *meter names* genéricos da Azure.
@@ -995,8 +995,9 @@ própria. Decisão do usuário: em vez de montar Grafana à parte, entra como um
 Coleta já existente, espelhando 1:1 a arquitetura da Coleta Azure (Service Principal → coleta agendada →
 tabela própria → dashboard).
 
-**Fase 1 (implementada)**: só a configuração da conexão — credenciais + endpoint de execução, sem coleta
-agendada real ainda (isso é Fase 2) nem dashboard (Fase 3).
+**Fase 1 (implementada)**: configuração da conexão — credenciais + endpoint de execução.
+**Fase 2 (implementada)**: coleta agendada real + gatilho manual + monitor ao vivo. Dashboard (Fase 3) ainda
+não existe.
 
 - **Tabela** `databricks_coleta_config` — mesmo formato de `azure_coleta_config`, incluindo os campos de
   agendamento (`dia_execucao`/`hora_execucao`/`dias_semana`/`granularidade_dias`/`auto_coleta`/
@@ -1011,9 +1012,8 @@ agendada real ainda (isso é Fase 2) nem dashboard (Fase 3).
   credenciais Azure) — zero cripto nova.
 - **`_dbxFetch`** (server.js) — fetch próprio com timeout via `AbortController`, **não reusa `_cbFetch`**:
   aquele helper está acoplado ao circuit breaker global do Azure (`_cbAPI`/`_cbCanAttempt`) — reusar faria
-  falhas do Databricks abrirem o circuito e bloquearem chamadas Azure não relacionadas (e vice-versa). Sem
-  retry/circuit breaker próprio ainda — Fase 1 só faz teste de conexão pontual, não um job agendado
-  recorrente (que precisaria de um breaker dedicado na Fase 2).
+  falhas do Databricks abrirem o circuito e bloquearem chamadas Azure não relacionadas (e vice-versa). Ainda
+  sem circuit breaker próprio (só timeout) — considerar se o volume de execuções justificar no futuro.
 - **`_databricksGetToken`/`_databricksRunQuery`** — OAuth 2.0 client_credentials (Basic Auth,
   `scope=all-apis`) contra `https://accounts.azuredatabricks.net/oidc/accounts/{account_id}/v1/token`, e
   Statement Execution API (`POST {workspace_host}/api/2.0/sql/statements`) pra rodar SQL. **Não validado
@@ -1031,26 +1031,48 @@ PATCH  /api/databricks-coleta/config/:id/ativo    — ativa/desativa
 PATCH  /api/databricks-coleta/config/:id/padrao   — define como padrão (único por vez)
 DELETE /api/databricks-coleta/config/:id         — exclui
 POST   /api/databricks-coleta/config/:id/testar   — pede token OAuth M2M + roda SELECT 1 no warehouse; erro cru é o propósito da rota (mesmo padrão de POST /api/azure-coleta/sps/:id/testar — não usa `_dbErr`)
+POST   /api/databricks-coleta/config/:id/coletar  — gatilho manual (data_inicio/data_fim, formato YYYY-MM-DD)
+GET    /api/databricks-coleta/status              — progresso ao vivo da coleta em execução (polling)
+PUT    /api/databricks-coleta/config/:id/agendamento — hora_execucao/dias_semana/auto_coleta/granularidade_dias (espelha PUT /api/azure-coleta/sps/:id/agendamento)
 ```
 
-**Frontend**: `frontend/src/views/DatabricksConfigModal.tsx` (porta simplificada de `SPModal.tsx`, sem os
-campos de agendamento) + novo card "Coleta Databricks" em `ColetaView.tsx`, entre Service Principals e
-Storage Accounts. `frontend/src/api/databricksColeta.ts`/`types/databricksColeta.ts` espelham
-`api/coleta.ts`/`types/coleta.ts`.
+**Fase 2 — coleta real**: `_executarColetaDatabricks(configId, startDate, endDate, origem)` autentica via
+`_databricksGetToken`, roda uma query parametrizada (`:data_inicio`/`:data_fim` — nunca concatena data direto
+na SQL) contra `system.billing.usage` JOIN `system.billing.list_prices` via `_databricksRunQuery` +
+`_parseDatabricksResult` (converte a resposta colunas+linhas da Statement Execution API em objetos nomeados),
+grava em `databricks_consumo` via UPSERT (`ON CONFLICT (workspace_id,sku_name,usage_date,usuario)`), loga em
+`databricks_coleta_historico` e `notificacoes_sistema` (mesmo padrão de `_registrarNotificacaoColeta` já
+usado pela Coleta Azure). **Não validado contra uma conta Databricks real** — mesma ressalva de
+`_databricksGetToken`/`_databricksRunQuery`; a sintaxe de acesso aos campos STRUCT
+(`identity_metadata.run_as`, `pricing.default`) e os nomes exatos de coluna podem precisar de ajuste na
+primeira execução real.
 
-**Roteiro (não implementado ainda)**:
-- **Fase 2** — coleta agendada real: estender `_iniciarAgendador()` pra também checar
-  `databricks_coleta_config` due (mesmo padrão de prioridade um-por-tick já usado pra Storage/SP Azure); nova
-  `_executarColetaDatabricks()` rodando a query real contra `system.billing.usage` JOIN
-  `system.billing.list_prices`; nova tabela `databricks_consumo` (workspace_id, usage_date, sku_name,
-  usage_quantity, custo_estimado, usuario, metadata); nova `databricks_coleta_historico`.
-- **Fase 3** — dashboard: consumo mensal, custo por workspace, custo por SKU de VM (dá pra fazer hoje com
-  `azure_costs`); usuário e free-tier só depois da Fase 2. Precisa de lib de gráficos nova (frontend não tem
-  nenhuma hoje — `recharts` recomendado). Tabela `budgets` nova (não existe conceito de orçamento no sistema
-  hoje) + CRUD. Alertas no padrão já existente da Reservas (`checkRsvAlertsPopup`, app.js:423-480 — popup
-  client-side ao logar, sem entrega externa/e-mail, já que não existe infra de notificação externa hoje).
+**Tabelas novas (Fase 2)**:
+- `databricks_consumo` — uma linha por `(workspace_id, sku_name, usage_date, usuario)`, com
+  `usage_quantity`/`preco_unitario`/`custo_estimado` — granularidade que `azure_costs` nunca vai ter.
+- `databricks_coleta_historico` — mesmo formato de `azure_coleta_historico` (status, contagens, timing,
+  origem manual/agendado).
 
-**Rollback**: tag git `pre-databricks-coleta-2026-08-25` no commit anterior a esta feature.
+**Agendador**: `_iniciarAgendador()` ganhou um bloco novo (dentro do mesmo `_tickAgendador`, mesmo timer de
+5min) que checa `databricks_coleta_config` due — usa `_dbxColetaEmExecucao` (variável própria, **não**
+`_coletaEmExecucao` do Azure), então uma coleta Databricks em andamento não bloqueia nem é bloqueada por uma
+coleta Azure em andamento (tabelas diferentes, circuit breakers separados).
+
+**Frontend**: `frontend/src/views/DatabricksConfigModal.tsx` (credenciais) + `DatabricksAgendamentoModal.tsx`
+(porta de `AgendamentoModal.tsx` sem o picker de assinaturas — a Coleta Databricks não tem escopo por
+subscription/RG) + `frontend/src/components/DatabricksColetaMonitor.tsx` (porta simplificada de
+`ColetaMonitor.tsx`, sem sub-assinaturas/chunks — a Fase 2 roda tudo num único statement; "Fechar" não é
+persistido em localStorage aqui, diferente do original). Tudo isso dentro do card "Coleta Databricks" em
+`ColetaView.tsx`, entre Service Principals e Storage Accounts.
+
+**Roteiro (não implementado ainda) — Fase 3**: dashboard (consumo mensal, custo por workspace, custo por SKU,
+usuário, free-tier vs. pago). Precisa de lib de gráficos nova (frontend não tem nenhuma hoje — `recharts`
+recomendado). Tabela `budgets` nova (não existe conceito de orçamento no sistema hoje) + CRUD. Alertas no
+padrão já existente da Reservas (`checkRsvAlertsPopup`, app.js:423-480 — popup client-side ao logar, sem
+entrega externa/e-mail, já que não existe infra de notificação externa hoje).
+
+**Rollback**: tag git `pre-databricks-coleta-2026-08-25` no commit anterior a esta feature (Fases 1 e 2
+inteiras — cobre também os commits desta rodada).
 
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
