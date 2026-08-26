@@ -5,11 +5,16 @@ import {
   getCoberturaMeses, getHistorico, getImports, listPendentes, listSPs, listStorages,
   setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
 } from '../api/coleta'
+import {
+  deleteDatabricksConfig, listDatabricksConfigs, setDatabricksConfigAtivo, setDatabricksConfigPadrao, testarDatabricksConfig,
+} from '../api/databricksColeta'
 import type { HistoricoItem, ImportItem, ServicePrincipal, StorageConfig } from '../types/coleta'
+import type { DatabricksConfig } from '../types/databricksColeta'
 import CoberturaGrid from '../components/CoberturaGrid'
 import ColetaMonitor from '../components/ColetaMonitor'
 import ImportManualPanel from '../components/ImportManualPanel'
 import SPModal from './SPModal'
+import DatabricksConfigModal from './DatabricksConfigModal'
 import StorageModal from './StorageModal'
 import WizardColetaModal from './WizardColetaModal'
 import AgendamentoModal from './AgendamentoModal'
@@ -162,6 +167,41 @@ export default function ColetaView() {
     onSuccess: (r) => window.showToast?.(r.message.replace(/\n/g, ' · '), r.results.management.ok ? 'success' : 'warn'),
     onError: (e: Error) => window.showToast?.('Erro ao testar: ' + e.message, 'error'),
   })
+
+  // ── Coleta Databricks (Fase 1 — só configuração da conexão) ──
+  const databricksQuery = useQuery({ queryKey: ['databricks-coleta-config'], queryFn: listDatabricksConfigs })
+  const [dbxModalOpen, setDbxModalOpen] = useState(false)
+  const [editingDbx, setEditingDbx] = useState<DatabricksConfig | null>(null)
+
+  const deleteDbxMutation = useMutation({
+    mutationFn: (id: number) => deleteDatabricksConfig(id),
+    onSuccess: () => {
+      window.showToast?.('Configuração Databricks excluída.', 'success')
+      queryClient.invalidateQueries({ queryKey: ['databricks-coleta-config'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao excluir: ' + e.message, 'error'),
+  })
+  const toggleDbxMutation = useMutation({
+    mutationFn: ({ id, ativo }: { id: number; ativo: boolean }) => setDatabricksConfigAtivo(id, ativo),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['databricks-coleta-config'] }),
+  })
+  const padraoDbxMutation = useMutation({
+    mutationFn: (id: number) => setDatabricksConfigPadrao(id),
+    onSuccess: () => {
+      window.showToast?.('Configuração Databricks definida como padrão.', 'success')
+      queryClient.invalidateQueries({ queryKey: ['databricks-coleta-config'] })
+    },
+  })
+  const testarDbxMutation = useMutation({
+    mutationFn: (id: number) => testarDatabricksConfig(id),
+    onSuccess: (r) => window.showToast?.(r.message, 'success'),
+    onError: (e: Error) => window.showToast?.('Erro ao testar: ' + e.message, 'error'),
+  })
+
+  function handleDeleteDbx(c: DatabricksConfig) {
+    if (!confirm(`Excluir a configuração Databricks "${c.nome}"? Esta ação não pode ser desfeita.`)) return
+    deleteDbxMutation.mutate(c.id)
+  }
 
   // ── Storage Accounts ──
   const storagesQuery = useQuery({ queryKey: ['coleta-storages'], queryFn: listStorages })
@@ -323,6 +363,65 @@ export default function ColetaView() {
                         <svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" /></svg>
                       </button>
                       <button className="btn-icon delete" title="Excluir" onClick={() => handleDeleteSP(sp)}>
+                        <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ── Coleta Databricks (Fase 1 — só configuração da conexão) ── */}
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">Coleta Databricks</span>
+          <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>Fase 1 — configuração</span>
+          <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingDbx(null); setDbxModalOpen(true) }}>
+            Nova Configuração
+          </button>
+        </div>
+        <div style={{ padding: '0 20px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
+          Custo por usuário e distinção free-tier vs. pago do Databricks vêm das System Tables do próprio
+          Databricks — dado que não existe no billing da Azure. Esta tela só configura a conexão (Service
+          Principal OAuth M2M); a coleta agendada em si ainda não está implementada.
+        </div>
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Nome</th><th>Account ID</th><th>Client ID</th><th>Workspace</th><th>Ativo</th><th>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {databricksQuery.isLoading && <tr><td colSpan={6} className="empty-state">Carregando...</td></tr>}
+              {!databricksQuery.isLoading && (databricksQuery.data?.length ?? 0) === 0 && (
+                <tr><td colSpan={6} className="empty-state">Nenhuma configuração Databricks cadastrada</td></tr>
+              )}
+              {databricksQuery.data?.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    {c.nome}
+                    {c.is_padrao && <span style={{ marginLeft: 6, fontSize: 9, padding: '1px 6px', borderRadius: 8, background: 'var(--accent-dim)', color: 'var(--accent)' }}>PADRÃO</span>}
+                  </td>
+                  <td style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>{c.account_id.slice(0, 8)}…</td>
+                  <td style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>{c.client_id.slice(0, 8)}…</td>
+                  <td style={{ fontSize: 11, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.workspace_host}>{c.workspace_host}</td>
+                  <td>
+                    <input type="checkbox" checked={c.ativo} onChange={(e) => toggleDbxMutation.mutate({ id: c.id, ativo: e.target.checked })} />
+                  </td>
+                  <td>
+                    <div className="table-actions">
+                      <button className="btn-icon" title="Testar conexão" disabled={testarDbxMutation.isPending} onClick={() => testarDbxMutation.mutate(c.id)}>🔌</button>
+                      {!c.is_padrao && (
+                        <button className="btn-icon" title="Definir como padrão" onClick={() => padraoDbxMutation.mutate(c.id)}>★</button>
+                      )}
+                      <button className="btn-icon" title="Editar" onClick={() => { setEditingDbx(c); setDbxModalOpen(true) }}>
+                        <svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" /></svg>
+                      </button>
+                      <button className="btn-icon delete" title="Excluir" onClick={() => handleDeleteDbx(c)}>
                         <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
                       </button>
                     </div>
@@ -511,6 +610,7 @@ export default function ColetaView() {
       </div>
 
       {spModalOpen && <SPModal sp={editingSP} onClose={() => setSpModalOpen(false)} />}
+      {dbxModalOpen && <DatabricksConfigModal config={editingDbx} onClose={() => setDbxModalOpen(false)} />}
       {storageModalOpen && <StorageModal storage={editingStorage} onClose={() => setStorageModalOpen(false)} />}
       {wizardSP && <WizardColetaModal sp={wizardSP} onClose={() => setWizardSP(null)} />}
       {agendamentoSP && <AgendamentoModal sp={agendamentoSP} onClose={() => setAgendamentoSP(null)} />}
