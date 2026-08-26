@@ -5355,6 +5355,18 @@ let _coletaCancelada  = false;
 let _coletaProgresso  = { fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] };
 let _coletaIniciadaEm = null;
 
+// Estado independente do Azure (_coletaEmExecucao acima) — Databricks e Azure podem
+// coletar em paralelo sem se bloquear, já que escrevem em tabelas diferentes e não
+// compartilham circuit breaker (_dbxFetch, deliberadamente separado de _cbFetch).
+let _dbxColetaEmExecucao = false;
+let _dbxColetaIniciadaEm = null;
+let _dbxColetaProgresso  = { fase: '', ins: 0, upd: 0, err: 0, log: [] };
+function _logColetaDbx(msg) {
+  _dbxColetaProgresso.log.push({ ts: new Date().toISOString().slice(11, 19), msg });
+  if (_dbxColetaProgresso.log.length > 200) _dbxColetaProgresso.log.shift();
+  console.log('[ColetaDbx] ' + msg);
+}
+
 // ── Circuit Breaker — Azure Cost Management API ────────────────────────────────
 const _CB_STATES       = Object.freeze({ CLOSED: 'CLOSED', OPEN: 'OPEN', HALF_OPEN: 'HALF_OPEN' });
 const _CB_MAX_FAILURES = 3;
@@ -5591,6 +5603,47 @@ async function ensureAzureColetaTable() {
     )
   `);
 
+  // ── databricks_consumo — Fase 2: linhas coletadas de system.billing.usage JOIN
+  // system.billing.list_prices. Uma linha por (workspace, sku, dia, usuário) — mesma
+  // granularidade que o dashboard (Fase 3) vai precisar pra distinguir usuário e
+  // free-tier vs. pago, coisa que azure_costs nunca vai ter (ver CLAUDE.md).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_consumo (
+      id              SERIAL PRIMARY KEY,
+      workspace_id    VARCHAR(200) NOT NULL,
+      sku_name        VARCHAR(200) NOT NULL,
+      usage_date      DATE NOT NULL,
+      usage_unit      VARCHAR(50),
+      usage_quantity  NUMERIC(20,6) DEFAULT 0,
+      usuario         VARCHAR(300) NOT NULL DEFAULT '',
+      preco_unitario  NUMERIC(20,10),
+      custo_estimado  NUMERIC(20,4) DEFAULT 0,
+      config_id       INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
+      criado_em       TIMESTAMP DEFAULT NOW(),
+      atualizado_em   TIMESTAMP DEFAULT NOW(),
+      UNIQUE (workspace_id, sku_name, usage_date, usuario)
+    )
+  `);
+
+  // ── databricks_coleta_historico — mesmo formato de azure_coleta_historico ──────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_coleta_historico (
+      id                  SERIAL PRIMARY KEY,
+      iniciado_em         TIMESTAMP DEFAULT NOW(),
+      concluido_em        TIMESTAMP,
+      status              VARCHAR(20) DEFAULT 'executando',
+      config_id           INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
+      origem              VARCHAR(20),
+      periodo_inicio      DATE,
+      periodo_fim         DATE,
+      linhas_inseridas    INTEGER DEFAULT 0,
+      linhas_atualizadas  INTEGER DEFAULT 0,
+      linhas_erro         INTEGER DEFAULT 0,
+      mensagem            TEXT,
+      detalhes            JSONB
+    )
+  `);
+
   _coletaTableReady = true;
 }
 
@@ -5810,6 +5863,41 @@ function _iniciarAgendador() {
           // "does not exist" = tabela ainda não criada (startup race) — skip silencioso
           if (!ePlSched.message.includes('does not exist')) {
             console.warn('[Agendador] Erro ao verificar schedule Price List:', ePlSched.message);
+          }
+        }
+      }
+
+      // ── Databricks: agendamento por hora+dia — independente do Azure, usa
+      // _dbxColetaEmExecucao (não _coletaEmExecucao) pra não bloquear nem ser
+      // bloqueado pela coleta Azure, já que escrevem em tabelas separadas.
+      if (!_dbxColetaEmExecucao) {
+        try {
+          const rDbx = await pool.query(`
+            SELECT id, nome, granularidade_dias, hora_execucao, dias_semana
+            FROM databricks_coleta_config
+            WHERE ativo = true
+              AND auto_coleta = true
+              AND hora_execucao IS NOT NULL
+              AND dias_semana IS NOT NULL
+              AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
+            ORDER BY is_padrao DESC, proxima_coleta ASC NULLS FIRST
+            LIMIT 1
+          `);
+          if (rDbx.rows.length) {
+            const dbxCfg = rDbx.rows[0];
+            console.log(`[Agendador] Disparando coleta Databricks #${dbxCfg.id} (${dbxCfg.nome})`);
+            const proxima = _computeProximaColeta(dbxCfg.hora_execucao, dbxCfg.dias_semana);
+            await pool.query(`UPDATE databricks_coleta_config SET proxima_coleta=$1 WHERE id=$2`, [proxima, dbxCfg.id]);
+            const granDias = dbxCfg.granularidade_dias || 7;
+            const fim    = new Date(); fim.setDate(fim.getDate() - 1);
+            const inicio = new Date(fim); inicio.setDate(inicio.getDate() - (granDias - 1));
+            const fmt = d => d.toISOString().slice(0, 10);
+            _executarColetaDatabricks(dbxCfg.id, fmt(inicio), fmt(fim), 'agendado')
+              .catch(e => console.error(`[Agendador] Erro coleta Databricks #${dbxCfg.id}:`, e.message));
+          }
+        } catch (eDbxSched) {
+          if (!eDbxSched.message.includes('does not exist')) {
+            console.warn('[Agendador] Erro ao verificar schedule Databricks:', eDbxSched.message);
           }
         }
       }
@@ -6370,15 +6458,32 @@ async function _databricksGetToken(accountId, clientId, clientSecret) {
 
 // Executa uma query SQL via Statement Execution API contra o warehouse configurado —
 // usado pelo teste de conexão (SELECT 1) e, na Fase 2, pelas queries reais de billing.
-async function _databricksRunQuery(workspaceHost, warehouseId, token, sql) {
+// `parameters` — array de {name, value, type} — usa placeholders `:nome` na SQL em vez
+// de concatenar valores direto na string, mesma prática de parametrização já usada em
+// toda query Postgres deste arquivo (aqui obrigatório mesmo pra um sistema externo: a
+// Fase 2 passa datas vindas do agendador OU de um gatilho manual via API, nunca confiar
+// em concatenação de string pra isso).
+async function _databricksRunQuery(workspaceHost, warehouseId, token, sql, parameters = []) {
   const host = (workspaceHost || '').replace(/\/+$/, '');
   const resp = await _dbxFetch(`${host}/api/2.0/sql/statements`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ warehouse_id: warehouseId, statement: sql, wait_timeout: '30s' }),
+    body: JSON.stringify({ warehouse_id: warehouseId, statement: sql, wait_timeout: '30s', parameters }),
   }, 35000);
   if (!resp.ok) { const e = await resp.text(); throw new Error(`Query Databricks falhou (${resp.status}): ${e}`); }
   return _safeRespJson(resp);
+}
+
+// Converte a resposta da Statement Execution API (colunas + linhas em array) em objetos
+// nomeados — NÃO VALIDADO contra uma resposta real (ver nota em _databricksGetToken).
+function _parseDatabricksResult(result) {
+  const state = result?.status?.state;
+  if (state !== 'SUCCEEDED') {
+    throw new Error(`Query Databricks não concluiu (status: ${state || 'desconhecido'})${result?.status?.error?.message ? ' — ' + result.status.error.message : ''}`);
+  }
+  const cols = (result.manifest?.schema?.columns || []).map(c => c.name);
+  const rows = result.result?.data_array || [];
+  return rows.map(row => Object.fromEntries(cols.map((c, i) => [c, row[i]])));
 }
 
 app.get('/api/databricks-coleta/config', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -6468,6 +6573,162 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+// ── Fase 2: coleta real contra system.billing.usage/system.billing.list_prices ──
+// Uma linha por (workspace_id, sku_name, usage_date, usuario) — granularidade que
+// azure_costs nunca vai ter (sem identidade de usuário nem SKU nativo do Databricks).
+// NÃO VALIDADO contra uma conta Databricks real neste ambiente — mesma ressalva de
+// _databricksGetToken/_databricksRunQuery. A sintaxe de acesso aos campos STRUCT
+// (identity_metadata.run_as, pricing.default) e os nomes exatos de coluna podem
+// precisar de ajuste na primeira execução real.
+async function _executarColetaDatabricks(configId, startDate, endDate, origem = 'manual') {
+  if (_dbxColetaEmExecucao) throw new Error('Coleta Databricks já em execução');
+  if (!pool) throw new Error('Banco não conectado');
+  _dbxColetaEmExecucao = true;
+  _dbxColetaIniciadaEm = new Date();
+  _dbxColetaProgresso  = { fase: 'Iniciando...', ins: 0, upd: 0, err: 0, log: [] };
+  _logColetaDbx(`Coleta Databricks — ${startDate} → ${endDate}`);
+  let histId, totalIns = 0, totalUpd = 0, totalErr = 0;
+
+  try {
+    await ensureAzureColetaTable();
+    const r = await pool.query(
+      `INSERT INTO databricks_coleta_historico (status,config_id,origem,periodo_inicio,periodo_fim) VALUES ('executando',$1,$2,$3,$4) RETURNING id`,
+      [configId, origem, startDate, endDate]
+    );
+    histId = r.rows[0].id;
+
+    const cfgRow = await pool.query(`SELECT * FROM databricks_coleta_config WHERE id=$1`, [configId]);
+    if (!cfgRow.rows.length) throw new Error('Configuração não encontrada');
+    const cfg = cfgRow.rows[0];
+    const accountId = _safeDecrypt(cfg.account_id);
+    const clientId  = _safeDecrypt(cfg.client_id);
+    const secret    = _safeDecrypt(cfg.client_secret);
+
+    _dbxColetaProgresso.fase = 'Autenticando...';
+    _logColetaDbx('Autenticando via OAuth M2M...');
+    const { token } = await _databricksGetToken(accountId, clientId, secret);
+
+    _dbxColetaProgresso.fase = 'Consultando System Tables...';
+    _logColetaDbx('Consultando system.billing.usage + system.billing.list_prices...');
+    const sql = `
+      SELECT
+        u.workspace_id                           AS workspace_id,
+        u.sku_name                                AS sku_name,
+        u.usage_date                              AS usage_date,
+        u.usage_unit                              AS usage_unit,
+        SUM(u.usage_quantity)                     AS usage_quantity,
+        COALESCE(u.identity_metadata.run_as, '')  AS usuario,
+        MAX(p.pricing.default)                    AS preco_unitario,
+        SUM(u.usage_quantity * COALESCE(p.pricing.default, 0)) AS custo_estimado
+      FROM system.billing.usage u
+      LEFT JOIN system.billing.list_prices p
+        ON u.sku_name = p.sku_name AND u.cloud = p.cloud
+        AND u.usage_start_time >= p.price_start_time
+        AND (p.price_end_time IS NULL OR u.usage_start_time < p.price_end_time)
+      WHERE u.usage_date >= :data_inicio AND u.usage_date <= :data_fim
+      GROUP BY u.workspace_id, u.sku_name, u.usage_date, u.usage_unit, u.identity_metadata.run_as
+    `;
+    const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
+      { name: 'data_inicio', value: startDate, type: 'DATE' },
+      { name: 'data_fim', value: endDate, type: 'DATE' },
+    ]);
+    const linhas = _parseDatabricksResult(raw);
+    _dbxColetaProgresso.fase = `Gravando ${linhas.length} linha(s)...`;
+    _logColetaDbx(`${linhas.length} linha(s) retornada(s) — gravando em databricks_consumo...`);
+
+    for (const l of linhas) {
+      try {
+        const ins = await pool.query(
+          `INSERT INTO databricks_consumo (workspace_id,sku_name,usage_date,usage_unit,usage_quantity,usuario,preco_unitario,custo_estimado,config_id,atualizado_em)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+           ON CONFLICT (workspace_id,sku_name,usage_date,usuario) DO UPDATE SET
+             usage_quantity=EXCLUDED.usage_quantity, usage_unit=EXCLUDED.usage_unit,
+             preco_unitario=EXCLUDED.preco_unitario, custo_estimado=EXCLUDED.custo_estimado,
+             config_id=EXCLUDED.config_id, atualizado_em=NOW()
+           RETURNING (xmax = 0) AS inserted`,
+          [l.workspace_id, l.sku_name, l.usage_date, l.usage_unit || null, l.usage_quantity || 0, l.usuario || '', l.preco_unitario || null, l.custo_estimado || 0, configId]
+        );
+        if (ins.rows[0]?.inserted) totalIns++; else totalUpd++;
+        _dbxColetaProgresso.ins = totalIns; _dbxColetaProgresso.upd = totalUpd;
+      } catch (eLinha) {
+        totalErr++;
+        _dbxColetaProgresso.err = totalErr;
+        _logColetaDbx(`Erro na linha (${l.workspace_id}/${l.sku_name}/${l.usage_date}): ${eLinha.message}`);
+      }
+    }
+
+    _logColetaDbx(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err`);
+    const msgFinal = `Databricks — ${linhas.length} linha(s) | ${startDate}→${endDate}`;
+    const detFinal = JSON.stringify({ log: [..._dbxColetaProgresso.log] });
+    await pool.query(
+      `UPDATE databricks_coleta_historico SET status='concluido',concluido_em=NOW(),linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+      [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
+    );
+    _dbxColetaProgresso.fase = 'Concluído';
+    _registrarNotificacaoColeta(
+      'Coleta Databricks concluída',
+      `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
+      'coleta_concluida'
+    ).catch(() => {});
+
+  } catch (err) {
+    _logColetaDbx(`ERRO: ${err.message}`);
+    const detErr = JSON.stringify({ log: [..._dbxColetaProgresso.log] });
+    if (histId) await pool.query(
+      `UPDATE databricks_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1,detalhes=$2 WHERE id=$3`,
+      [err.message, detErr, histId]
+    ).catch(() => {});
+    _registrarNotificacaoColeta('Coleta Databricks com erro', err.message, 'coleta_erro').catch(() => {});
+  } finally {
+    _dbxColetaEmExecucao = false;
+    _dbxColetaIniciadaEm = null;
+  }
+}
+
+const _DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+app.post('/api/databricks-coleta/config/:id/coletar', authMiddleware, dbMiddleware, async (req, res) => {
+  if (_dbxColetaEmExecucao) return res.status(409).json({ error: 'Coleta Databricks já em execução' });
+  const { data_inicio, data_fim } = req.body;
+  if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || ''))
+    return res.status(400).json({ error: 'data_inicio e data_fim são obrigatórios (formato YYYY-MM-DD)' });
+  res.json({ ok: true, message: 'Coleta Databricks iniciada' });
+  _executarColetaDatabricks(parseInt(req.params.id), data_inicio, data_fim, 'manual')
+    .catch(e => console.error('[ColetaDbx] Erro:', e.message));
+});
+
+app.get('/api/databricks-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
+  res.json({
+    em_execucao: _dbxColetaEmExecucao,
+    iniciada_em: _dbxColetaIniciadaEm,
+    progresso: _dbxColetaProgresso,
+  });
+});
+
+// Espelha PUT /api/azure-coleta/sps/:id/agendamento — agendamento em campos próprios,
+// separado do CRUD principal de credenciais.
+app.put('/api/databricks-coleta/config/:id/agendamento', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { hora_execucao, dias_semana, auto_coleta, granularidade_dias } = req.body;
+    const hora  = hora_execucao != null ? Math.max(0, Math.min(23, parseInt(hora_execucao))) : null;
+    const dias  = dias_semana || null;
+    const ativo = auto_coleta ? true : false;
+    const gran  = granularidade_dias != null ? Math.max(1, parseInt(granularidade_dias) || 7) : 7;
+    const proxima = ativo ? _computeProximaColeta(hora, dias) : null;
+    await pool.query(
+      `UPDATE databricks_coleta_config
+       SET hora_execucao=$1, dias_semana=$2, auto_coleta=$3, granularidade_dias=$4, proxima_coleta=$5, atualizado_em=NOW()
+       WHERE id=$6`,
+      [hora, dias, ativo, gran, proxima, req.params.id]
+    );
+    const r = await pool.query(
+      `SELECT id, nome, hora_execucao, dias_semana, auto_coleta, granularidade_dias, proxima_coleta FROM databricks_coleta_config WHERE id=$1`,
+      [req.params.id]
+    );
+    res.json({ ok: true, config: r.rows[0] });
+  } catch (e) { _dbErr(res, e); }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
