@@ -1,6 +1,8 @@
 import { apiFetch } from './client'
 import { numFields } from './normalize'
-import type { DatabricksConfig, DatabricksConfigInput, TestarDatabricksResponse } from '../types/databricksColeta'
+import type {
+  AgendamentoDatabricksInput, DatabricksColetaStatus, DatabricksConfig, DatabricksConfigInput, TestarDatabricksResponse,
+} from '../types/databricksColeta'
 
 const NUM_FIELDS: (keyof DatabricksConfig)[] = ['granularidade_dias', 'dia_execucao', 'hora_execucao']
 const normalize = (c: DatabricksConfig) => numFields(c, NUM_FIELDS)
@@ -27,3 +29,15 @@ export const setDatabricksConfigPadrao = (id: number) =>
 // mesmo padrão de testarSP (api/coleta.ts).
 export const testarDatabricksConfig = (id: number) =>
   apiFetch<TestarDatabricksResponse>('POST', '/databricks-coleta/config/' + id + '/testar', undefined, 40000)
+
+// ── Fase 2 — coleta real + agendamento ──────────────────────────
+export const coletarDatabricks = (id: number, data_inicio: string, data_fim: string) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/databricks-coleta/config/' + id + '/coletar', { data_inicio, data_fim })
+
+export const getDatabricksStatus = () => apiFetch<DatabricksColetaStatus>('GET', '/databricks-coleta/status')
+
+export const salvarAgendamentoDatabricks = (id: number, input: AgendamentoDatabricksInput) =>
+  apiFetch<{ ok: boolean; config: unknown }>('PUT', '/databricks-coleta/config/' + id + '/agendamento', input)
+
+export const excluirAgendamentoDatabricks = (id: number) =>
+  apiFetch<{ ok: boolean; config: unknown }>('PUT', '/databricks-coleta/config/' + id + '/agendamento', { hora_execucao: null, dias_semana: null, auto_coleta: false })

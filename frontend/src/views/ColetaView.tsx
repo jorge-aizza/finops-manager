@@ -12,9 +12,11 @@ import type { HistoricoItem, ImportItem, ServicePrincipal, StorageConfig } from 
 import type { DatabricksConfig } from '../types/databricksColeta'
 import CoberturaGrid from '../components/CoberturaGrid'
 import ColetaMonitor from '../components/ColetaMonitor'
+import DatabricksColetaMonitor from '../components/DatabricksColetaMonitor'
 import ImportManualPanel from '../components/ImportManualPanel'
 import SPModal from './SPModal'
 import DatabricksConfigModal from './DatabricksConfigModal'
+import DatabricksAgendamentoModal from './DatabricksAgendamentoModal'
 import StorageModal from './StorageModal'
 import WizardColetaModal from './WizardColetaModal'
 import AgendamentoModal from './AgendamentoModal'
@@ -197,6 +199,7 @@ export default function ColetaView() {
     onSuccess: (r) => window.showToast?.(r.message, 'success'),
     onError: (e: Error) => window.showToast?.('Erro ao testar: ' + e.message, 'error'),
   })
+  const [agendamentoDbx, setAgendamentoDbx] = useState<DatabricksConfig | null>(null)
 
   function handleDeleteDbx(c: DatabricksConfig) {
     if (!confirm(`Excluir a configuração Databricks "${c.nome}"? Esta ação não pode ser desfeita.`)) return
@@ -271,6 +274,7 @@ export default function ColetaView() {
       </div>
 
       <ColetaMonitor />
+      <DatabricksColetaMonitor />
 
       {/* ── Cobertura por Mês ── */}
       <div className="stat-card" style={{ padding: '16px 20px' }}>
@@ -374,19 +378,19 @@ export default function ColetaView() {
         </div>
       </div>
 
-      {/* ── Coleta Databricks (Fase 1 — só configuração da conexão) ── */}
+      {/* ── Coleta Databricks (Fase 2 — configuração + coleta agendada real) ── */}
       <div className="card">
         <div className="card-header">
           <span className="card-title">Coleta Databricks</span>
-          <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>Fase 1 — configuração</span>
+          <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>Fase 2 — coleta ativa</span>
           <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingDbx(null); setDbxModalOpen(true) }}>
             Nova Configuração
           </button>
         </div>
         <div style={{ padding: '0 20px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
           Custo por usuário e distinção free-tier vs. pago do Databricks vêm das System Tables do próprio
-          Databricks — dado que não existe no billing da Azure. Esta tela só configura a conexão (Service
-          Principal OAuth M2M); a coleta agendada em si ainda não está implementada.
+          Databricks — dado que não existe no billing da Azure. Use ⏰ para configurar agendamento recorrente
+          ou coletar agora; dashboard dedicado ainda não existe (Fase 3).
         </div>
         <div className="table-wrapper">
           <table className="data-table">
@@ -415,6 +419,7 @@ export default function ColetaView() {
                   <td>
                     <div className="table-actions">
                       <button className="btn-icon" title="Testar conexão" disabled={testarDbxMutation.isPending} onClick={() => testarDbxMutation.mutate(c.id)}>🔌</button>
+                      <button className="btn-icon" title="Agendamento" onClick={() => setAgendamentoDbx(c)}>⏰</button>
                       {!c.is_padrao && (
                         <button className="btn-icon" title="Definir como padrão" onClick={() => padraoDbxMutation.mutate(c.id)}>★</button>
                       )}
@@ -611,6 +616,7 @@ export default function ColetaView() {
 
       {spModalOpen && <SPModal sp={editingSP} onClose={() => setSpModalOpen(false)} />}
       {dbxModalOpen && <DatabricksConfigModal config={editingDbx} onClose={() => setDbxModalOpen(false)} />}
+      {agendamentoDbx && <DatabricksAgendamentoModal config={agendamentoDbx} onClose={() => setAgendamentoDbx(null)} />}
       {storageModalOpen && <StorageModal storage={editingStorage} onClose={() => setStorageModalOpen(false)} />}
       {wizardSP && <WizardColetaModal sp={wizardSP} onClose={() => setWizardSP(null)} />}
       {agendamentoSP && <AgendamentoModal sp={agendamentoSP} onClose={() => setAgendamentoSP(null)} />}
