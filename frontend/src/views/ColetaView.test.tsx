@@ -4,9 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import ColetaView from './ColetaView'
 import * as coletaApi from '../api/coleta'
+import * as databricksColetaApi from '../api/databricksColeta'
 import type { CoberturaMes, HistoricoItem, Pendente, ServicePrincipal, StorageConfig } from '../types/coleta'
 
 vi.mock('../api/coleta')
+vi.mock('../api/databricksColeta')
 
 const mockSPs: ServicePrincipal[] = [
   {
@@ -77,6 +79,11 @@ beforeEach(() => {
     em_execucao: false, cancelando: false, progresso: null, ultimo: null, ultimo_api: null, ultimo_storage: null,
     agendador_ativo: true, circuit_breaker: { state: 'closed', failures: 0, open_until: null },
   })
+  vi.mocked(databricksColetaApi.listDatabricksConfigs).mockResolvedValue([])
+  vi.mocked(databricksColetaApi.getDatabricksStatus).mockResolvedValue({
+    em_execucao: false, iniciada_em: null, progresso: { fase: '', ins: 0, upd: 0, err: 0, log: [] },
+  })
+  vi.mocked(databricksColetaApi.getDatabricksHistorico).mockResolvedValue([])
   window.showToast = vi.fn()
 })
 
@@ -276,6 +283,43 @@ describe('ColetaView', () => {
       await screen.findByText('👤 Manual')
       // linha 2 (id=2) tem validacao_status null — sem botão, só "—" na coluna
       expect(screen.queryByRole('button', { name: /Validar agora/ })).not.toBeInTheDocument()
+    });
+  });
+
+  describe('Histórico de Execuções — aba "Coleta Databricks"', () => {
+    it('busca de databricks_coleta_historico (não azure_coleta_historico) ao trocar de aba', async () => {
+      const user = userEvent.setup()
+      vi.mocked(databricksColetaApi.getDatabricksHistorico).mockResolvedValue([
+        {
+          id: 9, tipo: null, origem: 'manual', iniciado_em: '2026-08-25T22:27:24.000Z', concluido_em: '2026-08-25T22:30:00.000Z',
+          status: 'concluido', linhas_inseridas: 300, linhas_atualizadas: 10, linhas_erro: 0,
+          mensagem: 'Databricks — 310 linha(s)', detalhes: null, periodo_inicio: '2026-08-01', periodo_fim: '2026-08-25',
+          validacao_status: null, validacao_json: null, sp_nome: 'Databricks Principal',
+        },
+      ])
+      renderWithClient()
+      await screen.findByText('👤 Manual') // aba API já carregada (default)
+
+      await user.selectOptions(screen.getByRole('combobox'), 'databricks')
+
+      expect(await screen.findByText('Databricks Principal')).toBeInTheDocument()
+      expect(screen.getByText('Configuração')).toBeInTheDocument() // header trocado de "SP"
+      expect(databricksColetaApi.getDatabricksHistorico).toHaveBeenCalled()
+    });
+
+    it('"Limpar" na aba Databricks chama deleteDatabricksHistorico, não deleteHistorico (Azure)', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(databricksColetaApi.deleteDatabricksHistorico).mockResolvedValue({ ok: true })
+      renderWithClient()
+      await screen.findByText('👤 Manual')
+
+      await user.selectOptions(screen.getByRole('combobox'), 'databricks')
+      await screen.findByText('Configuração')
+      await user.click(screen.getByRole('button', { name: 'Limpar' }))
+
+      await waitFor(() => expect(databricksColetaApi.deleteDatabricksHistorico).toHaveBeenCalled())
+      expect(coletaApi.deleteHistorico).not.toHaveBeenCalled()
     });
   });
 });

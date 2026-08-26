@@ -5658,6 +5658,18 @@ async function ensureAzureColetaTable() {
     )
   `);
 
+  // Corrige linhas órfãs de 'executando' — nada as atualiza depois de um
+  // restart/crash do processo (o `_coletaEmExecucao`/`_dbxColetaEmExecucao`
+  // em memória volta a false num processo novo, mas a linha gravada no banco
+  // pela execução anterior nunca é tocada de novo, ficando "executando" pra
+  // sempre com 0/0/0 e sem concluido_em). Roda uma vez por boot (guardado
+  // por _coletaTableReady acima) — num processo recém-iniciado, por
+  // definição nenhuma coleta desta tabela pode genuinamente ainda estar em
+  // andamento, então qualquer linha 'executando' aqui é órfã de um processo
+  // anterior que morreu no meio (deploy, pm2 restart, crash).
+  await run(`UPDATE azure_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
+  await run(`UPDATE databricks_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
+
   _coletaTableReady = true;
 }
 
@@ -6750,6 +6762,32 @@ app.get('/api/databricks-coleta/status', authMiddleware, dbMiddleware, async (_r
     iniciada_em: _dbxColetaIniciadaEm,
     progresso: _dbxColetaProgresso,
   });
+});
+
+// Espelha GET/DELETE /api/azure-coleta/historico — mesmo shape de HistoricoItem
+// (frontend), sem tipo/validacao_status/validacao_json (conceitos que não existem
+// pra Databricks: uma única query por coleta, sem sub-tipo api/storage/price_list,
+// e sem revalidação pós-coleta ainda implementada). Alimenta a aba "Coleta
+// Databricks" do seletor de Histórico de Execuções em ColetaView.tsx.
+app.get('/api/databricks-coleta/historico', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT h.id, h.iniciado_em, h.concluido_em, h.status, h.origem, h.periodo_inicio, h.periodo_fim,
+             h.linhas_inseridas, h.linhas_atualizadas, h.linhas_erro, h.mensagem, h.detalhes,
+             c.nome AS sp_nome
+      FROM databricks_coleta_historico h
+      LEFT JOIN databricks_coleta_config c ON c.id = h.config_id
+      ORDER BY h.iniciado_em DESC LIMIT 50
+    `);
+    res.json(rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/databricks-coleta/historico', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await pool.query(`TRUNCATE TABLE databricks_coleta_historico RESTART IDENTITY`);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
 });
 
 // Espelha PUT /api/azure-coleta/sps/:id/agendamento — agendamento em campos próprios,

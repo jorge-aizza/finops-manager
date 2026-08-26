@@ -70,9 +70,19 @@ export default function CmsMultiSelect({
     setPending((prev) => {
       const next = new Set(prev)
       if (checked) next.add(value); else next.delete(value)
-      // cascata: marcar/desmarcar o pai propaga pros filhos gerenciados
+      // Cascata: marcar/desmarcar o pai propaga pros filhos gerenciados.
+      // Comparação precisa ser case-insensitive — nomes de RG do Azure são
+      // case-insensitive, mas `parentValue` (vindo de `parent_rg` resolvido
+      // pelo servidor, ver sortRgsComFilhos em api/calculadora.ts) às vezes
+      // chega numa grafia diferente da do RG pai real na lista (ex:
+      // `parentValue: "RG-X"` vs `o.value: "rg-x"`). Com `===` estrito a
+      // cascata nunca disparava nesses casos — o pai marcava, o filho ficava
+      // sem marcar, mesmo os dois exibidos corretamente agrupados (o
+      // agrupamento em si já era case-insensitive; só esta comparação não
+      // era). Mesma convenção já usada em outros lugares do app pra comparar RG.
+      const valueUpper = value.toUpperCase()
       for (const o of options) {
-        if (o.parentValue === value) {
+        if (o.parentValue && o.parentValue.toUpperCase() === valueUpper) {
           if (checked) next.add(o.value); else next.delete(o.value)
         }
       }
@@ -91,6 +101,7 @@ export default function CmsMultiSelect({
 
   function handleLimpar() {
     setPending(new Set())
+    setSearch('')
   }
 
   const filtered = search

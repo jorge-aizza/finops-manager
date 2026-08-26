@@ -6,6 +6,7 @@ import type {
 import type {
   DatabricksAlerta, DatabricksBudget, DatabricksBudgetInput, DatabricksResumo,
 } from '../types/databricksResumo'
+import type { HistoricoItem } from '../types/coleta'
 
 const NUM_FIELDS: (keyof DatabricksConfig)[] = ['granularidade_dias', 'dia_execucao', 'hora_execucao']
 const normalize = (c: DatabricksConfig) => numFields(c, NUM_FIELDS)
@@ -84,3 +85,18 @@ export const getDatabricksAlertas = () =>
   apiFetch<DatabricksAlerta[]>('GET', '/databricks-coleta/alertas').then((rows) =>
     rows.map((a) => ({ ...a, budget: normalizeBudget(a.budget), custo_atual: Number(a.custo_atual), pct: Number(a.pct) }))
   )
+
+// ── Histórico — alimenta a aba "Coleta Databricks" do seletor de Histórico
+// de Execuções em ColetaView.tsx (junto de API Oficial/Via Storage/Import
+// Manual, que são todas Azure). O servidor não retorna tipo/validacao_status/
+// validacao_json (conceitos que não existem pra Databricks hoje — ver rota
+// no server.js) — preenchidos aqui como null pra manter o contrato de
+// HistoricoItem, do qual ColetaView.tsx já sabe renderizar "—" pra ambos.
+const HIST_NUM_FIELDS: (keyof HistoricoItem)[] = ['linhas_inseridas', 'linhas_atualizadas', 'linhas_erro']
+export const getDatabricksHistorico = () =>
+  apiFetch<HistoricoItem[]>('GET', '/databricks-coleta/historico').then((rows) =>
+    rows.map((r) => numFields({ ...r, tipo: null, validacao_status: null, validacao_json: null }, HIST_NUM_FIELDS))
+  )
+
+export const deleteDatabricksHistorico = () =>
+  apiFetch<{ ok: boolean }>('DELETE', '/databricks-coleta/historico')

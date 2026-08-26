@@ -6,7 +6,8 @@ import {
   setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
 } from '../api/coleta'
 import {
-  deleteDatabricksConfig, listDatabricksConfigs, setDatabricksConfigAtivo, setDatabricksConfigPadrao, testarDatabricksConfig,
+  deleteDatabricksConfig, deleteDatabricksHistorico, getDatabricksHistorico, listDatabricksConfigs,
+  setDatabricksConfigAtivo, setDatabricksConfigPadrao, testarDatabricksConfig,
 } from '../api/databricksColeta'
 import type { HistoricoItem, ImportItem, ServicePrincipal, StorageConfig } from '../types/coleta'
 import type { DatabricksConfig } from '../types/databricksColeta'
@@ -60,7 +61,7 @@ const VALIDACAO_BADGE: Record<string, { color: string; label: string }> = {
   inconclusivo: { color: 'var(--text-muted)', label: '— S/dados' },
 }
 
-type HistTab = 'api' | 'storage' | 'manual'
+type HistTab = 'api' | 'storage' | 'manual' | 'databricks'
 
 export default function ColetaView() {
   const queryClient = useQueryClient()
@@ -253,10 +254,10 @@ export default function ColetaView() {
   const [histTab, setHistTab] = useState<HistTab>('api')
   const historicoQuery = useQuery<(HistoricoItem | ImportItem)[]>({
     queryKey: ['coleta-historico', histTab],
-    queryFn: () => (histTab === 'manual' ? getImports() : getHistorico(histTab)),
+    queryFn: () => (histTab === 'manual' ? getImports() : histTab === 'databricks' ? getDatabricksHistorico() : getHistorico(histTab)),
   })
   const limparHistoricoMutation = useMutation({
-    mutationFn: () => deleteHistorico(),
+    mutationFn: () => (histTab === 'databricks' ? deleteDatabricksHistorico() : deleteHistorico()),
     onSuccess: () => {
       window.showToast?.('Histórico limpo.', 'success')
       queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
@@ -506,6 +507,7 @@ export default function ColetaView() {
               <option value="api">API Oficial</option>
               <option value="storage">Via Storage</option>
               <option value="manual">Import Manual</option>
+              <option value="databricks">Coleta Databricks</option>
             </select>
             <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })}>
               Atualizar
@@ -553,7 +555,7 @@ export default function ColetaView() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Início</th><th>SP</th>{histTab === 'storage' && <th>Tipo</th>}<th>Status</th><th>Origem</th>
+                  <th>Início</th><th>{histTab === 'databricks' ? 'Configuração' : 'SP'}</th>{histTab === 'storage' && <th>Tipo</th>}<th>Status</th><th>Origem</th>
                   <th style={{ textAlign: 'right' }}>Inseridos</th><th style={{ textAlign: 'right' }}>Atualizados</th><th style={{ textAlign: 'right' }}>Erros</th>
                   <th>Duração</th><th>Mensagem</th><th style={{ textAlign: 'center' }}>Validação</th><th style={{ textAlign: 'center' }}>Log</th>
                 </tr>
