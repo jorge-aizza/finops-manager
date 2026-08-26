@@ -5561,6 +5561,36 @@ async function ensureAzureColetaTable() {
       criado_em       TIMESTAMP DEFAULT NOW()
     )
   `);
+
+  // ── databricks_coleta_config — Fase 1: só a configuração da conexão (credenciais
+  // OAuth M2M do Service Principal + endpoint de execução). Coleta em si (Fase 2) e
+  // dashboard (Fase 3) ainda não existem — ver CLAUDE.md "Coleta Databricks".
+  // Mesmo padrão de campos de agendamento de azure_coleta_config (dia/hora_execucao,
+  // granularidade_dias, dias_semana, auto_coleta, proxima_coleta) já incluído aqui pra
+  // não precisar de migração nova quando a Fase 2 (agendador real) for implementada —
+  // só não são expostos na UI ainda, já que não há nada que os consuma por enquanto.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_coleta_config (
+      id                  SERIAL PRIMARY KEY,
+      nome                VARCHAR(200) NOT NULL DEFAULT 'Databricks Principal',
+      account_id          VARCHAR(200),
+      client_id           VARCHAR(200),
+      client_secret       TEXT,
+      workspace_host      VARCHAR(500),
+      warehouse_id        VARCHAR(200),
+      ativo               BOOLEAN DEFAULT false,
+      is_padrao           BOOLEAN DEFAULT false,
+      granularidade_dias  INTEGER DEFAULT 7,
+      dia_execucao        INTEGER DEFAULT 5,
+      hora_execucao       INTEGER,
+      dias_semana         TEXT,
+      auto_coleta         BOOLEAN DEFAULT false,
+      proxima_coleta      TIMESTAMP,
+      criado_em           TIMESTAMP DEFAULT NOW(),
+      atualizado_em       TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
   _coletaTableReady = true;
 }
 
@@ -6297,6 +6327,147 @@ app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, a
     );
     res.json({ rgs: cached.rows.map(r => ({ subscriptionId: r.subscription_id, name: r.name })), fonte: cached.rowCount > 0 ? 'cache' : 'empty' });
   } catch (e) { _dbErr(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COLETA DATABRICKS — CONFIGURAÇÃO DA API (FASE 1)
+// ══════════════════════════════════════════════════════════════════════════════
+// Fase 1: só CRUD de credenciais + teste de conexão. A coleta agendada de verdade
+// (contra system.billing.usage/system.billing.list_prices, pra ter custo por usuário e
+// free-tier vs. pago — dado que azure_costs nunca vai ter isso, confirmado nesta sessão)
+// é Fase 2 — ver CLAUDE.md "Coleta Databricks". Reaproveita _encryptSecret/_safeDecrypt
+// (mesma cifra AES-256-GCM já usada pras credenciais Azure) — zero cripto nova.
+//
+// Fetch próprio, NÃO usa _cbFetch: aquele helper está acoplado ao circuit breaker
+// global do Azure (_cbAPI/_cbCanAttempt) — reusar significaria falhas do Databricks
+// abrindo o circuito e bloqueando chamadas Azure não relacionadas (e vice-versa). Sem
+// retry/circuit breaker próprio por enquanto — Fase 1 só faz teste de conexão pontual,
+// não um job agendado recorrente (que precisaria de um breaker dedicado na Fase 2).
+async function _dbxFetch(url, options = {}, timeoutMs = 30000) {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try { return await fetch(url, { ...options, signal: ctrl.signal }); }
+  finally { clearTimeout(timer); }
+}
+
+// Troca client_id/client_secret por um access token via OAuth 2.0 client_credentials —
+// Service Principal de conta (account-level), mesmo padrão que _managementGetToken faz
+// pro Azure. NÃO VALIDADO contra uma conta Databricks real neste ambiente (sem
+// credenciais disponíveis) — ajustar endpoint/scope aqui se necessário ao testar com uma
+// conta real pela primeira vez.
+async function _databricksGetToken(accountId, clientId, clientSecret) {
+  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const resp = await _dbxFetch(`https://accounts.azuredatabricks.net/oidc/accounts/${accountId}/v1/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: `Basic ${basic}` },
+    body: new URLSearchParams({ grant_type: 'client_credentials', scope: 'all-apis' }).toString(),
+  });
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Databricks falhou (${resp.status}): ${e}`); }
+  const tkData = await _safeRespJson(resp);
+  if (!tkData.access_token) throw new Error('Token Databricks: resposta sem access_token');
+  return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
+}
+
+// Executa uma query SQL via Statement Execution API contra o warehouse configurado —
+// usado pelo teste de conexão (SELECT 1) e, na Fase 2, pelas queries reais de billing.
+async function _databricksRunQuery(workspaceHost, warehouseId, token, sql) {
+  const host = (workspaceHost || '').replace(/\/+$/, '');
+  const resp = await _dbxFetch(`${host}/api/2.0/sql/statements`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ warehouse_id: warehouseId, statement: sql, wait_timeout: '30s' }),
+  }, 35000);
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Query Databricks falhou (${resp.status}): ${e}`); }
+  return _safeRespJson(resp);
+}
+
+app.get('/api/databricks-coleta/config', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const r = await pool.query(`SELECT id,nome,account_id,client_id,workspace_host,warehouse_id,ativo,is_padrao,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM databricks_coleta_config ORDER BY is_padrao DESC, id ASC`);
+    res.json(r.rows.map(row => ({
+      ...row,
+      account_id: _safeDecrypt(row.account_id),
+      client_id:  _safeDecrypt(row.client_id),
+    })));
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/databricks-coleta/config', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, account_id, client_id, client_secret, workspace_host, warehouse_id, ativo } = req.body;
+    if (!account_id?.trim() || !client_id?.trim() || !client_secret?.trim() || !workspace_host?.trim() || !warehouse_id?.trim())
+      return res.status(400).json({ error: 'account_id, client_id, client_secret, workspace_host e warehouse_id são obrigatórios' });
+    await ensureAzureColetaTable();
+    const aE = _encryptSecret(account_id.trim());
+    const cE = _encryptSecret(client_id.trim());
+    const sE = _encryptSecret(client_secret.trim());
+    await pool.query(
+      `INSERT INTO databricks_coleta_config(nome,account_id,client_id,client_secret,workspace_host,warehouse_id,ativo) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [nome || 'Databricks Principal', aE, cE, sE, workspace_host.trim(), warehouse_id.trim(), ativo ?? true]
+    );
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.put('/api/databricks-coleta/config/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, account_id, client_id, client_secret, workspace_host, warehouse_id, ativo } = req.body;
+    if (!account_id?.trim() || !client_id?.trim() || !workspace_host?.trim() || !warehouse_id?.trim())
+      return res.status(400).json({ error: 'account_id, client_id, workspace_host e warehouse_id são obrigatórios' });
+    const ex = await pool.query(`SELECT client_secret FROM databricks_coleta_config WHERE id=$1`, [req.params.id]);
+    if (!ex.rows.length) return res.status(404).json({ error: 'Configuração não encontrada' });
+    let sE = ex.rows[0].client_secret || '';
+    if (client_secret?.trim()) sE = _encryptSecret(client_secret.trim());
+    const aE = _encryptSecret(account_id.trim());
+    const cE = _encryptSecret(client_id.trim());
+    await pool.query(
+      `UPDATE databricks_coleta_config SET nome=$1,account_id=$2,client_id=$3,client_secret=$4,workspace_host=$5,warehouse_id=$6,ativo=$7,atualizado_em=NOW() WHERE id=$8`,
+      [nome || 'Databricks', aE, cE, sE, workspace_host.trim(), warehouse_id.trim(), ativo ?? true, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.patch('/api/databricks-coleta/config/:id/ativo', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { ativo } = req.body;
+    await pool.query(`UPDATE databricks_coleta_config SET ativo=$1,atualizado_em=NOW() WHERE id=$2`, [!!ativo, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.patch('/api/databricks-coleta/config/:id/padrao', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`UPDATE databricks_coleta_config SET is_padrao=false`);
+    await pool.query(`UPDATE databricks_coleta_config SET is_padrao=true,atualizado_em=NOW() WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/databricks-coleta/config/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM databricks_coleta_config WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Diagnóstico — a mensagem de erro É o propósito da rota (mesmo padrão de
+// POST /api/azure-coleta/sps/:id/testar), não genericizar com _dbErr aqui.
+app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT * FROM databricks_coleta_config WHERE id=$1`, [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Configuração não encontrada' });
+    const cfg = r.rows[0];
+    const accountId = _safeDecrypt(cfg.account_id);
+    const clientId  = _safeDecrypt(cfg.client_id);
+    const secret    = _safeDecrypt(cfg.client_secret);
+    const { token } = await _databricksGetToken(accountId, clientId, secret);
+    await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, 'SELECT 1');
+    res.json({ ok: true, message: 'Conexão com Databricks OK — autenticação e SQL Warehouse validados.' });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
