@@ -1777,6 +1777,28 @@ Nav group CSS is defined **once** in styles.css (~line 213). Do not add a second
 ### Notification panel
 Bell icon opens `#notif-panel`. Light theme: `rgba(110, 30, 170, 0.95)` (medium Vivo purple). Dark theme: default dark surface.
 
+**Dismissal — pedido do usuário (2026-08-25)**: ao abrir o painel, toda notificação exibida naquele momento
+(ação/reserva vencendo E coleta concluída/erro) some da lista e da contagem do badge a partir daí — inclusive
+em próximos logins — e só reaparece se for uma notificação nova (id/`_kind` diferente do já visto). Antes,
+só as notificações `_kind:'sistema'` (coleta concluída/erro) tinham qualquer rastreamento de "visto"
+(`notif_sistema_vista_id` no `localStorage`), e mesmo assim só afetava a CONTAGEM do badge — a notificação
+continuava aparecendo na lista pra sempre até expirar (48h) ou virar irrelevante. Ações/reservas vencendo
+não tinham rastreamento nenhum: reapareciam identicamente a cada login enquanto o prazo seguisse vencido,
+sem forma de "reconhecer e não ver de novo" — exatamente o comportamento que o usuário reportou querer mudar.
+
+Corrigido generalizando o mecanismo já existente (que só cobria sistema) pros três tipos: `_notifKey(n)`
+(app.js) gera uma chave estável por notificação (`sistema:${_id}` ou `${_kind}:${id}` — nunca baseada no
+texto/dias calculados, que mudam a cada request pra uma mesma ação/reserva). `loadNotificacoes()` filtra
+contra um Set `notif_dismissed` (`localStorage`, cap de 500 chaves) antes de montar lista e badge;
+`toggleNotifPanel()`, ao abrir, adiciona a chave de tudo que está renderizado em `#notif-list
+[data-notif-key]` nesse Set. `data-notif-key` substituiu o antigo `data-notif-id` (que só existia nos itens
+de sistema) — agora todo item renderizado (ação/reserva/sistema) carrega o atributo. `notif_dismissed`
+sobrevive a `logout()` de propósito (mesmo comportamento já assumido pelo mecanismo antigo) — é por navegador/
+perfil, não por usuário; múltiplos usuários no mesmo navegador compartilhariam o estado de dispensado, mesma
+limitação que já existia antes, não introduzida por esta mudança. Verificado via Playwright contra o
+servidor real: badge com 2 notificações → abrir painel → fechar → reload da página (simula "próximo login")
+→ badge some e lista mostra o estado vazio, zero erro de console.
+
 ### Auto-refresh
 `setRefreshInterval(minutes)` — covers dashboard, projetos, ações, estimativas, reservas, coleta, and calculadora views. Countdown shown in FAB button. Timer stored in `_refreshTimer` + `_countdownTimer`, both cleared on logout and before recreation.
 

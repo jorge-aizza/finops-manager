@@ -317,23 +317,38 @@ function enterApp() {
 }
 
 // ── NOTIFICAÇÕES ──────────────────────────────
+// Identidade estável de cada notificação (independe do texto/dia calculado,
+// que muda a cada request — ex: "vencido há 1 dia" vira "há 2 dias" no dia
+// seguinte, mesma ação). Usada tanto pra filtrar as já vistas quanto pra
+// marcar como vistas ao abrir o painel.
+function _notifKey(n) {
+  return n._kind === 'sistema' ? `sistema:${n._id}` : `${n._kind}:${n.id}`;
+}
+function _notifDismissedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem('notif_dismissed') || '[]')); }
+  catch (_) { return new Set(); }
+}
+
 async function loadNotificacoes() {
   try {
-    const notifs = await api('GET', '/notificacoes');
+    const todas = await api('GET', '/notificacoes');
     const badge  = document.getElementById('notif-badge');
     const list   = document.getElementById('notif-list');
     const header = document.getElementById('notif-header-count');
     if (!badge || !list) return;
 
+    // Notificação já vista (painel aberto numa sessão anterior) some da lista
+    // e da contagem — só reaparece se for uma nova (id/kind diferente; ex:
+    // outra ação venceu, ou uma nova coleta terminou). Mesmo comportamento
+    // pros três tipos (ação/reserva/sistema), antes só sistema tinha
+    // qualquer rastreamento (e só na contagem do badge, não na lista).
+    const dismissed = _notifDismissedSet();
+    const notifs = todas.filter(n => !dismissed.has(_notifKey(n)));
+
     const sistemaNotifs = notifs.filter(n => n._kind === 'sistema');
     const outrasNotifs  = notifs.filter(n => n._kind !== 'sistema');
 
-    // Badge: ações+reservas + sistema não vistas (via localStorage)
-    const ultimaVistaId = parseInt(localStorage.getItem('notif_sistema_vista_id') || '0');
-    const sisNaoVistas  = sistemaNotifs.filter(n => (n._id || 0) > ultimaVistaId).length;
-    const totalBadge    = outrasNotifs.length + sisNaoVistas;
-
-    if (!totalBadge && !outrasNotifs.length && !sistemaNotifs.length) {
+    if (!notifs.length) {
       badge.style.display = 'none';
       list.innerHTML = `<div style="padding:28px 16px;text-align:center;color:var(--text-muted);font-size:13px">
         <div style="font-size:26px;margin-bottom:8px">✅</div>
@@ -343,14 +358,9 @@ async function loadNotificacoes() {
       return;
     }
 
-    if (totalBadge > 0) {
-      badge.style.display = 'flex';
-      badge.textContent = totalBadge;
-    } else {
-      badge.style.display = 'none';
-    }
-    const totalLabel = outrasNotifs.length + sistemaNotifs.length;
-    header.textContent = `${totalLabel} notificaç${totalLabel !== 1 ? 'ões' : 'ão'}`;
+    badge.style.display = 'flex';
+    badge.textContent = notifs.length;
+    header.textContent = `${notifs.length} notificaç${notifs.length !== 1 ? 'ões' : 'ão'}`;
 
     const iconMap = {
       vencido:          { icon:'⚠',  bg:'rgba(243,139,168,0.12)', color:'#f38ba8', border:'rgba(243,139,168,0.25)' },
@@ -365,7 +375,7 @@ async function loadNotificacoes() {
       if (n._kind === 'sistema') {
         const s = iconMap[n.tipo] || iconMap.coleta_concluida;
         const quando = n.criado_em ? new Date(n.criado_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
-        return `<div data-notif-id="${n._id || 0}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
+        return `<div data-notif-key="${_notifKey(n)}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
           <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.acao)}</div>
@@ -383,7 +393,7 @@ async function loadNotificacoes() {
       const sub = isReserva
         ? `${escHtml(n.id_finops)}`
         : `${escHtml(n.id_finops)} · ${escHtml(n.projeto_nome || '—')}`;
-      return `<div onclick="${onclick}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;background:${s.bg}" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+      return `<div data-notif-key="${_notifKey(n)}" onclick="${onclick}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;background:${s.bg}" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
         <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.mensagem)}</div>
@@ -402,15 +412,19 @@ function toggleNotifPanel() {
   const opening = panel.style.display === 'none';
   panel.style.display = opening ? 'block' : 'none';
   if (opening) {
-    // Marca todas as notificações do sistema como vistas
-    const badge = document.getElementById('notif-badge');
+    // Marca todas as notificações atualmente exibidas como vistas — somem da
+    // lista e da contagem a partir de agora (inclusive em próximos logins),
+    // a não ser que surja uma nova (id/kind diferente da já vista).
     try {
-      const items = document.querySelectorAll('#notif-list [data-notif-id]');
-      let maxId = parseInt(localStorage.getItem('notif_sistema_vista_id') || '0');
-      items.forEach(el => { const id = parseInt(el.dataset.notifId || 0); if (id > maxId) maxId = id; });
-      if (maxId > 0) localStorage.setItem('notif_sistema_vista_id', String(maxId));
+      const dismissed = _notifDismissedSet();
+      document.querySelectorAll('#notif-list [data-notif-key]').forEach(el => {
+        if (el.dataset.notifKey) dismissed.add(el.dataset.notifKey);
+      });
+      // Limita o tamanho — sem isso o set cresceria pra sempre com ações/reservas
+      // antigas já concluídas/removidas, cujas chaves nunca mais aparecem de novo.
+      const arr = [...dismissed];
+      localStorage.setItem('notif_dismissed', JSON.stringify(arr.slice(-500)));
     } catch (_) {}
-    // Atualiza badge removendo contagem de sistema (serão zeradas na próxima loadNotificacoes)
     loadNotificacoes();
   }
 }
