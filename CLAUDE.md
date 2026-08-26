@@ -985,6 +985,73 @@ DELETE /api/azure-coleta/pendentes/:id      — remove pending job
 **SP modal — `saveSP()` pitfall:**
 `sp-dia` element does not exist in the modal HTML — always use `document.getElementById('sp-dia')?.value` (optional chaining). The entire `saveSP()` body is wrapped in try/catch so any future `null.value` errors surface as a toast instead of silent failure.
 
+### Coleta Databricks (Fase 1 — 2026-08-25)
+**Por quê**: custo por usuário e distinção free-tier vs. pago (ex: `GENIE_FREE_USAGE`) **não existem** e
+**nunca vão existir** em `azure_costs` — confirmado por investigação: Azure Cost Management nunca carrega
+identidade de usuário nem o catálogo de produto interno do Databricks, só *meter names* genéricos da Azure.
+Essa granularidade só existe nas **System Tables do próprio Databricks** (`system.billing.usage` +
+`system.billing.list_prices`, Unity Catalog) — uma fonte de dados totalmente separada, com autenticação
+própria. Decisão do usuário: em vez de montar Grafana à parte, entra como uma nova aba dentro do módulo
+Coleta já existente, espelhando 1:1 a arquitetura da Coleta Azure (Service Principal → coleta agendada →
+tabela própria → dashboard).
+
+**Fase 1 (implementada)**: só a configuração da conexão — credenciais + endpoint de execução, sem coleta
+agendada real ainda (isso é Fase 2) nem dashboard (Fase 3).
+
+- **Tabela** `databricks_coleta_config` — mesmo formato de `azure_coleta_config`, incluindo os campos de
+  agendamento (`dia_execucao`/`hora_execucao`/`dias_semana`/`granularidade_dias`/`auto_coleta`/
+  `proxima_coleta`) já presentes no schema pra não precisar de migração nova na Fase 2, mesmo não expostos
+  na UI ainda.
+- **Autenticação**: Service Principal OAuth M2M (account-level, não Personal Access Token) — mesma razão da
+  Coleta Azure já usar Service Principal: não amarra a automação a uma pessoa. Campos: `account_id` (Account
+  ID da conta Databricks), `client_id`/`client_secret` (credenciais OAuth), `workspace_host` (URL de um
+  workspace, usado pra executar as queries mesmo as System Tables sendo account-wide) e `warehouse_id` (SQL
+  Warehouse usado via Statement Execution API).
+- **Cifra**: reaproveita `_encryptSecret`/`_safeDecrypt` (AES-256-GCM, mesma `MASTER_KEY` já usada pra
+  credenciais Azure) — zero cripto nova.
+- **`_dbxFetch`** (server.js) — fetch próprio com timeout via `AbortController`, **não reusa `_cbFetch`**:
+  aquele helper está acoplado ao circuit breaker global do Azure (`_cbAPI`/`_cbCanAttempt`) — reusar faria
+  falhas do Databricks abrirem o circuito e bloquearem chamadas Azure não relacionadas (e vice-versa). Sem
+  retry/circuit breaker próprio ainda — Fase 1 só faz teste de conexão pontual, não um job agendado
+  recorrente (que precisaria de um breaker dedicado na Fase 2).
+- **`_databricksGetToken`/`_databricksRunQuery`** — OAuth 2.0 client_credentials (Basic Auth,
+  `scope=all-apis`) contra `https://accounts.azuredatabricks.net/oidc/accounts/{account_id}/v1/token`, e
+  Statement Execution API (`POST {workspace_host}/api/2.0/sql/statements`) pra rodar SQL. **Não validado
+  contra uma conta Databricks real** — implementado com base no conhecimento atual da API pública do
+  Databricks; ajustar endpoint/scope se necessário na primeira configuração real (mesma ressalva já dada
+  pro SSO Entra ID).
+
+**Endpoints** (todos `authMiddleware, dbMiddleware` — mesmo nível de acesso que `/api/azure-coleta/sps*`,
+que também não exige `adminMiddleware` hoje):
+```
+GET    /api/databricks-coleta/config             — lista configurações (decripta account_id/client_id)
+POST   /api/databricks-coleta/config             — cria (client_secret obrigatório)
+PUT    /api/databricks-coleta/config/:id         — atualiza (client_secret opcional — mantém o atual se vazio)
+PATCH  /api/databricks-coleta/config/:id/ativo    — ativa/desativa
+PATCH  /api/databricks-coleta/config/:id/padrao   — define como padrão (único por vez)
+DELETE /api/databricks-coleta/config/:id         — exclui
+POST   /api/databricks-coleta/config/:id/testar   — pede token OAuth M2M + roda SELECT 1 no warehouse; erro cru é o propósito da rota (mesmo padrão de POST /api/azure-coleta/sps/:id/testar — não usa `_dbErr`)
+```
+
+**Frontend**: `frontend/src/views/DatabricksConfigModal.tsx` (porta simplificada de `SPModal.tsx`, sem os
+campos de agendamento) + novo card "Coleta Databricks" em `ColetaView.tsx`, entre Service Principals e
+Storage Accounts. `frontend/src/api/databricksColeta.ts`/`types/databricksColeta.ts` espelham
+`api/coleta.ts`/`types/coleta.ts`.
+
+**Roteiro (não implementado ainda)**:
+- **Fase 2** — coleta agendada real: estender `_iniciarAgendador()` pra também checar
+  `databricks_coleta_config` due (mesmo padrão de prioridade um-por-tick já usado pra Storage/SP Azure); nova
+  `_executarColetaDatabricks()` rodando a query real contra `system.billing.usage` JOIN
+  `system.billing.list_prices`; nova tabela `databricks_consumo` (workspace_id, usage_date, sku_name,
+  usage_quantity, custo_estimado, usuario, metadata); nova `databricks_coleta_historico`.
+- **Fase 3** — dashboard: consumo mensal, custo por workspace, custo por SKU de VM (dá pra fazer hoje com
+  `azure_costs`); usuário e free-tier só depois da Fase 2. Precisa de lib de gráficos nova (frontend não tem
+  nenhuma hoje — `recharts` recomendado). Tabela `budgets` nova (não existe conceito de orçamento no sistema
+  hoje) + CRUD. Alertas no padrão já existente da Reservas (`checkRsvAlertsPopup`, app.js:423-480 — popup
+  client-side ao logar, sem entrega externa/e-mail, já que não existe infra de notificação externa hoje).
+
+**Rollback**: tag git `pre-databricks-coleta-2026-08-25` no commit anterior a esta feature.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
