@@ -8,6 +8,8 @@ import ColetaView from './views/ColetaView'
 import EstimativasView from './views/EstimativasView'
 import DashboardView from './views/DashboardView'
 import CalculadoraView from './views/CalculadoraView'
+import DatabricksDashboardView from './views/DatabricksDashboardView'
+import DatabricksBudgetAlertModal from './components/DatabricksBudgetAlertModal'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } },
@@ -22,13 +24,23 @@ const VIEWS: Record<string, ComponentType> = {
   estimativas: EstimativasView,
   dashboard: DashboardView,
   calculadora: CalculadoraView,
+  databricks: DatabricksDashboardView,
 }
 
 export default function App() {
   const [view, setView] = useState<string | null>(null)
+  // Latch, não espelho de `view` — `view` some (null) sempre que o usuário
+  // navega pra uma view legada ainda não migrada (bridge unmount()), mas o
+  // popup de alerta de orçamento Databricks deve continuar montado (com seu
+  // próprio estado de "já mostrei/dispensei") pelo resto da sessão, não
+  // desmontar/remontar (e reabrir) a cada ida-e-volta entre view migrada e
+  // legada. Vira true na primeira vez que qualquer view monta — proxy de
+  // "usuário autenticado e dentro do app", já que a query de alertas exige
+  // authMiddleware e não faz sentido disparar antes do login.
+  const [autenticado, setAutenticado] = useState(false)
 
   useEffect(() => {
-    setViewListener(setView)
+    setViewListener((v) => { setView(v); if (v) setAutenticado(true) })
     // Botão "Atualizar"/countdown de auto-refresh (app.js, manualRefresh()) —
     // invalida tudo; só as queries ativas (da view montada no momento) de
     // fato refazem a chamada de rede, então isso vale pra qualquer tela.
@@ -40,6 +52,7 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       {ViewComponent ? <ViewComponent /> : null}
+      {autenticado && <DatabricksBudgetAlertModal />}
     </QueryClientProvider>
   )
 }

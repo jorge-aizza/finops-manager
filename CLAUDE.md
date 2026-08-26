@@ -1093,14 +1093,72 @@ usuário), então OAuth M2M foi a escolha deliberada desde o plano original dest
 um PAT disponível (não um Service Principal OAuth de conta), avisar antes de configurar — precisaria de um
 método de auth alternativo não coberto hoje.
 
-**Roteiro (não implementado ainda) — Fase 3**: dashboard (consumo mensal, custo por workspace, custo por SKU,
-usuário, free-tier vs. pago). Precisa de lib de gráficos nova (frontend não tem nenhuma hoje — `recharts`
-recomendado). Tabela `budgets` nova (não existe conceito de orçamento no sistema hoje) + CRUD. Alertas no
-padrão já existente da Reservas (`checkRsvAlertsPopup`, app.js:423-480 — popup client-side ao logar, sem
-entrega externa/e-mail, já que não existe infra de notificação externa hoje).
+### Coleta Databricks — Fase 3 (dashboard, orçamentos, alertas — 2026-08-25)
 
-**Rollback**: tag git `pre-databricks-coleta-2026-08-25` no commit anterior a esta feature (Fases 1 e 2
-inteiras — cobre também os commits desta rodada).
+Fecha o ciclo: `databricks_consumo` (Fase 2) já era coletado mas não tinha nenhuma tela pra consultar, nenhum
+conceito de orçamento no sistema, e nenhum alerta de estouro. O card "Coleta Databricks" (`ColetaView.tsx`)
+dizia literalmente "dashboard dedicado ainda não existe (Fase 3)" antes desta rodada.
+
+**Sem lib de gráficos nova, deliberadamente contra o roteiro original** (que cogitava `recharts`) —
+`DashboardView.tsx` já tinha um precedente 100% funcional de barra via CSS puro (`.cloud-stat-bar`/
+`.cloud-stat-bar-fill`, `width:pct+'%'` inline, sem nenhuma lib) pra exatamente esse tipo de visual. Os 5
+gráficos pedidos (tendência mensal, ranking por workspace/SKU/usuário, free-tier vs. pago) cabem todos em
+barras CSS + um sparkline SVG inline — zero dependência nova adicionada, bundle cresceu ~15KB (~3.5KB gzip)
+em vez dos 100KB+ que `recharts` traria. Cor sequencial única por card de ranking (magnitude, não identidade
+entre cards — reaproveita tokens já validados `--accent`/`--blue`/`--green`, não uma paleta nova).
+
+**Agregação em SQL, não client-side** — `databricks_consumo` é série temporal que cresce por coleta
+(diferente de `acoes`/`estimativas`, pequenas e agregadas no cliente pelo `DashboardView.tsx`); segue o
+padrão de `azure_costs`.
+
+**Backend** (`server.js`): nova tabela `databricks_budgets` (`nome`, `workspace_id` nullable = orçamento
+global, `valor_mensal`, `ativo`). Novas rotas, todas `authMiddleware, dbMiddleware` (mesmo nível de acesso já
+usado por `/api/databricks-coleta/config*` — nenhuma rota Databricks usa `adminMiddleware` hoje):
+```
+GET    /api/databricks-coleta/resumo      — agregações pro dashboard (data_inicio/data_fim; default últimos 6 meses)
+GET    /api/databricks-coleta/budgets     — lista orçamentos
+POST   /api/databricks-coleta/budgets     — cria
+PUT    /api/databricks-coleta/budgets/:id — atualiza
+DELETE /api/databricks-coleta/budgets/:id — exclui
+GET    /api/databricks-coleta/alertas     — orçamentos ativos com % do mês corrente ≥ 75%
+```
+`GET /resumo` roda 6 queries `GROUP BY` em paralelo (`Promise.all`) contra `databricks_consumo` — total, por
+mês, por workspace/SKU/usuário (top 10 cada, `usuario=''` mapeado pra `'Não identificado'` na resposta) e
+free-tier vs. pago (`sku_name ILIKE '%FREE%' OR custo_estimado=0`, heurística do exemplo original do usuário
+— `GENIE_FREE_USAGE`). Sem cache de 5min (diferente das rotas de `azure_costs`) — tabela ainda pequena, YAGNI.
+`GET /alertas` soma `custo_estimado` do mês corrente por orçamento ativo (filtrado por `workspace_id` quando
+escopado) e retorna severidade `atencao`(≥75%)/`critico`(≥90%)/`estourado`(≥100%).
+
+**Frontend**: `frontend/src/views/DatabricksDashboardView.tsx` (nova view de topo, rota `databricks` — não
+mais uma seção dentro de `ColetaView.tsx`, que já tinha 636 linhas e 11 modais importados antes desta fase).
+Adicionada a `MIGRATED_VIEWS` (app.js) e ao mapa `VIEWS` (`App.tsx`); novo item de sidebar em `index.html`
+("Databricks", entre "Coleta Azure" e o menu de usuário). `ColetaView.tsx`'s card "Coleta Databricks" ganhou
+um botão "📊 Ver Dashboard" (`window.showView('databricks')`) no lugar do texto "ainda não existe".
+`frontend/src/components/DatabricksBudgetModal.tsx` (CRUD de orçamento) e
+`frontend/src/components/DatabricksBudgetAlertModal.tsx` (popup de alerta).
+
+**Alerta em React, não no `app.js` legado** — o padrão espelhado é `checkRsvAlertsPopup` (app.js:423-480,
+Reservas: popup client-side ao entrar no app, severidade por faixa), mas Fases 1/2 desta feature já eram
+100% React; escrever DOM/modal legado novo iria contra a direção da migração. Diferença deliberada do
+original: o Reservas não tem nenhum guard de sessão real (o comentário no código promete "uma vez por sessão"
+mas não há guard — bug documentado, não replicado aqui de propósito); `DatabricksBudgetAlertModal.tsx` usa
+`sessionStorage` (`databricks_alertas_dismissed`, guardando os ids de orçamento já dispensados) pra não
+reabrir o mesmo alerta a cada navegação entre views na mesma sessão. Montado globalmente em `App.tsx`, mas
+condicionado a um `autenticado` latch (vira `true` na primeira vez que qualquer view monta via bridge, nunca
+volta a `false`) — `view` em si vira `null` toda vez que o usuário navega pra uma tela legada ainda não
+migrada, o que desmontaria/remontaria (e reabriria) o popup a cada ida-e-volta entre view migrada/legada se
+ele dependesse de `view` diretamente.
+
+**Verificado via Playwright contra o servidor real** (login real, não só testes unitários): dashboard monta
+sem erro de console, estado vazio (`tem_dados:false`, sem dado Databricks real neste ambiente) renderiza
+corretamente, CRUD de orçamento completo (criar → aparece na tabela com toast de sucesso → toggle ativo/
+inativo sem erro → excluir com `confirm()` → some da tabela com toast) funciona ponta a ponta, e o botão
+"Ver Dashboard" em `ColetaView.tsx` navega pra `databricks` corretamente. **Não verificado**: os gráficos com
+dados reais (nenhuma conta Databricks disponível neste ambiente, mesma ressalva de Fases 1/2) — a
+verificação cobriu o estado vazio e a mecânica de CRUD/navegação, não a renderização dos rankings/sparkline
+com valores reais.
+
+**Rollback**: tag git `pre-databricks-coleta-2026-08-25` no commit anterior a toda a feature (Fases 1, 2 e 3).
 
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.

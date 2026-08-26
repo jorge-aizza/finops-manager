@@ -383,19 +383,22 @@ export default function ColetaView() {
         </div>
       </div>
 
-      {/* ── Coleta Databricks (Fase 2 — configuração + coleta agendada real) ── */}
+      {/* ── Coleta Databricks (Fase 3 — dashboard, orçamentos e alertas) ── */}
       <div className="card">
         <div className="card-header">
           <span className="card-title">Coleta Databricks</span>
-          <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>Fase 2 — coleta ativa</span>
-          <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingDbx(null); setDbxModalOpen(true) }}>
-            Nova Configuração
-          </button>
+          <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>Fase 3 — dashboard ativo</span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <button className="btn-ghost" onClick={() => window.showView?.('databricks')}>📊 Ver Dashboard</button>
+            <button className="btn-primary" onClick={() => { setEditingDbx(null); setDbxModalOpen(true) }}>
+              Nova Configuração
+            </button>
+          </div>
         </div>
         <div style={{ padding: '0 20px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
           Custo por usuário e distinção free-tier vs. pago do Databricks vêm das System Tables do próprio
           Databricks — dado que não existe no billing da Azure. Use ⏰ para configurar agendamento recorrente
-          ou coletar agora; dashboard dedicado ainda não existe (Fase 3).
+          ou coletar agora; consumo mensal, custo por workspace/SKU/usuário e orçamentos ficam no Dashboard.
         </div>
         <div className="table-wrapper">
           <table className="data-table">

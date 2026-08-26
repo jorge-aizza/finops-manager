@@ -543,7 +543,7 @@ let allAcoes = [];
 // C:\Users\jorge\.claude\plans\magical-gliding-gem.md. showView() monta o
 // bundle React em #react-root em vez de ativar a antiga #view-<nome>
 // (que fica no HTML vazia, sem conteúdo, até a migração terminar de vez).
-const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora']);
+const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks']);
 
 // ── VIEW ROUTING ──────────────────────────────
 function showView(view) {
@@ -583,7 +583,7 @@ function showView(view) {
   }
   currentView = view;
 
-  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure' };
+  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure', databricks: 'Dashboard Databricks' };
   document.getElementById('page-title').textContent = titles[view] || view;
 
   const btn = document.getElementById('top-action-btn');

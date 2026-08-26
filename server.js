@@ -5644,6 +5644,20 @@ async function ensureAzureColetaTable() {
     )
   `);
 
+  // ── databricks_budgets — Fase 3: orçamento mensal opcional, global ou por
+  // workspace (workspace_id NULL = todos). Base do alerta em GET .../alertas.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_budgets (
+      id             SERIAL PRIMARY KEY,
+      nome           VARCHAR(200) NOT NULL,
+      workspace_id   VARCHAR(200),
+      valor_mensal   NUMERIC(14,2) NOT NULL,
+      ativo          BOOLEAN DEFAULT true,
+      criado_em      TIMESTAMP DEFAULT NOW(),
+      atualizado_em  TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
   _coletaTableReady = true;
 }
 
@@ -6759,6 +6773,119 @@ app.put('/api/databricks-coleta/config/:id/agendamento', authMiddleware, dbMiddl
       [req.params.id]
     );
     res.json({ ok: true, config: r.rows[0] });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Fase 3: dashboard (agregações), orçamentos e alerta de estouro ─────────────
+// databricks_consumo é uma série temporal que cresce por coleta (diferente de
+// acoes/estimativas, pequenas e agregadas no cliente) — segue o padrão de
+// azure_costs: agregação em SQL. Tabela ainda pequena comparada a azure_costs,
+// sem necessidade do cache de 5min usado lá (YAGNI aqui).
+app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    let { data_inicio, data_fim } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setMonth(ini.getMonth() - 6);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    const where = `usage_date >= $1 AND usage_date <= $2`;
+    const params = [data_inicio, data_fim];
+
+    const [rTotal, rMes, rWs, rSku, rUser, rFree] = await Promise.all([
+      pool.query(`SELECT COALESCE(SUM(custo_estimado),0) AS total, COUNT(*) AS linhas FROM databricks_consumo WHERE ${where}`, params),
+      pool.query(`SELECT to_char(usage_date,'YYYY-MM') AS mes, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 1`, params),
+      pool.query(`SELECT workspace_id, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
+      pool.query(`SELECT sku_name, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
+      pool.query(`SELECT NULLIF(usuario,'') AS usuario, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
+      pool.query(
+        `SELECT
+           COALESCE(SUM(custo_estimado) FILTER (WHERE sku_name ILIKE '%FREE%' OR custo_estimado = 0), 0) AS free,
+           COALESCE(SUM(custo_estimado) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS pago
+         FROM databricks_consumo WHERE ${where}`, params
+      ),
+    ]);
+
+    res.json({
+      periodo: { inicio: data_inicio, fim: data_fim },
+      tem_dados: parseInt(rTotal.rows[0].linhas, 10) > 0,
+      total_custo: rTotal.rows[0].total,
+      por_mes: rMes.rows,
+      por_workspace: rWs.rows,
+      por_sku: rSku.rows,
+      por_usuario: rUser.rows.map(r => ({ usuario: r.usuario || 'Não identificado', custo: r.custo })),
+      free_vs_pago: rFree.rows[0],
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.get('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`SELECT * FROM databricks_budgets ORDER BY nome`);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, workspace_id, valor_mensal, ativo } = req.body;
+    if (!nome || !valor_mensal) return res.status(400).json({ error: 'nome e valor_mensal são obrigatórios' });
+    const r = await pool.query(
+      `INSERT INTO databricks_budgets (nome, workspace_id, valor_mensal, ativo) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [nome, workspace_id || null, valor_mensal, ativo !== false]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.put('/api/databricks-coleta/budgets/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, workspace_id, valor_mensal, ativo } = req.body;
+    if (!nome || !valor_mensal) return res.status(400).json({ error: 'nome e valor_mensal são obrigatórios' });
+    const r = await pool.query(
+      `UPDATE databricks_budgets SET nome=$1, workspace_id=$2, valor_mensal=$3, ativo=$4, atualizado_em=NOW() WHERE id=$5 RETURNING *`,
+      [nome, workspace_id || null, valor_mensal, ativo !== false, req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/databricks-coleta/budgets/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM databricks_budgets WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Alerta de estouro — soma custo_estimado do mês corrente por orçamento ativo
+// (escopado por workspace_id quando definido), retorna só os que passam de 75%.
+app.get('/api/databricks-coleta/alertas', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const budgets = (await pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true`)).rows;
+    if (!budgets.length) return res.json([]);
+
+    const inicioMes = new Date();
+    inicioMes.setDate(1);
+    const inicioMesStr = inicioMes.toISOString().slice(0, 10);
+
+    const alertas = [];
+    for (const b of budgets) {
+      const params = [inicioMesStr];
+      let sql = `SELECT COALESCE(SUM(custo_estimado),0) AS custo FROM databricks_consumo WHERE usage_date >= $1`;
+      if (b.workspace_id) { sql += ` AND workspace_id = $2`; params.push(b.workspace_id); }
+      const r = await pool.query(sql, params);
+      const custoAtual = parseFloat(r.rows[0].custo);
+      const valorMensal = parseFloat(b.valor_mensal);
+      const pct = valorMensal > 0 ? custoAtual / valorMensal : 0;
+      if (pct < 0.75) continue;
+      const severidade = pct >= 1 ? 'estourado' : pct >= 0.9 ? 'critico' : 'atencao';
+      alertas.push({ budget: b, custo_atual: custoAtual, pct, severidade });
+    }
+    alertas.sort((a, b) => b.pct - a.pct);
+    res.json(alertas);
   } catch (e) { _dbErr(res, e); }
 });
 
