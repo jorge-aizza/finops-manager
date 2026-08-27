@@ -5667,26 +5667,61 @@ async function ensureAzureColetaTable() {
   `);
 
   // ── databricks_consumo — Fase 2: linhas coletadas de system.billing.usage JOIN
-  // system.billing.list_prices. Uma linha por (workspace, sku, dia, usuário) — mesma
-  // granularidade que o dashboard (Fase 3) vai precisar pra distinguir usuário e
-  // free-tier vs. pago, coisa que azure_costs nunca vai ter (ver CLAUDE.md).
+  // system.billing.list_prices. Granularidade por RECURSO (cluster/job/warehouse
+  // individual, via recurso_hash — ver _executarColetaDatabricks), não mais por
+  // (workspace,sku,dia,usuário) agregado — pedido explícito do usuário (2026-08-26)
+  // pra permitir chargeback correto por custom_tags: duas linhas de billing com o
+  // mesmo workspace+sku+dia+usuário mas tags/recursos diferentes (ex: dois jobs
+  // rodando com o mesmo service principal de automação, cada um com uma tag de
+  // projeto diferente) antes colapsavam numa única linha, guardando só UMA tag
+  // "de exemplo" — atribuía 100% do custo combinado à tag errada pra qualquer
+  // recurso que não fosse o escolhido arbitrariamente pelo agregado.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS databricks_consumo (
       id              SERIAL PRIMARY KEY,
       workspace_id    VARCHAR(200) NOT NULL,
       sku_name        VARCHAR(200) NOT NULL,
+      produto_origem  VARCHAR(100) NOT NULL DEFAULT '',
       usage_date      DATE NOT NULL,
       usage_unit      VARCHAR(50),
       usage_quantity  NUMERIC(20,6) DEFAULT 0,
       usuario         VARCHAR(300) NOT NULL DEFAULT '',
       preco_unitario  NUMERIC(20,10),
       custo_estimado  NUMERIC(20,4) DEFAULT 0,
+      usage_metadata  JSONB,
+      custom_tags     JSONB,
+      recurso_hash    CHAR(32) NOT NULL DEFAULT '',
       config_id       INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
       criado_em       TIMESTAMP DEFAULT NOW(),
       atualizado_em   TIMESTAMP DEFAULT NOW(),
-      UNIQUE (workspace_id, sku_name, usage_date, usuario)
+      UNIQUE (workspace_id, sku_name, produto_origem, usage_date, usuario, recurso_hash)
     )
   `);
+  // Migração pra quem já tinha a tabela na granularidade antiga (agregada) — instalações
+  // novas já nascem com o schema certo via CREATE TABLE acima, isto é só pra bancos
+  // existentes. ADD COLUMN é sempre seguro (linhas antigas ganham os defaults); a troca de
+  // UNIQUE precisa achar o nome real da constraint antiga (nomeação automática do Postgres
+  // pra UNIQUE inline pode variar) em vez de arriscar um DROP CONSTRAINT com nome chutado.
+  await run(`ALTER TABLE databricks_consumo ADD COLUMN IF NOT EXISTS produto_origem VARCHAR(100) NOT NULL DEFAULT ''`);
+  await run(`ALTER TABLE databricks_consumo ADD COLUMN IF NOT EXISTS usage_metadata JSONB`);
+  await run(`ALTER TABLE databricks_consumo ADD COLUMN IF NOT EXISTS custom_tags JSONB`);
+  await run(`ALTER TABLE databricks_consumo ADD COLUMN IF NOT EXISTS recurso_hash CHAR(32) NOT NULL DEFAULT ''`);
+  await pool.query(`
+    DO $$
+    DECLARE r RECORD;
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'databricks_consumo_grain_key') THEN
+        FOR r IN
+          SELECT conname FROM pg_constraint
+          WHERE conrelid = 'databricks_consumo'::regclass AND contype = 'u'
+        LOOP
+          EXECUTE 'ALTER TABLE databricks_consumo DROP CONSTRAINT ' || quote_ident(r.conname);
+        END LOOP;
+        ALTER TABLE databricks_consumo ADD CONSTRAINT databricks_consumo_grain_key
+          UNIQUE (workspace_id, sku_name, produto_origem, usage_date, usuario, recurso_hash);
+      END IF;
+    END $$;
+  `).catch(e => console.warn('[ColetaTable] Migração databricks_consumo:', e.message.slice(0, 150)));
 
   // ── databricks_coleta_historico — mesmo formato de azure_coleta_historico ──────
   await pool.query(`
@@ -6950,15 +6985,26 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
 
     _dbxColetaProgresso.fase = 'Consultando System Tables...';
     _logColetaDbx('Consultando system.billing.usage + system.billing.list_prices...');
+    // Granularidade por recurso (2026-08-26, pedido do usuário — ver comentário em
+    // ensureAzureColetaTable/databricks_consumo): usage_metadata (STRUCT) e custom_tags
+    // (MAP) vêm via to_json() em vez de acessar campos aninhados específicos tipo
+    // `usage_metadata.machine.sku` — esse caminho exato não é confirmado no schema real
+    // do Databricks (não validável neste ambiente, sem conta real disponível), e um nome
+    // de campo errado quebraria a query inteira. to_json() captura o que existir de
+    // verdade, sem apostar num caminho específico, e serve como chave de agrupamento
+    // (MAP não pode ir em GROUP BY no Spark SQL — precisa ser uma STRING).
     const sql = `
       SELECT
-        u.workspace_id                           AS workspace_id,
-        u.sku_name                                AS sku_name,
-        u.usage_date                              AS usage_date,
-        u.usage_unit                              AS usage_unit,
-        SUM(u.usage_quantity)                     AS usage_quantity,
-        COALESCE(u.identity_metadata.run_as, '')  AS usuario,
-        MAX(p.pricing.default)                    AS preco_unitario,
+        u.workspace_id                                 AS workspace_id,
+        u.sku_name                                      AS sku_name,
+        COALESCE(u.billing_origin_product, '')          AS produto_origem,
+        u.usage_date                                    AS usage_date,
+        u.usage_unit                                    AS usage_unit,
+        COALESCE(u.identity_metadata.run_as, '')        AS usuario,
+        to_json(u.usage_metadata)                       AS usage_metadata_json,
+        to_json(u.custom_tags)                          AS custom_tags_json,
+        SUM(u.usage_quantity)                           AS usage_quantity,
+        MAX(p.pricing.default)                          AS preco_unitario,
         SUM(u.usage_quantity * COALESCE(p.pricing.default, 0)) AS custo_estimado
       FROM system.billing.usage u
       LEFT JOIN system.billing.list_prices p
@@ -6966,7 +7012,8 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
         AND u.usage_start_time >= p.price_start_time
         AND (p.price_end_time IS NULL OR u.usage_start_time < p.price_end_time)
       WHERE u.usage_date >= :data_inicio AND u.usage_date <= :data_fim
-      GROUP BY u.workspace_id, u.sku_name, u.usage_date, u.usage_unit, u.identity_metadata.run_as
+      GROUP BY u.workspace_id, u.sku_name, u.billing_origin_product, u.usage_date, u.usage_unit,
+               u.identity_metadata.run_as, to_json(u.usage_metadata), to_json(u.custom_tags)
     `;
     const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
       { name: 'data_inicio', value: startDate, type: 'DATE' },
@@ -6978,15 +7025,29 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
 
     for (const l of linhas) {
       try {
+        // recurso_hash — identifica um recurso individual (cluster/job/warehouse) sem
+        // depender de um nome de campo específico dentro de usage_metadata (ver nota
+        // acima): duas linhas com o mesmo workspace+sku+produto+dia+usuário mas
+        // metadata/tags diferentes (ex: dois jobs simultâneos) viram registros
+        // separados, em vez de colapsar numa linha só com uma tag "de exemplo" errada
+        // pra 2/3 do custo. Hash dos JSONs crus (não do objeto reparseado) — evita
+        // qualquer risco de reordenação de chaves alterar o hash pro mesmo recurso.
+        const recursoHash = crypto.createHash('md5')
+          .update((l.usage_metadata_json || '') + '|' + (l.custom_tags_json || ''))
+          .digest('hex');
+        // Já são strings JSON válidas (to_json() no Spark) — passa direto pro parâmetro
+        // jsonb, sem parse+stringify de volta (mesmo padrão de `detalhes` em
+        // databricks_coleta_historico, que também recebe uma string JSON pronta).
         const ins = await pool.query(
-          `INSERT INTO databricks_consumo (workspace_id,sku_name,usage_date,usage_unit,usage_quantity,usuario,preco_unitario,custo_estimado,config_id,atualizado_em)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-           ON CONFLICT (workspace_id,sku_name,usage_date,usuario) DO UPDATE SET
+          `INSERT INTO databricks_consumo (workspace_id,sku_name,produto_origem,usage_date,usage_unit,usage_quantity,usuario,preco_unitario,custo_estimado,usage_metadata,custom_tags,recurso_hash,config_id,atualizado_em)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+           ON CONFLICT (workspace_id,sku_name,produto_origem,usage_date,usuario,recurso_hash) DO UPDATE SET
              usage_quantity=EXCLUDED.usage_quantity, usage_unit=EXCLUDED.usage_unit,
              preco_unitario=EXCLUDED.preco_unitario, custo_estimado=EXCLUDED.custo_estimado,
+             usage_metadata=EXCLUDED.usage_metadata, custom_tags=EXCLUDED.custom_tags,
              config_id=EXCLUDED.config_id, atualizado_em=NOW()
            RETURNING (xmax = 0) AS inserted`,
-          [l.workspace_id, l.sku_name, l.usage_date, l.usage_unit || null, l.usage_quantity || 0, l.usuario || '', l.preco_unitario || null, l.custo_estimado || 0, configId]
+          [l.workspace_id, l.sku_name, l.produto_origem || '', l.usage_date, l.usage_unit || null, l.usage_quantity || 0, l.usuario || '', l.preco_unitario || null, l.custo_estimado || 0, l.usage_metadata_json || null, l.custom_tags_json || null, recursoHash, configId]
         );
         if (ins.rows[0]?.inserted) totalIns++; else totalUpd++;
         _dbxColetaProgresso.ins = totalIns; _dbxColetaProgresso.upd = totalUpd;

@@ -1040,16 +1040,38 @@ PUT    /api/databricks-coleta/config/:id/agendamento — hora_execucao/dias_sema
 `_databricksGetToken`, roda uma query parametrizada (`:data_inicio`/`:data_fim` — nunca concatena data direto
 na SQL) contra `system.billing.usage` JOIN `system.billing.list_prices` via `_databricksRunQuery` +
 `_parseDatabricksResult` (converte a resposta colunas+linhas da Statement Execution API em objetos nomeados),
-grava em `databricks_consumo` via UPSERT (`ON CONFLICT (workspace_id,sku_name,usage_date,usuario)`), loga em
-`databricks_coleta_historico` e `notificacoes_sistema` (mesmo padrão de `_registrarNotificacaoColeta` já
-usado pela Coleta Azure). **Não validado contra uma conta Databricks real** — mesma ressalva de
-`_databricksGetToken`/`_databricksRunQuery`; a sintaxe de acesso aos campos STRUCT
-(`identity_metadata.run_as`, `pricing.default`) e os nomes exatos de coluna podem precisar de ajuste na
-primeira execução real.
+grava em `databricks_consumo` via UPSERT, loga em `databricks_coleta_historico` e `notificacoes_sistema`
+(mesmo padrão de `_registrarNotificacaoColeta` já usado pela Coleta Azure). **Não validado contra uma conta
+Databricks real** — mesma ressalva de `_databricksGetToken`/`_databricksRunQuery`; os nomes exatos de coluna
+podem precisar de ajuste na primeira execução real.
 
-**Tabelas novas (Fase 2)**:
-- `databricks_consumo` — uma linha por `(workspace_id, sku_name, usage_date, usuario)`, com
-  `usage_quantity`/`preco_unitario`/`custo_estimado` — granularidade que `azure_costs` nunca vai ter.
+**Granularidade por recurso, não mais por dia agregado (2026-08-26, pedido do usuário)** — o schema original
+gravava uma linha por `(workspace_id, sku_name, usage_date, usuario)`, somando tudo daquele dia. Problema
+real identificado numa conversa com o usuário (antes de qualquer conta real disponível, então achado por
+raciocínio sobre o schema, não por bug reportado em produção): se dois recursos diferentes (ex: dois jobs
+rodando com o mesmo Service Principal de automação) batem no mesmo workspace+SKU+dia+usuário mas têm
+`custom_tags` diferentes (ex: tags de projeto/time diferentes, o caso de uso mais comum pra `custom_tags`
+existir), a linha agregada só conseguia guardar UMA tag "de exemplo" — atribuindo 100% do custo combinado a
+um projeto só, errado pra qualquer fração que na verdade pertencesse a outro recurso. Corrigido: cada
+recurso individual agora vira sua própria linha, via `recurso_hash` (MD5 de `to_json(usage_metadata) +
+to_json(custom_tags)`, computado em Node — nunca dois `to_json()` reparseados/re-serializados, pra não
+arriscar reordenação de chaves mudar o hash do mesmo recurso). `usage_metadata`/`custom_tags` vêm via
+`to_json()` no Spark SQL, não por um caminho de campo aninhado específico tipo `usage_metadata.machine.sku`
+— esse caminho exato não é confirmado no schema real do Databricks (visto num script Python que o usuário
+trouxe de outra fonte, com esse campo; não validável neste ambiente sem conta real) e um nome errado
+quebraria a query inteira; `to_json()` captura o que existir de verdade, sem apostar num nome de campo, e
+também serve de chave de agrupamento (MAP não pode ir em `GROUP BY` no Spark SQL — precisa virar STRING
+primeiro). `produto_origem` (`billing_origin_product` — JOBS/INTERACTIVE/SQL/MODEL_SERVING) também passou a
+ser capturado e faz parte da chave.
+
+**Tabelas novas/alteradas (Fase 2)**:
+- `databricks_consumo` — uma linha por `(workspace_id, sku_name, produto_origem, usage_date, usuario,
+  recurso_hash)`, com `usage_quantity`/`preco_unitario`/`custo_estimado`/`usage_metadata`
+  (JSONB)/`custom_tags` (JSONB) — granularidade que `azure_costs` nunca vai ter. Migração idempotente em
+  `ensureAzureColetaTable()` pra bancos que já tinham a tabela na granularidade antiga: `ADD COLUMN IF NOT
+  EXISTS` pras colunas novas + um bloco `DO $$...$$` que acha o nome real da UNIQUE constraint antiga via
+  `pg_constraint` (em vez de arriscar um `DROP CONSTRAINT` com nome chutado — a nomeação automática do
+  Postgres pra `UNIQUE` inline no `CREATE TABLE` pode variar) e troca pela nova de 6 colunas.
 - `databricks_coleta_historico` — mesmo formato de `azure_coleta_historico` (status, contagens, timing,
   origem manual/agendado).
 
