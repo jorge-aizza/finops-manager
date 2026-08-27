@@ -1195,6 +1195,47 @@ com valores reais.
 
 **Rollback**: tag git `pre-databricks-coleta-2026-08-25` no commit anterior a toda a feature (Fases 1, 2 e 3).
 
+**Histórico de Execuções ganhou aba própria "Coleta Databricks" (2026-08-26)** — antes disso, os logs/alertas
+de coleta Databricks já existiam (sino, e-mail, monitor ao vivo), mas não havia lugar pra ver o histórico de
+execuções passadas fora do monitor ao vivo. `GET/DELETE /api/databricks-coleta/historico` (server.js, mesmo
+padrão de `azure_coleta_historico` — JOIN com `databricks_coleta_config` pra trazer o nome da configuração)
+alimenta um 4º valor no seletor de Histórico de Execuções (`ColetaView.tsx`, junto de API Oficial/Via
+Storage/Import Manual — essas três são todas Azure). Reaproveita a mesma tabela/UI (Origem, Duração, Log
+clicável) já usada pras execuções Azure.
+
+**Validação (2026-08-27, pedido do usuário — paridade com a Coleta Azure)** — a Coleta Azure já tinha um
+mecanismo de integridade pós-coleta (`_validarColeta`: compara dias/subscriptions com dados vs. esperados no
+período, calcula gaps, classifica `ok`/`aviso`/`falha`/`inconclusivo`) com botão "Revalidar" na tela; a
+Coleta Databricks não tinha nada equivalente — a coluna Validação sempre mostrava "—" pras linhas de
+Databricks no histórico. `_validarColetaDatabricks(histId, configId, inicio, fim)` (server.js) espelha a
+mesma lógica contra `databricks_consumo` (`usage_date` em vez de `cost_date`, `custo_estimado` em vez de
+`cost_in_billing_currency`), mas **sem o conceito de "subscriptions esperadas"** — a Coleta Databricks não
+tem um escopo explícito de workspaces escolhido pelo usuário (System Tables são a nível de conta inteira,
+sem uma lista pra comparar contra) — `subs_esperadas` fica sempre `0` no JSON de validação, mesmo tratamento
+que a Coleta Azure já dá pro modo Storage (sem lista explícita = campo informativo, não afeta o status
+ok/aviso/falha). `workspaces_com_dados` (contagem de `workspace_id` distintos) é reportado no mesmo campo
+`subs_com_dados` do `ValidacaoJson` já existente no frontend — reaproveita o tipo/schema inteiro sem
+duplicar, só o **rótulo muda na UI** ("Workspaces" em vez de "Subscriptions").
+
+Chamada automaticamente ao final de toda coleta Databricks bem-sucedida (`_executarColetaDatabricks`, mesmo
+ponto onde a Coleta Azure chama `_validarColeta`). Nova rota `POST /api/databricks-coleta/historico/:id/validar`
+(revalidação manual) espelha `POST /api/azure-coleta/historico/:id/validar`. Novas colunas
+`validacao_status`/`validacao_json` em `databricks_coleta_historico` (migração idempotente via `ADD COLUMN
+IF NOT EXISTS`, mesmo padrão já usado nas outras tabelas Databricks).
+
+**Frontend**: `ColetaValidacaoModal.tsx` (já existia pra Azure) ganhou uma prop opcional `fonte?: 'azure' |
+'databricks'` — mesmo componente reaproveitado pros dois, só troca qual função de API chama
+(`validarHistoricoDatabricks` vs. `validarHistorico`) e o rótulo "Subscriptions"/"Workspaces". `ColetaView.tsx`
+passa `fonte={histTab === 'databricks' ? 'databricks' : 'azure'}` ao abrir o modal — decidido pela aba
+selecionada no momento, não por um campo no próprio item (`HistoricoItem` de Databricks não carrega essa
+informação, já que `tipo` fica `null` pra esses registros).
+
+Verificado: `node --check`, `tsc -b`, testes novos (Vitest, mockando as duas APIs de validação — confirma que
+`fonte='databricks'` chama a rota certa e não a de Azure) e rota `POST .../historico/99999/validar` retornando
+404 limpo contra o servidor real. **Não verificado**: o cálculo de validação com dados reais (nenhuma coleta
+Databricks bem-sucedida neste ambiente ainda — `databricks_consumo` está vazia) — mesma ressalva de sempre
+pras features Databricks desta sessão.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

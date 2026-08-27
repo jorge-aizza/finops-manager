@@ -88,15 +88,21 @@ export const getDatabricksAlertas = () =>
 
 // ── Histórico — alimenta a aba "Coleta Databricks" do seletor de Histórico
 // de Execuções em ColetaView.tsx (junto de API Oficial/Via Storage/Import
-// Manual, que são todas Azure). O servidor não retorna tipo/validacao_status/
-// validacao_json (conceitos que não existem pra Databricks hoje — ver rota
-// no server.js) — preenchidos aqui como null pra manter o contrato de
-// HistoricoItem, do qual ColetaView.tsx já sabe renderizar "—" pra ambos.
+// Manual, que são todas Azure). O servidor não retorna `tipo` (conceito que
+// não existe pra Databricks: uma única query por coleta, sem sub-tipo api/
+// storage/price_list) — preenchido aqui como null pra manter o contrato de
+// HistoricoItem. validacao_status/validacao_json vêm reais do servidor desde
+// 2026-08-27 (ver _validarColetaDatabricks) — os números dentro de
+// validacao_json já chegam como number de verdade (JSONB, não NUMERIC de
+// topo — sem o problema de string do normalize.ts).
 const HIST_NUM_FIELDS: (keyof HistoricoItem)[] = ['linhas_inseridas', 'linhas_atualizadas', 'linhas_erro']
 export const getDatabricksHistorico = () =>
   apiFetch<HistoricoItem[]>('GET', '/databricks-coleta/historico').then((rows) =>
-    rows.map((r) => numFields({ ...r, tipo: null, validacao_status: null, validacao_json: null }, HIST_NUM_FIELDS))
+    rows.map((r) => numFields({ ...r, tipo: null }, HIST_NUM_FIELDS))
   )
 
 export const deleteDatabricksHistorico = () =>
   apiFetch<{ ok: boolean }>('DELETE', '/databricks-coleta/historico')
+
+export const validarHistoricoDatabricks = (id: number) =>
+  apiFetch<{ validacao_status: string; validacao_json: HistoricoItem['validacao_json'] }>('POST', `/databricks-coleta/historico/${id}/validar`)

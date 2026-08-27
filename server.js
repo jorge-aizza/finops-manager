@@ -5746,9 +5746,15 @@ async function ensureAzureColetaTable() {
       linhas_atualizadas  INTEGER DEFAULT 0,
       linhas_erro         INTEGER DEFAULT 0,
       mensagem            TEXT,
-      detalhes            JSONB
+      detalhes            JSONB,
+      validacao_status    VARCHAR(20),
+      validacao_json      JSONB
     )
   `);
+  // Migração pra quem já tinha a tabela sem validação (2026-08-27, pedido do usuário —
+  // paridade com a Coleta Azure, que já tem esse conceito desde antes).
+  await run(`ALTER TABLE databricks_coleta_historico ADD COLUMN IF NOT EXISTS validacao_status VARCHAR(20)`);
+  await run(`ALTER TABLE databricks_coleta_historico ADD COLUMN IF NOT EXISTS validacao_json JSONB`);
 
   // ── databricks_budgets — Fase 3: orçamento mensal opcional, global ou por
   // workspace (workspace_id NULL = todos). Base do alerta em GET .../alertas.
@@ -7108,6 +7114,7 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
       [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
     );
     _dbxColetaProgresso.fase = 'Concluído';
+    _validarColetaDatabricks(histId, configId, startDate, endDate).catch(() => {});
     _registrarNotificacaoColeta(
       'Coleta Databricks concluída',
       `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
@@ -7150,21 +7157,38 @@ app.get('/api/databricks-coleta/status', authMiddleware, dbMiddleware, async (_r
 });
 
 // Espelha GET/DELETE /api/azure-coleta/historico — mesmo shape de HistoricoItem
-// (frontend), sem tipo/validacao_status/validacao_json (conceitos que não existem
-// pra Databricks: uma única query por coleta, sem sub-tipo api/storage/price_list,
-// e sem revalidação pós-coleta ainda implementada). Alimenta a aba "Coleta
-// Databricks" do seletor de Histórico de Execuções em ColetaView.tsx.
+// (frontend), sem `tipo` (conceito que não existe pra Databricks: uma única query
+// por coleta, sem sub-tipo api/storage/price_list). validacao_status/validacao_json
+// agora incluídos (2026-08-27, paridade com a Coleta Azure — ver
+// _validarColetaDatabricks). Alimenta a aba "Coleta Databricks" do seletor de
+// Histórico de Execuções em ColetaView.tsx.
 app.get('/api/databricks-coleta/historico', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT h.id, h.iniciado_em, h.concluido_em, h.status, h.origem, h.periodo_inicio, h.periodo_fim,
              h.linhas_inseridas, h.linhas_atualizadas, h.linhas_erro, h.mensagem, h.detalhes,
-             c.nome AS sp_nome
+             h.validacao_status, h.validacao_json, h.config_id, c.nome AS sp_nome
       FROM databricks_coleta_historico h
       LEFT JOIN databricks_coleta_config c ON c.id = h.config_id
       ORDER BY h.iniciado_em DESC LIMIT 50
     `);
     res.json(rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/databricks-coleta/historico/:id/validar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { rows } = await pool.query(
+      `SELECT config_id, periodo_inicio, periodo_fim FROM databricks_coleta_historico WHERE id=$1`, [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Registro não encontrado' });
+    const { config_id, periodo_inicio, periodo_fim } = rows[0];
+    await _validarColetaDatabricks(id, config_id, periodo_inicio, periodo_fim);
+    const { rows: updated } = await pool.query(
+      `SELECT validacao_status, validacao_json FROM databricks_coleta_historico WHERE id=$1`, [id]
+    );
+    res.json(updated[0] || {});
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -8261,6 +8285,91 @@ async function _validarColeta(histId, subIds, inicio, fim) {
     console.log(`[Validação] #${histId}: ${validStatus} — ${totalReg} reg | ${diasComDados}/${diasEsperados} dias | ${subsComDados}/${subsArr.length || '?'} subs`);
   } catch (e) {
     console.warn(`[Validação] Erro #${histId}:`, e.message);
+  }
+}
+
+// Espelha _validarColeta (Azure) — mesma ideia (dias com dados vs. esperados no
+// período, custo total, gaps), mas sem o conceito de "subscriptions esperadas":
+// a Coleta Databricks não tem um escopo explícito de workspaces escolhido pelo
+// usuário (System Tables são a nível de conta inteira) — subs_esperadas fica
+// sempre 0, mesmo tratamento que a Coleta Azure já dá pro modo Storage (sem
+// lista explícita = informativo, não afeta o status ok/aviso/falha).
+// workspaces_com_dados é reportado no campo subs_com_dados (mesmo ValidacaoJson
+// do frontend, reaproveitado — só o rótulo muda na UI pra "Workspaces").
+async function _validarColetaDatabricks(histId, configId, inicio, fim) {
+  if (!histId || !pool) return;
+  try {
+    let periodoInicio = inicio ? String(inicio).slice(0, 10) : null;
+    let periodoFim    = fim    ? String(fim).slice(0, 10)    : null;
+
+    if (!periodoInicio || !periodoFim) {
+      const { rows: [pr] } = await pool.query(
+        `SELECT MIN(usage_date)::text AS ini, MAX(usage_date)::text AS fim
+         FROM databricks_consumo
+         WHERE config_id=$1 AND atualizado_em >= (SELECT iniciado_em FROM databricks_coleta_historico WHERE id=$2)`,
+        [configId, histId]
+      );
+      periodoInicio = pr?.ini || null;
+      periodoFim    = pr?.fim || null;
+    }
+
+    if (!periodoInicio || !periodoFim) {
+      await pool.query(
+        `UPDATE databricks_coleta_historico SET validacao_status='inconclusivo', validacao_json=$1 WHERE id=$2`,
+        [JSON.stringify({ erro: 'Período não determinado — sem registros novos', validado_em: new Date().toISOString() }), histId]
+      );
+      return;
+    }
+
+    const diasEsperados = Math.round((new Date(periodoFim) - new Date(periodoInicio)) / 86400000) + 1;
+
+    const { rows: [row] } = await pool.query(
+      `SELECT COUNT(DISTINCT usage_date) AS dias, COUNT(DISTINCT workspace_id) AS workspaces,
+              COUNT(*) AS total, COALESCE(SUM(custo_estimado),0) AS custo
+       FROM databricks_consumo WHERE config_id=$1 AND usage_date BETWEEN $2 AND $3`,
+      [configId, periodoInicio, periodoFim]
+    );
+    const diasComDados       = parseInt(row.dias  || 0);
+    const workspacesComDados = parseInt(row.workspaces || 0);
+    const totalReg           = parseInt(row.total || 0);
+    const custoTotal         = parseFloat(row.custo || 0);
+
+    let diasSemDados = [];
+    if (totalReg > 0 && diasComDados < diasEsperados) {
+      const { rows: gaps } = await pool.query(
+        `SELECT gs::date::text AS dt FROM generate_series($1::date,$2::date,'1 day') gs
+         WHERE gs::date NOT IN (
+           SELECT DISTINCT usage_date FROM databricks_consumo WHERE config_id=$3 AND usage_date BETWEEN $1 AND $2
+         ) ORDER BY dt LIMIT 31`,
+        [periodoInicio, periodoFim, configId]
+      );
+      diasSemDados = gaps.map(g => g.dt);
+    }
+
+    let validStatus;
+    if (totalReg === 0) validStatus = 'falha';
+    else if (diasComDados < Math.floor(diasEsperados * 0.85)) validStatus = 'aviso';
+    else validStatus = 'ok';
+
+    const validJson = {
+      dias_esperados:  diasEsperados,
+      dias_com_dados:  diasComDados,
+      subs_esperadas:  0,
+      subs_com_dados:  workspacesComDados,
+      total_registros: totalReg,
+      custo_total:     custoTotal,
+      subs_sem_dados:  [],
+      dias_sem_dados:  diasSemDados,
+      validado_em:     new Date().toISOString()
+    };
+
+    await pool.query(
+      `UPDATE databricks_coleta_historico SET validacao_status=$1, validacao_json=$2, periodo_inicio=$3, periodo_fim=$4 WHERE id=$5`,
+      [validStatus, JSON.stringify(validJson), periodoInicio, periodoFim, histId]
+    );
+    console.log(`[ValidaçãoDbx] #${histId}: ${validStatus} — ${totalReg} reg | ${diasComDados}/${diasEsperados} dias | ${workspacesComDados} workspaces`);
+  } catch (e) {
+    console.warn(`[ValidaçãoDbx] Erro #${histId}:`, e.message);
   }
 }
 

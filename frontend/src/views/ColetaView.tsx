@@ -639,7 +639,7 @@ export default function ColetaView() {
       {expurgoOpen && <ExpurgoModal onClose={() => setExpurgoOpen(false)} />}
       {diagnosticoOpen && <DiagnosticoModal onClose={() => setDiagnosticoOpen(false)} />}
       {logItem && <ColetaLogModal item={logItem} onClose={() => setLogItem(null)} />}
-      {validacaoItem && <ColetaValidacaoModal item={validacaoItem} onClose={() => setValidacaoItem(null)} />}
+      {validacaoItem && <ColetaValidacaoModal item={validacaoItem} fonte={histTab === 'databricks' ? 'databricks' : 'azure'} onClose={() => setValidacaoItem(null)} />}
     </div>
   )
 }

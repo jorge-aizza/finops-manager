@@ -1,9 +1,15 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { validarHistorico } from '../api/coleta'
+import { validarHistoricoDatabricks } from '../api/databricksColeta'
 import type { HistoricoItem } from '../types/coleta'
 
 interface Props {
   item: HistoricoItem
+  // 'databricks' — mesmo modal, mas chama a rota de validação da Coleta
+  // Databricks (2026-08-27, paridade com a Coleta Azure) em vez da de Azure,
+  // e troca o rótulo "Subscriptions" por "Workspaces" (Databricks não tem o
+  // conceito de lista de subscriptions esperada — ver _validarColetaDatabricks).
+  fonte?: 'azure' | 'databricks'
   onClose: () => void
 }
 
@@ -24,13 +30,14 @@ function fmtBrl(n: number | null | undefined): string {
 // Porta de verValidacaoColeta()/revalidarColeta() (app.js:6339-6438) — resumo
 // de integridade de uma coleta já concluída (registros/custo/dias com dados/
 // subscriptions sem dados) + botão pra rodar a validação sob demanda.
-export default function ColetaValidacaoModal({ item, onClose }: Props) {
+export default function ColetaValidacaoModal({ item, fonte = 'azure', onClose }: Props) {
   const queryClient = useQueryClient()
   const revalidarMutation = useMutation({
-    mutationFn: () => validarHistorico(item.id),
+    mutationFn: () => (fonte === 'databricks' ? validarHistoricoDatabricks(item.id) : validarHistorico(item.id)),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['coleta-historico'] }),
     onError: (e: Error) => window.showToast?.('Erro ao revalidar: ' + e.message, 'error'),
   })
+  const rotuloEscopo = fonte === 'databricks' ? 'Workspaces' : 'Subscriptions'
 
   const vs = revalidarMutation.data?.validacao_status ?? item.validacao_status
   const vj = revalidarMutation.data?.validacao_json ?? item.validacao_json
@@ -83,12 +90,12 @@ export default function ColetaValidacaoModal({ item, onClose }: Props) {
                 </div>
                 {vj.subs_esperadas ? (
                   <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(255,255,255,.03)', border: '1px solid ' + (subsOk ? 'var(--border)' : 'var(--danger)') }}>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>Subscriptions</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>{rotuloEscopo}</div>
                     <div style={{ fontSize: 15, fontWeight: 700, color: subsOk ? 'var(--green)' : 'var(--danger)' }}>{vj.subs_com_dados} / {vj.subs_esperadas}</div>
                   </div>
                 ) : (
                   <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(255,255,255,.03)', border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>Subscriptions</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>{rotuloEscopo}</div>
                     <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)' }}>{fmtNum(vj.subs_com_dados)}</div>
                   </div>
                 )}
