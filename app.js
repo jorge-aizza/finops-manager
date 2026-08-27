@@ -317,6 +317,17 @@ function enterApp() {
 }
 
 // ── NOTIFICAÇÕES ──────────────────────────────
+// Migração de uma vez só (2026-08-27): a versão anterior dispensava TUDO
+// automaticamente ao abrir o painel — quem já tinha aberto o sino nessa versão
+// ficou com notif_dismissed cheio de chaves de notificações que na verdade
+// nunca foram fechadas manualmente, e ficariam escondidas pra sempre com o
+// novo comportamento (só fecha via ✕). Zera o set uma única vez; a flag evita
+// zerar de novo em cargas futuras (senão o botão ✕ nunca "pegaria" de vez).
+if (!localStorage.getItem('notif_dismissed_reset_v2')) {
+  localStorage.removeItem('notif_dismissed');
+  localStorage.setItem('notif_dismissed_reset_v2', '1');
+}
+
 // Identidade estável de cada notificação (independe do texto/dia calculado,
 // que muda a cada request — ex: "vencido há 1 dia" vira "há 2 dias" no dia
 // seguinte, mesma ação). Usada pra filtrar as já dispensadas.
