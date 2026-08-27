@@ -5648,9 +5648,11 @@ async function ensureAzureColetaTable() {
     CREATE TABLE IF NOT EXISTS databricks_coleta_config (
       id                  SERIAL PRIMARY KEY,
       nome                VARCHAR(200) NOT NULL DEFAULT 'Databricks Principal',
+      modo_auth           VARCHAR(20) NOT NULL DEFAULT 'oauth_m2m',
       account_id          VARCHAR(200),
       client_id           VARCHAR(200),
       client_secret       TEXT,
+      token               TEXT,
       workspace_host      VARCHAR(500),
       warehouse_id        VARCHAR(200),
       ativo               BOOLEAN DEFAULT false,
@@ -5665,6 +5667,12 @@ async function ensureAzureColetaTable() {
       atualizado_em       TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Migração pra quem já tinha a tabela sem esses campos (PAT — pedido do usuário,
+  // 2026-08-26: alternativa mais simples ao OAuth M2M quando não há acesso de account
+  // admin pra criar Service Principal na conta Databricks — mesmo token que o usuário já
+  // usaria manualmente num SQL editor).
+  await run(`ALTER TABLE databricks_coleta_config ADD COLUMN IF NOT EXISTS modo_auth VARCHAR(20) NOT NULL DEFAULT 'oauth_m2m'`);
+  await run(`ALTER TABLE databricks_coleta_config ADD COLUMN IF NOT EXISTS token TEXT`);
 
   // ── databricks_consumo — Fase 2: linhas coletadas de system.billing.usage JOIN
   // system.billing.list_prices. Granularidade por RECURSO (cluster/job/warehouse
@@ -6828,30 +6836,61 @@ function _parseDatabricksResult(result) {
   return rows.map(row => Object.fromEntries(cols.map((c, i) => [c, row[i]])));
 }
 
+// Resolve o bearer token a usar contra a Statement Execution API, de acordo com
+// cfg.modo_auth — pedido do usuário (2026-08-26): alternativa mais simples ao OAuth
+// M2M pra quem não tem acesso de account admin pra criar um Service Principal na
+// conta Databricks (só precisa de workspace_host + warehouse_id + um Personal Access
+// Token gerado pelo próprio usuário em User Settings → Developer → Access tokens, ou
+// por um Service Principal a nível de workspace). PAT não precisa de troca de token —
+// usado direto como Bearer. `cfg` é a linha crua de databricks_coleta_config (campos
+// sensíveis ainda cifrados, decifrados aqui).
+async function _resolveDbxToken(cfg) {
+  if (cfg.modo_auth === 'pat') {
+    const token = _safeDecrypt(cfg.token);
+    if (!token) throw new Error('Token PAT não configurado para esta conexão');
+    return token;
+  }
+  const accountId = _safeDecrypt(cfg.account_id);
+  const clientId  = _safeDecrypt(cfg.client_id);
+  const secret    = _safeDecrypt(cfg.client_secret);
+  const { token } = await _databricksGetToken(accountId, clientId, secret);
+  return token;
+}
+
 app.get('/api/databricks-coleta/config', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`SELECT id,nome,account_id,client_id,workspace_host,warehouse_id,ativo,is_padrao,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM databricks_coleta_config ORDER BY is_padrao DESC, id ASC`);
+    const r = await pool.query(`SELECT id,nome,modo_auth,account_id,client_id,workspace_host,warehouse_id,ativo,is_padrao,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM databricks_coleta_config ORDER BY is_padrao DESC, id ASC`);
     res.json(r.rows.map(row => ({
       ...row,
       account_id: _safeDecrypt(row.account_id),
       client_id:  _safeDecrypt(row.client_id),
+      // client_secret/token nunca voltam do GET (mesmo padrão de credenciais Azure/SMTP)
     })));
   } catch (e) { _dbErr(res, e); }
 });
 
+// modo_auth='oauth_m2m' (padrão) exige account_id/client_id/client_secret; modo_auth='pat'
+// exige só token (Personal Access Token — ver _resolveDbxToken). workspace_host/
+// warehouse_id são obrigatórios nos dois modos.
 app.post('/api/databricks-coleta/config', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, account_id, client_id, client_secret, workspace_host, warehouse_id, ativo } = req.body;
-    if (!account_id?.trim() || !client_id?.trim() || !client_secret?.trim() || !workspace_host?.trim() || !warehouse_id?.trim())
-      return res.status(400).json({ error: 'account_id, client_id, client_secret, workspace_host e warehouse_id são obrigatórios' });
+    const { nome, modo_auth, account_id, client_id, client_secret, token, workspace_host, warehouse_id, ativo } = req.body;
+    const modo = modo_auth === 'pat' ? 'pat' : 'oauth_m2m';
+    if (!workspace_host?.trim() || !warehouse_id?.trim())
+      return res.status(400).json({ error: 'workspace_host e warehouse_id são obrigatórios' });
+    if (modo === 'pat' && !token?.trim())
+      return res.status(400).json({ error: 'token é obrigatório no modo Personal Access Token' });
+    if (modo === 'oauth_m2m' && (!account_id?.trim() || !client_id?.trim() || !client_secret?.trim()))
+      return res.status(400).json({ error: 'account_id, client_id e client_secret são obrigatórios no modo OAuth M2M' });
     await ensureAzureColetaTable();
-    const aE = _encryptSecret(account_id.trim());
-    const cE = _encryptSecret(client_id.trim());
-    const sE = _encryptSecret(client_secret.trim());
+    const aE = account_id?.trim() ? _encryptSecret(account_id.trim()) : null;
+    const cE = client_id?.trim() ? _encryptSecret(client_id.trim()) : null;
+    const sE = client_secret?.trim() ? _encryptSecret(client_secret.trim()) : null;
+    const tE = token?.trim() ? _encryptSecret(token.trim()) : null;
     await pool.query(
-      `INSERT INTO databricks_coleta_config(nome,account_id,client_id,client_secret,workspace_host,warehouse_id,ativo) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-      [nome || 'Databricks Principal', aE, cE, sE, workspace_host.trim(), warehouse_id.trim(), ativo ?? true]
+      `INSERT INTO databricks_coleta_config(nome,modo_auth,account_id,client_id,client_secret,token,workspace_host,warehouse_id,ativo) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [nome || 'Databricks Principal', modo, aE, cE, sE, tE, workspace_host.trim(), warehouse_id.trim(), ativo ?? true]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
@@ -6859,18 +6898,27 @@ app.post('/api/databricks-coleta/config', authMiddleware, dbMiddleware, async (r
 
 app.put('/api/databricks-coleta/config/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, account_id, client_id, client_secret, workspace_host, warehouse_id, ativo } = req.body;
-    if (!account_id?.trim() || !client_id?.trim() || !workspace_host?.trim() || !warehouse_id?.trim())
-      return res.status(400).json({ error: 'account_id, client_id, workspace_host e warehouse_id são obrigatórios' });
-    const ex = await pool.query(`SELECT client_secret FROM databricks_coleta_config WHERE id=$1`, [req.params.id]);
+    const { nome, modo_auth, account_id, client_id, client_secret, token, workspace_host, warehouse_id, ativo } = req.body;
+    const modo = modo_auth === 'pat' ? 'pat' : 'oauth_m2m';
+    if (!workspace_host?.trim() || !warehouse_id?.trim())
+      return res.status(400).json({ error: 'workspace_host e warehouse_id são obrigatórios' });
+    if (modo === 'oauth_m2m' && (!account_id?.trim() || !client_id?.trim()))
+      return res.status(400).json({ error: 'account_id e client_id são obrigatórios no modo OAuth M2M' });
+    const ex = await pool.query(`SELECT client_secret, token FROM databricks_coleta_config WHERE id=$1`, [req.params.id]);
     if (!ex.rows.length) return res.status(404).json({ error: 'Configuração não encontrada' });
-    let sE = ex.rows[0].client_secret || '';
+    if (modo === 'pat' && !token?.trim() && !ex.rows[0].token)
+      return res.status(400).json({ error: 'token é obrigatório no modo Personal Access Token' });
+    // client_secret/token vazios no body = manter o valor já salvo (mesmo padrão de
+    // "opcional, mantém o atual se vazio" já usado pra client_secret antes desta mudança)
+    let sE = ex.rows[0].client_secret || null;
     if (client_secret?.trim()) sE = _encryptSecret(client_secret.trim());
-    const aE = _encryptSecret(account_id.trim());
-    const cE = _encryptSecret(client_id.trim());
+    let tE = ex.rows[0].token || null;
+    if (token?.trim()) tE = _encryptSecret(token.trim());
+    const aE = account_id?.trim() ? _encryptSecret(account_id.trim()) : null;
+    const cE = client_id?.trim() ? _encryptSecret(client_id.trim()) : null;
     await pool.query(
-      `UPDATE databricks_coleta_config SET nome=$1,account_id=$2,client_id=$3,client_secret=$4,workspace_host=$5,warehouse_id=$6,ativo=$7,atualizado_em=NOW() WHERE id=$8`,
-      [nome || 'Databricks', aE, cE, sE, workspace_host.trim(), warehouse_id.trim(), ativo ?? true, req.params.id]
+      `UPDATE databricks_coleta_config SET nome=$1,modo_auth=$2,account_id=$3,client_id=$4,client_secret=$5,token=$6,workspace_host=$7,warehouse_id=$8,ativo=$9,atualizado_em=NOW() WHERE id=$10`,
+      [nome || 'Databricks', modo, aE, cE, sE, tE, workspace_host.trim(), warehouse_id.trim(), ativo ?? true, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
@@ -6918,10 +6966,7 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
     const r = await pool.query(`SELECT * FROM databricks_coleta_config WHERE id=$1`, [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'Configuração não encontrada' });
     const cfg = r.rows[0];
-    const accountId = _safeDecrypt(cfg.account_id);
-    const clientId  = _safeDecrypt(cfg.client_id);
-    const secret    = _safeDecrypt(cfg.client_secret);
-    const { token } = await _databricksGetToken(accountId, clientId, secret);
+    const token = await _resolveDbxToken(cfg);
     await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, 'SELECT 1');
 
     const tabelas = {};
@@ -6949,12 +6994,12 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
 });
 
 // ── Fase 2: coleta real contra system.billing.usage/system.billing.list_prices ──
-// Uma linha por (workspace_id, sku_name, usage_date, usuario) — granularidade que
-// azure_costs nunca vai ter (sem identidade de usuário nem SKU nativo do Databricks).
-// NÃO VALIDADO contra uma conta Databricks real neste ambiente — mesma ressalva de
-// _databricksGetToken/_databricksRunQuery. A sintaxe de acesso aos campos STRUCT
-// (identity_metadata.run_as, pricing.default) e os nomes exatos de coluna podem
-// precisar de ajuste na primeira execução real.
+// Uma linha por recurso individual (workspace, sku, produto, dia, usuário, recurso_hash)
+// — granularidade que azure_costs nunca vai ter (sem identidade de usuário nem SKU
+// nativo do Databricks). NÃO VALIDADO contra uma conta Databricks real neste ambiente —
+// mesma ressalva de _databricksGetToken/_databricksRunQuery. A sintaxe de acesso aos
+// campos STRUCT (identity_metadata.run_as, pricing.default) e os nomes exatos de
+// coluna podem precisar de ajuste na primeira execução real.
 async function _executarColetaDatabricks(configId, startDate, endDate, origem = 'manual') {
   if (_dbxColetaEmExecucao) throw new Error('Coleta Databricks já em execução');
   if (!pool) throw new Error('Banco não conectado');
@@ -6975,13 +7020,10 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
     const cfgRow = await pool.query(`SELECT * FROM databricks_coleta_config WHERE id=$1`, [configId]);
     if (!cfgRow.rows.length) throw new Error('Configuração não encontrada');
     const cfg = cfgRow.rows[0];
-    const accountId = _safeDecrypt(cfg.account_id);
-    const clientId  = _safeDecrypt(cfg.client_id);
-    const secret    = _safeDecrypt(cfg.client_secret);
 
     _dbxColetaProgresso.fase = 'Autenticando...';
-    _logColetaDbx('Autenticando via OAuth M2M...');
-    const { token } = await _databricksGetToken(accountId, clientId, secret);
+    _logColetaDbx(cfg.modo_auth === 'pat' ? 'Usando Personal Access Token...' : 'Autenticando via OAuth M2M...');
+    const token = await _resolveDbxToken(cfg);
 
     _dbxColetaProgresso.fase = 'Consultando System Tables...';
     _logColetaDbx('Consultando system.billing.usage + system.billing.list_prices...');

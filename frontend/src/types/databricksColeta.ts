@@ -4,9 +4,16 @@
 // contrato de ServicePrincipal/ServicePrincipalInput (types/coleta.ts) usado pela Coleta
 // Azure. Dashboard (Fase 3) ainda não existe — ver CLAUDE.md "Coleta Databricks".
 
+// modo_auth — pedido do usuário (2026-08-26): 'oauth_m2m' (Service Principal da conta
+// Databricks, o padrão original) ou 'pat' (Personal Access Token — alternativa mais
+// simples pra quem não tem acesso de account admin pra criar um Service Principal;
+// só precisa de workspace_host+warehouse_id+token, sem account_id/client_id/secret).
+export type DatabricksAuthMode = 'oauth_m2m' | 'pat'
+
 export interface DatabricksConfig {
   id: number
   nome: string
+  modo_auth: DatabricksAuthMode
   account_id: string
   client_id: string
   workspace_host: string
@@ -22,12 +29,14 @@ export interface DatabricksConfig {
   atualizado_em: string
 }
 
-// client_secret nunca volta do GET — só é enviado (opcional) no save.
+// client_secret/token nunca voltam do GET — só são enviados (opcional) no save.
 export interface DatabricksConfigInput {
   nome: string
-  account_id: string
-  client_id: string
+  modo_auth: DatabricksAuthMode
+  account_id?: string
+  client_id?: string
   client_secret?: string
+  token?: string
   workspace_host: string
   warehouse_id: string
   ativo: boolean

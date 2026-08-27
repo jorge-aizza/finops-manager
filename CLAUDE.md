@@ -1104,16 +1104,29 @@ descobrir só na primeira coleta agendada real. Frontend (`ColetaView.tsx`'s `te
 resumo por tabela no toast (✅/❌ por nome + mensagem de erro quando falha).
 
 **Esclarecimento sobre "token da API" (2026-08-25)** — o usuário reportou que a tela de configuração pede
-Client ID/Client Secret mas não um "token da API". Isso é esperado no fluxo OAuth M2M implementado: não existe
-um token pra colar manualmente — `client_id`+`client_secret` são as credenciais do Service Principal criado
-no console da conta Databricks (account-level), e `_databricksGetToken` troca essas credenciais por um
-token de acesso automaticamente, a cada execução (mesmo padrão da Coleta Azure — o usuário também nunca cola
-um "token" lá, só tenant/client/secret). Um campo de "token" faria sentido apenas se o método de autenticação
-fosse Personal Access Token (PAT) em vez de OAuth M2M — **não implementado nesta fase**; PAT amarra a
-automação a uma pessoa (mesma razão pela qual a Coleta Azure usa Service Principal, não credencial de
-usuário), então OAuth M2M foi a escolha deliberada desde o plano original desta feature. Se o usuário só tiver
-um PAT disponível (não um Service Principal OAuth de conta), avisar antes de configurar — precisaria de um
-método de auth alternativo não coberto hoje.
+Client ID/Client Secret mas não um "token da API". Isso é esperado no fluxo OAuth M2M: não existe um token
+pra colar manualmente — `client_id`+`client_secret` são as credenciais do Service Principal criado no
+console da conta Databricks (account-level), e `_databricksGetToken` troca essas credenciais por um token de
+acesso automaticamente, a cada execução (mesmo padrão da Coleta Azure). Motivo original de não ter oferecido
+PAT desde o início: amarra a automação a uma pessoa (mesma razão pela qual a Coleta Azure usa Service
+Principal). **Atualizado em 2026-08-26** — ver bullet abaixo: PAT foi implementado como modo alternativo, a
+pedido explícito do usuário (não tinha acesso de account admin pra criar um Service Principal na conta).
+
+**Modo de autenticação PAT (Personal Access Token) — 2026-08-26, pedido do usuário**: além de OAuth M2M
+(Service Principal a nível de conta — precisa de account admin pra criar), agora `databricks_coleta_config`
+tem `modo_auth` (`'oauth_m2m'` padrão | `'pat'`) + coluna `token` (cifrada, mesmo padrão de `client_secret`).
+PAT é um Bearer token usado direto contra a Statement Execution API — **sem** troca de token via
+`_databricksGetToken` (`_resolveDbxToken(cfg)`, novo helper compartilhado por `/testar` e
+`_executarColetaDatabricks`, decide qual caminho usar a partir de `cfg.modo_auth`). `account_id`/`client_id`/
+`client_secret` viram opcionais no schema e na validação das rotas (`POST`/`PUT /api/databricks-coleta/config`)
+quando `modo_auth='pat'` — só `token`+`workspace_host`+`warehouse_id` são obrigatórios nesse modo. Frontend
+(`DatabricksConfigModal.tsx`) troca os campos de credencial conforme o modo selecionado (`<select
+id="dbx-modo-auth">`); `ColetaView.tsx`'s tabela mostra um badge "🔑 PAT" no lugar das colunas Account/Client
+ID quando aplicável. Funciona porque System Tables do Unity Catalog são a nível de metastore/conta — um PAT
+de workspace (gerado por qualquer usuário ou Service Principal de workspace com `USE SCHEMA`+`SELECT` em
+`system.billing.*`) consegue ler as mesmas tabelas sem precisar de uma identidade a nível de conta. Verificado
+via Playwright contra o servidor real: alternar pro modo PAT esconde Account/Client ID e mostra o campo
+Token; salvar com token preenchido funciona; badge "🔑 PAT" aparece na listagem; exclusão de teste sem erro.
 
 ### Coleta Databricks — Fase 3 (dashboard, orçamentos, alertas — 2026-08-25)
 

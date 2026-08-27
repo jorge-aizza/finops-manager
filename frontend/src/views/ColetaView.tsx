@@ -405,13 +405,13 @@ export default function ColetaView() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Nome</th><th>Account ID</th><th>Client ID</th><th>Workspace</th><th>Ativo</th><th>Ações</th>
+                <th>Nome</th><th>Autenticação</th><th>Workspace</th><th>Ativo</th><th>Ações</th>
               </tr>
             </thead>
             <tbody>
-              {databricksQuery.isLoading && <tr><td colSpan={6} className="empty-state">Carregando...</td></tr>}
+              {databricksQuery.isLoading && <tr><td colSpan={5} className="empty-state">Carregando...</td></tr>}
               {!databricksQuery.isLoading && (databricksQuery.data?.length ?? 0) === 0 && (
-                <tr><td colSpan={6} className="empty-state">Nenhuma configuração Databricks cadastrada</td></tr>
+                <tr><td colSpan={5} className="empty-state">Nenhuma configuração Databricks cadastrada</td></tr>
               )}
               {databricksQuery.data?.map((c) => (
                 <tr key={c.id}>
@@ -419,8 +419,13 @@ export default function ColetaView() {
                     {c.nome}
                     {c.is_padrao && <span style={{ marginLeft: 6, fontSize: 9, padding: '1px 6px', borderRadius: 8, background: 'var(--accent-dim)', color: 'var(--accent)' }}>PADRÃO</span>}
                   </td>
-                  <td style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>{c.account_id.slice(0, 8)}…</td>
-                  <td style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>{c.client_id.slice(0, 8)}…</td>
+                  <td style={{ fontSize: 11 }}>
+                    {c.modo_auth === 'pat' ? (
+                      <span>🔑 PAT</span>
+                    ) : (
+                      <span title={c.client_id} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>OAuth M2M · {c.client_id.slice(0, 8)}…</span>
+                    )}
+                  </td>
                   <td style={{ fontSize: 11, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.workspace_host}>{c.workspace_host}</td>
                   <td>
                     <input type="checkbox" checked={c.ativo} onChange={(e) => toggleDbxMutation.mutate({ id: c.id, ativo: e.target.checked })} />
