@@ -402,23 +402,23 @@ async function loadNotificacoes() {
       coleta_concluida: { icon:'✅', bg:'rgba(34,197,94,0.08)',   color:'var(--green)',  border:'rgba(34,197,94,0.25)'  },
       coleta_erro:      { icon:'❌', bg:'rgba(255,77,106,0.08)',  color:'var(--danger)', border:'rgba(255,77,106,0.25)' },
     };
-    const closeBtn = (key) => `<button onclick="dismissNotifItem('${key}',event)" title="Fechar" style="flex-shrink:0;width:20px;height:20px;border:none;background:transparent;color:var(--text-dim);cursor:pointer;font-size:13px;line-height:1;border-radius:4px" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'">✕</button>`;
+    // Botão ✕ posicionado absoluto, sobreposto no canto da linha — não empurra
+    // o layout (data/texto ficam na mesma linha única de antes, sem empilhar).
+    const closeBtn = (key) => `<button onclick="dismissNotifItem('${key}',event)" title="Fechar" style="position:absolute;top:4px;right:4px;width:18px;height:18px;border:none;background:transparent;color:var(--text-dim);cursor:pointer;font-size:12px;line-height:1;border-radius:4px" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'">✕</button>`;
 
     list.innerHTML = [...outrasNotifs, ...sistemaNotifs].map(n => {
       const key = _notifKey(n);
       if (n._kind === 'sistema') {
         const s = iconMap[n.tipo] || iconMap.coleta_concluida;
         const quando = n.criado_em ? new Date(n.criado_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
-        return `<div data-notif-key="${key}" style="display:flex;gap:10px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
+        return `<div data-notif-key="${key}" style="position:relative;display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
           <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.acao)}</div>
             <div style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHtml(n.mensagem)}">${escHtml(n.mensagem)}</div>
           </div>
-          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-            <div style="font-size:10px;color:var(--text-dim);white-space:nowrap">${quando}</div>
-            ${closeBtn(key)}
-          </div>
+          <div style="font-size:10px;color:var(--text-dim);white-space:nowrap;padding-top:2px">${quando}</div>
+          ${closeBtn(key)}
         </div>`;
       }
       const s = iconMap[n.tipo] || iconMap.urgente;
@@ -430,17 +430,15 @@ async function loadNotificacoes() {
       const sub = isReserva
         ? `${escHtml(n.id_finops)}`
         : `${escHtml(n.id_finops)} · ${escHtml(n.projeto_nome || '—')}`;
-      return `<div data-notif-key="${key}" onclick="${onclick}" style="display:flex;gap:10px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;background:${s.bg}" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+      return `<div data-notif-key="${key}" onclick="${onclick}" style="position:relative;display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;background:${s.bg}" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
         <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.mensagem)}</div>
           <div style="font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(n.acao)}</div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${sub}</div>
         </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-          <div style="font-size:10px;color:var(--text-dim);white-space:nowrap">${dataLabel}</div>
-          ${closeBtn(key)}
-        </div>
+        <div style="font-size:10px;color:var(--text-dim);white-space:nowrap;padding-top:2px">${dataLabel}</div>
+        ${closeBtn(key)}
       </div>`;
     }).join('');
 
