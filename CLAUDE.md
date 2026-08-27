@@ -1232,9 +1232,71 @@ informação, já que `tipo` fica `null` pra esses registros).
 
 Verificado: `node --check`, `tsc -b`, testes novos (Vitest, mockando as duas APIs de validação — confirma que
 `fonte='databricks'` chama a rota certa e não a de Azure) e rota `POST .../historico/99999/validar` retornando
-404 limpo contra o servidor real. **Não verificado**: o cálculo de validação com dados reais (nenhuma coleta
-Databricks bem-sucedida neste ambiente ainda — `databricks_consumo` está vazia) — mesma ressalva de sempre
-pras features Databricks desta sessão.
+404 limpo contra o servidor real. **Atualização (mesmo dia, via Importação Manual — ver abaixo)**: o cálculo
+de validação em si foi confirmado com dados reais gravados via o import manual novo — `validacao_status:'ok'`,
+`custo_total`/`dias_com_dados`/`subs_com_dados` todos corretos pro CSV de teste. O que continua não verificado
+é só o caminho da coleta AO VIVO via API (`_executarColetaDatabricks`) — nenhuma conta Databricks real
+disponível neste ambiente pra isso.
+
+### Coleta Databricks — Importação Manual (2026-08-27)
+
+Pedido do usuário: "igual temos para os demais" (Azure já tem uma aba "📥 Importação Manual" —
+`ImportManualPanel.tsx` — pra quem não tem/não quer configurar coleta automática). Databricks não tinha
+nenhum caminho de ingestão fora da coleta via API.
+
+**Deliberadamente mais simples que o import Azure**: só `.csv` (não `.parquet`/`.zip`) — um export do Azure
+Cost Management é um artefato oficial grande, que pode vir compactado/particionado; um export Databricks
+manual é tipicamente o resultado de uma query que o próprio usuário rodou no SQL Editor contra
+`system.billing.usage`, bem menor. Limite de 100 MB (vs. 2 GB do Azure).
+
+**Template de colunas próprio, não uma tentativa de imitar o export nativo do Databricks** — não há como
+confirmar o formato exato de export do Databricks neste ambiente (sem conta real), e um STRUCT/MAP
+(`usage_metadata`/`custom_tags`) exportado pra CSV por ferramentas diferentes pode ficar formatado de jeitos
+imprevisíveis. Em vez de adivinhar, o CSV aceito usa os MESMOS nomes de campo internos que a coleta ao vivo
+já produz (`workspace_id`, `sku_name`, `produto_origem`, `usage_date`, `usage_unit`, `usage_quantity`,
+`usuario`, `preco_unitario`, `custo_estimado`, `usage_metadata`, `custom_tags` — as duas últimas, opcionais,
+esperam uma string JSON válida; se não for JSON válido, a linha ainda é aceita, só sem esse dado). Poucos
+aliases pros nomes nativos do Databricks (`billing_origin_product` → `produto_origem`) via `_mapRowDatabricksImport`
+(mesmo padrão de lookup case-insensitive já usado em `_mapRowCSV` pro import Azure). Colunas obrigatórias:
+`workspace_id`, `sku_name`, `usage_date` — linhas sem essas três são ignoradas (contadas e logadas, não
+derrubam o import inteiro).
+
+**Reaproveita a infraestrutura de progresso da coleta ao vivo, não um segundo mecanismo de job/polling** —
+diferente do Azure (que tem seu próprio `_importJob`/`GET /azure-costs/import-status`), a importação
+Databricks usa `_dbxColetaEmExecucao`/`_dbxColetaProgresso`, os MESMOS que a coleta via API já usa. Resultado
+prático: o `DatabricksColetaMonitor` (card já existente, sem nenhuma mudança) mostra o progresso do import em
+tempo real de graça — e as duas travam uma à outra (não dá pra rodar uma coleta ao vivo e um import ao mesmo
+tempo), o que faz sentido já que os dois escrevem na mesma tabela.
+
+`_processarLinhasDatabricks(histId, configId, origem, periodoInicio, periodoFim, linhas, msgFinal)` — extraído
+de dentro de `_executarColetaDatabricks` (que ficou só com a parte de autenticar+consultar a API, delegando a
+gravação pra essa função compartilhada) pra ser reaproveitado pelos dois caminhos sem duplicar
+upsert/hash/validação/notificação.
+
+**`config_id` sempre `NULL`** pra dados importados manualmente — não é "de" nenhuma conexão OAuth M2M/PAT
+específica, é um dado avulso. Isso expôs um bug real em `_validarColetaDatabricks`: as 3 queries que filtram
+por `config_id=$1` nunca teriam batido com `config_id NULL` (SQL `NULL = NULL` nunca é verdadeiro) — a
+validação de qualquer import manual sempre daria "0 registros" mesmo com dados reais gravados. Corrigido
+trocando `=` por `IS NOT DISTINCT FROM` (operador null-safe do Postgres) nas 3 queries. **Confirmado o bug
+existia e o fix funciona**: testado contra o servidor real — antes do fix isso não foi testado (o bug só foi
+percebido ao desenhar o import manual), depois do fix um import de teste (2 linhas, `config_id NULL`) validou
+corretamente (`validacao_status:'ok'`, contagens batendo).
+
+**Novo `origem='import'`** (além de `'agendado'`/`'manual'` já existentes) — distingue "importação de arquivo"
+de "coleta via API disparada manualmente". Badge próprio `📥 Import` em `ORIGEM_BADGE` (`ColetaView.tsx`).
+
+**Frontend**: `DatabricksImportManualPanel.tsx` (novo componente, dentro do card "Coleta Databricks", não um
+card próprio como o do Azure) + `uploadDatabricksImport` (`api/databricksColeta.ts`, multipart via `fetch`
+direto — mesmo padrão de `uploadImportFile` pro Azure, incompatível com o `apiFetch` padrão que fixa
+`Content-Type: application/json`). Sem barra de progresso própria — só dispara o upload e mostra um toast;
+o progresso real já aparece no `DatabricksColetaMonitor` (que já está montado na tela).
+
+**Verificado via curl/Playwright contra o servidor real**: upload de um CSV de teste (2 linhas, workspace
+fictício `ws-teste-verificacao`) → `202 Accepted` → status muda pra "Concluído" com `ins:2` → linha aparece em
+`GET /databricks-coleta/historico` com `origem:'import'`, `validacao_status:'ok'` → `GET /databricks-coleta/resumo`
+reflete o novo custo total e workspace corretamente → histórico de teste limpo depois (`DELETE
+/databricks-coleta/historico`, única linha existente na tabela). Botão "Selecionar Arquivo .csv" confirmado
+visível e funcional na tela real via Playwright, zero erro de console.
 
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.

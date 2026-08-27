@@ -7006,6 +7006,61 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
 // mesma ressalva de _databricksGetToken/_databricksRunQuery. A sintaxe de acesso aos
 // campos STRUCT (identity_metadata.run_as, pricing.default) e os nomes exatos de
 // coluna podem precisar de ajuste na primeira execução real.
+// Grava `linhas` (mesmo shape nos dois chamadores — ver _executarColetaDatabricks e
+// _processarImportDatabricks: workspace_id/sku_name/produto_origem/usage_date/
+// usage_unit/usage_quantity/usuario/preco_unitario/custo_estimado/usage_metadata_json/
+// custom_tags_json) em databricks_consumo e finaliza o registro de histórico —
+// extraído (2026-08-27) pra ser compartilhado entre a coleta ao vivo (via API) e a
+// importação manual (via CSV), sem duplicar upsert/hash/validação/notificação.
+async function _processarLinhasDatabricks(histId, configId, origem, periodoInicio, periodoFim, linhas, msgFinal) {
+  let totalIns = 0, totalUpd = 0, totalErr = 0;
+  for (const l of linhas) {
+    try {
+      // recurso_hash — identifica um recurso individual (cluster/job/warehouse) sem
+      // depender de um nome de campo específico dentro de usage_metadata (System
+      // Tables): duas linhas com o mesmo workspace+sku+produto+dia+usuário mas
+      // metadata/tags diferentes (ex: dois jobs simultâneos) viram registros
+      // separados, em vez de colapsar numa linha só com uma tag "de exemplo" errada
+      // pra 2/3 do custo. Hash dos JSONs crus (não do objeto reparseado) — evita
+      // qualquer risco de reordenação de chaves alterar o hash pro mesmo recurso.
+      const recursoHash = crypto.createHash('md5')
+        .update((l.usage_metadata_json || '') + '|' + (l.custom_tags_json || ''))
+        .digest('hex');
+      const ins = await pool.query(
+        `INSERT INTO databricks_consumo (workspace_id,sku_name,produto_origem,usage_date,usage_unit,usage_quantity,usuario,preco_unitario,custo_estimado,usage_metadata,custom_tags,recurso_hash,config_id,atualizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+         ON CONFLICT (workspace_id,sku_name,produto_origem,usage_date,usuario,recurso_hash) DO UPDATE SET
+           usage_quantity=EXCLUDED.usage_quantity, usage_unit=EXCLUDED.usage_unit,
+           preco_unitario=EXCLUDED.preco_unitario, custo_estimado=EXCLUDED.custo_estimado,
+           usage_metadata=EXCLUDED.usage_metadata, custom_tags=EXCLUDED.custom_tags,
+           config_id=EXCLUDED.config_id, atualizado_em=NOW()
+         RETURNING (xmax = 0) AS inserted`,
+        [l.workspace_id, l.sku_name, l.produto_origem || '', l.usage_date, l.usage_unit || null, l.usage_quantity || 0, l.usuario || '', l.preco_unitario || null, l.custo_estimado || 0, l.usage_metadata_json || null, l.custom_tags_json || null, recursoHash, configId]
+      );
+      if (ins.rows[0]?.inserted) totalIns++; else totalUpd++;
+      _dbxColetaProgresso.ins = totalIns; _dbxColetaProgresso.upd = totalUpd;
+    } catch (eLinha) {
+      totalErr++;
+      _dbxColetaProgresso.err = totalErr;
+      _logColetaDbx(`Erro na linha (${l.workspace_id}/${l.sku_name}/${l.usage_date}): ${eLinha.message}`);
+    }
+  }
+
+  _logColetaDbx(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err`);
+  const detFinal = JSON.stringify({ log: [..._dbxColetaProgresso.log] });
+  await pool.query(
+    `UPDATE databricks_coleta_historico SET status='concluido',concluido_em=NOW(),linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+    [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
+  );
+  _dbxColetaProgresso.fase = 'Concluído';
+  _validarColetaDatabricks(histId, configId, periodoInicio, periodoFim).catch(() => {});
+  _registrarNotificacaoColeta(
+    origem === 'import' ? 'Importação Databricks concluída' : 'Coleta Databricks concluída',
+    origem === 'import' ? msgFinal : `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
+    'coleta_concluida'
+  ).catch(() => {});
+}
+
 async function _executarColetaDatabricks(configId, startDate, endDate, origem = 'manual') {
   if (_dbxColetaEmExecucao) throw new Error('Coleta Databricks já em execução');
   if (!pool) throw new Error('Banco não conectado');
@@ -7013,7 +7068,7 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
   _dbxColetaIniciadaEm = new Date();
   _dbxColetaProgresso  = { fase: 'Iniciando...', ins: 0, upd: 0, err: 0, log: [] };
   _logColetaDbx(`Coleta Databricks — ${startDate} → ${endDate}`);
-  let histId, totalIns = 0, totalUpd = 0, totalErr = 0;
+  let histId;
 
   try {
     await ensureAzureColetaTable();
@@ -7071,55 +7126,8 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
     _dbxColetaProgresso.fase = `Gravando ${linhas.length} linha(s)...`;
     _logColetaDbx(`${linhas.length} linha(s) retornada(s) — gravando em databricks_consumo...`);
 
-    for (const l of linhas) {
-      try {
-        // recurso_hash — identifica um recurso individual (cluster/job/warehouse) sem
-        // depender de um nome de campo específico dentro de usage_metadata (ver nota
-        // acima): duas linhas com o mesmo workspace+sku+produto+dia+usuário mas
-        // metadata/tags diferentes (ex: dois jobs simultâneos) viram registros
-        // separados, em vez de colapsar numa linha só com uma tag "de exemplo" errada
-        // pra 2/3 do custo. Hash dos JSONs crus (não do objeto reparseado) — evita
-        // qualquer risco de reordenação de chaves alterar o hash pro mesmo recurso.
-        const recursoHash = crypto.createHash('md5')
-          .update((l.usage_metadata_json || '') + '|' + (l.custom_tags_json || ''))
-          .digest('hex');
-        // Já são strings JSON válidas (to_json() no Spark) — passa direto pro parâmetro
-        // jsonb, sem parse+stringify de volta (mesmo padrão de `detalhes` em
-        // databricks_coleta_historico, que também recebe uma string JSON pronta).
-        const ins = await pool.query(
-          `INSERT INTO databricks_consumo (workspace_id,sku_name,produto_origem,usage_date,usage_unit,usage_quantity,usuario,preco_unitario,custo_estimado,usage_metadata,custom_tags,recurso_hash,config_id,atualizado_em)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
-           ON CONFLICT (workspace_id,sku_name,produto_origem,usage_date,usuario,recurso_hash) DO UPDATE SET
-             usage_quantity=EXCLUDED.usage_quantity, usage_unit=EXCLUDED.usage_unit,
-             preco_unitario=EXCLUDED.preco_unitario, custo_estimado=EXCLUDED.custo_estimado,
-             usage_metadata=EXCLUDED.usage_metadata, custom_tags=EXCLUDED.custom_tags,
-             config_id=EXCLUDED.config_id, atualizado_em=NOW()
-           RETURNING (xmax = 0) AS inserted`,
-          [l.workspace_id, l.sku_name, l.produto_origem || '', l.usage_date, l.usage_unit || null, l.usage_quantity || 0, l.usuario || '', l.preco_unitario || null, l.custo_estimado || 0, l.usage_metadata_json || null, l.custom_tags_json || null, recursoHash, configId]
-        );
-        if (ins.rows[0]?.inserted) totalIns++; else totalUpd++;
-        _dbxColetaProgresso.ins = totalIns; _dbxColetaProgresso.upd = totalUpd;
-      } catch (eLinha) {
-        totalErr++;
-        _dbxColetaProgresso.err = totalErr;
-        _logColetaDbx(`Erro na linha (${l.workspace_id}/${l.sku_name}/${l.usage_date}): ${eLinha.message}`);
-      }
-    }
-
-    _logColetaDbx(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err`);
     const msgFinal = `Databricks — ${linhas.length} linha(s) | ${startDate}→${endDate}`;
-    const detFinal = JSON.stringify({ log: [..._dbxColetaProgresso.log] });
-    await pool.query(
-      `UPDATE databricks_coleta_historico SET status='concluido',concluido_em=NOW(),linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
-      [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
-    );
-    _dbxColetaProgresso.fase = 'Concluído';
-    _validarColetaDatabricks(histId, configId, startDate, endDate).catch(() => {});
-    _registrarNotificacaoColeta(
-      'Coleta Databricks concluída',
-      `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
-      'coleta_concluida'
-    ).catch(() => {});
+    await _processarLinhasDatabricks(histId, configId, origem, startDate, endDate, linhas, msgFinal);
 
   } catch (err) {
     _logColetaDbx(`ERRO: ${err.message}`);
@@ -7133,6 +7141,109 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
   } finally {
     _dbxColetaEmExecucao = false;
     _dbxColetaIniciadaEm = null;
+  }
+}
+
+// Mapeia uma linha de CSV de importação manual pro mesmo shape que a coleta ao vivo
+// produz (ver SELECT em _executarColetaDatabricks) — nomes de coluna esperados batem
+// 1:1 com os campos internos (workspace_id, sku_name, produto_origem, usage_date,
+// usage_unit, usage_quantity, usuario, preco_unitario, custo_estimado, usage_metadata,
+// custom_tags), com alguns aliases pros nomes nativos do Databricks (ex:
+// billing_origin_product). Preferido a tentar imitar o formato exato de export do
+// Databricks (desconhecido/não confirmável sem conta real) — um template próprio,
+// documentado na UI, é previsível e não depende de nenhuma suposição sobre como o
+// usuário extraiu os dados.
+function _mapRowDatabricksImport(row) {
+  const keysLower = Object.keys(row).reduce((m, k) => { m[k.toLowerCase().replace(/[\s_-]/g, '')] = k; return m; }, {});
+  const ci = (...slugs) => { for (const s of slugs) { const k = keysLower[s]; if (k != null) { const v = row[k]; if (v != null && v !== '') return v; } } return null; };
+
+  const workspace_id = ci('workspaceid');
+  const sku_name      = ci('skuname');
+  const produto_origem = ci('produtoorigem', 'billingoriginproduct') || '';
+  const usage_date    = ci('usagedate');
+  const usage_unit    = ci('usageunit');
+  const usage_quantity = parseFloat(ci('usagequantity')) || 0;
+  const usuario        = ci('usuario', 'usageuser', 'runas', 'identitymetadatarunas') || '';
+  const precoRaw   = ci('precounitario', 'price', 'unitprice');
+  const preco_unitario = precoRaw != null ? parseFloat(precoRaw) : null;
+  const custoRaw   = ci('custoestimado', 'cost');
+  const custo_estimado = custoRaw != null ? parseFloat(custoRaw) : (usage_quantity * (preco_unitario || 0));
+
+  // usage_metadata/custom_tags: só aceita se for JSON válido — se o usuário deixou
+  // texto livre ou uma coluna vazia, trata como ausente em vez de falhar a linha
+  // inteira (essas colunas são opcionais; sem elas, a linha ainda tem
+  // workspace/sku/data/usuário suficientes pra formar um recurso_hash próprio).
+  function _validJsonOrNull(raw) {
+    if (!raw) return null;
+    try { JSON.parse(raw); return raw; } catch (_) { return null; }
+  }
+  const usage_metadata_json = _validJsonOrNull(ci('usagemetadata'));
+  const custom_tags_json    = _validJsonOrNull(ci('customtags'));
+
+  return { workspace_id, sku_name, produto_origem, usage_date, usage_unit, usage_quantity, usuario, preco_unitario, custo_estimado, usage_metadata_json, custom_tags_json };
+}
+
+// Importação manual (CSV) — pedido do usuário (2026-08-27), mesma ideia do "Importação
+// Manual" já existente pra Azure, mas reaproveitando a infraestrutura de progresso já
+// construída pra Databricks (_dbxColetaProgresso/_dbxColetaEmExecucao) em vez de criar
+// um segundo mecanismo de job/polling só pra isso — o monitor ao vivo já existente
+// (DatabricksColetaMonitor) funciona sem nenhuma mudança no frontend além do botão de
+// upload. config_id sempre NULL (dado avulso, não atribuído a nenhuma conexão
+// OAuth/PAT específica) — _validarColetaDatabricks usa IS NOT DISTINCT FROM (não `=`)
+// pra continuar funcionando corretamente com config_id NULL (SQL `NULL = NULL` nunca é
+// verdadeiro; precisa do operador null-safe).
+async function _processarImportDatabricks(tmpPath, originalname) {
+  if (_dbxColetaEmExecucao) throw new Error('Coleta Databricks já em execução');
+  if (!pool) throw new Error('Banco não conectado');
+  _dbxColetaEmExecucao = true;
+  _dbxColetaIniciadaEm = new Date();
+  _dbxColetaProgresso  = { fase: 'Lendo arquivo...', ins: 0, upd: 0, err: 0, log: [] };
+  _logColetaDbx(`Importação manual — ${originalname}`);
+  let histId;
+
+  try {
+    await ensureAzureColetaTable();
+    const rows = await _lerCSV(tmpPath);
+    if (!rows.length) throw new Error('Arquivo vazio ou sem linhas de dados.');
+
+    const linhas = [];
+    let ignoradas = 0;
+    for (const row of rows) {
+      const m = _mapRowDatabricksImport(row);
+      if (!m.workspace_id || !m.sku_name || !m.usage_date) { ignoradas++; continue; }
+      linhas.push(m);
+    }
+    if (ignoradas) _logColetaDbx(`${ignoradas} linha(s) ignorada(s) — sem workspace_id/sku_name/usage_date.`);
+    if (!linhas.length) throw new Error('Nenhuma linha válida — confira as colunas obrigatórias (workspace_id, sku_name, usage_date).');
+
+    const datas = linhas.map(l => l.usage_date).sort();
+    const periodoInicio = datas[0], periodoFim = datas[datas.length - 1];
+
+    const r = await pool.query(
+      `INSERT INTO databricks_coleta_historico (status,config_id,origem,periodo_inicio,periodo_fim) VALUES ('executando',NULL,'import',$1,$2) RETURNING id`,
+      [periodoInicio, periodoFim]
+    );
+    histId = r.rows[0].id;
+
+    _dbxColetaProgresso.fase = `Gravando ${linhas.length} linha(s)...`;
+    _logColetaDbx(`${linhas.length} linha(s) válida(s) — gravando em databricks_consumo...`);
+    const msgFinal = `Import manual — ${originalname} — ${linhas.length} linha(s)`;
+    await _processarLinhasDatabricks(histId, null, 'import', periodoInicio, periodoFim, linhas, msgFinal);
+
+  } catch (err) {
+    _logColetaDbx(`ERRO: ${err.message}`);
+    const detErr = JSON.stringify({ log: [..._dbxColetaProgresso.log] });
+    if (histId) await pool.query(
+      `UPDATE databricks_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1,detalhes=$2 WHERE id=$3`,
+      [err.message, detErr, histId]
+    ).catch(() => {});
+    _registrarNotificacaoColeta('Importação Databricks com erro', err.message, 'coleta_erro').catch(() => {});
+    _alertarColetaComErro('Importação Databricks com erro', err.message).catch(() => {});
+  } finally {
+    _dbxColetaEmExecucao = false;
+    _dbxColetaIniciadaEm = null;
+    const fs = require('fs');
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
   }
 }
 
@@ -7155,6 +7266,44 @@ app.get('/api/databricks-coleta/status', authMiddleware, dbMiddleware, async (_r
     progresso: _dbxColetaProgresso,
   });
 });
+
+// Importação manual (CSV) — só .csv (diferente do import Azure, que aceita .csv/
+// .parquet/.zip pra lidar com exports oficiais grandes; aqui é um export manual que o
+// próprio usuário monta a partir de uma query no SQL editor do Databricks, tipicamente
+// bem menor). Reaproveita _dbxColetaEmExecucao como trava (mesma trava que já bloqueia
+// coleta ao vivo concorrente — os dois usam a mesma tabela de destino).
+if (_multer) {
+  const _uploadDbx = _multer({
+    storage: _multer.diskStorage({
+      destination: (_, __, cb) => cb(null, _uploadDir),
+      filename: (_, file, cb) => cb(null, Date.now() + '_' + file.originalname),
+    }),
+    limits: { fileSize: 100 * 1024 * 1024, files: 1 }, // 100 MB — bem menor que o limite do Azure
+  });
+
+  app.post('/api/databricks-coleta/import', authMiddleware, dbMiddleware, (req, res, next) => {
+    _uploadDbx.single('arquivo')(req, res, (err) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Arquivo muito grande (limite: 100 MB).' });
+        return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      }
+      next();
+    });
+  }, (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+    if (!req.file.originalname.toLowerCase().endsWith('.csv')) {
+      require('fs').unlink(req.file.path, () => {});
+      return res.status(400).json({ error: 'Apenas arquivos .csv são aceitos.' });
+    }
+    if (_dbxColetaEmExecucao) {
+      require('fs').unlink(req.file.path, () => {});
+      return res.status(409).json({ error: 'Uma coleta ou importação Databricks já está em andamento. Aguarde a conclusão.' });
+    }
+    res.status(202).json({ ok: true, message: 'Importação iniciada' });
+    _processarImportDatabricks(req.file.path, req.file.originalname)
+      .catch(e => console.error('[ImportDbx] Erro:', e.message));
+  });
+}
 
 // Espelha GET/DELETE /api/azure-coleta/historico — mesmo shape de HistoricoItem
 // (frontend), sem `tipo` (conceito que não existe pra Databricks: uma única query
@@ -8306,7 +8455,7 @@ async function _validarColetaDatabricks(histId, configId, inicio, fim) {
       const { rows: [pr] } = await pool.query(
         `SELECT MIN(usage_date)::text AS ini, MAX(usage_date)::text AS fim
          FROM databricks_consumo
-         WHERE config_id=$1 AND atualizado_em >= (SELECT iniciado_em FROM databricks_coleta_historico WHERE id=$2)`,
+         WHERE config_id IS NOT DISTINCT FROM $1 AND atualizado_em >= (SELECT iniciado_em FROM databricks_coleta_historico WHERE id=$2)`,
         [configId, histId]
       );
       periodoInicio = pr?.ini || null;
@@ -8326,7 +8475,7 @@ async function _validarColetaDatabricks(histId, configId, inicio, fim) {
     const { rows: [row] } = await pool.query(
       `SELECT COUNT(DISTINCT usage_date) AS dias, COUNT(DISTINCT workspace_id) AS workspaces,
               COUNT(*) AS total, COALESCE(SUM(custo_estimado),0) AS custo
-       FROM databricks_consumo WHERE config_id=$1 AND usage_date BETWEEN $2 AND $3`,
+       FROM databricks_consumo WHERE config_id IS NOT DISTINCT FROM $1 AND usage_date BETWEEN $2 AND $3`,
       [configId, periodoInicio, periodoFim]
     );
     const diasComDados       = parseInt(row.dias  || 0);
@@ -8339,7 +8488,7 @@ async function _validarColetaDatabricks(histId, configId, inicio, fim) {
       const { rows: gaps } = await pool.query(
         `SELECT gs::date::text AS dt FROM generate_series($1::date,$2::date,'1 day') gs
          WHERE gs::date NOT IN (
-           SELECT DISTINCT usage_date FROM databricks_consumo WHERE config_id=$3 AND usage_date BETWEEN $1 AND $2
+           SELECT DISTINCT usage_date FROM databricks_consumo WHERE config_id IS NOT DISTINCT FROM $3 AND usage_date BETWEEN $1 AND $2
          ) ORDER BY dt LIMIT 31`,
         [periodoInicio, periodoFim, configId]
       );

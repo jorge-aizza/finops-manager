@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { API_BASE, ApiError, apiFetch, getToken } from './client'
 import { numFields } from './normalize'
 import type {
   AgendamentoDatabricksInput, DatabricksColetaStatus, DatabricksConfig, DatabricksConfigInput, TestarDatabricksResponse,
@@ -103,6 +103,27 @@ export const getDatabricksHistorico = () =>
 
 export const deleteDatabricksHistorico = () =>
   apiFetch<{ ok: boolean }>('DELETE', '/databricks-coleta/historico')
+
+// Importação manual (CSV) — multipart, mesmo padrão de uploadImportFile (api/coleta.ts):
+// monta o próprio fetch com FormData, incompatível com o Content-Type: application/json
+// fixo do apiFetch. Progresso real vem do polling já existente de getDatabricksStatus
+// (DatabricksColetaMonitor) — esta chamada só inicia e retorna assim que o servidor
+// aceita o arquivo (202), não espera a importação terminar.
+export async function uploadDatabricksImport(file: File): Promise<{ ok: true }> {
+  const fd = new FormData()
+  fd.append('arquivo', file)
+  const token = getToken()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = 'Bearer ' + token
+
+  const res = await fetch(API_BASE + '/databricks-coleta/import', { method: 'POST', headers, body: fd })
+  if (res.status === 401) { window.logout?.(false); throw new ApiError('Sessão expirada') }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    throw new ApiError(data.error || `Erro HTTP ${res.status}`)
+  }
+  return { ok: true }
+}
 
 export const validarHistoricoDatabricks = (id: number) =>
   apiFetch<{ validacao_status: string; validacao_json: HistoricoItem['validacao_json'] }>('POST', `/databricks-coleta/historico/${id}/validar`)

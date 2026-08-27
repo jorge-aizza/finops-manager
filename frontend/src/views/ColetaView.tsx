@@ -14,6 +14,7 @@ import type { DatabricksConfig } from '../types/databricksColeta'
 import CoberturaGrid from '../components/CoberturaGrid'
 import ColetaMonitor from '../components/ColetaMonitor'
 import DatabricksColetaMonitor from '../components/DatabricksColetaMonitor'
+import DatabricksImportManualPanel from '../components/DatabricksImportManualPanel'
 import ImportManualPanel from '../components/ImportManualPanel'
 import SPModal from './SPModal'
 import DatabricksConfigModal from './DatabricksConfigModal'
@@ -46,6 +47,9 @@ const STATUS_COLORS: Record<string, string> = {
 const ORIGEM_BADGE: Record<string, { color: string; bg: string; label: string }> = {
   agendado: { color: 'var(--green)', bg: 'rgba(34,197,94,.10)', label: '⏰ Agendada' },
   manual: { color: 'var(--blue)', bg: 'rgba(77,166,255,.10)', label: '👤 Manual' },
+  // 'import' — só existe pra Databricks (importação manual via CSV, distinta de
+  // "manual" = coleta via API disparada manualmente pelo usuário).
+  import: { color: 'var(--accent)', bg: 'rgba(147,51,234,.10)', label: '📥 Import' },
 }
 
 const TIPO_BADGE: Record<string, { color: string; bg: string; label: string }> = {
@@ -450,6 +454,7 @@ export default function ColetaView() {
             </tbody>
           </table>
         </div>
+        <DatabricksImportManualPanel />
       </div>
 
       {/* ── Storage Accounts ── */}
