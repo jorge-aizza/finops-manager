@@ -1298,6 +1298,41 @@ reflete o novo custo total e workspace corretamente → histórico de teste limp
 /databricks-coleta/historico`, única linha existente na tabela). Botão "Selecionar Arquivo .csv" confirmado
 visível e funcional na tela real via Playwright, zero erro de console.
 
+**Script de dados de teste** — `gerar_dados_teste_databricks.py` (raiz do repo, script solto, não faz parte
+do app) gera um CSV sintético no formato aceito pela Importação Manual, com mistura de SKUs pagas/free-tier,
+`custom_tags`/`usage_metadata` variados por recurso (testa a granularidade por recurso) e, opcionalmente
+(`--criar-orcamentos`), Orçamentos de teste via API. Só biblioteca padrão do Python pra gerar o CSV;
+`requests` só é necessário com `--criar-orcamentos`.
+
+### Coleta Databricks — Expurgo de Dados (2026-08-27)
+
+Pedido do usuário logo depois de gerar dados de teste repetidamente via `gerar_dados_teste_databricks.py`
+pra validar a Importação Manual — precisava de um jeito de limpar `databricks_consumo` sem esperar um
+"Limpar Dados" geral (que nem existia). Porta de `ExpurgoModal.tsx` (Azure), mesma UX (preview antes de
+habilitar "Confirmar", `confirm()` como segundo gate), mas **escopado por `workspace_id` em vez de
+`arquivo_origem`** — `databricks_consumo` não rastreia de qual arquivo cada linha veio (`config_id` fica
+`NULL` pra import manual, sem coluna de arquivo), então "por arquivo" não é um filtro possível hoje; "por
+workspace" cobre o caso de uso real (limpar um workspace de teste específico) sem precisar de coluna nova.
+Sem retry de deadlock (diferente do purge Azure, `azure-costs/purge`) — volume de escrita concorrente muito
+menor aqui, esse cenário não se aplica.
+
+**Backend**: `GET /api/databricks-coleta/purge/preview` + `DELETE /api/databricks-coleta/purge`
+(`data_inicio`/`data_fim`/`workspace_id` como query params, mutuamente exclusivos — mesmo padrão do Azure).
+Sem `workspace_id` nem período: `TRUNCATE TABLE databricks_consumo`. Só afeta `databricks_consumo` — nunca
+`databricks_coleta_historico` (esse já tem seu próprio "Limpar" desde a aba Histórico de Execuções, mesma
+separação de responsabilidade que a Azure já tinha entre `azure_costs`/`azure_coleta_historico`).
+
+**Frontend**: `DatabricksExpurgoModal.tsx`, novo botão "🗑 Limpar Dados" no card Histórico de Execuções quando
+`histTab === 'databricks'` (ao lado do "Limpar" que já existia ali, que limpa só o histórico/log, não os
+dados de consumo em si). Lista de workspaces pro modo "Por workspace" vem de `GET /resumo`, mas chamado com
+um range bem largo (`2015-01-01` → hoje) em vez do default de 6 meses do dashboard — o objetivo aqui é
+justamente limpar dados antigos que o dashboard normal talvez nem esteja mostrando.
+
+**Verificado contra o servidor real** — usado pra limpar de vez os dados de teste acumulados nesta sessão
+(102 registros, entre o teste manual anterior e o script Python): preview + delete por `workspace_id` (2
+registros, exato) e depois "tudo" (100 registros restantes) — os dois modos confirmados removendo
+exatamente o número previsto, tabela zerada no final. Modal renderizado via Playwright sem erro de console.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

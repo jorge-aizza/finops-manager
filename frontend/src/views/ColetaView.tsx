@@ -24,6 +24,7 @@ import WizardColetaModal from './WizardColetaModal'
 import AgendamentoModal from './AgendamentoModal'
 import DiagAgendadorModal from './DiagAgendadorModal'
 import ExpurgoModal from './ExpurgoModal'
+import DatabricksExpurgoModal from './DatabricksExpurgoModal'
 import DiagnosticoModal from './DiagnosticoModal'
 import ColetaLogModal from './ColetaLogModal'
 import ColetaValidacaoModal from './ColetaValidacaoModal'
@@ -167,6 +168,7 @@ export default function ColetaView() {
   const [agendamentoSP, setAgendamentoSP] = useState<ServicePrincipal | null>(null)
   const [diagOpen, setDiagOpen] = useState(false)
   const [expurgoOpen, setExpurgoOpen] = useState(false)
+  const [expurgoDbxOpen, setExpurgoDbxOpen] = useState(false)
   const [diagnosticoOpen, setDiagnosticoOpen] = useState(false)
 
   const testarSPMutation = useMutation({
@@ -537,6 +539,11 @@ export default function ColetaView() {
                 </button>
               </>
             )}
+            {histTab === 'databricks' && (
+              <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px', borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => setExpurgoDbxOpen(true)}>
+                🗑 Limpar Dados
+              </button>
+            )}
           </div>
         </div>
         <div className="table-wrapper">
@@ -642,6 +649,7 @@ export default function ColetaView() {
       {agendamentoSP && <AgendamentoModal sp={agendamentoSP} onClose={() => setAgendamentoSP(null)} />}
       {diagOpen && <DiagAgendadorModal onClose={() => setDiagOpen(false)} />}
       {expurgoOpen && <ExpurgoModal onClose={() => setExpurgoOpen(false)} />}
+      {expurgoDbxOpen && <DatabricksExpurgoModal onClose={() => setExpurgoDbxOpen(false)} />}
       {diagnosticoOpen && <DiagnosticoModal onClose={() => setDiagnosticoOpen(false)} />}
       {logItem && <ColetaLogModal item={logItem} onClose={() => setLogItem(null)} />}
       {validacaoItem && <ColetaValidacaoModal item={validacaoItem} fonte={histTab === 'databricks' ? 'databricks' : 'azure'} onClose={() => setValidacaoItem(null)} />}

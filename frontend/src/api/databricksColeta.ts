@@ -6,7 +6,7 @@ import type {
 import type {
   DatabricksAlerta, DatabricksBudget, DatabricksBudgetInput, DatabricksResumo,
 } from '../types/databricksResumo'
-import type { HistoricoItem } from '../types/coleta'
+import type { HistoricoItem, PurgeResult } from '../types/coleta'
 
 const NUM_FIELDS: (keyof DatabricksConfig)[] = ['granularidade_dias', 'dia_execucao', 'hora_execucao']
 const normalize = (c: DatabricksConfig) => numFields(c, NUM_FIELDS)
@@ -103,6 +103,25 @@ export const getDatabricksHistorico = () =>
 
 export const deleteDatabricksHistorico = () =>
   apiFetch<{ ok: boolean }>('DELETE', '/databricks-coleta/historico')
+
+// Expurgo de databricks_consumo — espelha getPurgePreview/executarPurge (api/coleta.ts,
+// Azure), escopado por workspace_id em vez de arquivo (ver rota no server.js).
+export const getDatabricksPurgePreview = (params: { data_inicio?: string; data_fim?: string; workspace_id?: string }) => {
+  const q = new URLSearchParams()
+  if (params.data_inicio) q.set('data_inicio', params.data_inicio)
+  if (params.data_fim) q.set('data_fim', params.data_fim)
+  if (params.workspace_id) q.set('workspace_id', params.workspace_id)
+  return apiFetch<{ total: number }>('GET', '/databricks-coleta/purge/preview?' + q.toString())
+}
+
+export const executarDatabricksPurge = (params: { data_inicio?: string; data_fim?: string; workspace_id?: string }) => {
+  const q = new URLSearchParams()
+  if (params.data_inicio) q.set('data_inicio', params.data_inicio)
+  if (params.data_fim) q.set('data_fim', params.data_fim)
+  if (params.workspace_id) q.set('workspace_id', params.workspace_id)
+  const qs = q.toString()
+  return apiFetch<PurgeResult>('DELETE', '/databricks-coleta/purge' + (qs ? '?' + qs : ''), undefined, 60000)
+}
 
 // Importação manual (CSV) — multipart, mesmo padrão de uploadImportFile (api/coleta.ts):
 // monta o próprio fetch com FormData, incompatível com o Content-Type: application/json

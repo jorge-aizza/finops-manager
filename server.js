@@ -7348,6 +7348,55 @@ app.delete('/api/databricks-coleta/historico', authMiddleware, dbMiddleware, asy
   } catch (e) { _dbErr(res, e); }
 });
 
+// Expurgo de databricks_consumo (2026-08-27, pedido do usuário) — espelha
+// GET/DELETE /api/azure-costs/purge, mas escopado por workspace_id em vez de
+// arquivo_origem: databricks_consumo não rastreia de qual arquivo cada linha
+// veio (config_id fica NULL pra import manual — ver nota em
+// _processarImportDatabricks), então "por arquivo" não é um filtro possível
+// hoje; "por workspace" cobre o caso de uso real (limpar um workspace de
+// teste específico) sem precisar de uma coluna nova. Sem retry de deadlock
+// (diferente do purge Azure) — volume de escrita concorrente muito menor
+// aqui, esse cenário não se aplica.
+app.get('/api/databricks-coleta/purge/preview', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { data_inicio, data_fim, workspace_id } = req.query;
+    let q = 'SELECT COUNT(*) AS total FROM databricks_consumo WHERE 1=1';
+    const params = [];
+    if (workspace_id) { params.push(workspace_id); q += ` AND workspace_id = $${params.length}`; }
+    if (data_inicio)  { params.push(data_inicio);  q += ` AND usage_date >= $${params.length}`; }
+    if (data_fim)     { params.push(data_fim);     q += ` AND usage_date <= $${params.length}`; }
+    const r = await pool.query(q, params);
+    res.json({ total: parseInt(r.rows[0].total) });
+  } catch (err) { _dbErr(res, err); }
+});
+
+app.delete('/api/databricks-coleta/purge', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { data_inicio, data_fim, workspace_id } = req.query;
+    let removidos, msg;
+    if (workspace_id) {
+      const r = await pool.query('DELETE FROM databricks_consumo WHERE workspace_id = $1', [workspace_id]);
+      removidos = r.rowCount;
+      msg = `${removidos} registro(s) do workspace "${workspace_id}" removidos.`;
+    } else if (data_inicio || data_fim) {
+      let q = 'DELETE FROM databricks_consumo WHERE 1=1';
+      const params = [];
+      if (data_inicio) { params.push(data_inicio); q += ` AND usage_date >= $${params.length}`; }
+      if (data_fim)    { params.push(data_fim);    q += ` AND usage_date <= $${params.length}`; }
+      const r = await pool.query(q, params);
+      removidos = r.rowCount;
+      msg = `${removidos} registro(s) do período ${data_inicio || '—'} → ${data_fim || '—'} removidos.`;
+    } else {
+      const count = (await pool.query('SELECT COUNT(*) AS n FROM databricks_consumo')).rows[0].n;
+      await pool.query('TRUNCATE TABLE databricks_consumo');
+      removidos = parseInt(count);
+      msg = `Todos os ${removidos} registros foram removidos.`;
+    }
+    console.log(`[Databricks Purge] ${msg}`);
+    res.json({ message: msg, removidos });
+  } catch (err) { _dbErr(res, err); }
+});
+
 // Espelha PUT /api/azure-coleta/sps/:id/agendamento — agendamento em campos próprios,
 // separado do CRUD principal de credenciais.
 app.put('/api/databricks-coleta/config/:id/agendamento', authMiddleware, dbMiddleware, async (req, res) => {
