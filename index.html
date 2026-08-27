@@ -3063,7 +3063,7 @@
         <div class="settings-tabs">
           <div class="settings-tab active" onclick="switchSettingsTab('usuarios')">👤 Usuários</div>
           <div class="settings-tab" onclick="switchSettingsTab('privilegios')">🔐 Privilégios</div>
-          <div class="settings-tab" onclick="switchSettingsTab('integracao')">🔗 AD / Entra ID</div>
+          <div class="settings-tab" onclick="switchSettingsTab('integracao')">🔗 Integrações</div>
           <div class="settings-tab" onclick="switchSettingsTab('banco')">🗄️ Banco de Dados</div>
           <div class="settings-tab" onclick="switchSettingsTab('pricelist')">💰 Price List</div>
           <div class="settings-tab" onclick="switchSettingsTab('portal'); loadPortalConfig();">🌐 Portal Público</div>
@@ -3237,6 +3237,43 @@
               <div style="display:flex;gap:8px;margin-top:8px">
                 <button type="button" class="btn-primary" onclick="testarConexao('entra')">Testar Conexão</button>
                 <button type="button" class="btn-rep secondary" onclick="salvarIntegracao('entra')">💾 Salvar Configuração</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- E-mail (SMTP) -->
+          <div class="integration-card">
+            <div class="integration-header" style="justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:10px">
+                <svg class="integration-logo" viewBox="0 0 32 32" fill="none">
+                  <rect width="32" height="32" rx="4" fill="#9333ea"/>
+                  <path d="M6 10h20v12H6V10z" stroke="white" stroke-width="1.5" fill="none"/>
+                  <path d="M6 10l10 8 10-8" stroke="white" stroke-width="1.5" fill="none"/>
+                </svg>
+                <div>
+                  <div class="integration-title">E-mail (SMTP)</div>
+                  <div class="integration-sub">Alertas de orçamento, reservas, ações vencendo, coleta com erro e estimativas</div>
+                </div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-smtp" onchange="toggleIntegration('smtp')">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="config-smtp" style="display:none">
+              <div class="form-grid-2" style="margin-top:12px">
+                <div class="form-group"><label>Host SMTP</label><input type="text" id="smtp-host" placeholder="smtp.office365.com"></div>
+                <div class="form-group"><label>Porta</label><input type="number" id="smtp-port" placeholder="587" value="587"></div>
+                <div class="form-group"><label>Usuário</label><input type="text" id="smtp-usuario" placeholder="finops@empresa.com"></div>
+                <div class="form-group"><label>Senha</label><input type="password" id="smtp-senha" placeholder="Deixe em branco para manter a atual"></div>
+                <div class="form-group"><label>Nome do remetente</label><input type="text" id="smtp-remetente-nome" placeholder="FinOps Manager"></div>
+                <div class="form-group"><label>E-mail do remetente</label><input type="text" id="smtp-remetente-email" placeholder="finops@empresa.com"></div>
+                <div class="form-group" style="grid-column:1/-1"><label>Destinatários padrão (alertas de infraestrutura — separados por vírgula)</label><input type="text" id="smtp-destinatarios" placeholder="time-finops@empresa.com, ti@empresa.com"></div>
+                <div class="form-group"><label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="smtp-secure" style="width:auto"> Conexão segura (SSL/TLS na porta, ex: 465)</label></div>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button type="button" class="btn-primary" onclick="testarConexao('smtp')">Testar Conexão</button>
+                <button type="button" class="btn-rep secondary" onclick="salvarIntegracao('smtp')">💾 Salvar Configuração</button>
               </div>
             </div>
           </div>

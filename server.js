@@ -59,6 +59,7 @@ const jwt      = require('jsonwebtoken');
 const crypto   = require('crypto');
 const fs       = require('fs');
 const jwksRsa  = require('jwks-rsa');
+const nodemailer = require('nodemailer');
 
 const JWT_SECRET  = process.env.JWT_SECRET  || 'finops-secret-2024';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '8h';
@@ -324,6 +325,21 @@ async function initDB() {
       );
       INSERT INTO integracoes (tipo) VALUES ('ad')    ON CONFLICT (tipo) DO NOTHING;
       INSERT INTO integracoes (tipo) VALUES ('entra') ON CONFLICT (tipo) DO NOTHING;
+    `);
+
+    // Dedup de alertas por e-mail — sem isso, uma checagem periódica (orçamento
+    // estourado, reserva/ação vencendo) reenviaria o mesmo alerta a cada ciclo
+    // pra sempre. `chave` carrega a identidade do alerta (ex: 'reserva:42',
+    // 'orcamento:3:2026-08' — mês incluso pra reavisar todo mês se continuar
+    // estourado). Ver _sendEmail/_checkReservasVencendo etc. mais abaixo.
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS email_alertas_enviados (
+        id         SERIAL PRIMARY KEY,
+        tipo       VARCHAR(50) NOT NULL,
+        chave      VARCHAR(200) NOT NULL,
+        enviado_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE (tipo, chave)
+      );
     `);
 
     await c.query(`
@@ -813,19 +829,65 @@ app.get('/api/permissoes', authMiddleware, async (req, res) => {
 // esses segredos em texto puro via GET, ou reescrever a configuração via POST.
 app.get('/api/integrations', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    res.json((await pool.query('SELECT tipo, config, ativo FROM integracoes')).rows);
+    const rows = (await pool.query('SELECT tipo, config, ativo FROM integracoes')).rows;
+    // smtp.senha vai cifrada no banco (ao contrário de ad/bind_pass e entra/client_secret,
+    // que já ficam em texto puro no JSONB — gap pré-existente, não repetido aqui) — nunca
+    // devolve nem o texto puro nem o blob cifrado pro cliente, mesmo padrão de
+    // "client_secret nunca volta do GET" já usado em /api/databricks-coleta/config.
+    for (const r of rows) if (r.tipo === 'smtp' && r.config?.senha) r.config = { ...r.config, senha: undefined };
+    res.json(rows);
   } catch (err) { _dbErr(res, err); }
 });
 
+// Bug real corrigido (2026-08-26): era só UPDATE...WHERE tipo=$3 — se a linha não existisse
+// ainda em `integracoes` (só ad/entra vinham semeadas no CREATE TABLE), o UPDATE não fazia
+// nada e a rota respondia {ok:true} mesmo assim, um no-op silencioso. Corrigido com
+// INSERT...ON CONFLICT — funciona pra qualquer tipo novo (ex: smtp) sem precisar semear linha.
 app.post('/api/integrations/:tipo', authMiddleware, adminMiddleware, async (req, res) => {
   const { config, ativo } = req.body;
   try {
+    // smtp.senha: cifra se veio um valor novo do form; se veio vazio (usuário não trocou a
+    // senha ao editar), mantém a que já está salva — mesmo padrão de "client_secret opcional,
+    // mantém o atual se vazio" já usado em PUT /api/databricks-coleta/config/:id.
+    if (req.params.tipo === 'smtp') {
+      if (config.senha) {
+        config.senha = _encryptSecret(config.senha);
+      } else {
+        const atual = await pool.query(`SELECT config FROM integracoes WHERE tipo='smtp'`);
+        config.senha = atual.rows[0]?.config?.senha || null;
+      }
+    }
     await pool.query(
-      'UPDATE integracoes SET config=$1, ativo=$2, atualizado_em=NOW() WHERE tipo=$3',
-      [JSON.stringify(config), ativo, req.params.tipo]
+      `INSERT INTO integracoes (tipo, config, ativo) VALUES ($1,$2,$3)
+       ON CONFLICT (tipo) DO UPDATE SET config=EXCLUDED.config, ativo=EXCLUDED.ativo, atualizado_em=NOW()`,
+      [req.params.tipo, JSON.stringify(config), ativo]
     );
     res.json({ ok: true });
   } catch (err) { _dbErr(res, err); }
+});
+
+// Testa credenciais SMTP ainda não salvas (mesmo padrão de POST /api/azure-coleta/sps/:id/testar
+// — o erro cru É o propósito da rota) — envia um e-mail de teste pro próprio remetente.
+app.post('/api/integrations/smtp/testar', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { host, port, secure, usuario, senha, remetente_email, remetente_nome } = req.body;
+    if (!host || !usuario || !senha || !remetente_email) {
+      return res.status(400).json({ error: 'Preencha host, usuário, senha e e-mail do remetente antes de testar.' });
+    }
+    const transporter = nodemailer.createTransport({
+      host, port: parseInt(port, 10) || 587, secure: !!secure,
+      auth: { user: usuario, pass: senha },
+    });
+    await transporter.sendMail({
+      from: `"${remetente_nome || 'FinOps Manager'}" <${remetente_email}>`,
+      to: remetente_email,
+      subject: '✅ Teste de conexão SMTP — FinOps Manager',
+      html: _emailTemplate('Teste de conexão', '<p>Se você está lendo isso, a configuração de SMTP está funcionando corretamente.</p>'),
+    });
+    res.json({ ok: true, message: `E-mail de teste enviado para ${remetente_email}.` });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // ─── DB CONNECTIONS ──────────────────────────────────────────────────────────
@@ -1737,6 +1799,7 @@ app.put('/api/estimativas/:id/status', authMiddleware, dbMiddleware, async (req,
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Não encontrada' });
     res.json(r.rows[0]);
+    _alertarEstimativaStatus(r.rows[0]).catch(() => {});
   } catch (err) { _dbErr(res, err); }
 });
 
@@ -5708,6 +5771,223 @@ function _safeDecrypt(val) {
   try { return _decryptSecret(val); } catch (_) { return val; }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// EMAIL — SMTP e alertas (2026-08-26)
+// ══════════════════════════════════════════════════════════════════════════════
+// Reaproveita a tabela `integracoes` já existente (tipo novo 'smtp'), mesmo padrão
+// de AD/Entra — mas diferente deles, a senha vai cifrada com _encryptSecret (AD/
+// Entra guardam segredo em texto puro no JSONB; não repetir isso aqui).
+// Todas as funções abaixo são silenciosas quando SMTP não está configurado/ativo —
+// o sistema inteiro funciona normalmente sem e-mail, ele só some.
+
+function _escHtmlServer(str) {
+  return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function _parseDestinatarios(str) {
+  return String(str || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+async function _getSmtpConfig() {
+  if (!pool) return null;
+  try {
+    const r = await pool.query(`SELECT config, ativo FROM integracoes WHERE tipo='smtp'`);
+    if (!r.rows.length || !r.rows[0].ativo) return null;
+    const cfg = r.rows[0].config || {};
+    if (!cfg.host || !cfg.usuario || !cfg.senha) return null;
+    return { ...cfg, senha: _safeDecrypt(cfg.senha) };
+  } catch (_) { return null; }
+}
+
+// Nunca lança pro chamador — falha de e-mail não pode quebrar uma coleta, uma
+// troca de status de estimativa, nem nenhum outro fluxo real do sistema.
+async function _sendEmail({ to, subject, html }) {
+  try {
+    const cfg = await _getSmtpConfig();
+    if (!cfg) return;
+    const destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
+    if (!destinatarios.length) return;
+    const transporter = nodemailer.createTransport({
+      host: cfg.host,
+      port: parseInt(cfg.port, 10) || 587,
+      secure: !!cfg.secure,
+      auth: { user: cfg.usuario, pass: cfg.senha },
+    });
+    await transporter.sendMail({
+      from: `"${cfg.remetente_nome || 'FinOps Manager'}" <${cfg.remetente_email || cfg.usuario}>`,
+      to: destinatarios.join(','),
+      subject,
+      html,
+    });
+  } catch (e) {
+    console.warn('[Email] Falha ao enviar:', e.message);
+  }
+}
+
+// Wrapper HTML com estilos inline (obrigatório em e-mail — a maioria dos clientes
+// remove <style> em bloco), cabeçalho no roxo Vivo já usado no resto do app.
+function _emailTemplate(titulo, corpoHtml) {
+  return `<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+    <div style="background:#6d28d9;padding:20px 24px"><span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:.5px">FinOps Manager</span></div>
+    <div style="padding:24px"><h2 style="margin:0 0 16px;color:#111827;font-size:16px">${_escHtmlServer(titulo)}</h2><div style="color:#374151;font-size:14px;line-height:1.6">${corpoHtml}</div></div>
+    <div style="padding:14px 24px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:11px">Notificação automática — FinOps Manager</div>
+  </div>`;
+}
+
+// Dedup atômico: uma linha por (tipo,chave); só "ganha o direito" de enviar se não
+// houver registro dentro do cooldown de 24h — sem isso, uma checagem periódica
+// reenviaria o mesmo alerta a cada hora pra sempre. RETURNING vazio = já enviado
+// recentemente, não reenvia (sem race condition — tudo numa query só).
+async function _tentarClaimAlerta(tipo, chave) {
+  const r = await pool.query(
+    `INSERT INTO email_alertas_enviados (tipo, chave) VALUES ($1,$2)
+     ON CONFLICT (tipo, chave) DO UPDATE SET enviado_em = NOW()
+     WHERE email_alertas_enviados.enviado_em < NOW() - INTERVAL '24 hours'
+     RETURNING id`,
+    [tipo, chave]
+  );
+  return r.rows.length > 0;
+}
+
+// Orçamento Databricks estourado (≥75%) — chave inclui o mês (YYYY-MM) pra
+// reavisar todo mês se continuar estourado, em vez de nunca mais alertar depois
+// da primeira vez. Reaproveita a mesma regra de severidade da rota do dashboard.
+async function _checkOrcamentosDatabricks() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+  const alertas = await _computeAlertasDatabricks();
+  const mes = new Date().toISOString().slice(0, 7);
+  for (const a of alertas) {
+    const chave = `orcamento:${a.budget.id}:${mes}`;
+    if (!(await _tentarClaimAlerta('orcamento_databricks', chave))) continue;
+    const pctFmt = (a.pct * 100).toFixed(0);
+    await _sendEmail({
+      to: destinatarios,
+      subject: `⚠ Orçamento Databricks ${a.severidade === 'estourado' ? 'estourado' : 'em alerta'} — ${a.budget.nome}`,
+      html: _emailTemplate('Orçamento Databricks', `
+        <p><strong>${_escHtmlServer(a.budget.nome)}</strong> (${_escHtmlServer(a.budget.workspace_id || 'todos os workspaces')}) atingiu <strong>${pctFmt}%</strong> do valor mensal.</p>
+        <p>Consumo atual: R$ ${a.custo_atual.toFixed(2)} de R$ ${parseFloat(a.budget.valor_mensal).toFixed(2)}</p>`),
+    });
+  }
+}
+
+// Reservas Cloud vencendo/vencidas (≤90 dias) — mesma janela do popup in-app
+// (checkRsvAlertsPopup, app.js). Destinatário: dono real (criado_por → usuarios.email)
+// quando existir; sem isso, lista padrão configurada no SMTP.
+async function _checkReservasVencendo() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
+  const r = await pool.query(`
+    SELECT rc.*, u.email AS dono_email
+    FROM reservas_cloud rc
+    LEFT JOIN usuarios u ON u.id = rc.criado_por
+    WHERE rc.status = 'Ativa' AND rc.data_vencimento <= NOW() + INTERVAL '90 days'
+  `);
+  for (const reserva of r.rows) {
+    const destinatarios = reserva.dono_email ? [reserva.dono_email] : padrao;
+    if (!destinatarios.length) continue;
+    if (!(await _tentarClaimAlerta('reserva_vencendo', `reserva:${reserva.id}`))) continue;
+    const dias = Math.floor((new Date(reserva.data_vencimento) - new Date()) / 86400000);
+    const situacao = dias < 0 ? `expirada há ${Math.abs(dias)} dia(s)` : dias === 0 ? 'vence hoje' : `vence em ${dias} dia(s)`;
+    await _sendEmail({
+      to: destinatarios,
+      subject: `🔖 Reserva ${_escHtmlServer(reserva.cloud)} ${dias < 0 ? 'expirada' : 'vencendo'} — ${reserva.nome_reserva}`,
+      html: _emailTemplate('Reserva Cloud vencendo', `
+        <p><strong>${_escHtmlServer(reserva.nome_reserva)}</strong> (${_escHtmlServer(reserva.cloud)} · ${_escHtmlServer(reserva.tipo_recurso)}) ${situacao}.</p>
+        <p>Vencimento: ${new Date(reserva.data_vencimento).toLocaleDateString('pt-BR')}</p>`),
+    });
+  }
+}
+
+// Ações FinOps com prazo vencendo/vencido (≤5 dias) — mesmo filtro de
+// GET /api/notificacoes. `responsavel` é texto livre (sem FK/email na tabela) —
+// tenta casar contra usuarios.nome (mesma convenção já usada pelo sino: lá o
+// match é feito no sentido contrário, req.user.nome ILIKE responsavel); sem
+// match, cai pra lista padrão.
+async function _checkAcoesVencendo() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
+  const em5dias = new Date(); em5dias.setDate(em5dias.getDate() + 5);
+  const r = await pool.query(`
+    SELECT a.*, p.nome AS projeto_nome
+    FROM acoes_finops a LEFT JOIN projetos p ON a.projeto_id = p.id
+    WHERE a.status NOT IN ('Concluído','Cancelado') AND a.data_conclusao IS NOT NULL AND a.data_conclusao <= $1
+  `, [em5dias.toISOString().split('T')[0]]);
+  for (const acao of r.rows) {
+    let destinatarios = padrao;
+    if (acao.responsavel) {
+      const uMatch = await pool.query(`SELECT email FROM usuarios WHERE nome ILIKE $1 LIMIT 1`, [acao.responsavel]);
+      if (uMatch.rows[0]?.email) destinatarios = [uMatch.rows[0].email];
+    }
+    if (!destinatarios.length) continue;
+    if (!(await _tentarClaimAlerta('acao_vencendo', `acao:${acao.id}`))) continue;
+    const dias = Math.floor((new Date(acao.data_conclusao) - new Date()) / 86400000);
+    const situacao = dias < 0 ? `venceu há ${Math.abs(dias)} dia(s)` : dias === 0 ? 'vence hoje' : `vence em ${dias} dia(s)`;
+    await _sendEmail({
+      to: destinatarios,
+      subject: `⚠ Ação FinOps ${dias < 0 ? 'vencida' : 'vencendo'} — ${acao.id_finops}`,
+      html: _emailTemplate('Ação FinOps com prazo vencendo', `
+        <p><strong>${_escHtmlServer(acao.acao)}</strong> (${_escHtmlServer(acao.id_finops)}${acao.projeto_nome ? ' · ' + _escHtmlServer(acao.projeto_nome) : ''}) ${situacao}.</p>
+        <p>Responsável: ${_escHtmlServer(acao.responsavel || '—')}</p>`),
+    });
+  }
+}
+
+// Checagens periódicas — intervalo próprio, separado do agendador de coleta
+// (_iniciarAgendador/_tickAgendador rodam a cada 5min com um `return` antecipado
+// no bloco de Storage que pularia qualquer coisa adicionada depois no mesmo tick;
+// alertas por e-mail não têm essa urgência de 5min, então não valia acoplar ali).
+let _alertasEmailTimer = null;
+function _iniciarAlertasEmail() {
+  if (_alertasEmailTimer || !pool) return;
+  const tick = async () => {
+    try { await _checkOrcamentosDatabricks(); } catch (e) { console.warn('[Email] Checagem de orçamentos falhou:', e.message); }
+    try { await _checkReservasVencendo(); } catch (e) { console.warn('[Email] Checagem de reservas falhou:', e.message); }
+    try { await _checkAcoesVencendo(); } catch (e) { console.warn('[Email] Checagem de ações falhou:', e.message); }
+  };
+  setTimeout(tick, 180 * 1000);
+  _alertasEmailTimer = setInterval(tick, 60 * 60 * 1000);
+}
+
+// Coleta com erro (Azure API/Storage + Databricks) — evento, dispara 1x por falha
+// real (não precisa de dedup, ao contrário das checagens periódicas acima).
+// Chamada ao lado de cada _registrarNotificacaoColeta(...,'coleta_erro') — não
+// duplica a lógica de notificação in-app, só soma o envio por e-mail.
+async function _alertarColetaComErro(titulo, mensagem) {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+  await _sendEmail({ to: destinatarios, subject: `❌ ${titulo}`, html: _emailTemplate(titulo, `<p>${_escHtmlServer(mensagem)}</p>`) });
+}
+
+// Estimativa aprovada/reprovada — evento (PUT /api/estimativas/:id/status), sem
+// dedup (dispara 1x por troca real de status). `responsavel` é texto livre —
+// mesma tentativa de casar com usuarios.nome usada em _checkAcoesVencendo.
+async function _alertarEstimativaStatus(estimativa) {
+  if (estimativa.status !== 'Aprovado' && estimativa.status !== 'Nao Aprovado') return;
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  let destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (estimativa.responsavel) {
+    const uMatch = await pool.query(`SELECT email FROM usuarios WHERE nome ILIKE $1 LIMIT 1`, [estimativa.responsavel]);
+    if (uMatch.rows[0]?.email) destinatarios = [uMatch.rows[0].email];
+  }
+  if (!destinatarios.length) return;
+  const aprovado = estimativa.status === 'Aprovado';
+  await _sendEmail({
+    to: destinatarios,
+    subject: `${aprovado ? '✅' : '❌'} Estimativa ${estimativa.numero || estimativa.id} — ${estimativa.status}`,
+    html: _emailTemplate('Estimativa ' + estimativa.status, `
+      <p><strong>${_escHtmlServer(estimativa.titulo || 'Estimativa')}</strong> (${_escHtmlServer(estimativa.numero || '#' + estimativa.id)}${estimativa.projeto_nome ? ' · ' + _escHtmlServer(estimativa.projeto_nome) : ''}) foi <strong>${aprovado ? 'aprovada' : 'reprovada'}</strong>.</p>
+      <p>Total: R$ ${parseFloat(estimativa.total_final || 0).toFixed(2)}</p>`),
+  });
+}
+
 function _logColeta(msg) {
   _coletaProgresso.log.push({ ts: new Date().toISOString().slice(11, 19), msg });
   if (_coletaProgresso.log.length > 200) _coletaProgresso.log.shift();
@@ -5997,6 +6277,7 @@ app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
 app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
   // Auto-recover: if scheduler timer was lost (e.g. startup race), restart it
   if (!_agendadorTimer && pool) _iniciarAgendador();
+  if (!_alertasEmailTimer && pool) _iniciarAlertasEmail();
   try {
     await ensureAzureColetaTable();
     const cols = `id,tipo,origem,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem`;
@@ -6738,6 +7019,7 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
       [err.message, detErr, histId]
     ).catch(() => {});
     _registrarNotificacaoColeta('Coleta Databricks com erro', err.message, 'coleta_erro').catch(() => {});
+    _alertarColetaComErro('Coleta Databricks com erro', err.message).catch(() => {});
   } finally {
     _dbxColetaEmExecucao = false;
     _dbxColetaIniciadaEm = null;
@@ -6900,30 +7182,38 @@ app.delete('/api/databricks-coleta/budgets/:id', authMiddleware, dbMiddleware, a
 
 // Alerta de estouro — soma custo_estimado do mês corrente por orçamento ativo
 // (escopado por workspace_id quando definido), retorna só os que passam de 75%.
+// Extraído pra função compartilhada (2026-08-26) — usada tanto por esta rota
+// (dashboard, sob demanda) quanto por _checkOrcamentosDatabricks() (checagem
+// periódica pra e-mail, ver seção EMAIL) — mesma regra de severidade/threshold
+// nos dois lugares, sem duplicar.
+async function _computeAlertasDatabricks() {
+  const budgets = (await pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true`)).rows;
+  if (!budgets.length) return [];
+
+  const inicioMes = new Date();
+  inicioMes.setDate(1);
+  const inicioMesStr = inicioMes.toISOString().slice(0, 10);
+
+  const alertas = [];
+  for (const b of budgets) {
+    const params = [inicioMesStr];
+    let sql = `SELECT COALESCE(SUM(custo_estimado),0) AS custo FROM databricks_consumo WHERE usage_date >= $1`;
+    if (b.workspace_id) { sql += ` AND workspace_id = $2`; params.push(b.workspace_id); }
+    const r = await pool.query(sql, params);
+    const custoAtual = parseFloat(r.rows[0].custo);
+    const valorMensal = parseFloat(b.valor_mensal);
+    const pct = valorMensal > 0 ? custoAtual / valorMensal : 0;
+    if (pct < 0.75) continue;
+    const severidade = pct >= 1 ? 'estourado' : pct >= 0.9 ? 'critico' : 'atencao';
+    alertas.push({ budget: b, custo_atual: custoAtual, pct, severidade });
+  }
+  alertas.sort((a, b) => b.pct - a.pct);
+  return alertas;
+}
+
 app.get('/api/databricks-coleta/alertas', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
-    const budgets = (await pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true`)).rows;
-    if (!budgets.length) return res.json([]);
-
-    const inicioMes = new Date();
-    inicioMes.setDate(1);
-    const inicioMesStr = inicioMes.toISOString().slice(0, 10);
-
-    const alertas = [];
-    for (const b of budgets) {
-      const params = [inicioMesStr];
-      let sql = `SELECT COALESCE(SUM(custo_estimado),0) AS custo FROM databricks_consumo WHERE usage_date >= $1`;
-      if (b.workspace_id) { sql += ` AND workspace_id = $2`; params.push(b.workspace_id); }
-      const r = await pool.query(sql, params);
-      const custoAtual = parseFloat(r.rows[0].custo);
-      const valorMensal = parseFloat(b.valor_mensal);
-      const pct = valorMensal > 0 ? custoAtual / valorMensal : 0;
-      if (pct < 0.75) continue;
-      const severidade = pct >= 1 ? 'estourado' : pct >= 0.9 ? 'critico' : 'atencao';
-      alertas.push({ budget: b, custo_atual: custoAtual, pct, severidade });
-    }
-    alertas.sort((a, b) => b.pct - a.pct);
-    res.json(alertas);
+    res.json(await _computeAlertasDatabricks());
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -7482,6 +7772,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       err.message,
       'coleta_erro'
     ).catch(() => {});
+    _alertarColetaComErro('Coleta API com erro', err.message).catch(() => {});
   } finally {
     _coletaEmExecucao = false;
     _coletaIniciadaEm = null;
@@ -7754,6 +8045,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       err.message,
       'coleta_erro'
     ).catch(() => {});
+    _alertarColetaComErro('Coleta Storage com erro', err.message).catch(() => {});
     throw err;
   } finally {
     _coletaEmExecucao = false;
@@ -8056,6 +8348,7 @@ app.get('/health', (_req, res) => {
       // MVs podem demorar com dados; executar antes do agendador garante que a tabela exista no primeiro tick.
       try { await ensurePriceListTable(); } catch (e) { console.warn('[PriceList] Tabela será criada no primeiro sync:', e.message); }
       _iniciarAgendador();
+      _iniciarAlertasEmail();
       // Carrega caches persistentes imediatamente do banco (sem query pesada)
       pool.query(`SELECT ws_name, parent_rg FROM azure_ws_cache`).then(r => {
         if (r.rows.length) {
@@ -8134,6 +8427,7 @@ app.get('/health', (_req, res) => {
           await pool.query('SELECT 1');
           console.log('  Banco reconectado com sucesso.');
           _iniciarAgendador();
+          _iniciarAlertasEmail();
         }
       } catch (e2) {
         console.error('  Falha ao reconectar:', e2.message);

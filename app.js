@@ -1869,6 +1869,15 @@ async function openSettingsModal() {
             const el = document.getElementById('entra-' + k);
             if (el) el.value = i.config[k.replace('-','_') === 'tenant' ? 'tenant_id' : k.replace('-','_') === 'client' ? 'client_id' : k.replace(/-/g,'_')] || '';
           });
+        } else if (i.tipo === 'smtp') {
+          // senha nunca vem do GET (servidor mascara) — deixa #smtp-senha vazio de propósito
+          const map = { host:'host', port:'port', usuario:'usuario', 'remetente-nome':'remetente_nome', 'remetente-email':'remetente_email', destinatarios:'destinatarios_padrao' };
+          Object.keys(map).forEach(k => {
+            const el = document.getElementById('smtp-' + k);
+            if (el) el.value = i.config[map[k]] || '';
+          });
+          const secureEl = document.getElementById('smtp-secure');
+          if (secureEl) secureEl.checked = !!i.config.secure;
         }
       }
     });
@@ -3014,10 +3023,16 @@ async function salvarIntegracao(tipo) {
     config = { server:document.getElementById('ad-server').value, basedn:document.getElementById('ad-basedn').value,
       bind_user:document.getElementById('ad-user').value, bind_pass:document.getElementById('ad-pass')?.value||'',
       grp_admin:document.getElementById('ad-grp-admin').value, grp_finops:document.getElementById('ad-grp-finops').value, grp_reader:document.getElementById('ad-grp-reader').value };
-  } else {
+  } else if (tipo==='entra') {
     config = { tenant_id:document.getElementById('entra-tenant').value, client_id:document.getElementById('entra-client').value,
       client_secret:document.getElementById('entra-secret')?.value||'', redirect_uri:document.getElementById('entra-redirect').value,
       grp_admin:document.getElementById('entra-grp-admin').value, grp_finops:document.getElementById('entra-grp-finops').value, grp_reader:document.getElementById('entra-grp-reader').value };
+  } else if (tipo==='smtp') {
+    // senha vazia = manter a atual (servidor decide: só sobrescreve se vier preenchida)
+    config = { host:document.getElementById('smtp-host').value, port:document.getElementById('smtp-port').value||587,
+      secure:document.getElementById('smtp-secure').checked, usuario:document.getElementById('smtp-usuario').value,
+      senha:document.getElementById('smtp-senha')?.value||'', remetente_nome:document.getElementById('smtp-remetente-nome').value,
+      remetente_email:document.getElementById('smtp-remetente-email').value, destinatarios_padrao:document.getElementById('smtp-destinatarios').value };
   }
   const ativo = document.getElementById('toggle-'+tipo).checked;
   try { await api('POST','/integrations/'+tipo,{config,ativo}); showToast('Configuração salva!','success'); }
@@ -3031,6 +3046,15 @@ async function testarConexao(type) {
     if (!server||!bind_user) { showToast('Preencha servidor e usuário de bind','error'); return; }
     showToast('Testando conexão AD...','success');
     try { const r=await api('POST','/auth/ad/test',{server,basedn,bind_user,bind_pass}); showToast(r.message||'Conexão OK!','success'); }
+    catch(e) { showToast('Falha: '+e.message,'error'); }
+  } else if (type==='smtp') {
+    const host=document.getElementById('smtp-host').value, port=document.getElementById('smtp-port').value||587;
+    const secure=document.getElementById('smtp-secure').checked, usuario=document.getElementById('smtp-usuario').value;
+    const senha=document.getElementById('smtp-senha')?.value||'';
+    const remetente_nome=document.getElementById('smtp-remetente-nome').value, remetente_email=document.getElementById('smtp-remetente-email').value;
+    if (!host||!usuario||!senha||!remetente_email) { showToast('Preencha host, usuário, senha e e-mail do remetente para testar','error'); return; }
+    showToast('Enviando e-mail de teste...','success');
+    try { const r=await api('POST','/integrations/smtp/testar',{host,port,secure,usuario,senha,remetente_nome,remetente_email}); showToast(r.message||'E-mail de teste enviado!','success'); }
     catch(e) { showToast('Falha: '+e.message,'error'); }
   } else {
     showToast('Para testar Entra ID, configure e use o botão na tela de login','success');

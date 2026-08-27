@@ -1654,6 +1654,90 @@ Azure → Subscription | AWS → Account | GCP → Project | Oracle → Tenancy 
 - `31–60 dias` → Atenção (yellow)
 - `61–90 dias` → Aviso (blue)
 
+### E-mail (SMTP) e alertas (2026-08-26)
+
+Antes desta feature, todo alerta do sistema só existia dentro da própria tela (sino, popups) — se ninguém
+estivesse logado, uma reserva vencia, uma coleta parava de rodar, ou um orçamento Databricks estourava sem
+que ninguém soubesse. Pedido explícito do usuário. Confirmado por investigação: **zero infraestrutura de
+e-mail** existia em todo o código antes disso, e **zero mecanismo de dedup** em lugar nenhum — sem isso,
+qualquer checagem periódica reenviaria o mesmo alerta a cada ciclo pra sempre.
+
+**SMTP reaproveita `integracoes`** (tipo novo `'smtp'`, mesma tabela genérica já usada por AD/Entra ID) —
+zero tabela nova pra configuração. Diferente de AD/Entra (que guardam segredo em texto puro no JSONB — gap
+pré-existente, não replicado aqui), `senha` vai cifrada com `_encryptSecret`/`_safeDecrypt` (mesmas usadas
+pras credenciais Azure/Databricks) e **nunca volta em nenhum GET** (mascarada com `undefined` antes de
+responder) — mesmo padrão de "client_secret nunca volta do GET" já usado em `/api/databricks-coleta/config`.
+`POST /api/integrations/:tipo` trata `senha` vazia como "manter a atual" (busca o valor já cifrado no banco
+antes de sobrescrever), mesmo padrão de "client_secret opcional" do Databricks.
+
+**Bug real corrigido de passagem**: `POST /api/integrations/:tipo` fazia só `UPDATE ... WHERE tipo=$3` — se
+a linha não existisse ainda em `integracoes` (só `ad`/`entra` vinham semeadas no `CREATE TABLE`), o UPDATE
+não fazia nada e a rota respondia `{ok:true}` mesmo assim, um no-op silencioso. Só nunca foi notado porque
+`ad`/`entra` sempre existiam. Corrigido com `INSERT ... ON CONFLICT (tipo) DO UPDATE` — funciona pra `smtp`
+e qualquer tipo futuro sem precisar semear linha nenhuma.
+
+**5 gatilhos implementados** (server.js, seção "EMAIL"):
+
+| Gatilho | Tipo | Dedup |
+|---|---|---|
+| Coleta com erro (Azure API/Storage + Databricks) | evento — `_alertarColetaComErro`, ao lado de cada `_registrarNotificacaoColeta(...,'coleta_erro')` (3 call sites) | não precisa (1x por falha real) |
+| Estimativa aprovada/reprovada | evento — `_alertarEstimativaStatus`, dentro de `PUT /api/estimativas/:id/status` | não precisa |
+| Orçamento Databricks estourado (≥75%) | periódico — `_checkOrcamentosDatabricks` | sim |
+| Reserva Cloud vencendo/vencida (≤90 dias) | periódico — `_checkReservasVencendo` | sim |
+| Ação FinOps com prazo vencendo/vencido (≤5 dias) | periódico — `_checkAcoesVencendo` | sim |
+
+**Não incluído de propósito**: e-mail de coleta com **sucesso** — acontece várias vezes por dia por SP,
+viraria spam sem valor real (já existe no sino, lugar certo pra isso).
+
+**Dedup** (`email_alertas_enviados`, tabela nova: `tipo`, `chave`, `enviado_em`, `UNIQUE(tipo,chave)`) —
+upsert atômico numa query só, sem race condition:
+```sql
+INSERT INTO email_alertas_enviados (tipo, chave) VALUES ($1,$2)
+ON CONFLICT (tipo, chave) DO UPDATE SET enviado_em = NOW()
+WHERE email_alertas_enviados.enviado_em < NOW() - INTERVAL '24 hours'
+RETURNING id
+```
+`RETURNING` vazio = já enviado dentro do cooldown de 24h, não reenvia. Cooldown de 24h (não "só uma vez pra
+sempre") é deliberado — o problema pode persistir (reserva continua vencida, orçamento continua estourado),
+então continua lembrando diariamente até ser resolvido, mesmo espírito do popup in-app (que já reaparece a
+cada login). Chave do orçamento inclui o mês (`orcamento:{id}:{YYYY-MM}`) pra reavisar todo mês se continuar
+estourado, em vez de nunca mais alertar depois da primeira vez.
+
+**Destinatário** — infra (coleta erro, orçamento estourado): lista `destinatarios_padrao` configurada no
+SMTP. Pessoal (reserva/ação/estimativa): `reservas_cloud.criado_por` é FK real pra `usuarios(id)` — usa o
+e-mail do dono quando existir; `acoes_finops.responsavel`/`estimativas.responsavel` são só texto livre (sem
+FK/e-mail na tabela) — tenta casar `usuarios.nome ILIKE responsavel` (mesma convenção que o sino já usa, só
+no sentido contrário: `GET /api/notificacoes` faz `req.user.nome ILIKE a.responsavel`); sem match em nenhum
+dos dois, cai pra `destinatarios_padrao`.
+
+**`_iniciarAlertasEmail()`** — `setInterval` **próprio e separado** do agendador de coleta
+(`_iniciarAgendador`/`_tickAgendador`, que já roda a cada 5min com um `return` antecipado no bloco de
+Storage que pularia qualquer coisa adicionada depois no mesmo tick) — alertas por e-mail não têm urgência de
+5min, então não valia acoplar ali. Primeira checagem 3min após o boot, depois de hora em hora. Chamado nos
+mesmos 3 pontos que já chamam `_iniciarAgendador()` (startup, reconexão de banco, auto-recover em
+`GET /api/azure-coleta/status`) — mesmo padrão de idempotência (guardado por `_alertasEmailTimer`).
+
+**Tudo silencioso sem SMTP configurado/ativo** — `_getSmtpConfig()` retorna `null` se `!ativo` ou campos
+faltando, e todo gatilho checa isso antes de fazer qualquer trabalho. `_sendEmail()` nunca lança pro chamador
+(falha de e-mail não pode quebrar uma coleta nem uma troca de status) — só loga um aviso no console.
+
+**Frontend**: novo card ".integration-card" "E-mail (SMTP)" na aba Integrações de Configurações (renomeada
+de "AD / Entra ID" pra "Integrações", já que agora cobre 3 tipos) — 100% legado (`index.html`/`app.js`,
+mesmo padrão de AD/Entra, não migrado pra React já que essa aba inteira ainda não foi). `toggleIntegration`/
+`salvarIntegracao`/`testarConexao`/`openSettingsModal`'s populate ganharam um 3º branch `smtp` (antes só
+`ad`/`entra` hardcoded nos 4 lugares). `POST /api/integrations/smtp/testar` (`adminMiddleware`) testa
+credenciais ainda não salvas — mesmo padrão de "erro cru é o propósito da rota" de `POST
+/api/azure-coleta/sps/:id/testar`.
+
+**Verificado via Playwright contra o servidor real** (não só testes unitários — este código não tem cobertura
+automatizada, é 100% backend/legado): salvou config de teste via API, confirmou `senha` nunca volta no GET,
+confirmou os campos pré-preenchem corretamente ao reabrir Configurações, e "Testar Conexão" contra um
+servidor SMTP real (smtp.mailtrap.io) com credenciais falsas retornou o erro real do servidor (`Invalid
+login: 535 5.7.0 Invalid credentials`) — prova que o transporte nodemailer conecta e autentica de verdade,
+não só que o código não quebra. **Não verificado**: entrega de e-mail de ponta a ponta com credenciais reais
+(nenhum SMTP real disponível neste ambiente) — quando o usuário configurar um servidor de verdade, "Testar
+Conexão" é o primeiro passo pra confirmar que funciona.
+
 ### Excel export
 `GET /api/export/excel` — ExcelJS, 3-sheet `.xlsx`:
 1. **Sumário Executivo** — status + cloud breakdown
