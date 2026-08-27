@@ -1918,6 +1918,24 @@ limitação que já existia antes, não introduzida por esta mudança. Verificad
 servidor real: badge com 2 notificações → abrir painel → fechar → reload da página (simula "próximo login")
 → badge some e lista mostra o estado vazio, zero erro de console.
 
+**Refinado a pedido do usuário (2026-08-26) — dispensa deixou de ser automática ao abrir o painel**: a versão
+acima dispensava TUDO que estava visível no momento em que o painel era aberto, sem ação nenhuma do usuário
+— na prática, ação/reserva sumiam só de o usuário abrir o sino, mesmo sem ele "ter feito nada" com aquela
+notificação específica. Pedido explícito: ação/reserva (prazo real, dinheiro real em jogo) devem ficar
+visíveis até o usuário fechar cada uma manualmente; coleta (só informativo) pode ganhar uma opção de
+desativar o tipo inteiro. `toggleNotifPanel()` não dispensa mais nada ao abrir — só chama `loadNotificacoes()`
+pra mostrar o estado atual. Nova função `dismissNotifItem(key, event)` — botão "✕" em cada linha (`closeBtn`
+em `loadNotificacoes()`), `event.stopPropagation()` pra não disparar o `onclick` da própria linha
+(`viewAcao`/`showView('reservas')`) ao clicar no ✕. Novo checkbox no rodapé do painel ("Ocultar notificações
+de coleta", `#notif-toggle-sistema` em index.html) — grava `notif_sistema_desativado` (`'1'`/`'0'`) no
+`localStorage`; quando ativo, filtra `_kind:'sistema'` inteiro em `loadNotificacoes()`, independente de já
+ter sido dispensado individualmente ou não. `notif_dismissed` (mecanismo de chave estável) continua o mesmo,
+só muda O QUE dispara a dispensa — de "abrir o painel" pra "clicar no ✕". Verificado via Playwright contra o
+servidor real: abrir/fechar/reabrir o painel sem clicar em nada preserva todas as notificações (a mudança de
+comportamento central); clicar no ✕ de uma remove só aquela; marcar o checkbox esconde as 4 notificações de
+coleta do usuário de teste (mostra o estado vazio); desmarcar restaura, respeitando a que já tinha sido
+dispensada manualmente antes.
+
 ### Auto-refresh
 `setRefreshInterval(minutes)` — covers dashboard, projetos, ações, estimativas, reservas, coleta, and calculadora views. Countdown shown in FAB button. Timer stored in `_refreshTimer` + `_countdownTimer`, both cleared on logout and before recreation.
 

@@ -319,14 +319,40 @@ function enterApp() {
 // ── NOTIFICAÇÕES ──────────────────────────────
 // Identidade estável de cada notificação (independe do texto/dia calculado,
 // que muda a cada request — ex: "vencido há 1 dia" vira "há 2 dias" no dia
-// seguinte, mesma ação). Usada tanto pra filtrar as já vistas quanto pra
-// marcar como vistas ao abrir o painel.
+// seguinte, mesma ação). Usada pra filtrar as já dispensadas.
 function _notifKey(n) {
   return n._kind === 'sistema' ? `sistema:${n._id}` : `${n._kind}:${n.id}`;
 }
 function _notifDismissedSet() {
   try { return new Set(JSON.parse(localStorage.getItem('notif_dismissed') || '[]')); }
   catch (_) { return new Set(); }
+}
+
+// Dispensa 1 notificação específica (botão ✕) — pedido do usuário (2026-08-26):
+// diferente do comportamento anterior (abrir o painel já dispensava TUDO que
+// estava visível automaticamente), ação/reserva agora só somem por interação
+// explícita do usuário aqui — nunca sozinhas só por ele ter aberto o painel.
+// stopPropagation evita disparar o onclick da própria linha (viewAcao/showView).
+function dismissNotifItem(key, event) {
+  event.stopPropagation();
+  try {
+    const dismissed = _notifDismissedSet();
+    dismissed.add(key);
+    // Limita o tamanho — sem isso o set cresceria pra sempre com ações/reservas
+    // antigas já concluídas/removidas, cujas chaves nunca mais aparecem de novo.
+    localStorage.setItem('notif_dismissed', JSON.stringify([...dismissed].slice(-500)));
+  } catch (_) {}
+  loadNotificacoes();
+}
+
+// Toggle "Ocultar notificações de coleta" — pedido do usuário: diferente de
+// ação/reserva (sempre ativas até fechar manualmente, prazo/dinheiro real em
+// jogo), coleta é só informativo — dá pra desativar o tipo inteiro de vez,
+// não só dispensar uma a uma.
+function toggleNotifSistema() {
+  const checked = document.getElementById('notif-toggle-sistema')?.checked;
+  localStorage.setItem('notif_sistema_desativado', checked ? '1' : '0');
+  loadNotificacoes();
 }
 
 async function loadNotificacoes() {
@@ -337,13 +363,19 @@ async function loadNotificacoes() {
     const header = document.getElementById('notif-header-count');
     if (!badge || !list) return;
 
-    // Notificação já vista (painel aberto numa sessão anterior) some da lista
-    // e da contagem — só reaparece se for uma nova (id/kind diferente; ex:
-    // outra ação venceu, ou uma nova coleta terminou). Mesmo comportamento
-    // pros três tipos (ação/reserva/sistema), antes só sistema tinha
-    // qualquer rastreamento (e só na contagem do badge, não na lista).
+    const toggleEl = document.getElementById('notif-toggle-sistema');
+    const sistemaDesativado = localStorage.getItem('notif_sistema_desativado') === '1';
+    if (toggleEl) toggleEl.checked = sistemaDesativado;
+
+    // Notificação dispensada explicitamente (botão ✕, ver dismissNotifItem) some
+    // da lista/contagem — só reaparece se for uma nova (id/kind diferente; ex:
+    // outra ação venceu, ou uma nova coleta terminou). Coleta some inteira se o
+    // usuário desativou o tipo (toggle acima), independente de já ter sido vista.
     const dismissed = _notifDismissedSet();
-    const notifs = todas.filter(n => !dismissed.has(_notifKey(n)));
+    const notifs = todas.filter(n => {
+      if (sistemaDesativado && n._kind === 'sistema') return false;
+      return !dismissed.has(_notifKey(n));
+    });
 
     const sistemaNotifs = notifs.filter(n => n._kind === 'sistema');
     const outrasNotifs  = notifs.filter(n => n._kind !== 'sistema');
@@ -352,7 +384,7 @@ async function loadNotificacoes() {
       badge.style.display = 'none';
       list.innerHTML = `<div style="padding:28px 16px;text-align:center;color:var(--text-muted);font-size:13px">
         <div style="font-size:26px;margin-bottom:8px">✅</div>
-        Nenhuma ação com prazo pendente
+        Nenhuma notificação pendente
       </div>`;
       header.textContent = '';
       return;
@@ -370,18 +402,23 @@ async function loadNotificacoes() {
       coleta_concluida: { icon:'✅', bg:'rgba(34,197,94,0.08)',   color:'var(--green)',  border:'rgba(34,197,94,0.25)'  },
       coleta_erro:      { icon:'❌', bg:'rgba(255,77,106,0.08)',  color:'var(--danger)', border:'rgba(255,77,106,0.25)' },
     };
+    const closeBtn = (key) => `<button onclick="dismissNotifItem('${key}',event)" title="Fechar" style="flex-shrink:0;width:20px;height:20px;border:none;background:transparent;color:var(--text-dim);cursor:pointer;font-size:13px;line-height:1;border-radius:4px" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'">✕</button>`;
 
     list.innerHTML = [...outrasNotifs, ...sistemaNotifs].map(n => {
+      const key = _notifKey(n);
       if (n._kind === 'sistema') {
         const s = iconMap[n.tipo] || iconMap.coleta_concluida;
         const quando = n.criado_em ? new Date(n.criado_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
-        return `<div data-notif-key="${_notifKey(n)}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
+        return `<div data-notif-key="${key}" style="display:flex;gap:10px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
           <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.acao)}</div>
             <div style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHtml(n.mensagem)}">${escHtml(n.mensagem)}</div>
           </div>
-          <div style="font-size:10px;color:var(--text-dim);white-space:nowrap;padding-top:2px">${quando}</div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+            <div style="font-size:10px;color:var(--text-dim);white-space:nowrap">${quando}</div>
+            ${closeBtn(key)}
+          </div>
         </div>`;
       }
       const s = iconMap[n.tipo] || iconMap.urgente;
@@ -393,14 +430,17 @@ async function loadNotificacoes() {
       const sub = isReserva
         ? `${escHtml(n.id_finops)}`
         : `${escHtml(n.id_finops)} · ${escHtml(n.projeto_nome || '—')}`;
-      return `<div data-notif-key="${_notifKey(n)}" onclick="${onclick}" style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;background:${s.bg}" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
+      return `<div data-notif-key="${key}" onclick="${onclick}" style="display:flex;gap:10px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s;background:${s.bg}" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''">
         <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.mensagem)}</div>
           <div style="font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(n.acao)}</div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${sub}</div>
         </div>
-        <div style="font-size:10px;color:var(--text-dim);white-space:nowrap;padding-top:2px">${dataLabel}</div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <div style="font-size:10px;color:var(--text-dim);white-space:nowrap">${dataLabel}</div>
+          ${closeBtn(key)}
+        </div>
       </div>`;
     }).join('');
 
@@ -411,22 +451,10 @@ function toggleNotifPanel() {
   const panel = document.getElementById('notif-panel');
   const opening = panel.style.display === 'none';
   panel.style.display = opening ? 'block' : 'none';
-  if (opening) {
-    // Marca todas as notificações atualmente exibidas como vistas — somem da
-    // lista e da contagem a partir de agora (inclusive em próximos logins),
-    // a não ser que surja uma nova (id/kind diferente da já vista).
-    try {
-      const dismissed = _notifDismissedSet();
-      document.querySelectorAll('#notif-list [data-notif-key]').forEach(el => {
-        if (el.dataset.notifKey) dismissed.add(el.dataset.notifKey);
-      });
-      // Limita o tamanho — sem isso o set cresceria pra sempre com ações/reservas
-      // antigas já concluídas/removidas, cujas chaves nunca mais aparecem de novo.
-      const arr = [...dismissed];
-      localStorage.setItem('notif_dismissed', JSON.stringify(arr.slice(-500)));
-    } catch (_) {}
-    loadNotificacoes();
-  }
+  // Abrir o painel só mostra o estado atual — não dispensa mais nada
+  // automaticamente (ver dismissNotifItem: dispensa agora é sempre explícita,
+  // por notificação, via botão ✕).
+  if (opening) loadNotificacoes();
 }
 function closeNotifPanel() {
   const panel = document.getElementById('notif-panel');
