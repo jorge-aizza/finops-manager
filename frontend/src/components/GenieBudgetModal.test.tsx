@@ -110,4 +110,70 @@ describe('GenieBudgetModal', () => {
     renderWithClient()
     expect(screen.getByRole('button', { name: 'Salvar' })).toBeDisabled()
   })
+
+  it('overrides por usuário só aparecem com escopo "Por usuário"', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    expect(screen.queryByText(/Limites individuais por usuário/)).not.toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Escopo do limite'), 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
+    expect(screen.getByText(/Limites individuais por usuário/)).toBeInTheDocument()
+  })
+
+  it('busca usuário por e-mail, adiciona um override e envia principal_overrides no payload', async () => {
+    const user = userEvent.setup()
+    vi.mocked(genieBudgetsApi.createGenieBudget).mockResolvedValue(createdBudget)
+    vi.mocked(genieBudgetsApi.searchGeniePrincipals).mockResolvedValue([{ id: '12345', nome: 'João Silva' }])
+    renderWithClient()
+
+    await user.type(screen.getByLabelText('Nome'), 'Quota com override')
+    await user.type(screen.getByLabelText('Limite mensal (US$)'), '100')
+    await user.selectOptions(screen.getByLabelText('Escopo do limite'), 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
+
+    await user.type(screen.getByPlaceholderText('e-mail exato'), 'joao@vivo.com.br')
+    await user.click(screen.getByRole('button', { name: 'Buscar' }))
+    expect(genieBudgetsApi.searchGeniePrincipals).toHaveBeenCalledWith('user', 'joao@vivo.com.br')
+
+    await user.click(await screen.findByText(/João Silva/))
+    expect(screen.getByText('João Silva')).toBeInTheDocument()
+
+    // sem preencher o limite do override ainda, "Salvar" continua bloqueado
+    expect(screen.getByRole('button', { name: 'Salvar' })).toBeDisabled()
+
+    const overrideInputs = screen.getAllByPlaceholderText('US$')
+    await user.type(overrideInputs[0], '50')
+    await user.click(screen.getByRole('button', { name: 'Salvar' }))
+
+    expect(genieBudgetsApi.createGenieBudget).toHaveBeenCalledWith(expect.objectContaining({
+      principal_overrides: [{ principal_id: 12345, override_threshold: '50' }],
+    }))
+  })
+
+  it('busca por grupo usa tipo "group" na chamada da API', async () => {
+    const user = userEvent.setup()
+    vi.mocked(genieBudgetsApi.searchGeniePrincipals).mockResolvedValue([])
+    renderWithClient()
+
+    await user.selectOptions(screen.getByLabelText('Escopo do limite'), 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
+    await user.selectOptions(screen.getByDisplayValue('Usuário'), 'group')
+    await user.type(screen.getByPlaceholderText('nome exato do grupo'), 'Time de Dados')
+    await user.click(screen.getByRole('button', { name: 'Buscar' }))
+
+    expect(genieBudgetsApi.searchGeniePrincipals).toHaveBeenCalledWith('group', 'Time de Dados')
+  })
+
+  it('remover um override tira ele da lista e do payload', async () => {
+    const user = userEvent.setup()
+    vi.mocked(genieBudgetsApi.searchGeniePrincipals).mockResolvedValue([{ id: '999', nome: 'Maria Souza' }])
+    renderWithClient()
+
+    await user.selectOptions(screen.getByLabelText('Escopo do limite'), 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
+    await user.type(screen.getByPlaceholderText('e-mail exato'), 'maria@vivo.com.br')
+    await user.click(screen.getByRole('button', { name: 'Buscar' }))
+    await user.click(await screen.findByText(/Maria Souza/))
+    expect(screen.getByText('Maria Souza')).toBeInTheDocument()
+
+    await user.click(screen.getByTitle('Remover'))
+    expect(screen.queryByText('Maria Souza')).not.toBeInTheDocument()
+  })
 })

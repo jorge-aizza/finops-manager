@@ -1819,6 +1819,7 @@ function toggleNavGroup(id) {
 function openNavGroup(id) {
   document.getElementById('nav-group-' + id)?.classList.add('open');
   if (id === 'dashboard') showDashTab('acoes');
+  if (id === 'databricks') showDbxTab('dashboard');
 }
 
 function showDashTab(tab) {
@@ -1833,6 +1834,20 @@ function switchDashTab(tab) {
   // a troca de aba agora é um estado React, avisado via canal próprio da
   // ponte (não usa mount()/showView(), que só remontariam a mesma view).
   window.__reactBridge?.setDashboardTab?.(tab);
+}
+
+// Databricks ganhou o mesmo padrão de sub-abas do Dashboard (2026-08-28) — Dashboard/
+// Orçamentos e Anomalias/Quotas dentro da mesma DatabricksDashboardView.tsx, trocadas
+// sem remontar a view (canal próprio setDatabricksTab, separado do de Dashboard).
+function showDbxTab(tab) {
+  showView('databricks');
+  switchDbxTab(tab);
+  document.querySelectorAll('.nav-sub').forEach(el => el.classList.remove('active'));
+  document.getElementById('nav-sub-dbx-' + tab)?.classList.add('active');
+}
+
+function switchDbxTab(tab) {
+  window.__reactBridge?.setDatabricksTab?.(tab);
 }
 
 // ── HELPERS ───────────────────────────────────

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteDatabricksBudget, getDatabricksAnomalias, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
 import { deleteGenieBudget, listGenieBudgets } from '../api/genieBudgets'
@@ -7,6 +7,14 @@ import type { GenieBudget } from '../types/genieBudgets'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
 import GenieBudgetModal from '../components/GenieBudgetModal'
 import { forecastLinear } from '../lib/forecastLinear'
+import { setDatabricksTabListener } from '../bridge'
+
+type DbxTab = 'dashboard' | 'orcamentos' | 'quotas'
+const DBX_TAB_INFO: Record<DbxTab, { titulo: string; sub: string }> = {
+  dashboard: { titulo: 'Dashboard Databricks', sub: 'Consumo mensal, custo por workspace/SKU/usuário/job/cluster/warehouse e free-tier vs. pago' },
+  orcamentos: { titulo: 'Orçamentos e Anomalias', sub: 'Orçamentos internos com alerta por e-mail e detecção automática de anomalias de consumo' },
+  quotas: { titulo: 'Quotas Genie', sub: 'Limites nativos do Databricks (Unity AI Gateway) para o uso do Genie — por workspace, usuário ou grupo' },
+}
 
 function escopoLabel(b: DatabricksBudget): string {
   if (b.escopo_tipo === 'workspace') return b.workspace_id || '—'
@@ -181,6 +189,12 @@ function labelFiltroValor(campo: keyof DatabricksResumoFiltros, valor: string): 
 
 export default function DatabricksDashboardView() {
   const queryClient = useQueryClient()
+  // 3 sub-abas (Dashboard/Orçamentos e Anomalias/Quotas) trocadas pelo sub-nav da sidebar
+  // sem remontar esta view — mesmo padrão já usado por DashboardView.tsx (Ações/
+  // Estimativas), canal próprio da ponte (setDatabricksTabListener), separado do de
+  // Dashboard.
+  const [dbxTab, setDbxTab] = useState<DbxTab>('dashboard')
+  useEffect(() => setDatabricksTabListener((t) => setDbxTab(t === 'orcamentos' || t === 'quotas' ? t : 'dashboard')), [])
   const [periodo, setPeriodo] = useState(defaultPeriodo)
   const [inicioInput, setInicioInput] = useState(periodo.inicio)
   const [fimInput, setFimInput] = useState(periodo.fim)
@@ -250,185 +264,193 @@ export default function DatabricksDashboardView() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div className="view-hero">
-        <div className="page-title">Dashboard Databricks</div>
-        <div className="view-hero-sub">Consumo mensal, custo por workspace/SKU/usuário, free-tier vs. pago e orçamentos</div>
+        <div className="page-title">{DBX_TAB_INFO[dbxTab].titulo}</div>
+        <div className="view-hero-sub">{DBX_TAB_INFO[dbxTab].sub}</div>
       </div>
 
-      <div className="stat-card" style={{ padding: '14px 20px', display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
-        <div className="form-group" style={{ margin: 0 }}>
-          <label htmlFor="dbxd-ini">De</label>
-          <input id="dbxd-ini" type="date" value={inicioInput} onChange={(e) => setInicioInput(e.target.value)} />
-        </div>
-        <div className="form-group" style={{ margin: 0 }}>
-          <label htmlFor="dbxd-fim">Até</label>
-          <input id="dbxd-fim" type="date" value={fimInput} onChange={(e) => setFimInput(e.target.value)} />
-        </div>
-        <button className="btn-primary" disabled={!inicioInput || !fimInput} onClick={() => setPeriodo({ inicio: inicioInput, fim: fimInput })}>
-          Buscar
-        </button>
-        {resumoQuery.isFetching && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</span>}
-      </div>
-
-      {(Object.entries(filtros) as [keyof DatabricksResumoFiltros, string | undefined][]).some(([, v]) => v) && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Detalhando por:</span>
-          {(Object.entries(filtros) as [keyof DatabricksResumoFiltros, string | undefined][])
-            .filter((entry): entry is [keyof DatabricksResumoFiltros, string] => !!entry[1])
-            .map(([campo, valor]) => (
-              <span
-                key={campo}
-                className="badge"
-                style={{ cursor: 'pointer' }}
-                title="Clique para remover este filtro"
-                onClick={() => setFiltros((f) => ({ ...f, [campo]: undefined }))}
-              >
-                {FILTRO_LABELS[campo]}: {labelFiltroValor(campo, valor)} ✕
-              </span>
-            ))}
-          <button className="btn-ghost" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setFiltros({})}>
-            Limpar filtros
-          </button>
-        </div>
-      )}
-
-      {resumo && !resumo.tem_dados && (
-        <div className="stat-card" style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>
-          Nenhum dado de consumo Databricks no período selecionado. Configure uma conexão e rode uma coleta em
-          <strong> Coleta Automática → Coleta Databricks</strong> — os gráficos aparecem aqui assim que houver dados.
-        </div>
-      )}
-
-      {resumo && resumo.tem_dados && (
+      {dbxTab === 'dashboard' && (
         <>
-          <div className="stats-grid">
-            <div className="stat-card accent">
-              <div className="stat-label">Custo Total no Período</div>
-              <div className="stat-value">{fmtBRL(resumo.total_custo)}</div>
-              <div className="stat-sub">{resumo.periodo.inicio} → {resumo.periodo.fim}</div>
+          <div className="stat-card" style={{ padding: '14px 20px', display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label htmlFor="dbxd-ini">De</label>
+              <input id="dbxd-ini" type="date" value={inicioInput} onChange={(e) => setInicioInput(e.target.value)} />
             </div>
-            <div className="stat-card green-card">
-              <div className="stat-label">Free-tier</div>
-              <div className="stat-value green">{fmtBRL(totalFree)}</div>
-              <div className="stat-sub">{pctFree}% do consumo</div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label htmlFor="dbxd-fim">Até</label>
+              <input id="dbxd-fim" type="date" value={fimInput} onChange={(e) => setFimInput(e.target.value)} />
             </div>
-            <div className="stat-card">
-              <div className="stat-label">Pago</div>
-              <div className="stat-value">{fmtBRL(totalPago)}</div>
-              <div className="stat-sub">{100 - pctFree}% do consumo</div>
-            </div>
+            <button className="btn-primary" disabled={!inicioInput || !fimInput} onClick={() => setPeriodo({ inicio: inicioInput, fim: fimInput })}>
+              Buscar
+            </button>
+            {resumoQuery.isFetching && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</span>}
           </div>
 
-          {totalFreePago > 0 && (
-            <div style={{ display: 'flex', height: 10, borderRadius: 5, overflow: 'hidden', border: '1px solid var(--border)' }}>
-              <div style={{ width: pctFree + '%', background: 'var(--green,#22c55e)' }} title={`Free-tier: ${fmtBRL(totalFree)}`} />
-              <div style={{ width: (100 - pctFree) + '%', background: 'var(--accent)' }} title={`Pago: ${fmtBRL(totalPago)}`} />
+          {(Object.entries(filtros) as [keyof DatabricksResumoFiltros, string | undefined][]).some(([, v]) => v) && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Detalhando por:</span>
+              {(Object.entries(filtros) as [keyof DatabricksResumoFiltros, string | undefined][])
+                .filter((entry): entry is [keyof DatabricksResumoFiltros, string] => !!entry[1])
+                .map(([campo, valor]) => (
+                  <span
+                    key={campo}
+                    className="badge"
+                    style={{ cursor: 'pointer' }}
+                    title="Clique para remover este filtro"
+                    onClick={() => setFiltros((f) => ({ ...f, [campo]: undefined }))}
+                  >
+                    {FILTRO_LABELS[campo]}: {labelFiltroValor(campo, valor)} ✕
+                  </span>
+                ))}
+              <button className="btn-ghost" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setFiltros({})}>
+                Limpar filtros
+              </button>
             </div>
           )}
 
-          <div className="card">
-            <div className="card-header"><span className="card-title">Tendência Mensal</span></div>
-            <MonthlyBarChart data={resumo.por_mes} />
-          </div>
+          {resumo && !resumo.tem_dados && (
+            <div className="stat-card" style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>
+              Nenhum dado de consumo Databricks no período selecionado. Configure uma conexão e rode uma coleta em
+              <strong> Coleta Automática → Coleta Databricks</strong> — os gráficos aparecem aqui assim que houver dados.
+            </div>
+          )}
 
-          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            🔍 Clique num item de Workspace, SKU, Usuário, Job, Cluster ou Warehouse para detalhar os demais números por esse filtro — clique de novo pra remover.
-          </div>
-          <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
-            <RankingCard
-              title="Por Workspace"
-              color="var(--accent)"
-              items={resumo.por_workspace.map((w) => ({ custo: w.custo, label: w.workspace_id, value: w.workspace_id }))}
-              activeValue={filtros.workspace_id ?? null}
-              onToggle={(v) => toggleFiltro('workspace_id', v)}
-            />
-            <RankingCard
-              title="Por SKU"
-              color="var(--blue,#4da6ff)"
-              items={resumo.por_sku.map((s) => ({ custo: s.custo, label: s.sku_name, value: s.sku_name }))}
-              activeValue={filtros.sku_name ?? null}
-              onToggle={(v) => toggleFiltro('sku_name', v)}
-            />
-            <RankingCard
-              title="Por Usuário"
-              color="var(--green,#22c55e)"
-              items={resumo.por_usuario.map((u) => ({ custo: u.custo, label: u.usuario, value: u.usuario === 'Não identificado' ? '__vazio__' : u.usuario }))}
-              hint="Usuário vem de identity_metadata.run_as (System Tables)"
-              activeValue={filtros.usuario ?? null}
-              onToggle={(v) => toggleFiltro('usuario', v)}
-            />
-            <RankingCard
-              title="Por Job"
-              color="var(--orange,#ff8c42)"
-              items={resumo.por_job.map((j) => ({ custo: j.custo, label: j.job_name || j.job_id, value: j.job_id }))}
-              hint="Job/nome vêm de usage_metadata (System Tables) — só aparece quando a linha de billing veio de job compute"
-              activeValue={filtros.job_id ?? null}
-              onToggle={(v) => toggleFiltro('job_id', v)}
-            />
-            <RankingCard
-              title="Por Cluster"
-              color="var(--accent)"
-              items={resumo.por_cluster.map((c) => ({ custo: c.custo, label: c.cluster_id, value: c.cluster_id }))}
-              hint="Sem nome amigável — inventário de clusters (dono, tags) ainda não é coletado, só o ID"
-              activeValue={filtros.cluster_id ?? null}
-              onToggle={(v) => toggleFiltro('cluster_id', v)}
-            />
-            <RankingCard
-              title="Por Warehouse"
-              color="var(--blue,#4da6ff)"
-              items={resumo.por_warehouse.map((w) => ({ custo: w.custo, label: w.warehouse_id, value: w.warehouse_id }))}
-              hint="Só SQL Warehouse — Databricks não tem system table de inventário pra warehouses"
-              activeValue={filtros.warehouse_id ?? null}
-              onToggle={(v) => toggleFiltro('warehouse_id', v)}
-            />
-          </div>
+          {resumo && resumo.tem_dados && (
+            <>
+              <div className="stats-grid">
+                <div className="stat-card accent">
+                  <div className="stat-label">Custo Total no Período</div>
+                  <div className="stat-value">{fmtBRL(resumo.total_custo)}</div>
+                  <div className="stat-sub">{resumo.periodo.inicio} → {resumo.periodo.fim}</div>
+                </div>
+                <div className="stat-card green-card">
+                  <div className="stat-label">Free-tier</div>
+                  <div className="stat-value green">{fmtBRL(totalFree)}</div>
+                  <div className="stat-sub">{pctFree}% do consumo</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Pago</div>
+                  <div className="stat-value">{fmtBRL(totalPago)}</div>
+                  <div className="stat-sub">{100 - pctFree}% do consumo</div>
+                </div>
+              </div>
+
+              {totalFreePago > 0 && (
+                <div style={{ display: 'flex', height: 10, borderRadius: 5, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                  <div style={{ width: pctFree + '%', background: 'var(--green,#22c55e)' }} title={`Free-tier: ${fmtBRL(totalFree)}`} />
+                  <div style={{ width: (100 - pctFree) + '%', background: 'var(--accent)' }} title={`Pago: ${fmtBRL(totalPago)}`} />
+                </div>
+              )}
+
+              <div className="card">
+                <div className="card-header"><span className="card-title">Tendência Mensal</span></div>
+                <MonthlyBarChart data={resumo.por_mes} />
+              </div>
+
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                🔍 Clique num item de Workspace, SKU, Usuário, Job, Cluster ou Warehouse para detalhar os demais números por esse filtro — clique de novo pra remover.
+              </div>
+              <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+                <RankingCard
+                  title="Por Workspace"
+                  color="var(--accent)"
+                  items={resumo.por_workspace.map((w) => ({ custo: w.custo, label: w.workspace_id, value: w.workspace_id }))}
+                  activeValue={filtros.workspace_id ?? null}
+                  onToggle={(v) => toggleFiltro('workspace_id', v)}
+                />
+                <RankingCard
+                  title="Por SKU"
+                  color="var(--blue,#4da6ff)"
+                  items={resumo.por_sku.map((s) => ({ custo: s.custo, label: s.sku_name, value: s.sku_name }))}
+                  activeValue={filtros.sku_name ?? null}
+                  onToggle={(v) => toggleFiltro('sku_name', v)}
+                />
+                <RankingCard
+                  title="Por Usuário"
+                  color="var(--green,#22c55e)"
+                  items={resumo.por_usuario.map((u) => ({ custo: u.custo, label: u.usuario, value: u.usuario === 'Não identificado' ? '__vazio__' : u.usuario }))}
+                  hint="Usuário vem de identity_metadata.run_as (System Tables)"
+                  activeValue={filtros.usuario ?? null}
+                  onToggle={(v) => toggleFiltro('usuario', v)}
+                />
+                <RankingCard
+                  title="Por Job"
+                  color="var(--orange,#ff8c42)"
+                  items={resumo.por_job.map((j) => ({ custo: j.custo, label: j.job_name || j.job_id, value: j.job_id }))}
+                  hint="Job/nome vêm de usage_metadata (System Tables) — só aparece quando a linha de billing veio de job compute"
+                  activeValue={filtros.job_id ?? null}
+                  onToggle={(v) => toggleFiltro('job_id', v)}
+                />
+                <RankingCard
+                  title="Por Cluster"
+                  color="var(--accent)"
+                  items={resumo.por_cluster.map((c) => ({ custo: c.custo, label: c.cluster_id, value: c.cluster_id }))}
+                  hint="Sem nome amigável — inventário de clusters (dono, tags) ainda não é coletado, só o ID"
+                  activeValue={filtros.cluster_id ?? null}
+                  onToggle={(v) => toggleFiltro('cluster_id', v)}
+                />
+                <RankingCard
+                  title="Por Warehouse"
+                  color="var(--blue,#4da6ff)"
+                  items={resumo.por_warehouse.map((w) => ({ custo: w.custo, label: w.warehouse_id, value: w.warehouse_id }))}
+                  hint="Só SQL Warehouse — Databricks não tem system table de inventário pra warehouses"
+                  activeValue={filtros.warehouse_id ?? null}
+                  onToggle={(v) => toggleFiltro('warehouse_id', v)}
+                />
+              </div>
+            </>
+          )}
         </>
       )}
 
-      <div className="card">
-        <div className="card-header">
-          <span className="card-title">Orçamentos</span>
-          <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>{budgetsQuery.data?.length ?? 0}</span>
-          <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingBudget(null); setBudgetModalOpen(true) }}>
-            Novo Orçamento
-          </button>
-        </div>
-        <div style={{ padding: '0 20px 8px', fontSize: 12, color: 'var(--text-muted)' }}>
-          Alerta é disparado ao entrar no sistema quando o consumo do mês corrente passa do threshold "Alertar" de cada orçamento (100% é sempre estourado). Escopo pode ser global, um workspace específico, ou uma tag (projeto/time/centro de custo).
-        </div>
-        <div className="table-wrapper">
-          <table className="data-table">
-            <thead><tr><th>Nome</th><th>Escopo</th><th>Valor Mensal</th><th>Alertar / Crítico</th><th>Ativo</th><th>Ações</th></tr></thead>
-            <tbody>
-              {(budgetsQuery.data || []).map((b) => (
-                <tr key={b.id}>
-                  <td>{b.nome}</td>
-                  <td>{escopoLabel(b)}</td>
-                  <td>{fmtBRL(b.valor_mensal)}</td>
-                  <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{b.threshold_atencao}% / {b.threshold_critico}%</td>
-                  <td><input type="checkbox" checked={b.ativo} onChange={() => toggleAtivoMutation.mutate(b)} /></td>
-                  <td>
-                    <div className="table-actions">
-                      <button className="btn-icon" title="Editar" onClick={() => { setEditingBudget(b); setBudgetModalOpen(true) }}>
-                        <svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" /></svg>
-                      </button>
-                      <button className="btn-icon delete" title="Excluir" onClick={() => handleDeleteBudget(b)}>
-                        <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {(budgetsQuery.data || []).length === 0 && (
-                <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhum orçamento cadastrado.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {dbxTab === 'orcamentos' && (
+        <>
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Orçamentos</span>
+              <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>{budgetsQuery.data?.length ?? 0}</span>
+              <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingBudget(null); setBudgetModalOpen(true) }}>
+                Novo Orçamento
+              </button>
+            </div>
+            <div style={{ padding: '0 20px 8px', fontSize: 12, color: 'var(--text-muted)' }}>
+              Alerta é disparado ao entrar no sistema quando o consumo do mês corrente passa do threshold "Alertar" de cada orçamento (100% é sempre estourado). Escopo pode ser global, um workspace específico, ou uma tag (projeto/time/centro de custo).
+            </div>
+            <div className="table-wrapper">
+              <table className="data-table">
+                <thead><tr><th>Nome</th><th>Escopo</th><th>Valor Mensal</th><th>Alertar / Crítico</th><th>Ativo</th><th>Ações</th></tr></thead>
+                <tbody>
+                  {(budgetsQuery.data || []).map((b) => (
+                    <tr key={b.id}>
+                      <td>{b.nome}</td>
+                      <td>{escopoLabel(b)}</td>
+                      <td>{fmtBRL(b.valor_mensal)}</td>
+                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{b.threshold_atencao}% / {b.threshold_critico}%</td>
+                      <td><input type="checkbox" checked={b.ativo} onChange={() => toggleAtivoMutation.mutate(b)} /></td>
+                      <td>
+                        <div className="table-actions">
+                          <button className="btn-icon" title="Editar" onClick={() => { setEditingBudget(b); setBudgetModalOpen(true) }}>
+                            <svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" /></svg>
+                          </button>
+                          <button className="btn-icon delete" title="Excluir" onClick={() => handleDeleteBudget(b)}>
+                            <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {(budgetsQuery.data || []).length === 0 && (
+                    <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhum orçamento cadastrado.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
 
-      <AnomaliasCard />
+          <AnomaliasCard />
+        </>
+      )}
 
-      <GenieBudgetsCard />
+      {dbxTab === 'quotas' && <GenieBudgetsCard />}
 
       {budgetModalOpen && (
         <DatabricksBudgetModal budget={editingBudget} workspaces={workspaces} onClose={() => setBudgetModalOpen(false)} />

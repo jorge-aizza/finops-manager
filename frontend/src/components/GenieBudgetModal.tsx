@@ -1,18 +1,24 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { createGenieBudget } from '../api/genieBudgets'
-import type { GenieActionType, GenieBudgetTagInput, GenieScopeType } from '../types/genieBudgets'
+import { createGenieBudget, searchGeniePrincipals } from '../api/genieBudgets'
+import type { GenieActionType, GenieBudgetTagInput, GeniePrincipal, GenieScopeType } from '../types/genieBudgets'
 
 interface Props {
   onClose: () => void
 }
 
+interface OverrideRow {
+  principal_id: number
+  nome: string
+  override_threshold: string
+}
+
 // Cria uma quota Genie via Databricks Account Budgets API (resource_type=
 // BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY) — a Databricks aplica isso de verdade,
 // inclusive podendo BLOQUEAR acesso ao Genie (action_type=BLOCK_USAGE). Sem edição
-// nem múltiplos thresholds nesta v1 (a API suporta até 4 compartilhados + 20
-// overrides por usuário — deliberadamente simplificado aqui pra 1 threshold, dado o
-// risco de configurar algo tão sensível sem poder validar contra uma conta real).
+// nesta v1 (múltiplos thresholds compartilhados — a API suporta até 4 — ficaram de
+// fora, dado o risco de configurar algo tão sensível sem poder validar contra uma
+// conta real; overrides individuais por usuário/grupo, sim, foram implementados).
 export default function GenieBudgetModal({ onClose }: Props) {
   const queryClient = useQueryClient()
   const [nome, setNome] = useState('')
@@ -24,7 +30,18 @@ export default function GenieBudgetModal({ onClose }: Props) {
   const [emailTarget, setEmailTarget] = useState('')
   const [confirmarBloqueio, setConfirmarBloqueio] = useState(false)
 
+  // Overrides — limite individual por usuário (busca por e-mail) ou grupo (busca por
+  // nome) via Account SCIM API, resolvendo pro principal_id numérico que a Budgets API
+  // exige. Só faz sentido (e só é aceito pelo servidor) com escopo "Por usuário" — ver
+  // guard-rail em POST /genie-budgets.
+  const [overrideTipo, setOverrideTipo] = useState<'user' | 'group'>('user')
+  const [overrideQuery, setOverrideQuery] = useState('')
+  const [overrideResultados, setOverrideResultados] = useState<GeniePrincipal[]>([])
+  const [overrideBuscando, setOverrideBuscando] = useState(false)
+  const [overrides, setOverrides] = useState<OverrideRow[]>([])
+
   const workspaceIds = workspaceIdsRaw.split(',').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => !isNaN(n))
+  const isPerUser = scopeType === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER'
 
   function addTag() { setTags((t) => [...t, { key: '', value: '' }]) }
   function updateTag(i: number, field: 'key' | 'value', v: string) {
@@ -32,8 +49,42 @@ export default function GenieBudgetModal({ onClose }: Props) {
   }
   function removeTag(i: number) { setTags((t) => t.filter((_, idx) => idx !== i)) }
 
+  async function buscarPrincipal() {
+    const q = overrideQuery.trim()
+    if (!q) return
+    setOverrideBuscando(true)
+    setOverrideResultados([])
+    try {
+      const resultados = await searchGeniePrincipals(overrideTipo, q)
+      if (resultados.length === 0) window.showToast?.('Nenhum resultado encontrado.', 'warn')
+      setOverrideResultados(resultados)
+    } catch (e) {
+      window.showToast?.('Erro ao buscar: ' + (e as Error).message, 'error')
+    } finally {
+      setOverrideBuscando(false)
+    }
+  }
+
+  function adicionarOverride(p: GeniePrincipal) {
+    const id = Number(p.id)
+    if (overrides.some((o) => o.principal_id === id)) { window.showToast?.('Já adicionado.', 'warn'); return }
+    if (overrides.length >= 20) { window.showToast?.('Máximo de 20 overrides por quota.', 'warn'); return }
+    setOverrides((prev) => [...prev, { principal_id: id, nome: p.nome, override_threshold: '' }])
+    setOverrideResultados([])
+    setOverrideQuery('')
+  }
+
+  function removerOverride(principalId: number) {
+    setOverrides((prev) => prev.filter((o) => o.principal_id !== principalId))
+  }
+
+  function updateOverrideThreshold(principalId: number, v: string) {
+    setOverrides((prev) => prev.map((o) => (o.principal_id === principalId ? { ...o, override_threshold: v } : o)))
+  }
+
+  const overridesValidos = overrides.every((o) => o.override_threshold && parseFloat(o.override_threshold) > 0)
   const isBloqueio = actionType === 'BLOCK_USAGE'
-  const podeConfirmar = !!nome && !!valor && parseFloat(valor) > 0 && (!isBloqueio || confirmarBloqueio)
+  const podeConfirmar = !!nome && !!valor && parseFloat(valor) > 0 && (!isBloqueio || confirmarBloqueio) && overridesValidos
 
   const salvarMutation = useMutation({
     mutationFn: () => createGenieBudget({
@@ -47,6 +98,9 @@ export default function GenieBudgetModal({ onClose }: Props) {
         email_target: actionType === 'EMAIL_NOTIFICATION' ? (emailTarget || undefined) : undefined,
       },
       confirmar_bloqueio: isBloqueio ? true : undefined,
+      principal_overrides: isPerUser && overrides.length
+        ? overrides.map((o) => ({ principal_id: o.principal_id, override_threshold: o.override_threshold }))
+        : undefined,
     }),
     onSuccess: () => {
       window.showToast?.('Quota Genie criada no Databricks.', 'success')
@@ -97,6 +151,61 @@ export default function GenieBudgetModal({ onClose }: Props) {
               <option value="ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER">Por usuário (cada usuário até este valor)</option>
             </select>
           </div>
+
+          {isPerUser && (
+            <div className="form-group">
+              <label>Limites individuais por usuário/grupo (opcional, até 20)</label>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                Sobrescreve o limite acima só pra quem for adicionado aqui — os demais usuários continuam com o valor padrão.
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                <select value={overrideTipo} onChange={(e) => setOverrideTipo(e.target.value as 'user' | 'group')} style={{ flexShrink: 0, width: 110 }}>
+                  <option value="user">Usuário</option>
+                  <option value="group">Grupo</option>
+                </select>
+                <input
+                  value={overrideQuery}
+                  onChange={(e) => setOverrideQuery(e.target.value)}
+                  placeholder={overrideTipo === 'user' ? 'e-mail exato' : 'nome exato do grupo'}
+                  style={{ flex: 1 }}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), buscarPrincipal())}
+                />
+                <button className="btn-ghost" style={{ flexShrink: 0 }} disabled={overrideBuscando || !overrideQuery.trim()} onClick={buscarPrincipal}>
+                  {overrideBuscando ? 'Buscando...' : 'Buscar'}
+                </button>
+              </div>
+              {overrideResultados.length > 0 && (
+                <div style={{ border: '1px solid var(--border)', borderRadius: 6, marginBottom: 8, overflow: 'hidden' }}>
+                  {overrideResultados.map((p) => (
+                    <div
+                      key={p.id}
+                      onClick={() => adicionarOverride(p)}
+                      style={{ padding: '6px 10px', fontSize: 12, cursor: 'pointer', borderBottom: '1px solid var(--border)' }}
+                      title="Clique para adicionar"
+                    >
+                      {p.nome} <span style={{ color: 'var(--text-muted)' }}>({p.id})</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {overrides.map((o) => (
+                <div key={o.principal_id} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ flex: 1, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={o.nome}>{o.nome}</span>
+                  <input
+                    type="number" min={0} step="0.01" value={o.override_threshold}
+                    onChange={(e) => updateOverrideThreshold(o.principal_id, e.target.value)}
+                    placeholder="US$"
+                    style={{ width: 100, flexShrink: 0 }}
+                  />
+                  <button className="btn-icon delete" title="Remover" onClick={() => removerOverride(o.principal_id)} style={{ flexShrink: 0 }}>✕</button>
+                </div>
+              ))}
+              {overrides.length > 0 && !overridesValidos && (
+                <div style={{ fontSize: 11, color: 'var(--danger)' }}>Preencha um limite válido (maior que zero) pra cada override.</div>
+              )}
+            </div>
+          )}
+
           <div className="form-group">
             <label htmlFor="gb-acao">Ação ao atingir o limite</label>
             <select id="gb-acao" value={actionType} onChange={(e) => { setActionType(e.target.value as GenieActionType); setConfirmarBloqueio(false) }}>

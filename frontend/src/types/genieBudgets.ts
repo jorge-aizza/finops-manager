@@ -23,12 +23,31 @@ export interface GenieBudgetTagInput {
   value: string
 }
 
+// Overrides (limite individual por usuário/grupo, até 20 por budget) só valem com
+// threshold.scope_type = ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER — o Databricks os
+// ignora silenciosamente em budgets de escopo compartilhado (validado também no
+// servidor, ver POST /genie-budgets). principal_id vem da busca por e-mail/nome via
+// Account SCIM API (ver GeniePrincipal abaixo) — a Budgets API só aceita o ID numérico
+// interno, nunca o e-mail direto.
+export interface GenieBudgetPrincipalOverride {
+  principal_id: number
+  override_threshold: string
+}
+
 export interface GenieBudgetInput {
   display_name: string
   workspace_ids: number[]
   tags: GenieBudgetTagInput[]
   threshold: GenieBudgetThresholdInput
   confirmar_bloqueio?: boolean // obrigatório (true) quando threshold.action_type = BLOCK_USAGE
+  principal_overrides?: GenieBudgetPrincipalOverride[]
+}
+
+// GET /api/databricks-coleta/genie-principals — resultado de busca por e-mail (tipo
+// 'user') ou nome (tipo 'group') via Account SCIM v2.1 API.
+export interface GeniePrincipal {
+  id: string
+  nome: string
 }
 
 // Resposta crua da Budgets API — campos vistos na documentação; qualquer campo extra

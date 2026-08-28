@@ -16,6 +16,13 @@ let listener: ViewChangeListener | null = null
 let currentDashboardTab = 'acoes'
 let dashboardTabListener: DashboardTabListener | null = null
 
+// Databricks ganhou o mesmo padrão (2026-08-28) — 3 sub-abas (Dashboard/Orçamentos e
+// Anomalias/Quotas) dentro da mesma DatabricksDashboardView.tsx montada, trocadas pelo
+// sub-nav sem remount. Canal separado do de Dashboard — cada view migrada com sub-abas
+// tem o seu próprio, não compartilham estado.
+let currentDatabricksTab = 'dashboard'
+let databricksTabListener: DashboardTabListener | null = null
+
 // manualRefresh() (app.js, botão "Atualizar" + countdown de auto-refresh)
 // chama isso pra telas migradas em vez de reimplementar refetch por tela —
 // App.tsx registra um handler único (queryClient.invalidateQueries()) que
@@ -31,6 +38,11 @@ export function setViewListener(fn: ViewChangeListener): void {
 export function setDashboardTabListener(fn: DashboardTabListener): void {
   dashboardTabListener = fn
   fn(currentDashboardTab)
+}
+
+export function setDatabricksTabListener(fn: DashboardTabListener): void {
+  databricksTabListener = fn
+  fn(currentDatabricksTab)
 }
 
 export function setRefreshHandler(fn: RefreshHandler): void {
@@ -52,13 +64,18 @@ function setDashboardTab(tab: string): void {
   dashboardTabListener?.(tab)
 }
 
+function setDatabricksTab(tab: string): void {
+  currentDatabricksTab = tab
+  databricksTabListener?.(tab)
+}
+
 async function refresh(): Promise<void> {
   await refreshHandler?.()
 }
 
 declare global {
   interface Window {
-    __reactBridge: { mount: typeof mount; unmount: typeof unmount; setDashboardTab: typeof setDashboardTab; refresh: typeof refresh }
+    __reactBridge: { mount: typeof mount; unmount: typeof unmount; setDashboardTab: typeof setDashboardTab; setDatabricksTab: typeof setDatabricksTab; refresh: typeof refresh }
     __reactBridgeQueuedView?: string
     currentUser?: { nome?: string; email?: string; perfil?: string } | null
     logout?: (pedirConfirmacao?: boolean) => void
@@ -70,7 +87,7 @@ declare global {
   }
 }
 
-window.__reactBridge = { mount, unmount, setDashboardTab, refresh }
+window.__reactBridge = { mount, unmount, setDashboardTab, setDatabricksTab, refresh }
 
 // Bug real: `react-app.js` (<script type="module">) só executa depois que o
 // parsing do documento termina — mais tarde que o <script src="app.js">

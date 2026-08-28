@@ -1656,6 +1656,96 @@ via a Warehouses REST API de verdade (`GET /api/2.0/sql/warehouses`) — não im
 3 cards novos populados corretamente após o fix do bucket null; drill-down por Job
 reconsulta e escopa todos os outros cards, incluindo o estado vazio do card Warehouse.
 
+### Coleta Databricks — Overrides por usuário/grupo nas Quotas Genie + reestruturação em sub-menu (2026-08-28)
+
+Duas mudanças pedidas juntas: (1) permitir limite individual por usuário/grupo específico
+nas Quotas Genie (a v1 anterior só tinha "mesmo limite pra cada usuário", não "usuário X
+tem limite diferente de usuário Y"); (2) reorganizar a tela Databricks (que tinha virado
+uma página única muito longa — KPIs, tendência, 6 rankings, Orçamentos, Anomalias, Quotas
+Genie, tudo empilhado) num grupo de menu com 3 sub-abas: Dashboard / Orçamentos e
+Anomalias / Quotas.
+
+**Overrides — resolvido via Account SCIM v2.1 API**: a Budgets API só aceita
+`principal_id` (int64, ID interno da conta) nos `principal_overrides`, nunca e-mail
+direto — pesquisado na documentação oficial (WebSearch) que o caminho é
+`GET /api/2.0/accounts/{account_id}/scim/v2/Users?filter=emails.value eq "..."` (usuário)
+ou `.../Groups?filter=displayName eq "..."` (grupo), retornando o `id` que vira o
+`principal_id`. Novo helper `_dbxScimFetch` (server.js) — prefixo de path diferente da
+Budgets API (`/api/2.0`, não `/api/2.1`), por isso não generaliza `_dbxBudgetsFetch`, pra
+não confundir as duas versões. Nova rota `GET /api/databricks-coleta/genie-principals?
+tipo=user|group&query=...`. **Reaproveita a mesma credencial OAuth M2M de conta já usada
+pra Budgets/System Tables** — nenhuma configuração nova pro usuário.
+
+**Guard-rail: overrides só valem com escopo "Por usuário"** — a documentação é explícita
+que overrides são ignorados silenciosamente em budgets de escopo compartilhado. Bloqueado
+no servidor (`POST /genie-budgets` rejeita com 400 se `principal_overrides` vier
+preenchido e `scope_type` não for `PER_USER`) — evita o admin descobrir isso só depois de
+criar uma quota que não fez o que ele esperava. Limite de 20 overrides (da própria API)
+também replicado no frontend antes de deixar adicionar o 21º.
+
+**Frontend (`GenieBudgetModal.tsx`)**: seção "Limites individuais por usuário/grupo" só
+aparece com escopo "Por usuário" — busca por e-mail exato (usuário) ou nome exato
+(grupo), lista de resultados clicável, cada override adicionado vira uma linha com nome +
+campo de valor (US$) + botão remover. "Salvar" fica bloqueado se qualquer override tiver
+o campo de valor vazio ou ≤ 0 — mesmo padrão de validação já usado pros outros campos do
+modal. **Não implementado**: edição de override depois de criado (a API não documenta um
+PATCH pra isso na pesquisa feita) — mudar um override hoje é excluir e recriar a quota
+inteira.
+
+**Reestruturação em sub-menu — mesmo padrão já usado pelo Dashboard principal
+(Ações/Estimativas)**: replicado nos 4 mesmos pontos —
+- `index.html`: item plano `<a data-view="databricks">` virou `<div class="nav-group"
+  id="nav-group-databricks">` com header (`data-view="databricks"`, `onclick=
+  "openNavGroup('databricks')"`) + 3 sub-itens (`#nav-sub-dbx-dashboard`/`-orcamentos`/
+  `-quotas`, cada um `onclick="showDbxTab('...')"`). Diferente do grupo Dashboard
+  (`class="nav-group open"`, sempre expandido — é a tela de entrada do sistema), o grupo
+  Databricks começa **colapsado** (`class="nav-group"`, sem `open`) — não é a página de
+  login; `showView()` já abre o grupo automaticamente (`_navEl.closest('.nav-group')`)
+  quando alguém navega pra lá por qualquer caminho (inclusive o botão "Ver Dashboard" de
+  `ColetaView.tsx`, que chama `showView('databricks')` direto).
+- `app.js`: `openNavGroup('databricks')` chama `showDbxTab('dashboard')` (mesmo padrão de
+  `openNavGroup('dashboard')` → `showDashTab('acoes')`); `showDbxTab(tab)` chama
+  `showView('databricks')` + `switchDbxTab(tab)` + atualiza `.nav-sub.active`;
+  `switchDbxTab(tab)` só repassa pro canal da ponte (`window.__reactBridge.
+  setDatabricksTab(tab)`) — nunca usa `mount()`/`showView()` de novo, que só
+  remontariam a mesma view.
+- `bridge.ts`: canal `currentDatabricksTab`/`databricksTabListener`/
+  `setDatabricksTabListener`/`setDatabricksTab` — **separado** do canal já existente do
+  Dashboard (`currentDashboardTab`/...), cada view migrada com sub-abas tem o seu
+  próprio, não compartilham estado.
+- `DatabricksDashboardView.tsx`: `useEffect(() => setDatabricksTabListener(...), [])`
+  guarda `dbxTab` em estado local; o componente **continua sendo um único arquivo/
+  export** montado sob a mesma chave `databricks` em `VIEWS` (App.tsx) — a divisão em 3
+  "telas" é só JSX condicional por `dbxTab`, não 3 componentes/rotas separados (mesma
+  decisão já tomada pro Dashboard principal: um arquivo, um estado de aba, não uma
+  entrada nova em `MIGRATED_VIEWS`/`VIEWS`). Date-range picker + filtros de drill-down +
+  KPIs + tendência + 6 rankings só aparecem na aba "Dashboard" (fazem sentido só ali —
+  Orçamentos internos sempre olham "mês corrente", Anomalias tem janela fixa própria,
+  Quotas Genie não tem conceito de período); `view-hero` (título + subtítulo dentro da
+  página) muda de texto por aba via `DBX_TAB_INFO[dbxTab]` — o título da top-bar (fora da
+  área de conteúdo, `#page-title`) continua fixo em "Dashboard Databricks" pro grupo
+  inteiro, mesmo comportamento já aceito pro grupo Dashboard (Ações/Estimativas também
+  não trocam o título da top-bar).
+
+**Testes**: `DatabricksDashboardView.test.tsx` precisou de `window.__reactBridge.
+setDatabricksTab('orcamentos'|'quotas')` antes de cada teste que verifica conteúdo dessas
+abas (mesmo padrão já usado por `DashboardView.test.tsx` pras abas Ações/Estimativas) — e
+um reset em `beforeEach` (`setDatabricksTab('dashboard')`), já que o estado do canal é de
+módulo (singleton) e vaza entre testes sem isso. `GenieBudgetModal.test.tsx` ganhou 5
+testes novos cobrindo a seção de overrides (aparece só com escopo certo, busca por
+usuário/grupo, adicionar/remover, payload final).
+
+**Verificado via Playwright contra o servidor real**: grupo "Databricks" expande com os 3
+sub-itens corretos; alternar entre as 3 abas via `window.showDbxTab(...)` troca o
+conteúdo e o título do `view-hero` sem remontar a view (sem perda de estado de outras
+abas); modal "Nova Quota Genie" com escopo "Por usuário" mostra a seção de busca de
+usuário/grupo corretamente. Zero erro de console (os 400 esperados são só a chamada de
+Genie budgets falhando por falta de conexão OAuth M2M padrão, comportamento já
+documentado). **Não verificado**: o fluxo de busca real via SCIM contra uma conta
+Databricks de verdade (sem conta disponível neste ambiente, mesma ressalva de sempre) —
+só a mecânica de UI (adicionar/remover/validar) foi confirmada, com dados mockados nos
+testes automatizados.
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

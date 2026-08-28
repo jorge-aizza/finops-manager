@@ -7852,6 +7852,41 @@ async function _dbxBudgetsFetch(accountId, token, path, opts = {}) {
   return _safeRespJson(resp);
 }
 
+// Account SCIM v2.1 — usado só pra resolver e-mail/nome de grupo em principal_id (int64),
+// campo exigido pelos overrides por usuário/grupo dos budgets (ver POST .../genie-budgets
+// abaixo). Prefixo de path diferente da Budgets API (/api/2.0, não /api/2.1) — helper
+// próprio em vez de generalizar _dbxBudgetsFetch pra não confundir as duas versões.
+// NÃO VALIDADO contra uma conta Databricks real (mesma ressalva de toda a Coleta
+// Databricks) — pesquisado via documentação oficial (WebSearch, 2026-08-28).
+async function _dbxScimFetch(accountId, token, path) {
+  const resp = await _dbxFetch(`${_DBX_ACCOUNTS_BASE}/api/2.0/accounts/${accountId}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000);
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`SCIM API do Databricks falhou (${resp.status}): ${e}`); }
+  return _safeRespJson(resp);
+}
+
+// Busca usuário (por e-mail, filtro `emails.value eq`) ou grupo (por nome, filtro
+// `displayName eq`) — usado pelo modal de Quota Genie pra resolver o principal_id
+// (numérico, exigido pela API) a partir do que o admin realmente conhece (e-mail/nome).
+app.get('/api/databricks-coleta/genie-principals', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { tipo, query } = req.query;
+    if (!query) return res.status(400).json({ error: 'query é obrigatório' });
+    const { accountId, token } = await _getDbxAccountCredentials();
+    const resource = tipo === 'group' ? 'Groups' : 'Users';
+    const filterField = tipo === 'group' ? 'displayName' : 'emails.value';
+    const filterVal = String(query).replace(/"/g, '\\"');
+    const filter = encodeURIComponent(`${filterField} eq "${filterVal}"`);
+    const data = await _dbxScimFetch(accountId, token, `/scim/v2/${resource}?filter=${filter}`);
+    const resultados = (data.Resources || []).map(r => ({
+      id: r.id,
+      nome: r.displayName || r.userName || r.emails?.[0]?.value || r.id,
+    }));
+    res.json(resultados);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     const { accountId, token } = await _getDbxAccountCredentials();
@@ -7869,7 +7904,7 @@ app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, as
 
 app.post('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { display_name, workspace_ids, tags, threshold, confirmar_bloqueio } = req.body;
+    const { display_name, workspace_ids, tags, threshold, confirmar_bloqueio, principal_overrides } = req.body;
     if (!display_name || !threshold?.quantity_threshold || !threshold?.scope_type || !threshold?.action_type) {
       return res.status(400).json({ error: 'display_name e threshold (quantity_threshold, scope_type, action_type) são obrigatórios' });
     }
@@ -7881,6 +7916,14 @@ app.post('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, a
     if (threshold.action_type === 'BLOCK_USAGE' && !confirmar_bloqueio) {
       return res.status(400).json({ error: 'Threshold com ação BLOCK_USAGE requer confirmar_bloqueio:true no payload — essa ação bloqueia acesso real ao Genie assim que o limite é cruzado.' });
     }
+    // Overrides (limite individual por usuário/grupo) só fazem sentido com escopo "por
+    // usuário" — a documentação do Databricks é explícita: overrides são ignorados
+    // silenciosamente em budgets de escopo compartilhado. Bloqueado aqui com uma
+    // mensagem clara em vez de deixar o admin descobrir isso só depois de criar.
+    const temOverrides = Array.isArray(principal_overrides) && principal_overrides.length > 0;
+    if (temOverrides && threshold.scope_type !== 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER') {
+      return res.status(400).json({ error: 'Overrides por usuário/grupo só valem com escopo "Por usuário" — o Databricks os ignora silenciosamente em budgets de escopo compartilhado.' });
+    }
 
     const { accountId, token } = await _getDbxAccountCredentials();
     const filter = {};
@@ -7890,20 +7933,28 @@ app.post('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, a
     const actionConfig = { action_type: threshold.action_type };
     if (threshold.action_type === 'EMAIL_NOTIFICATION' && threshold.email_target) actionConfig.target = threshold.email_target;
 
+    const alertConfig = {
+      time_period: 'MONTH',
+      trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
+      quantity_type: 'LIST_PRICE_DOLLARS_USD',
+      quantity_threshold: String(threshold.quantity_threshold),
+      scope_type: threshold.scope_type,
+      action_configurations: [actionConfig],
+    };
+    if (temOverrides) {
+      alertConfig.principal_overrides = principal_overrides.map(p => ({
+        principal_id: Number(p.principal_id),
+        override_threshold: String(p.override_threshold),
+      }));
+    }
+
     const payload = {
       budget: {
         display_name,
         account_id: accountId,
         resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
         filter,
-        alert_configurations: [{
-          time_period: 'MONTH',
-          trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
-          quantity_type: 'LIST_PRICE_DOLLARS_USD',
-          quantity_threshold: String(threshold.quantity_threshold),
-          scope_type: threshold.scope_type,
-          action_configurations: [actionConfig],
-        }],
+        alert_configurations: [alertConfig],
       },
     };
     const data = await _dbxBudgetsFetch(accountId, token, '/budgets', { method: 'POST', body: JSON.stringify(payload) });

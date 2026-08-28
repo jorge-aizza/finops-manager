@@ -40,6 +40,9 @@ beforeEach(() => {
   vi.mocked(databricksColetaApi.listDatabricksBudgets).mockResolvedValue([])
   vi.mocked(databricksColetaApi.getDatabricksAnomalias).mockResolvedValue({ custo_diario: [], usuarios: [] })
   vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([])
+  // `bridge.ts` mantém currentDatabricksTab como estado de módulo (singleton) — sem
+  // resetar aqui, um teste que troca de aba (Orçamentos/Quotas) vaza pro próximo.
+  window.__reactBridge?.setDatabricksTab('dashboard')
 })
 
 describe('DatabricksDashboardView', () => {
@@ -120,7 +123,7 @@ describe('DatabricksDashboardView', () => {
     ))
   })
 
-  it('lista orçamentos existentes na tabela', async () => {
+  it('lista orçamentos existentes na tabela (aba Orçamentos e Anomalias)', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     vi.mocked(databricksColetaApi.listDatabricksBudgets).mockResolvedValue([
       {
@@ -129,13 +132,14 @@ describe('DatabricksDashboardView', () => {
         ativo: true, criado_em: '', atualizado_em: '',
       },
     ])
+    window.__reactBridge.setDatabricksTab('orcamentos')
     renderWithClient()
 
     expect(await screen.findByText('Orçamento Global')).toBeInTheDocument()
     expect(screen.getByText('Todos os workspaces')).toBeInTheDocument()
   })
 
-  it('lista quotas Genie e mostra o badge de bloqueio quando aplicável', async () => {
+  it('lista quotas Genie e mostra o badge de bloqueio quando aplicável (aba Quotas)', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
       {
@@ -146,17 +150,32 @@ describe('DatabricksDashboardView', () => {
         }],
       },
     ])
+    window.__reactBridge.setDatabricksTab('quotas')
     renderWithClient()
 
     expect(await screen.findByText('Quota Genie Bloqueio')).toBeInTheDocument()
     expect(screen.getByText('🚫 Bloqueia')).toBeInTheDocument()
   })
 
-  it('mostra a mensagem de erro do servidor quando a conexão padrão não é OAuth M2M', async () => {
+  it('mostra a mensagem de erro do servidor quando a conexão padrão não é OAuth M2M (aba Quotas)', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     vi.mocked(genieBudgetsApi.listGenieBudgets).mockRejectedValue(new Error('A conexão padrão usa modo PAT — quotas Genie exigem OAuth M2M com Account Admin.'))
+    window.__reactBridge.setDatabricksTab('quotas')
     renderWithClient()
 
     expect(await screen.findByText(/exigem OAuth M2M com Account Admin/)).toBeInTheDocument()
+  })
+
+  it('troca de aba via setDatabricksTabListener (ponte com o sidebar legado)', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    window.__reactBridge.setDatabricksTab('orcamentos')
+    expect(await screen.findByText('Orçamentos')).toBeInTheDocument()
+    expect(screen.queryByText('Custo Total no Período')).not.toBeInTheDocument()
+
+    window.__reactBridge.setDatabricksTab('quotas')
+    expect(await screen.findByText(/Quotas Genie \(Databricks nativo\)/)).toBeInTheDocument()
   })
 })

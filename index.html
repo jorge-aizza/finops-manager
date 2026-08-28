@@ -1299,12 +1299,28 @@
           </svg>
           <span class="nav-label">Coleta Azure</span>
         </a>
-        <a class="nav-item" data-view="databricks" onclick="showView('databricks')" title="Dashboard Databricks">
-          <svg viewBox="0 0 20 20" fill="none">
-            <path d="M3 16V9M8 16V5M13 16v-7M17 16v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
-          <span class="nav-label">Databricks</span>
-        </a>
+        <!-- Databricks — grupo expansível (2026-08-28): Dashboard/Orçamentos e Anomalias/Quotas -->
+        <div class="nav-group" id="nav-group-databricks">
+          <div class="nav-group-header" data-view="databricks" onclick="openNavGroup('databricks')" title="Databricks">
+            <svg viewBox="0 0 20 20" fill="none" width="17" height="17" style="flex-shrink:0"><path d="M3 16V9M8 16V5M13 16v-7M17 16v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <span class="nav-label">Databricks</span>
+            <svg class="nav-chevron" viewBox="0 0 16 16" fill="none" width="13" height="13" onclick="event.stopPropagation();toggleNavGroup('databricks')"><path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="nav-group-items">
+            <a class="nav-item nav-sub active" id="nav-sub-dbx-dashboard" onclick="showDbxTab('dashboard')">
+              <svg viewBox="0 0 20 20" fill="none" width="15" height="15"><rect x="2" y="2" width="7" height="7" rx="1" fill="currentColor"/><rect x="11" y="2" width="7" height="7" rx="1" fill="currentColor" opacity="0.5"/><rect x="2" y="11" width="7" height="7" rx="1" fill="currentColor" opacity="0.5"/><rect x="11" y="11" width="7" height="7" rx="1" fill="currentColor" opacity="0.3"/></svg>
+              <span class="nav-label">Dashboard</span>
+            </a>
+            <a class="nav-item nav-sub" id="nav-sub-dbx-orcamentos" onclick="showDbxTab('orcamentos')">
+              <svg viewBox="0 0 20 20" fill="none" width="15" height="15"><path d="M10 2a8 8 0 100 16 8 8 0 000-16z" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v4l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="nav-label">Orçamentos e Anomalias</span>
+            </a>
+            <a class="nav-item nav-sub" id="nav-sub-dbx-quotas" onclick="showDbxTab('quotas')">
+              <svg viewBox="0 0 20 20" fill="none" width="15" height="15"><path d="M10 2l6 3v5c0 4-2.5 6.5-6 8-3.5-1.5-6-4-6-8V5l6-3z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+              <span class="nav-label">Quotas</span>
+            </a>
+          </div>
+        </div>
       </nav>
 
       <!-- Usuário conectado -->
