@@ -7783,6 +7783,115 @@ app.get('/api/databricks-coleta/anomalias', authMiddleware, dbMiddleware, async 
   } catch (e) { _dbErr(res, e); }
 });
 
+// ── Quotas Genie via Databricks Account Budgets API (2026-08-28, pedido do usuário) ────
+// Diferente de databricks_budgets (orçamento CALCULADO por nós sobre databricks_consumo,
+// só alerta) — isto é a Budgets API NATIVA do Databricks (nível de conta,
+// /api/2.1/accounts/{account_id}/budgets, resource_type=BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY,
+// já que Genie roda sobre o Unity AI Gateway), que o próprio Databricks aplica — inclusive
+// podendo BLOQUEAR acesso real ao Genie quando um threshold é cruzado (ação BLOCK_USAGE).
+// Pesquisado via documentação oficial (WebFetch/WebSearch, 2026-08-28) — NÃO VALIDADO
+// contra uma conta Databricks real (mesma ressalva de _databricksGetToken/_databricksRunQuery)
+// — nomes exatos de campo da resposta (principalmente o shape de spend status) podem
+// precisar de ajuste na primeira chamada real.
+//
+// Exige OAuth M2M de Service Principal de CONTA com a role Account Admin/escopo `billing`
+// — um grant bem mais alto que o já usado pra ler System Tables (USE SCHEMA+SELECT, a
+// nível de dado). O modo PAT (workspace-level) não serve pra API de conta — rejeitado
+// explicitamente abaixo com uma mensagem que explica o motivo, em vez de uma falha de
+// autenticação genérica do Databricks.
+const _DBX_ACCOUNTS_BASE = 'https://accounts.azuredatabricks.net';
+
+async function _getDbxAccountCredentials() {
+  const r = await pool.query(`SELECT * FROM databricks_coleta_config WHERE is_padrao = true LIMIT 1`);
+  if (!r.rows.length) throw new Error('Nenhuma conexão Databricks configurada como padrão (Coleta Automática → Coleta Databricks).');
+  const cfg = r.rows[0];
+  if (cfg.modo_auth !== 'oauth_m2m') {
+    throw new Error('A conexão padrão usa modo PAT (workspace-level). Quotas Genie usam a API de conta do Databricks, que exige OAuth M2M de Service Principal de CONTA com role Account Admin — configure uma conexão em modo OAuth M2M e marque como padrão.');
+  }
+  const accountId = _safeDecrypt(cfg.account_id);
+  const clientId = _safeDecrypt(cfg.client_id);
+  const clientSecret = _safeDecrypt(cfg.client_secret);
+  if (!accountId || !clientId || !clientSecret) throw new Error('Credenciais OAuth M2M incompletas na conexão padrão.');
+  const { token } = await _databricksGetToken(accountId, clientId, clientSecret);
+  return { accountId, token };
+}
+
+async function _dbxBudgetsFetch(accountId, token, path, opts = {}) {
+  const resp = await _dbxFetch(`${_DBX_ACCOUNTS_BASE}/api/2.1/accounts/${accountId}${path}`, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(opts.headers || {}) },
+  }, 30000);
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Budgets API do Databricks falhou (${resp.status}): ${e}`); }
+  return _safeRespJson(resp);
+}
+
+app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const { accountId, token } = await _getDbxAccountCredentials();
+    const data = await _dbxBudgetsFetch(accountId, token, '/budgets?include_spend_status=true');
+    const genieBudgets = (data.budgets || []).filter(b => b.resource_type === 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY');
+    res.json(genieBudgets);
+  } catch (e) {
+    // Erro cru é o propósito da rota (mesmo padrão de POST .../config/:id/testar) — as
+    // mensagens de _getDbxAccountCredentials/_dbxBudgetsFetch explicam exatamente o que
+    // falhou (modo de auth errado, credenciais incompletas, erro da API do Databricks);
+    // _dbErr mascararia tudo isso pra "Erro interno do servidor.", inútil aqui.
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { display_name, workspace_ids, tags, threshold, confirmar_bloqueio } = req.body;
+    if (!display_name || !threshold?.quantity_threshold || !threshold?.scope_type || !threshold?.action_type) {
+      return res.status(400).json({ error: 'display_name e threshold (quantity_threshold, scope_type, action_type) são obrigatórios' });
+    }
+    // Guard-rail: BLOCK_USAGE bloqueia acesso real ao Genie assim que o threshold é
+    // cruzado — aplicado pelo próprio Databricks, sem nenhuma checagem nossa depois de
+    // criado. Exige confirmação explícita no BODY da requisição (não só um confirm() no
+    // frontend) — quem chamar essa rota direto (curl/script) também precisa declarar
+    // ciência, mesmo padrão já usado pro segundo gate do Expurgo de dados.
+    if (threshold.action_type === 'BLOCK_USAGE' && !confirmar_bloqueio) {
+      return res.status(400).json({ error: 'Threshold com ação BLOCK_USAGE requer confirmar_bloqueio:true no payload — essa ação bloqueia acesso real ao Genie assim que o limite é cruzado.' });
+    }
+
+    const { accountId, token } = await _getDbxAccountCredentials();
+    const filter = {};
+    if (Array.isArray(workspace_ids) && workspace_ids.length) filter.workspace_id = { operator: 'IN', values: workspace_ids };
+    if (Array.isArray(tags) && tags.length) filter.tags = tags.map(t => ({ key: t.key, value: { operator: 'IN', values: [t.value] } }));
+
+    const actionConfig = { action_type: threshold.action_type };
+    if (threshold.action_type === 'EMAIL_NOTIFICATION' && threshold.email_target) actionConfig.target = threshold.email_target;
+
+    const payload = {
+      budget: {
+        display_name,
+        account_id: accountId,
+        resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+        filter,
+        alert_configurations: [{
+          time_period: 'MONTH',
+          trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
+          quantity_type: 'LIST_PRICE_DOLLARS_USD',
+          quantity_threshold: String(threshold.quantity_threshold),
+          scope_type: threshold.scope_type,
+          action_configurations: [actionConfig],
+        }],
+      },
+    };
+    const data = await _dbxBudgetsFetch(accountId, token, '/budgets', { method: 'POST', body: JSON.stringify(payload) });
+    res.json(data.budget || data);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.delete('/api/databricks-coleta/genie-budgets/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { accountId, token } = await _getDbxAccountCredentials();
+    await _dbxBudgetsFetch(accountId, token, `/budgets/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 // COLETA VIA AZURE BLOB STORAGE
 // ══════════════════════════════════════════════════════════════════════════════

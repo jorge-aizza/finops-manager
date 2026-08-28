@@ -1,8 +1,11 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteDatabricksBudget, getDatabricksAnomalias, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
+import { deleteGenieBudget, listGenieBudgets } from '../api/genieBudgets'
 import type { DatabricksBudget } from '../types/databricksResumo'
+import type { GenieBudget } from '../types/genieBudgets'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
+import GenieBudgetModal from '../components/GenieBudgetModal'
 import { forecastLinear } from '../lib/forecastLinear'
 
 function escopoLabel(b: DatabricksBudget): string {
@@ -398,6 +401,8 @@ export default function DatabricksDashboardView() {
 
       <AnomaliasCard />
 
+      <GenieBudgetsCard />
+
       {budgetModalOpen && (
         <DatabricksBudgetModal budget={editingBudget} workspaces={workspaces} onClose={() => setBudgetModalOpen(false)} />
       )}
@@ -462,6 +467,99 @@ function AnomaliasCard() {
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+function genieEscopoLabel(b: GenieBudget): string {
+  const wsIds = b.filter?.workspace_id?.values
+  if (wsIds?.length) return `Workspaces: ${wsIds.join(', ')}`
+  const tags = b.filter?.tags
+  if (tags?.length) return tags.map((t) => `${t.key} = ${t.value?.values?.join('/') ?? '?'}`).join(', ')
+  return 'Toda a conta'
+}
+
+// Quotas Genie via Databricks Account Budgets API (2026-08-28) — diferente do card
+// "Orçamentos" acima (calculado por nós sobre databricks_consumo, só alerta): isto lista/
+// cria/exclui budgets NATIVOS do Databricks (resource_type=UNITY_AI_GATEWAY), aplicados
+// pelo próprio Databricks — inclusive podendo bloquear acesso real ao Genie (ver
+// GenieBudgetModal.tsx). Exige conexão padrão em modo OAuth M2M com Account Admin — sem
+// isso, o servidor recusa com uma mensagem explicando o motivo (ver
+// _getDbxAccountCredentials, server.js), exibida aqui em vez de escondida.
+function GenieBudgetsCard() {
+  const queryClient = useQueryClient()
+  const [modalOpen, setModalOpen] = useState(false)
+  const budgetsQuery = useQuery({ queryKey: ['genie-budgets'], queryFn: listGenieBudgets })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteGenieBudget(id),
+    onSuccess: () => {
+      window.showToast?.('Quota Genie excluída no Databricks.', 'success')
+      queryClient.invalidateQueries({ queryKey: ['genie-budgets'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao excluir quota Genie: ' + e.message, 'error'),
+  })
+
+  function handleDelete(b: GenieBudget) {
+    if (!confirm(`Excluir a quota Genie "${b.display_name}" no Databricks? Isso remove o limite/bloqueio configurado lá, não só localmente.`)) return
+    deleteMutation.mutate(b.budget_configuration_id)
+  }
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">🧞 Quotas Genie (Databricks nativo)</span>
+        <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>{budgetsQuery.data?.length ?? 0}</span>
+        <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => setModalOpen(true)}>
+          Nova Quota Genie
+        </button>
+      </div>
+      <div style={{ padding: '0 20px 8px', fontSize: 12, color: 'var(--text-muted)' }}>
+        Limites nativos do Databricks (Unity AI Gateway) pro uso do Genie — aplicados pelo próprio Databricks,
+        não pelo FinOps Manager. Exige a conexão padrão (Coleta Databricks) em modo OAuth M2M com Account Admin.
+      </div>
+      {budgetsQuery.isError && (
+        <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--red,#ff4d6a)' }}>
+          {(budgetsQuery.error as Error).message}
+        </div>
+      )}
+      {budgetsQuery.isSuccess && (
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead><tr><th>Nome</th><th>Escopo</th><th>Limite (US$)</th><th>Ação</th><th>Ações</th></tr></thead>
+            <tbody>
+              {budgetsQuery.data.map((b) => {
+                const alerta = b.alert_configurations?.[0]
+                const temBloqueio = alerta?.action_configurations?.some((a) => a.action_type === 'BLOCK_USAGE')
+                return (
+                  <tr key={b.budget_configuration_id}>
+                    <td>{b.display_name}</td>
+                    <td>{genieEscopoLabel(b)}</td>
+                    <td>
+                      {alerta ? Number(alerta.quantity_threshold).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
+                      {alerta?.scope_type === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER' ? ' /usuário' : ''}
+                    </td>
+                    <td>
+                      {temBloqueio
+                        ? <span className="badge" style={{ background: 'var(--red,#ff4d6a)', color: '#fff' }}>🚫 Bloqueia</span>
+                        : <span className="badge">✉ Alerta</span>}
+                    </td>
+                    <td>
+                      <button className="btn-icon delete" title="Excluir" onClick={() => handleDelete(b)}>
+                        <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+              {budgetsQuery.data.length === 0 && (
+                <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhuma quota Genie cadastrada.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {modalOpen && <GenieBudgetModal onClose={() => setModalOpen(false)} />}
     </div>
   )
 }

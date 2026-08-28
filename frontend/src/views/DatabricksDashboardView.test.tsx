@@ -4,9 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import DatabricksDashboardView from './DatabricksDashboardView'
 import * as databricksColetaApi from '../api/databricksColeta'
+import * as genieBudgetsApi from '../api/genieBudgets'
 import type { DatabricksResumo } from '../types/databricksResumo'
 
 vi.mock('../api/databricksColeta')
+vi.mock('../api/genieBudgets')
 
 function makeResumo(overrides: Partial<DatabricksResumo> = {}): DatabricksResumo {
   return {
@@ -36,6 +38,7 @@ beforeEach(() => {
   window.showToast = vi.fn()
   vi.mocked(databricksColetaApi.listDatabricksBudgets).mockResolvedValue([])
   vi.mocked(databricksColetaApi.getDatabricksAnomalias).mockResolvedValue({ custo_diario: [], usuarios: [] })
+  vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([])
 })
 
 describe('DatabricksDashboardView', () => {
@@ -108,5 +111,30 @@ describe('DatabricksDashboardView', () => {
 
     expect(await screen.findByText('Orçamento Global')).toBeInTheDocument()
     expect(screen.getByText('Todos os workspaces')).toBeInTheDocument()
+  })
+
+  it('lista quotas Genie e mostra o badge de bloqueio quando aplicável', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+      {
+        budget_configuration_id: 'gb-1', display_name: 'Quota Genie Bloqueio', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+        alert_configurations: [{
+          quantity_threshold: '500', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED',
+          action_configurations: [{ action_type: 'BLOCK_USAGE' }],
+        }],
+      },
+    ])
+    renderWithClient()
+
+    expect(await screen.findByText('Quota Genie Bloqueio')).toBeInTheDocument()
+    expect(screen.getByText('🚫 Bloqueia')).toBeInTheDocument()
+  })
+
+  it('mostra a mensagem de erro do servidor quando a conexão padrão não é OAuth M2M', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockRejectedValue(new Error('A conexão padrão usa modo PAT — quotas Genie exigem OAuth M2M com Account Admin.'))
+    renderWithClient()
+
+    expect(await screen.findByText(/exigem OAuth M2M com Account Admin/)).toBeInTheDocument()
   })
 })

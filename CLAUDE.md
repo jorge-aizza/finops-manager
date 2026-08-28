@@ -1498,6 +1498,106 @@ ponta a ponta — aparece na tabela com o escopo certo, dropdown de chave/valor 
 do banco. Orçamento de teste removido após a verificação (dados de consumo sintéticos continuam no banco,
 a pedido do usuário — ver seção abaixo).
 
+### Coleta Databricks — Quotas Genie via Databricks Account Budgets API (2026-08-28)
+
+Pedido do usuário: pesquisar a documentação oficial do Databricks sobre gestão de quotas do
+Genie via API e implementar. Pesquisado via WebSearch/WebFetch contra `docs.databricks.com`
+(sem SDK/lib nova — só REST direto, mesmo padrão já usado pro resto da Coleta Databricks).
+
+**Não existe uma "API do Genie" própria pra quotas** — cobrança de Genie começou em
+2026-07-08, e o controle de gasto passa pela **Budgets API de nível de CONTA**
+(`/api/2.1/accounts/{account_id}/budgets`, distinta de `.../budget-policies`, um recurso
+diferente), usando `resource_type: BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY` — Genie roda sobre
+o Unity AI Gateway, então quota de Genie é um caso particular de budget do AI Gateway.
+Suporta threshold **compartilhado** (soma de todos) e **por usuário** (até 20 overrides,
+4 thresholds compartilhados por budget — só 1 threshold implementado nesta v1, ver abaixo),
+e duas ações por threshold: `EMAIL_NOTIFICATION` (alerta) ou **`BLOCK_USAGE`** (bloqueia
+acesso real ao Genie quando o limite é cruzado — aplicado pelo próprio Databricks, não por
+nós, sem nenhuma checagem nossa depois de criado).
+
+**Diferente de `databricks_budgets` (Governança implementada antes, nesta mesma sessão)**:
+aquele é um orçamento CALCULADO por nós sobre `databricks_consumo` (dado que já coletamos),
+só alerta (nunca bloqueia nada). Isto aqui é a Budgets API NATIVA do Databricks — o
+FinOps Manager só cria/lista/exclui via API, quem aplica o limite de verdade é o Databricks.
+
+**Permissão — bloqueio provável identificado ANTES de implementar**: essa API exige
+escopo OAuth `billing`, na prática role **Account Admin** (ou billing-admin) na conta — um
+grant de CONTROLE DE CONTA, bem mais alto que o já usado pra ler System Tables (`USE
+SCHEMA`+`SELECT`, um grant de DADO). O usuário já tinha dito, na sessão anterior (motivo
+de existir o modo PAT — ver "Modo de autenticação PAT" acima), que não tinha acesso de
+Account Admin pra criar Service Principal de conta — perguntado explicitamente via
+`AskUserQuestion` antes de escrever qualquer código (evitar construir uma integração
+inchamável no ambiente real do usuário); confirmou que TEM Account Admin desta vez, e
+pediu o escopo completo incluindo bloqueio (não só leitura).
+
+**`_getDbxAccountCredentials()` (server.js) rejeita modo PAT com mensagem explicando o
+motivo** — APIs de nível de conta exigem OAuth M2M de Service Principal de CONTA; PAT
+(usado hoje só pra System Tables via `_resolveDbxToken`) é workspace-level e não serve
+aqui. Reaproveita a MESMA troca de token já usada pra System Tables (`_databricksGetToken`,
+`scope=all-apis`) — nenhuma credencial nova precisa ser configurada, só a conexão padrão
+(`is_padrao=true`) precisa estar em modo OAuth M2M.
+
+**Guard-rail pra `BLOCK_USAGE` — dois portões, não um**: (1) frontend
+(`GenieBudgetModal.tsx`) mostra uma caixa vermelha explicando a consequência + um checkbox
+"Entendo e quero bloquear..." que precisa estar marcado pra habilitar "Salvar" (troca de
+label pra "Criar quota com bloqueio", em vermelho); (2) `POST
+/api/databricks-coleta/genie-budgets` (server.js) exige `confirmar_bloqueio:true` no BODY
+da requisição — quem chamar a rota direto (curl/script, contornando o frontend) também
+precisa declarar ciência, mesmo padrão de segundo gate já usado no Expurgo de Dados. Sem
+o campo, retorna 400 com mensagem explicando o motivo, não falha silenciosa.
+
+**`_dbErr` vs. erro cru — acerto de escopo desde o início**: as 3 rotas novas
+(`GET/POST/DELETE .../genie-budgets`) inicialmente usavam `_dbErr(res, e)` (padrão da
+maioria das rotas do arquivo — mascara qualquer erro pra `"Erro interno do servidor."`
+por segurança) — isso derrotava o propósito das mensagens de erro específicas que a
+própria feature depende pra ser usável (ex: "conexão padrão usa modo PAT..."). Corrigido
+pra `res.status(400).json({ error: e.message })` nas 3 rotas, mesmo padrão já usado por
+`POST .../config/:id/testar` ("erro cru é o propósito da rota") — achado e corrigido
+ANTES de reportar a feature como pronta, testando contra o servidor real (a app já tinha
+uma conexão Databricks real cadastrada em modo PAT, não marcada como padrão — cenário
+perfeito pra expor o bug: sem o fix, o erro aparecia genérico; com o fix, a mensagem real
+"Nenhuma conexão Databricks configurada como padrão..." aparece no card).
+
+**Endpoints**: `GET /api/databricks-coleta/genie-budgets` (lista, filtra
+`resource_type=BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY` no lado do servidor — a Budgets API
+não filtra por resource_type na query, então trazemos tudo e filtramos aqui), `POST` (cria,
+1 threshold por vez nesta v1 — múltiplos thresholds/overrides por usuário ficaram de fora
+por simplicidade, dado o risco de configurar algo tão sensível sem poder validar contra
+uma conta real), `DELETE .../genie-budgets/:id`. Sem UPDATE nesta v1 (schema de PATCH não
+confirmado pela documentação pesquisada) — editar hoje é excluir e recriar.
+
+**⚠️ NÃO VALIDADO contra uma conta Databricks real** (mesma ressalva de
+`_databricksGetToken`/`_databricksRunQuery` desde a Fase 1) — implementado com base na
+documentação oficial pesquisada nesta sessão (WebSearch/WebFetch, 2026-08-28), mas o shape
+exato da resposta (principalmente campos de spend status, cuja documentação consultada não
+detalhou completamente) pode precisar de ajuste na primeira chamada real. `GenieBudget`
+(`frontend/src/types/genieBudgets.ts`) tipa só os campos confirmados pela documentação e
+aceita `[extra: string]: unknown` pro resto, renderizado defensivamente.
+
+**Frontend**: `GenieBudgetsCard` (dentro de `DatabricksDashboardView.tsx`) lista as quotas
+com badge vermelho "🚫 Bloqueia" quando qualquer threshold tem `BLOCK_USAGE`, badge neutro
+"✉ Alerta" caso contrário; erro do servidor (ex: conexão não-OAuth-M2M) aparece direto no
+card, não escondido. `GenieBudgetModal.tsx` — nome, workspace IDs (lista separada por
+vírgula), tags (pares chave/valor, N linhas), limite em **USD** (moeda da Budgets API do
+Databricks — texto explícito no modal pra não confundir com o resto do app, que é BRL),
+escopo compartilhado/por-usuário, ação alerta/bloqueio.
+
+**Verificado via Playwright contra o servidor real**: card mostra o erro real
+("Nenhuma conexão Databricks configurada como padrão...", já que a única conexão
+cadastrada no ambiente é PAT e não está marcada como padrão) em vez de um erro genérico;
+modal abre, aviso vermelho aparece ao selecionar "Bloquear acesso ao Genie", botão fica
+desabilitado até marcar o checkbox de confirmação e habilita corretamente depois. Zero
+erro de console (os 2 "Failed to load resource: 400" são o comportamento esperado do
+browser logando a chamada que intencionalmente falha, não um bug JS). Fluxo de criação
+bem-sucedida (POST retornando 200 com um budget real) **não pôde ser testado** — precisa
+de uma conta Databricks real com Account Admin, não disponível neste ambiente.
+
+Sources: [Manage budgets for Unity AI Gateway](https://docs.databricks.com/aws/en/ai-gateway/budgets),
+[Manage budgets and cost controls for Genie](https://docs.databricks.com/aws/en/genie/budgets),
+[Budgets API — Create new budget](https://docs.databricks.com/api/account/budgets/create),
+[Budgets API — Get budget](https://docs.databricks.com/api/account/budgets/get),
+[Budgets API — List](https://docs.databricks.com/api/account/budgets)
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),
