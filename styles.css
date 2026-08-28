@@ -386,16 +386,6 @@ body {
   color: var(--accent);
   font-weight: 600;
 }
-.nav-sub.active::after {
-  content: '';
-  position: absolute;
-  left: 14px; top: 50%;
-  transform: translateY(-50%);
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
 /* Divisor de seção */
 .nav-divider {
   height: 1px;
