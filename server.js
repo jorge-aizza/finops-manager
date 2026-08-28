@@ -5769,6 +5769,21 @@ async function ensureAzureColetaTable() {
       atualizado_em  TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Governança (2026-08-28, pedido do usuário): escopo por tag (projeto/time/centro de
+  // custo — qualquer chave de custom_tags já coletada, ver "Coleta Databricks — Granularidade
+  // por recurso") além de workspace/global, e threshold de alerta configurável por orçamento
+  // (antes fixo em 75%/90% no código — ver _computeAlertasDatabricks). DEFAULT 'workspace' em
+  // escopo_tipo casa com o dado real de toda linha pré-existente que tem workspace_id
+  // preenchido; a única exceção (orçamento global, workspace_id NULL) é corrigida pelo UPDATE
+  // abaixo — sem isso, orçamentos globais existentes ficariam com escopo_tipo='workspace'
+  // errado (mas com workspace_id NULL, então o filtro efetivo continuaria correto por
+  // coincidência — corrigido mesmo assim pra não deixar o dado inconsistente).
+  await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS escopo_tipo VARCHAR(20) NOT NULL DEFAULT 'workspace'`);
+  await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS tag_key VARCHAR(100)`);
+  await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS tag_valor VARCHAR(200)`);
+  await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS threshold_atencao NUMERIC(5,2) NOT NULL DEFAULT 75`);
+  await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS threshold_critico NUMERIC(5,2) NOT NULL DEFAULT 90`);
+  await run(`UPDATE databricks_budgets SET escopo_tipo = 'global' WHERE workspace_id IS NULL AND escopo_tipo = 'workspace'`);
 
   // Corrige linhas órfãs de 'executando' — nada as atualiza depois de um
   // restart/crash do processo (o `_coletaEmExecucao`/`_dbxColetaEmExecucao`
@@ -5912,12 +5927,56 @@ async function _checkOrcamentosDatabricks() {
     const chave = `orcamento:${a.budget.id}:${mes}`;
     if (!(await _tentarClaimAlerta('orcamento_databricks', chave))) continue;
     const pctFmt = (a.pct * 100).toFixed(0);
+    const escopoTxt = a.budget.escopo_tipo === 'workspace' ? a.budget.workspace_id
+      : a.budget.escopo_tipo === 'tag' ? `${a.budget.tag_key} = ${a.budget.tag_valor}`
+      : 'todos os workspaces';
     await _sendEmail({
       to: destinatarios,
       subject: `⚠ Orçamento Databricks ${a.severidade === 'estourado' ? 'estourado' : 'em alerta'} — ${a.budget.nome}`,
       html: _emailTemplate('Orçamento Databricks', `
-        <p><strong>${_escHtmlServer(a.budget.nome)}</strong> (${_escHtmlServer(a.budget.workspace_id || 'todos os workspaces')}) atingiu <strong>${pctFmt}%</strong> do valor mensal.</p>
+        <p><strong>${_escHtmlServer(a.budget.nome)}</strong> (${_escHtmlServer(escopoTxt)}) atingiu <strong>${pctFmt}%</strong> do valor mensal.</p>
         <p>Consumo atual: R$ ${a.custo_atual.toFixed(2)} de R$ ${parseFloat(a.budget.valor_mensal).toFixed(2)}</p>`),
+    });
+  }
+}
+
+// Anomalias de consumo Databricks (2026-08-28) — mesmo mecanismo de dedup/cooldown de 24h
+// dos demais gatilhos; chave de custo diário não precisa de sufixo de período (usage_date
+// é um dia histórico imutável, nunca se repete), chave de usuário não inclui data (o
+// cooldown de 24h já cobre "continua anômalo → reavisa todo dia enquanto persistir",
+// mesmo padrão de reserva/ação vencendo acima).
+async function _checkAnomaliasDatabricks() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+  const { custo_diario, usuarios } = await _computeAnomaliasDatabricks();
+
+  for (const a of custo_diario) {
+    const chave = `custo_diario:${a.escopo_tipo}:${a.escopo_valor || 'global'}:${a.usage_date}`;
+    if (!(await _tentarClaimAlerta('anomalia_databricks', chave))) continue;
+    const escopoTxt = a.escopo_tipo === 'workspace' ? `workspace ${a.escopo_valor}` : 'todos os workspaces';
+    await _sendEmail({
+      to: destinatarios,
+      subject: `📈 Anomalia de custo Databricks — ${escopoTxt}`,
+      html: _emailTemplate('Anomalia de custo detectada', `
+        <p>Custo de <strong>${_escHtmlServer(escopoTxt)}</strong> em ${new Date(a.usage_date).toLocaleDateString('pt-BR')} ficou fora do padrão histórico (Z-score ${a.zscore.toFixed(2)}).</p>
+        <p>Custo do dia: R$ ${a.custo.toFixed(2)} — média da janela: R$ ${a.media.toFixed(2)} (desvio padrão: R$ ${a.desvio.toFixed(2)})</p>`),
+    });
+  }
+
+  for (const u of usuarios) {
+    const chave = `usuario:${u.usuario}`;
+    if (!(await _tentarClaimAlerta('anomalia_databricks_usuario', chave))) continue;
+    const crescimentoTxt = u.crescimento_pct == null
+      ? 'apareceu com consumo relevante sem histórico anterior'
+      : `cresceu ${(u.crescimento_pct * 100).toFixed(0)}% vs. a média das últimas semanas`;
+    await _sendEmail({
+      to: destinatarios,
+      subject: `👤 Consumo Databricks fora do padrão — ${u.usuario}`,
+      html: _emailTemplate('Anomalia de consumo por usuário', `
+        <p><strong>${_escHtmlServer(u.usuario)}</strong> ${crescimentoTxt}.</p>
+        <p>Consumo dos últimos 7 dias: R$ ${u.custo_recente.toFixed(2)} (R$ ${u.media_diaria_recente.toFixed(2)}/dia)</p>`),
     });
   }
 }
@@ -5997,6 +6056,7 @@ function _iniciarAlertasEmail() {
     try { await _checkOrcamentosDatabricks(); } catch (e) { console.warn('[Email] Checagem de orçamentos falhou:', e.message); }
     try { await _checkReservasVencendo(); } catch (e) { console.warn('[Email] Checagem de reservas falhou:', e.message); }
     try { await _checkAcoesVencendo(); } catch (e) { console.warn('[Email] Checagem de ações falhou:', e.message); }
+    try { await _checkAnomaliasDatabricks(); } catch (e) { console.warn('[Email] Checagem de anomalias Databricks falhou:', e.message); }
   };
   setTimeout(tick, 180 * 1000);
   _alertasEmailTimer = setInterval(tick, 60 * 60 * 1000);
@@ -7484,13 +7544,35 @@ app.get('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (_
   } catch (e) { _dbErr(res, e); }
 });
 
+// Validação compartilhada por POST/PUT — escopo por tag (custom_tags, ex: projeto/time/
+// centro de custo) além de workspace/global, e threshold de alerta/crítico configuráveis
+// por orçamento (antes fixos em 75%/90% direto no código de _computeAlertasDatabricks).
+function _validarBudgetInput(body) {
+  const { nome, valor_mensal, ativo } = body;
+  let { escopo_tipo, workspace_id, tag_key, tag_valor, threshold_atencao, threshold_critico } = body;
+  if (!nome || !valor_mensal) return { error: 'nome e valor_mensal são obrigatórios' };
+  escopo_tipo = escopo_tipo || (workspace_id ? 'workspace' : 'global');
+  if (!['global', 'workspace', 'tag'].includes(escopo_tipo)) return { error: 'escopo_tipo inválido' };
+  if (escopo_tipo === 'workspace' && !workspace_id) return { error: 'workspace_id é obrigatório para escopo "workspace"' };
+  if (escopo_tipo === 'tag' && (!tag_key || !tag_valor)) return { error: 'tag_key e tag_valor são obrigatórios para escopo "tag"' };
+  if (escopo_tipo !== 'workspace') workspace_id = null;
+  if (escopo_tipo !== 'tag') { tag_key = null; tag_valor = null; }
+  threshold_atencao = threshold_atencao != null ? parseFloat(threshold_atencao) : 75;
+  threshold_critico = threshold_critico != null ? parseFloat(threshold_critico) : 90;
+  if (!(threshold_atencao > 0 && threshold_atencao < 100)) return { error: 'threshold_atencao deve estar entre 0 e 100' };
+  if (!(threshold_critico > threshold_atencao && threshold_critico <= 100)) return { error: 'threshold_critico deve ser maior que threshold_atencao e no máximo 100' };
+  return { value: { nome, escopo_tipo, workspace_id: workspace_id || null, tag_key, tag_valor, valor_mensal, threshold_atencao, threshold_critico, ativo: ativo !== false } };
+}
+
 app.post('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, workspace_id, valor_mensal, ativo } = req.body;
-    if (!nome || !valor_mensal) return res.status(400).json({ error: 'nome e valor_mensal são obrigatórios' });
+    const v = _validarBudgetInput(req.body);
+    if (v.error) return res.status(400).json({ error: v.error });
+    const b = v.value;
     const r = await pool.query(
-      `INSERT INTO databricks_budgets (nome, workspace_id, valor_mensal, ativo) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [nome, workspace_id || null, valor_mensal, ativo !== false]
+      `INSERT INTO databricks_budgets (nome, escopo_tipo, workspace_id, tag_key, tag_valor, valor_mensal, threshold_atencao, threshold_critico, ativo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [b.nome, b.escopo_tipo, b.workspace_id, b.tag_key, b.tag_valor, b.valor_mensal, b.threshold_atencao, b.threshold_critico, b.ativo]
     );
     res.json(r.rows[0]);
   } catch (e) { _dbErr(res, e); }
@@ -7498,11 +7580,12 @@ app.post('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (
 
 app.put('/api/databricks-coleta/budgets/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, workspace_id, valor_mensal, ativo } = req.body;
-    if (!nome || !valor_mensal) return res.status(400).json({ error: 'nome e valor_mensal são obrigatórios' });
+    const v = _validarBudgetInput(req.body);
+    if (v.error) return res.status(400).json({ error: v.error });
+    const b = v.value;
     const r = await pool.query(
-      `UPDATE databricks_budgets SET nome=$1, workspace_id=$2, valor_mensal=$3, ativo=$4, atualizado_em=NOW() WHERE id=$5 RETURNING *`,
-      [nome, workspace_id || null, valor_mensal, ativo !== false, req.params.id]
+      `UPDATE databricks_budgets SET nome=$1, escopo_tipo=$2, workspace_id=$3, tag_key=$4, tag_valor=$5, valor_mensal=$6, threshold_atencao=$7, threshold_critico=$8, ativo=$9, atualizado_em=NOW() WHERE id=$10 RETURNING *`,
+      [b.nome, b.escopo_tipo, b.workspace_id, b.tag_key, b.tag_valor, b.valor_mensal, b.threshold_atencao, b.threshold_critico, b.ativo, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
     res.json(r.rows[0]);
@@ -7516,12 +7599,13 @@ app.delete('/api/databricks-coleta/budgets/:id', authMiddleware, dbMiddleware, a
   } catch (e) { _dbErr(res, e); }
 });
 
-// Alerta de estouro — soma custo_estimado do mês corrente por orçamento ativo
-// (escopado por workspace_id quando definido), retorna só os que passam de 75%.
-// Extraído pra função compartilhada (2026-08-26) — usada tanto por esta rota
-// (dashboard, sob demanda) quanto por _checkOrcamentosDatabricks() (checagem
-// periódica pra e-mail, ver seção EMAIL) — mesma regra de severidade/threshold
-// nos dois lugares, sem duplicar.
+// Alerta de estouro — soma custo_estimado do mês corrente por orçamento ativo, escopado
+// por workspace_id OU por tag (custom_tags->>tag_key = tag_valor) conforme escopo_tipo do
+// orçamento (ver migração de databricks_budgets acima) — retorna só os que passam do
+// próprio threshold_atencao do orçamento (antes um valor fixo de 75% pra todos). Extraído
+// pra função compartilhada (2026-08-26) — usada tanto por esta rota (dashboard, sob
+// demanda) quanto por _checkOrcamentosDatabricks() (checagem periódica pra e-mail, ver
+// seção EMAIL) — mesma regra de severidade/threshold nos dois lugares, sem duplicar.
 async function _computeAlertasDatabricks() {
   const budgets = (await pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true`)).rows;
   if (!budgets.length) return [];
@@ -7534,13 +7618,20 @@ async function _computeAlertasDatabricks() {
   for (const b of budgets) {
     const params = [inicioMesStr];
     let sql = `SELECT COALESCE(SUM(custo_estimado),0) AS custo FROM databricks_consumo WHERE usage_date >= $1`;
-    if (b.workspace_id) { sql += ` AND workspace_id = $2`; params.push(b.workspace_id); }
+    if (b.escopo_tipo === 'workspace' && b.workspace_id) {
+      sql += ` AND workspace_id = $2`; params.push(b.workspace_id);
+    } else if (b.escopo_tipo === 'tag' && b.tag_key && b.tag_valor) {
+      params.push(b.tag_key, b.tag_valor);
+      sql += ` AND custom_tags ->> $2 = $3`;
+    }
     const r = await pool.query(sql, params);
     const custoAtual = parseFloat(r.rows[0].custo);
     const valorMensal = parseFloat(b.valor_mensal);
     const pct = valorMensal > 0 ? custoAtual / valorMensal : 0;
-    if (pct < 0.75) continue;
-    const severidade = pct >= 1 ? 'estourado' : pct >= 0.9 ? 'critico' : 'atencao';
+    const thAtencao = parseFloat(b.threshold_atencao) / 100;
+    const thCritico = parseFloat(b.threshold_critico) / 100;
+    if (pct < thAtencao) continue;
+    const severidade = pct >= 1 ? 'estourado' : pct >= thCritico ? 'critico' : 'atencao';
     alertas.push({ budget: b, custo_atual: custoAtual, pct, severidade });
   }
   alertas.sort((a, b) => b.pct - a.pct);
@@ -7550,6 +7641,145 @@ async function _computeAlertasDatabricks() {
 app.get('/api/databricks-coleta/alertas', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     res.json(await _computeAlertasDatabricks());
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Chaves/valores de custom_tags já vistos em databricks_consumo — alimenta o dropdown de
+// "Escopo por tag" do modal de orçamento (evita texto livre propenso a erro de digitação,
+// ex: "projeto" vs "Projeto" nunca baterem no filtro). custom_tags é JSONB de estrutura
+// livre (cada linha pode ter chaves diferentes — ver "Granularidade por recurso"), então
+// não dá pra saber as chaves de antemão; jsonb_object_keys() precisa de LATERAL/CROSS JOIN
+// pra expandir por linha.
+app.get('/api/databricks-coleta/tags', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT DISTINCT chave FROM databricks_consumo, LATERAL jsonb_object_keys(custom_tags) AS chave
+      WHERE custom_tags IS NOT NULL ORDER BY 1
+    `);
+    res.json(r.rows.map(row => row.chave));
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.get('/api/databricks-coleta/tags/:chave/valores', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT DISTINCT custom_tags ->> $1 AS valor FROM databricks_consumo
+       WHERE custom_tags ? $1 ORDER BY 1`,
+      [req.params.chave]
+    );
+    res.json(r.rows.map(row => row.valor).filter(v => v != null));
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Anomaly Detection (2026-08-28, pedido do usuário) ──────────────────────────────────
+// Dois tipos de anomalia, escolhidos pelo que o dado atual (databricks_consumo) realmente
+// permite detectar com confiança estatística — "consumo noturno"/"job anormal" do prompt
+// original ficaram de fora: exigiriam granularidade de horário (usage_date é DATE, sem
+// hora) ou inventário de jobs (não coletado, ver Fase C não implementada), nenhum dos dois
+// existe hoje.
+//
+// 1. Custo diário fora do padrão (Z-score) — série contínua de 1 variável (custo/dia),
+//    caso clássico de Z-score: (valor - média) / desvio-padrão da própria janela. Rodado
+//    por escopo global E por workspace (workspaces pequenos/novos não "somem" dentro da
+//    média geral).
+// 2. Usuário com crescimento fora do padrão — comparação de % de crescimento (janela
+//    recente vs. janela histórica anterior), não Z-score: a "série" por usuário é só 2
+//    números agregados (não uma série diária), Z-score exigiria aproximar variância de
+//    uma soma de N dias (estatisticamente frágil) — % de crescimento é mais direto e mais
+//    fácil de explicar num alerta ("consumo de X cresceu 340% essa semana").
+const _ANOM_ZSCORE_THRESHOLD = 2.5;      // |z| >= 2.5 ~ eventos além de 98.7% da distribuição normal
+const _ANOM_USER_GROWTH_PCT = 1.0;       // crescimento >= 100% (dobrou) vs. média histórica
+const _ANOM_USER_MIN_CUSTO = 50;         // piso em R$ — evita ruído de usuário com R$2→R$6 "triplicando"
+
+async function _computeAnomaliasDatabricks() {
+  const hoje = new Date();
+  const fim = hoje.toISOString().slice(0, 10);
+  const recenteIni = new Date(hoje); recenteIni.setDate(recenteIni.getDate() - 6); // últimos 7 dias (inclusive hoje)
+  const historicoIni = new Date(hoje); historicoIni.setDate(historicoIni.getDate() - 34); // 4 semanas antes disso
+  const recenteIniStr = recenteIni.toISOString().slice(0, 10);
+  const historicoIniStr = historicoIni.toISOString().slice(0, 10);
+
+  // Custo diário — global e por workspace, últimos 35 dias (janela usada como base da
+  // média/desvio). In-sample (o próprio dia entra na média) — simplificação deliberada;
+  // com uma janela de 35 dias um único outlier não domina a média o suficiente pra mascarar
+  // a si mesmo.
+  const [rGlobal, rWs] = await Promise.all([
+    pool.query(`
+      WITH diario AS (
+        SELECT usage_date, SUM(custo_estimado) AS custo FROM databricks_consumo
+        WHERE usage_date >= $1 AND usage_date <= $2 GROUP BY 1
+      ), stats AS (SELECT AVG(custo) AS media, STDDEV_POP(custo) AS desvio FROM diario)
+      SELECT to_char(d.usage_date,'YYYY-MM-DD') AS usage_date, d.custo, s.media, s.desvio,
+        CASE WHEN s.desvio > 0 THEN (d.custo - s.media) / s.desvio ELSE 0 END AS zscore
+      FROM diario d, stats s ORDER BY d.usage_date
+    `, [historicoIniStr, fim]),
+    pool.query(`
+      WITH diario AS (
+        SELECT workspace_id, usage_date, SUM(custo_estimado) AS custo FROM databricks_consumo
+        WHERE usage_date >= $1 AND usage_date <= $2 GROUP BY 1, 2
+      ), stats AS (SELECT workspace_id, AVG(custo) AS media, STDDEV_POP(custo) AS desvio FROM diario GROUP BY 1)
+      SELECT d.workspace_id, to_char(d.usage_date,'YYYY-MM-DD') AS usage_date, d.custo, s.media, s.desvio,
+        CASE WHEN s.desvio > 0 THEN (d.custo - s.media) / s.desvio ELSE 0 END AS zscore
+      FROM diario d JOIN stats s USING (workspace_id) ORDER BY d.workspace_id, d.usage_date
+    `, [historicoIniStr, fim]),
+  ]);
+
+  const custoDiario = [];
+  for (const r of rGlobal.rows) {
+    if (Math.abs(parseFloat(r.zscore)) >= _ANOM_ZSCORE_THRESHOLD) {
+      custoDiario.push({ escopo_tipo: 'global', escopo_valor: null, usage_date: r.usage_date, custo: parseFloat(r.custo), media: parseFloat(r.media), desvio: parseFloat(r.desvio), zscore: parseFloat(r.zscore) });
+    }
+  }
+  for (const r of rWs.rows) {
+    if (Math.abs(parseFloat(r.zscore)) >= _ANOM_ZSCORE_THRESHOLD) {
+      custoDiario.push({ escopo_tipo: 'workspace', escopo_valor: r.workspace_id, usage_date: r.usage_date, custo: parseFloat(r.custo), media: parseFloat(r.media), desvio: parseFloat(r.desvio), zscore: parseFloat(r.zscore) });
+    }
+  }
+  custoDiario.sort((a, b) => Math.abs(b.zscore) - Math.abs(a.zscore));
+
+  // Usuário — janela recente (7 dias) vs. janela histórica (4 semanas anteriores a essa).
+  const rUser = await pool.query(`
+    WITH recente AS (
+      SELECT COALESCE(usuario,'') AS usuario, SUM(custo_estimado) AS custo, COUNT(DISTINCT usage_date) AS dias
+      FROM databricks_consumo WHERE usage_date >= $1 AND usage_date <= $2 GROUP BY 1
+    ), historico AS (
+      SELECT COALESCE(usuario,'') AS usuario, SUM(custo_estimado) AS custo, COUNT(DISTINCT usage_date) AS dias
+      FROM databricks_consumo WHERE usage_date >= $3 AND usage_date < $1 GROUP BY 1
+    )
+    SELECT r.usuario, r.custo AS custo_recente, r.dias AS dias_recente,
+      COALESCE(h.custo, 0) AS custo_historico, COALESCE(h.dias, 0) AS dias_historico
+    FROM recente r LEFT JOIN historico h USING (usuario)
+  `, [recenteIniStr, fim, historicoIniStr]);
+
+  const usuarios = [];
+  for (const r of rUser.rows) {
+    const custoRecente = parseFloat(r.custo_recente);
+    if (custoRecente < _ANOM_USER_MIN_CUSTO) continue;
+    const diasRecente = parseInt(r.dias_recente, 10) || 1;
+    const diasHistorico = parseInt(r.dias_historico, 10);
+    const mediaDiariaRecente = custoRecente / diasRecente;
+    const custoHistorico = parseFloat(r.custo_historico);
+    const mediaDiariaHistorica = diasHistorico > 0 ? custoHistorico / diasHistorico : 0;
+    // sem histórico algum (usuário novo) → sinaliza como "novo usuário de alto custo" (crescimento_pct null),
+    // não um crescimento percentual (base 0 tornaria qualquer custo um "infinito%")
+    const crescimentoPct = mediaDiariaHistorica > 0 ? (mediaDiariaRecente / mediaDiariaHistorica - 1) : null;
+    const anomalo = crescimentoPct === null ? true : crescimentoPct >= _ANOM_USER_GROWTH_PCT;
+    if (!anomalo) continue;
+    usuarios.push({
+      usuario: r.usuario || 'Não identificado',
+      custo_recente: custoRecente, media_diaria_recente: mediaDiariaRecente,
+      custo_historico: custoHistorico, media_diaria_historica: mediaDiariaHistorica,
+      crescimento_pct: crescimentoPct,
+    });
+  }
+  usuarios.sort((a, b) => (b.crescimento_pct ?? Infinity) - (a.crescimento_pct ?? Infinity));
+
+  return { custo_diario: custoDiario, usuarios };
+}
+
+app.get('/api/databricks-coleta/anomalias', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    res.json(await _computeAnomaliasDatabricks());
   } catch (e) { _dbErr(res, e); }
 });
 

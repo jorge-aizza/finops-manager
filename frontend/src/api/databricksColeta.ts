@@ -4,7 +4,7 @@ import type {
   AgendamentoDatabricksInput, DatabricksColetaStatus, DatabricksConfig, DatabricksConfigInput, TestarDatabricksResponse,
 } from '../types/databricksColeta'
 import type {
-  DatabricksAlerta, DatabricksBudget, DatabricksBudgetInput, DatabricksResumo,
+  DatabricksAlerta, DatabricksAnomalias, DatabricksBudget, DatabricksBudgetInput, DatabricksResumo,
 } from '../types/databricksResumo'
 import type { HistoricoItem, PurgeResult } from '../types/coleta'
 
@@ -80,7 +80,7 @@ export const getDatabricksResumo = (data_inicio?: string, data_fim?: string, fil
   return apiFetch<DatabricksResumo>('GET', '/databricks-coleta/resumo' + (qs ? '?' + qs : '')).then(normalizeResumo)
 }
 
-const BUDGET_NUM_FIELDS: (keyof DatabricksBudget)[] = ['valor_mensal']
+const BUDGET_NUM_FIELDS: (keyof DatabricksBudget)[] = ['valor_mensal', 'threshold_atencao', 'threshold_critico']
 const normalizeBudget = (b: DatabricksBudget) => numFields(b, BUDGET_NUM_FIELDS)
 
 export const listDatabricksBudgets = () =>
@@ -160,3 +160,13 @@ export async function uploadDatabricksImport(file: File): Promise<{ ok: true }> 
 
 export const validarHistoricoDatabricks = (id: number) =>
   apiFetch<{ validacao_status: string; validacao_json: HistoricoItem['validacao_json'] }>('POST', `/databricks-coleta/historico/${id}/validar`)
+
+// Governança — chaves/valores de custom_tags já vistos em databricks_consumo, pro dropdown
+// de "Escopo por tag" do modal de orçamento (ver DatabricksBudgetModal.tsx).
+export const getDatabricksTagKeys = () => apiFetch<string[]>('GET', '/databricks-coleta/tags')
+export const getDatabricksTagValues = (chave: string) => apiFetch<string[]>('GET', `/databricks-coleta/tags/${encodeURIComponent(chave)}/valores`)
+
+// Anomaly Detection — ver _computeAnomaliasDatabricks (server.js). Números já chegam como
+// number de verdade (agregados em SQL/JS no servidor, nunca uma coluna NUMERIC de topo
+// devolvida crua) — sem necessidade de numFields aqui.
+export const getDatabricksAnomalias = () => apiFetch<DatabricksAnomalias>('GET', '/databricks-coleta/anomalias')

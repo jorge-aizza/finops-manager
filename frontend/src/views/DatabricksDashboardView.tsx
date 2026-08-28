@@ -1,9 +1,15 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { deleteDatabricksBudget, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
+import { deleteDatabricksBudget, getDatabricksAnomalias, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
 import type { DatabricksBudget } from '../types/databricksResumo'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
 import { forecastLinear } from '../lib/forecastLinear'
+
+function escopoLabel(b: DatabricksBudget): string {
+  if (b.escopo_tipo === 'workspace') return b.workspace_id || '—'
+  if (b.escopo_tipo === 'tag') return `${b.tag_key} = ${b.tag_valor}`
+  return 'Todos os workspaces'
+}
 
 function fmtBRL(v: number): string {
   return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -199,8 +205,17 @@ export default function DatabricksDashboardView() {
   const [budgetModalOpen, setBudgetModalOpen] = useState(false)
   const [editingBudget, setEditingBudget] = useState<DatabricksBudget | null>(null)
 
+  // Reenvia TODOS os campos do orçamento (não só {nome, workspace_id, valor_mensal,
+  // ativo}) — um PUT parcial faria _validarBudgetInput (server.js) derivar escopo_tipo
+  // de volta a partir só de workspace_id, convertendo silenciosamente um orçamento por
+  // tag pra "global" a cada toggle de ativo/inativo.
   const toggleAtivoMutation = useMutation({
-    mutationFn: (b: DatabricksBudget) => updateDatabricksBudget(b.id, { nome: b.nome, workspace_id: b.workspace_id, valor_mensal: b.valor_mensal, ativo: !b.ativo }),
+    mutationFn: (b: DatabricksBudget) => updateDatabricksBudget(b.id, {
+      nome: b.nome, escopo_tipo: b.escopo_tipo, workspace_id: b.workspace_id,
+      tag_key: b.tag_key, tag_valor: b.tag_valor, valor_mensal: b.valor_mensal,
+      threshold_atencao: b.threshold_atencao, threshold_critico: b.threshold_critico,
+      ativo: !b.ativo,
+    }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['databricks-budgets'] })
       queryClient.invalidateQueries({ queryKey: ['databricks-alertas'] })
@@ -348,17 +363,18 @@ export default function DatabricksDashboardView() {
           </button>
         </div>
         <div style={{ padding: '0 20px 8px', fontSize: 12, color: 'var(--text-muted)' }}>
-          Alerta é disparado ao entrar no sistema quando o consumo do mês corrente passa de 75% do valor mensal.
+          Alerta é disparado ao entrar no sistema quando o consumo do mês corrente passa do threshold "Alertar" de cada orçamento (100% é sempre estourado). Escopo pode ser global, um workspace específico, ou uma tag (projeto/time/centro de custo).
         </div>
         <div className="table-wrapper">
           <table className="data-table">
-            <thead><tr><th>Nome</th><th>Escopo</th><th>Valor Mensal</th><th>Ativo</th><th>Ações</th></tr></thead>
+            <thead><tr><th>Nome</th><th>Escopo</th><th>Valor Mensal</th><th>Alertar / Crítico</th><th>Ativo</th><th>Ações</th></tr></thead>
             <tbody>
               {(budgetsQuery.data || []).map((b) => (
                 <tr key={b.id}>
                   <td>{b.nome}</td>
-                  <td>{b.workspace_id || 'Todos os workspaces'}</td>
+                  <td>{escopoLabel(b)}</td>
                   <td>{fmtBRL(b.valor_mensal)}</td>
+                  <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{b.threshold_atencao}% / {b.threshold_critico}%</td>
                   <td><input type="checkbox" checked={b.ativo} onChange={() => toggleAtivoMutation.mutate(b)} /></td>
                   <td>
                     <div className="table-actions">
@@ -373,15 +389,78 @@ export default function DatabricksDashboardView() {
                 </tr>
               ))}
               {(budgetsQuery.data || []).length === 0 && (
-                <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhum orçamento cadastrado.</td></tr>
+                <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhum orçamento cadastrado.</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
 
+      <AnomaliasCard />
+
       {budgetModalOpen && (
         <DatabricksBudgetModal budget={editingBudget} workspaces={workspaces} onClose={() => setBudgetModalOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+// Anomaly Detection (2026-08-28) — card próprio, consulta independente da janela de
+// período do dashboard (o motor sempre olha os últimos 35 dias pra Z-score de custo e
+// 7 dias recentes vs. 4 semanas anteriores pra usuário — ver _computeAnomaliasDatabricks,
+// server.js — filtrar pelo period-picker do topo não faria sentido pra esse tipo de
+// análise). Sem drill-down aqui — anomalias já são, por definição, uma lista curta de
+// exceções, não um agregado pra detalhar mais.
+function AnomaliasCard() {
+  const anomaliasQuery = useQuery({ queryKey: ['databricks-anomalias'], queryFn: getDatabricksAnomalias })
+  const anomalias = anomaliasQuery.data
+  const total = (anomalias?.custo_diario.length ?? 0) + (anomalias?.usuarios.length ?? 0)
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">⚠ Anomalias Detectadas</span>
+        <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>{total}</span>
+      </div>
+      <div style={{ padding: '0 20px 8px', fontSize: 12, color: 'var(--text-muted)' }}>
+        Custo diário fora do padrão histórico (Z-score ≥ 2,5) e usuários com crescimento de consumo ≥ 100% vs. a média das últimas 4 semanas.
+      </div>
+      {anomaliasQuery.isLoading && <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Calculando...</div>}
+      {anomalias && total === 0 && (
+        <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma anomalia detectada.</div>
+      )}
+      {anomalias && total > 0 && (
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead><tr><th>Tipo</th><th>Escopo</th><th>Detalhe</th><th>Desvio</th></tr></thead>
+            <tbody>
+              {anomalias.custo_diario.map((a, i) => (
+                <tr key={'cd' + i}>
+                  <td>📈 Custo diário</td>
+                  <td>{a.escopo_tipo === 'workspace' ? a.escopo_valor : 'Global'}</td>
+                  <td>
+                    {new Date(a.usage_date + 'T00:00:00').toLocaleDateString('pt-BR')} — {fmtBRL(a.custo)}
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> (média {fmtBRL(a.media)})</span>
+                  </td>
+                  <td style={{ color: 'var(--orange,#ff8c42)', fontWeight: 700 }}>Z {a.zscore >= 0 ? '+' : ''}{a.zscore.toFixed(2)}</td>
+                </tr>
+              ))}
+              {anomalias.usuarios.map((u, i) => (
+                <tr key={'us' + i}>
+                  <td>👤 Usuário</td>
+                  <td>{u.usuario}</td>
+                  <td>
+                    Últimos 7 dias: {fmtBRL(u.custo_recente)}
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> (histórico: {fmtBRL(u.media_diaria_historica)}/dia)</span>
+                  </td>
+                  <td style={{ color: 'var(--orange,#ff8c42)', fontWeight: 700 }}>
+                    {u.crescimento_pct == null ? 'Novo' : `+${(u.crescimento_pct * 100).toFixed(0)}%`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )

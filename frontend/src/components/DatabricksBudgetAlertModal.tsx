@@ -1,7 +1,13 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getDatabricksAlertas } from '../api/databricksColeta'
-import type { DatabricksAlertaSeveridade } from '../types/databricksResumo'
+import type { DatabricksAlertaSeveridade, DatabricksBudget } from '../types/databricksResumo'
+
+function escopoLabel(b: DatabricksBudget): string {
+  if (b.escopo_tipo === 'workspace') return b.workspace_id || '—'
+  if (b.escopo_tipo === 'tag') return `${b.tag_key} = ${b.tag_valor}`
+  return 'Todos os workspaces'
+}
 
 // Porta do padrão de checkRsvAlertsPopup (app.js:423-480, Reservas) pra orçamentos
 // Databricks: popup ao entrar no app quando algum orçamento ativo passou de 75% do
@@ -49,14 +55,21 @@ export default function DatabricksBudgetAlertModal() {
         </div>
         <div className="modal-body">
           <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>
-            {alertas.length === 1 ? '1 orçamento passou' : `${alertas.length} orçamentos passaram`} de 75% do valor mensal.
+            {alertas.length === 1 ? '1 orçamento atingiu' : `${alertas.length} orçamentos atingiram`} o limite de alerta configurado.
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {alertas.map((a) => {
               const info = SEVERIDADE_INFO[a.severidade]
               const pctFmt = (a.pct * 100).toLocaleString('pt-BR', { maximumFractionDigits: 0 })
               return (
-                <div key={a.budget.id} style={{ border: `1px solid ${info.cor}55`, background: info.cor + '14', borderRadius: 8, padding: '10px 14px' }}>
+                <div
+                  key={a.budget.id}
+                  style={{
+                    border: `1px solid color-mix(in srgb, ${info.cor} 35%, transparent)`,
+                    background: `color-mix(in srgb, ${info.cor} 8%, transparent)`,
+                    borderRadius: 8, padding: '10px 14px',
+                  }}
+                >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                     <strong style={{ fontSize: 13 }}>{a.budget.nome}</strong>
                     <span style={{ fontSize: 11, fontWeight: 700, color: info.cor, border: `1px solid ${info.cor}`, borderRadius: 8, padding: '1px 8px' }}>
@@ -64,7 +77,7 @@ export default function DatabricksBudgetAlertModal() {
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {a.budget.workspace_id || 'Todos os workspaces'} — R$ {a.custo_atual.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
+                    {escopoLabel(a.budget)} — R$ {a.custo_atual.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
                     {' de R$ '}{a.budget.valor_mensal.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
                   </div>
                 </div>

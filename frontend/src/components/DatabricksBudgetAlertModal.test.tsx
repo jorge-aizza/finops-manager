@@ -10,7 +10,9 @@ vi.mock('../api/databricksColeta')
 
 function budget(overrides: Partial<DatabricksBudget> = {}): DatabricksBudget {
   return {
-    id: 1, nome: 'Orçamento Global', workspace_id: null, valor_mensal: 1000,
+    id: 1, nome: 'Orçamento Global', escopo_tipo: 'global', workspace_id: null,
+    tag_key: null, tag_valor: null, valor_mensal: 1000,
+    threshold_atencao: 75, threshold_critico: 90,
     ativo: true, criado_em: '2026-01-01T00:00:00.000Z', atualizado_em: '2026-01-01T00:00:00.000Z',
     ...overrides,
   }
@@ -41,7 +43,7 @@ describe('DatabricksBudgetAlertModal', () => {
   it('mostra o popup com a severidade de cada orçamento estourado', async () => {
     const alertas: DatabricksAlerta[] = [
       { budget: budget({ id: 1, nome: 'Estourado' }), custo_atual: 1200, pct: 1.2, severidade: 'estourado' },
-      { budget: budget({ id: 2, nome: 'No limite', workspace_id: 'ws-1' }), custo_atual: 950, pct: 0.95, severidade: 'critico' },
+      { budget: budget({ id: 2, nome: 'No limite', escopo_tipo: 'workspace', workspace_id: 'ws-1' }), custo_atual: 950, pct: 0.95, severidade: 'critico' },
     ]
     vi.mocked(databricksColetaApi.getDatabricksAlertas).mockResolvedValue(alertas)
     renderWithClient()

@@ -1398,6 +1398,106 @@ console. Efeito colateral encontrado e corrigido durante a verificação: o popu
 orçamento estourado — não é um bug novo, só precisou ser fechado no fluxo de teste antes de interagir com o
 dashboard por trás dele.
 
+### Coleta Databricks — Governança de Custo (thresholds configuráveis + escopo por tag) e Anomaly Detection (2026-08-28)
+
+Contexto: usuário pediu avaliação de um prompt gigante ("FinOps Databricks Governance Platform" — Python/
+FastAPI/K8s, 12 subsistemas) para saber o que valeria adaptar pro FinOps Manager. Avaliação concluída: stack
+incompatível (o app é um monólito Node/Express, o prompt pedia microserviços Python) e a maior parte do
+prompt (Governance Engine com ações automáticas destrutivas, inventário de Jobs/Clusters/Genie/AI Gateway,
+Delta Lake, FinOps Score) fica fora de escopo — nenhuma dessas APIs Databricks é usada hoje, e ações
+automáticas de bloqueio/término carregam risco real de derrubar produção se mal implementadas. Escolhido
+implementar só as duas partes de baixo/médio esforço que reaproveitam 100% da infraestrutura já existente
+(`databricks_consumo`, `databricks_budgets`, alertas por e-mail): thresholds configuráveis + quota por tag
+(Fase A do plano avaliado), e Anomaly Detection por Z-score/crescimento (Fase B).
+
+**Governança — `databricks_budgets` ganhou escopo por tag e thresholds configuráveis**: antes, threshold
+de alerta (75%/90%/estourado) era hardcoded em `_computeAlertasDatabricks()`, igual pra todo orçamento, e o
+único escopo possível era "um workspace" ou "todos" (`workspace_id` nullable). Migração idempotente adiciona
+`escopo_tipo` (`'global'|'workspace'|'tag'`, DEFAULT `'workspace'` — bate com todo registro pré-existente que
+já tinha `workspace_id` preenchido), `tag_key`/`tag_valor` (nullable — usados só quando `escopo_tipo='tag'`,
+filtra `custom_tags ->> tag_key = tag_valor` em `databricks_consumo`) e `threshold_atencao`/`threshold_critico`
+(NUMERIC, DEFAULT 75/90 — preserva o comportamento antigo pra orçamentos já existentes). Um `UPDATE` corrige
+o único caso que o DEFAULT erra sozinho: orçamentos globais pré-existentes (`workspace_id IS NULL`) ficariam
+com `escopo_tipo='workspace'` por causa do DEFAULT — corrigido pra `'global'` explicitamente.
+
+**Por que "tag" e não "departamento"/"centro de custo" como campos próprios**: `custom_tags` (JSONB, já
+coletado por recurso desde a granularidade por-recurso — ver Fase 2 acima) é estrutura livre — cada
+organização usa chaves diferentes (`projeto`, `time`, `centro_custo`, `squad`...). Em vez de inventar colunas
+fixas que só cobririam os nomes que eu adivinhasse, o orçamento aponta pra QUALQUER chave já presente no dado
+real (`GET /api/databricks-coleta/tags` lista as chaves vistas — hoje `ambiente`/`projeto`/`time`, vindo dos
+dados sintéticos gerados nesta sessão; `GET /api/databricks-coleta/tags/:chave/valores` lista os valores de
+uma chave, populando dois `<datalist>` no modal em vez de texto livre — evita "projeto" vs "Projeto" nunca
+baterem no filtro por erro de digitação). Isso fecha o gap real que ficou em aberto numa conversa anterior
+desta sessão ("não existe quota por usuário/projeto hoje, só por workspace/global").
+
+**Bug real encontrado e corrigido de passagem, no popup `DatabricksBudgetAlertModal.tsx`** (existente desde a
+Fase 3, não introduzido agora): `background: info.cor + '14'` / `border: `1px solid ${info.cor}55`` — mesmo
+padrão de sufixo de alfa hex já documentado como bug noutros lugares deste arquivo (Cobertura, Reservas/
+Ações/Estimativas) — funciona só quando `cor` é um literal `#RRGGBB`; para `severidade='critico'` e
+`'estourado'`, `info.cor` é `'var(--orange,#ff8c42)'`/`'var(--red,#ff4d6a)'` (tokens `var()`), e concatenar um
+sufixo hex a um `var(...)` produz uma declaração CSS inválida, descartada pelo browser inteira — o card de
+alerta ficava sem fundo/borda visíveis pra exatamente os dois níveis de severidade mais urgentes (crítico e
+estourado), só "atenção" (cor `#f5c518`, hex literal) tinha alguma aparência. Corrigido com `color-mix(in
+srgb, ${info.cor} X%, transparent)` — aceita `var()` como argumento sem o problema (resolvido em tempo de
+paint, não por concatenação de string), mesmo padrão já usado em `RankingCard` (Dashboard). Também corrigido
+nesse popup: `a.budget.workspace_id || 'Todos os workspaces'` não sabia mostrar escopo por tag — extraído
+`escopoLabel()` (mesma função em `DatabricksBudgetAlertModal.tsx` e `DatabricksDashboardView.tsx`) e o texto
+fixo "de 75%" trocado por "o limite de alerta configurado" (thresholds agora variam por orçamento).
+
+**`toggleAtivoMutation` (DatabricksDashboardView.tsx) tinha um bug latente que só ia aparecer com escopo por
+tag**: reenviava só `{nome, workspace_id, valor_mensal, ativo}` ao marcar/desmarcar "Ativo" — um PUT parcial,
+sem `escopo_tipo`/`tag_key`/`tag_valor`. `_validarBudgetInput` (server.js) deriva `escopo_tipo` de
+`workspace_id` quando ausente no body — pra um orçamento por tag (`workspace_id` sempre `null`), isso
+converteria silenciosamente o orçamento pra `'global'` a cada toggle. Corrigido reenviando o objeto completo.
+
+**Anomaly Detection — dois tipos, escolhidos pelo que o dado atual permite detectar com confiança
+estatística**: `_computeAnomaliasDatabricks()` (server.js). "Consumo noturno"/"job anormal" (do prompt
+original avaliado) ficaram de fora — exigiriam granularidade de horário (`usage_date` é `DATE`, sem hora) ou
+inventário de jobs (não coletado, fora de escopo — ver avaliação acima), nenhum dos dois existe hoje.
+1. **Custo diário fora do padrão (Z-score)** — série contínua de 1 variável (custo/dia), caso clássico de
+   Z-score: `(valor − média) / desvio-padrão` sobre uma janela de 35 dias, in-sample (o próprio dia entra na
+   média — simplificação deliberada; com 35 dias um outlier isolado não domina a média o suficiente pra
+   mascarar a si mesmo). Rodado por escopo **global E por workspace** — um workspace pequeno "some" dentro da
+   média geral, então workspaces também têm sua própria série. Threshold `|z| ≥ 2,5` (~98,7% da distribuição
+   normal).
+2. **Usuário com crescimento fora do padrão** — não usa Z-score: a "série" por usuário são só 2 números
+   agregados (janela recente de 7 dias vs. janela histórica de 4 semanas anteriores), não uma série diária —
+   Z-score exigiria aproximar a variância de uma soma de N dias (estatisticamente frágil). Em vez disso, %
+   de crescimento (`média_diária_recente / média_diária_histórica − 1`), mais direto e mais fácil de explicar
+   num alerta ("consumo de X cresceu 340% essa semana"). Threshold ≥ 100% (dobrou) + piso de R$ 50 no custo
+   recente (evita ruído de usuário R$2→R$6 "triplicando"). `crescimento_pct: null` = usuário novo sem
+   histórico anterior pra comparar (tratado como anômalo — "apareceu com consumo relevante", não uma divisão
+   por zero disfarçada de "crescimento infinito").
+
+**Endpoints**: `GET /api/databricks-coleta/anomalias` (dashboard, sob demanda) + `GET .../tags` +
+`GET .../tags/:chave/valores` (dropdown do modal). `_checkAnomaliasDatabricks()` roda no mesmo ciclo horário
+de `_iniciarAlertasEmail()` — dedup via `_tentarClaimAlerta` (cooldown de 24h já existente, reaproveitado sem
+mudança): chave de custo diário não precisa de sufixo de período (`usage_date` é um dia histórico imutável,
+nunca se repete — alerta 1x por dia anômalo, pra sempre); chave de usuário não inclui data (o cooldown de 24h
+já cobre "continua anômalo → reavisa todo dia enquanto persistir", mesmo padrão de reserva/ação vencendo).
+
+**Bug real encontrado e corrigido durante a verificação visual (Playwright) — datas de anomalia apareciam
+como "Invalid Date"**: as duas queries SQL de custo diário devolviam `usage_date` cru (coluna `DATE`) em vez
+de `to_char(usage_date,'YYYY-MM-DD')` (padrão já usado por `por_mes` em `GET /resumo`) — o driver `pg`
+desserializa `DATE` como objeto `Date` do Node, e `res.json()` serializa esse objeto pra um ISO datetime
+completo (`"2026-08-05T03:00:00.000Z"`, não `"2026-08-05"`). O frontend (`AnomaliasCard`) assumia a string
+limpa e concatenava `+ 'T00:00:00'` pra montar a data — contra o ISO completo, produzia
+`"2026-08-05T03:00:00.000ZT00:00:00"`, uma string inválida pro construtor `Date`. Mesma classe de bug já
+documentada acima pro log da coleta ao vivo (`ColetaMonitor.tsx`), só na direção oposta: lá o servidor mandava
+uma string "crua demais" (`HH:MM:SS`) e o cliente tentava re-parsear como data completa; aqui o servidor
+mandava uma data "processada demais" (ISO datetime) e o cliente tentava completá-la como se fosse só o dia.
+Corrigido na origem (SQL), não no cliente — `to_char()` nas duas queries, mesmo padrão já usado em todo o
+resto do arquivo.
+
+**Verificado via Playwright contra o servidor real** (com os dados sintéticos + orçamentos já existentes
+desta sessão): motor de anomalia encontrou 4 anomalias reais nos dados sintéticos (Z-score 2,76 a 3,35,
+picos de custo em dias específicos — confirma que o cálculo bate com variação real dos dados, não só
+roda sem erro); popup de alerta renderiza com fundo/borda visíveis nos 3 níveis de severidade (fix do
+`color-mix` confirmado visualmente); criação de orçamento por tag (`projeto = finops-core`) funciona
+ponta a ponta — aparece na tabela com o escopo certo, dropdown de chave/valor populado com as tags reais
+do banco. Orçamento de teste removido após a verificação (dados de consumo sintéticos continuam no banco,
+a pedido do usuário — ver seção abaixo).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

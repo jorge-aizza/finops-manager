@@ -35,6 +35,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   window.showToast = vi.fn()
   vi.mocked(databricksColetaApi.listDatabricksBudgets).mockResolvedValue([])
+  vi.mocked(databricksColetaApi.getDatabricksAnomalias).mockResolvedValue({ custo_diario: [], usuarios: [] })
 })
 
 describe('DatabricksDashboardView', () => {
@@ -97,7 +98,11 @@ describe('DatabricksDashboardView', () => {
   it('lista orçamentos existentes na tabela', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     vi.mocked(databricksColetaApi.listDatabricksBudgets).mockResolvedValue([
-      { id: 1, nome: 'Orçamento Global', workspace_id: null, valor_mensal: 4000, ativo: true, criado_em: '', atualizado_em: '' },
+      {
+        id: 1, nome: 'Orçamento Global', escopo_tipo: 'global', workspace_id: null,
+        tag_key: null, tag_valor: null, valor_mensal: 4000, threshold_atencao: 75, threshold_critico: 90,
+        ativo: true, criado_em: '', atualizado_em: '',
+      },
     ])
     renderWithClient()
 
