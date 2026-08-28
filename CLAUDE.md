@@ -1788,6 +1788,58 @@ de credencial do GET, não um 404 de rota inexistente — prova que o roteamento
 correto). **Não validado**: um ciclo de edição completo contra uma conta Databricks
 real (nenhuma disponível neste ambiente, mesma ressalva de sempre).
 
+### Quotas Genie — modo demonstração (2026-08-28)
+
+Pedido do usuário: validar/ajustar a estrutura de criar/editar quotas Genie sem uma conta
+Databricks real disponível. Diferente do dashboard de consumo (`databricks_consumo`, uma
+tabela real que sempre existiu), Quotas Genie **nunca teve persistência própria** — as 5
+rotas (`GET/POST/PUT/DELETE /genie-budgets`, `GET /genie-principals`) sempre foram um
+proxy direto pra Budgets/SCIM API real do Databricks, sem nada local pra "carregar dados
+fictícios" dentro. As duas primeiras tentativas de resolver isso nesta sessão (screenshot
+com interceptação de rede via Playwright; depois um navegador visível com CRUD mockado
+client-side) davam só uma janela temporária — o processo em segundo plano era encerrado
+entre turnos da conversa (sem marcador de conclusão no transcript), então a "sessão de
+teste" nunca sobrevivia o suficiente pro usuário interagir de verdade.
+
+**Solução: fallback de demonstração dentro do próprio servidor**, não mais um script à
+parte. Nova tabela `databricks_genie_budgets_demo` (`id`, `payload` JSONB com o shape
+completo de um `GenieBudget`, timestamps) — semeada automaticamente com 3 quotas de
+exemplo (por workspace, por tag+usuário com overrides, com bloqueio) na primeira vez que
+o servidor sobe e a tabela está vazia.
+
+**Guard-rail contra misturar fictício com real**: `_dbxDemoModeNeeded(cfg)` (server.js) é
+verdadeiro só quando NÃO existe uma conexão padrão em modo `oauth_m2m` (sem conexão
+nenhuma, ou só PAT — exatamente o estado real deste ambiente, já que a única conexão
+cadastrada é PAT). As 5 rotas checam isso ANTES de decidir entre a API real do Databricks
+e a tabela local — nunca os dois ao mesmo tempo, então não tem como o dado fictício
+mascarar ou se misturar com um dado real. No momento em que o usuário configurar e marcar
+como padrão uma conexão `oauth_m2m` de verdade, todas as 5 rotas voltam a usar a Budgets/
+SCIM API real automaticamente, sem nenhuma mudança de código — o fallback só é alcançável
+na ausência de credencial real, nunca por escolha/flag manual que pudesse ser esquecida
+ligada em produção.
+
+**CRUD completo funciona de verdade em modo demonstração** — criar, editar (inclusive
+overrides por usuário/grupo) e excluir persistem na tabela local exatamente como
+persistiriam no Databricks real (mesma validação de `_validarGenieBudgetPayload`,
+incluindo os guard-rails de `BLOCK_USAGE`/`confirmar_bloqueio` e overrides-só-com-escopo-
+per-user). `GET /genie-principals` (busca de usuário/grupo pros overrides) também tem
+fallback fictício (`_GENIE_DEMO_PRINCIPALS`, filtro por substring em vez de match exato,
+já que é só pra exercitar a UI).
+
+**Frontend**: cada budget vindo do fallback ganha `_demo: true` (campo extra, já coberto
+pelo `[extra: string]: unknown` do tipo `GenieBudget`) — `GenieBudgetsCard` mostra um
+banner laranja "🧪 Modo demonstração" quando qualquer item tem essa flag, deixando claro
+que os dados são fictícios sem esconder isso do usuário nem exigir que ele saiba de
+antemão se há uma conexão real configurada.
+
+**Verificado contra o servidor real**: restart criou a tabela e semeou os 3 exemplos
+(confirmado via `GET /genie-budgets`, todos com `_demo:true`); ciclo completo testado via
+curl — criar (`POST`) → editar com novo valor (`PUT`) → listar (confirma o valor editado
+persistiu) → excluir (`DELETE`) → listar de novo (confirma sumiu) — tudo batendo na tabela
+local de verdade, não um mock de teste. Banner de demonstração confirmado visualmente via
+Playwright. 2 testes novos em `DatabricksDashboardView.test.tsx` (banner aparece com
+`_demo:true`, não aparece sem).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

@@ -578,6 +578,18 @@ function GenieBudgetsCard() {
         Limites nativos do Databricks (Unity AI Gateway) pro uso do Genie — aplicados pelo próprio Databricks,
         não pelo FinOps Manager. Exige a conexão padrão (Coleta Databricks) em modo OAuth M2M com Account Admin.
       </div>
+      {budgetsQuery.data?.some((b) => b._demo) && (
+        <div style={{
+          margin: '0 20px 12px', padding: '8px 12px', fontSize: 12, borderRadius: 6,
+          color: 'var(--orange,#ff8c42)',
+          border: '1px solid color-mix(in srgb, var(--orange,#ff8c42) 40%, transparent)',
+          background: 'color-mix(in srgb, var(--orange,#ff8c42) 10%, transparent)',
+        }}>
+          🧪 <strong>Modo demonstração</strong> — nenhuma conexão Databricks real (OAuth M2M) configurada.
+          Estas são quotas fictícias, guardadas só no nosso banco, pra você testar criar/editar/excluir livremente.
+          Assim que configurar uma conexão OAuth M2M em Coleta Databricks, esta tela passa a mostrar as quotas reais da conta.
+        </div>
+      )}
       {budgetsQuery.isError && (
         <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--red,#ff4d6a)' }}>
           {(budgetsQuery.error as Error).message}

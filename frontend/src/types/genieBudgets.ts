@@ -82,5 +82,9 @@ export interface GenieBudget {
   alert_configurations: GenieBudgetAlertConfiguration[]
   create_time?: number
   update_time?: number
+  // true quando o servidor não achou uma conexão OAuth M2M real configurada e caiu no
+  // fallback de demonstração (databricks_genie_budgets_demo) — ver server.js,
+  // _dbxDemoModeNeeded. Nunca presente junto com dado real da Budgets API.
+  _demo?: boolean
   [extra: string]: unknown // spend status e outros campos não confirmados pela documentação
 }

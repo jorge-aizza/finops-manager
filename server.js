@@ -5785,6 +5785,72 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS threshold_critico NUMERIC(5,2) NOT NULL DEFAULT 90`);
   await run(`UPDATE databricks_budgets SET escopo_tipo = 'global' WHERE workspace_id IS NULL AND escopo_tipo = 'workspace'`);
 
+  // ── Quotas Genie — modo demonstração (2026-08-28, pedido do usuário) ──────────────
+  // As rotas /genie-budgets sempre proxeiam a Budgets API real do Databricks — sem uma
+  // conexão OAuth M2M de conta configurada (Account Admin), não há nada real pra mostrar
+  // ou testar. Pra validar a tela sem uma conta real disponível, guardamos aqui um
+  // punhado de quotas fictícias que as rotas usam como FALLBACK — só quando não existe
+  // conexão padrão em modo oauth_m2m (`_dbxDemoModeNeeded`, definido perto das rotas).
+  // Nunca é alcançado quando uma conexão real existe, então não tem como esse dado
+  // fictício mascarar ou se misturar com dado real — a troca pra API real acontece
+  // sozinha assim que o usuário configurar uma conexão oauth_m2m de verdade.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_genie_budgets_demo (
+      id            VARCHAR(50) PRIMARY KEY,
+      payload       JSONB NOT NULL,
+      criado_em     TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  const _genieDemoCount = (await pool.query(`SELECT COUNT(*) AS n FROM databricks_genie_budgets_demo`)).rows[0].n;
+  if (parseInt(_genieDemoCount, 10) === 0) {
+    const _genieDemoSeed = [
+      {
+        id: 'demo-001',
+        payload: {
+          budget_configuration_id: 'demo-001', display_name: 'Quota Genie — Exemplo por Workspace', account_id: 'demo-account',
+          resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+          filter: { workspace_id: { operator: 'IN', values: [123456, 789012] } },
+          alert_configurations: [{
+            quantity_threshold: '1500.00', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED',
+            action_configurations: [{ action_type: 'EMAIL_NOTIFICATION', target: 'finops@vivo.com.br' }],
+          }],
+        },
+      },
+      {
+        id: 'demo-002',
+        payload: {
+          budget_configuration_id: 'demo-002', display_name: 'Quota Genie — Exemplo por Usuário (com overrides)', account_id: 'demo-account',
+          resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+          filter: { tags: [{ key: 'projeto', value: { operator: 'IN', values: ['finops-core'] } }] },
+          alert_configurations: [{
+            quantity_threshold: '100.00', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER',
+            action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }],
+            principal_overrides: [
+              { principal_id: 900111, override_threshold: '250.00' },
+              { principal_id: 900222, override_threshold: '50.00' },
+            ],
+          }],
+        },
+      },
+      {
+        id: 'demo-003',
+        payload: {
+          budget_configuration_id: 'demo-003', display_name: 'Quota Genie — Exemplo com Bloqueio', account_id: 'demo-account',
+          resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+          filter: {},
+          alert_configurations: [{
+            quantity_threshold: '5000.00', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED',
+            action_configurations: [{ action_type: 'BLOCK_USAGE' }],
+          }],
+        },
+      },
+    ];
+    for (const b of _genieDemoSeed) {
+      await pool.query(`INSERT INTO databricks_genie_budgets_demo (id, payload) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING`, [b.id, JSON.stringify(b.payload)]);
+    }
+  }
+
   // Corrige linhas órfãs de 'executando' — nada as atualiza depois de um
   // restart/crash do processo (o `_coletaEmExecucao`/`_dbxColetaEmExecucao`
   // em memória volta a false num processo novo, mas a linha gravada no banco
@@ -7828,10 +7894,23 @@ app.get('/api/databricks-coleta/anomalias', authMiddleware, dbMiddleware, async 
 // autenticação genérica do Databricks.
 const _DBX_ACCOUNTS_BASE = 'https://accounts.azuredatabricks.net';
 
-async function _getDbxAccountCredentials() {
+async function _getDbxAccountConfigRow() {
   const r = await pool.query(`SELECT * FROM databricks_coleta_config WHERE is_padrao = true LIMIT 1`);
-  if (!r.rows.length) throw new Error('Nenhuma conexão Databricks configurada como padrão (Coleta Automática → Coleta Databricks).');
-  const cfg = r.rows[0];
+  return r.rows[0] || null;
+}
+
+// Modo demonstração das Quotas Genie (2026-08-28) — verdadeiro sempre que NÃO existe uma
+// conexão padrão em modo OAuth M2M (sem conexão nenhuma, ou só PAT). Usado pelas 5 rotas
+// de genie-budgets/genie-principals abaixo pra decidir entre a Budgets API real e o
+// fallback local (databricks_genie_budgets_demo) — nunca os dois ao mesmo tempo, então
+// não tem como o dado fictício se misturar com um dado real.
+function _dbxDemoModeNeeded(cfg) {
+  return !cfg || cfg.modo_auth !== 'oauth_m2m';
+}
+
+async function _getDbxAccountCredentials() {
+  const cfg = await _getDbxAccountConfigRow();
+  if (!cfg) throw new Error('Nenhuma conexão Databricks configurada como padrão (Coleta Automática → Coleta Databricks).');
   if (cfg.modo_auth !== 'oauth_m2m') {
     throw new Error('A conexão padrão usa modo PAT (workspace-level). Quotas Genie usam a API de conta do Databricks, que exige OAuth M2M de Service Principal de CONTA com role Account Admin — configure uma conexão em modo OAuth M2M e marque como padrão.');
   }
@@ -7869,10 +7948,29 @@ async function _dbxScimFetch(accountId, token, path) {
 // Busca usuário (por e-mail, filtro `emails.value eq`) ou grupo (por nome, filtro
 // `displayName eq`) — usado pelo modal de Quota Genie pra resolver o principal_id
 // (numérico, exigido pela API) a partir do que o admin realmente conhece (e-mail/nome).
+// Busca fictícia (modo demonstração) — mesmo shape da resposta real do SCIM, filtrada
+// por substring (não exige match exato como a busca real, já que é só pra exercitar a
+// UI sem uma conta de verdade pra buscar).
+const _GENIE_DEMO_PRINCIPALS = {
+  user: [
+    { id: '900333', nome: 'ana.silva@vivo.com.br' },
+    { id: '900444', nome: 'carlos.souza@vivo.com.br' },
+  ],
+  group: [
+    { id: '900555', nome: 'Time de Dados' },
+    { id: '900666', nome: 'Time FinOps' },
+  ],
+};
+
 app.get('/api/databricks-coleta/genie-principals', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { tipo, query } = req.query;
     if (!query) return res.status(400).json({ error: 'query é obrigatório' });
+    const cfg = await _getDbxAccountConfigRow();
+    if (_dbxDemoModeNeeded(cfg)) {
+      const lista = _GENIE_DEMO_PRINCIPALS[tipo === 'group' ? 'group' : 'user'];
+      return res.json(lista.filter(p => p.nome.toLowerCase().includes(String(query).toLowerCase())));
+    }
     const { accountId, token } = await _getDbxAccountCredentials();
     const resource = tipo === 'group' ? 'Groups' : 'Users';
     const filterField = tipo === 'group' ? 'displayName' : 'emails.value';
@@ -7889,6 +7987,11 @@ app.get('/api/databricks-coleta/genie-principals', authMiddleware, dbMiddleware,
 
 app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
+    const cfg = await _getDbxAccountConfigRow();
+    if (_dbxDemoModeNeeded(cfg)) {
+      const demo = await pool.query(`SELECT payload FROM databricks_genie_budgets_demo ORDER BY criado_em`);
+      return res.json(demo.rows.map(r => ({ ...r.payload, _demo: true })));
+    }
     const { accountId, token } = await _getDbxAccountCredentials();
     const data = await _dbxBudgetsFetch(accountId, token, '/budgets?include_spend_status=true');
     const genieBudgets = (data.budgets || []).filter(b => b.resource_type === 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY');
@@ -7964,9 +8067,17 @@ function _validarGenieBudgetPayload(body, accountId) {
 
 app.post('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { accountId, token } = await _getDbxAccountCredentials();
-    const v = _validarGenieBudgetPayload(req.body, accountId);
+    const cfg = await _getDbxAccountConfigRow();
+    const demoMode = _dbxDemoModeNeeded(cfg);
+    const v = _validarGenieBudgetPayload(req.body, demoMode ? 'demo-account' : _safeDecrypt(cfg.account_id));
     if (v.error) return res.status(400).json({ error: v.error });
+    if (demoMode) {
+      const id = 'demo-' + Date.now().toString(36);
+      const payload = { budget_configuration_id: id, ...v.value };
+      await pool.query(`INSERT INTO databricks_genie_budgets_demo (id, payload) VALUES ($1,$2)`, [id, JSON.stringify(payload)]);
+      return res.json({ ...payload, _demo: true });
+    }
+    const { accountId, token } = await _getDbxAccountCredentials();
     const data = await _dbxBudgetsFetch(accountId, token, '/budgets', { method: 'POST', body: JSON.stringify({ budget: v.value }) });
     res.json(data.budget || data);
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -7976,10 +8087,17 @@ app.post('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, a
 // vai no corpo além do path, como a documentação exige.
 app.put('/api/databricks-coleta/genie-budgets/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { accountId, token } = await _getDbxAccountCredentials();
-    const v = _validarGenieBudgetPayload(req.body, accountId);
+    const cfg = await _getDbxAccountConfigRow();
+    const demoMode = _dbxDemoModeNeeded(cfg);
+    const v = _validarGenieBudgetPayload(req.body, demoMode ? 'demo-account' : _safeDecrypt(cfg.account_id));
     if (v.error) return res.status(400).json({ error: v.error });
     v.value.budget_configuration_id = req.params.id;
+    if (demoMode) {
+      const r = await pool.query(`UPDATE databricks_genie_budgets_demo SET payload=$1, atualizado_em=NOW() WHERE id=$2 RETURNING id`, [JSON.stringify(v.value), req.params.id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'Quota de demonstração não encontrada — pode já ter sido excluída.' });
+      return res.json({ ...v.value, _demo: true });
+    }
+    const { accountId, token } = await _getDbxAccountCredentials();
     const data = await _dbxBudgetsFetch(accountId, token, `/budgets/${encodeURIComponent(req.params.id)}`, { method: 'PUT', body: JSON.stringify({ budget: v.value }) });
     res.json(data.budget || data);
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -7987,6 +8105,11 @@ app.put('/api/databricks-coleta/genie-budgets/:id', authMiddleware, dbMiddleware
 
 app.delete('/api/databricks-coleta/genie-budgets/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
+    const cfg = await _getDbxAccountConfigRow();
+    if (_dbxDemoModeNeeded(cfg)) {
+      await pool.query(`DELETE FROM databricks_genie_budgets_demo WHERE id=$1`, [req.params.id]);
+      return res.json({ ok: true });
+    }
     const { accountId, token } = await _getDbxAccountCredentials();
     await _dbxBudgetsFetch(accountId, token, `/budgets/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
     res.json({ ok: true });

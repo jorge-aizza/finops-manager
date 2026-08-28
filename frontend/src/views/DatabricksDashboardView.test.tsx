@@ -157,6 +157,36 @@ describe('DatabricksDashboardView', () => {
     expect(screen.getByText('🚫 Bloqueia')).toBeInTheDocument()
   })
 
+  it('mostra o banner de modo demonstração quando os budgets vêm com _demo:true', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+      {
+        budget_configuration_id: 'demo-001', display_name: 'Quota Fictícia', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+        alert_configurations: [{ quantity_threshold: '100', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] }],
+        _demo: true,
+      },
+    ])
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    expect(await screen.findByText(/Modo demonstração/)).toBeInTheDocument()
+  })
+
+  it('não mostra o banner de demonstração quando os budgets são reais (sem _demo)', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+      {
+        budget_configuration_id: 'gb-real', display_name: 'Quota Real', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+        alert_configurations: [{ quantity_threshold: '100', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] }],
+      },
+    ])
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    await screen.findByText('Quota Real')
+    expect(screen.queryByText(/Modo demonstração/)).not.toBeInTheDocument()
+  })
+
   it('botão Editar abre o modal de Quota Genie pré-preenchido com os dados do budget', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
