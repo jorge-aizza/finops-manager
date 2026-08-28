@@ -76,6 +76,29 @@ describe('DatabricksDashboardView', () => {
     expect(screen.getByText('90% do consumo')).toBeInTheDocument()
   })
 
+  it('marca ⚠️ nos itens de Workspace/Usuário com anomalia detectada e leva pra aba Orçamentos ao clicar', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(databricksColetaApi.getDatabricksAnomalias).mockResolvedValue({
+      custo_diario: [{ escopo_tipo: 'workspace', escopo_valor: 'ws-prod', usage_date: '2026-08-05', custo: 900, media: 300, desvio: 100, zscore: 3.2 }],
+      usuarios: [{ usuario: 'joao@empresa.com', custo_recente: 500, media_diaria_recente: 71, custo_historico: 100, media_diaria_historica: 14, crescimento_pct: 4 }],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    const wsRow = screen.getByText('ws-prod').closest('div')!.parentElement!
+    expect(wsRow.textContent).toContain('⚠️')
+    const usuarioRow = screen.getByText('joao@empresa.com').closest('div')!.parentElement!
+    expect(usuarioRow.textContent).toContain('⚠️')
+
+    // "ws-dev" não tem anomalia — não deve ter o ícone
+    const wsDevRow = screen.getByText('ws-dev').closest('div')!.parentElement!
+    expect(wsDevRow.textContent).not.toContain('⚠️')
+
+    await user.click(screen.getAllByTitle(/Anomalia de consumo detectada/)[0])
+    expect(await screen.findByText('Orçamentos')).toBeInTheDocument()
+  })
+
   it('busca um novo período ao trocar as datas e clicar em "Buscar"', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     const user = userEvent.setup()

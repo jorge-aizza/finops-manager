@@ -1871,6 +1871,41 @@ já validado, só com `fmtDBU()` (número + sufixo "DBU") em vez de `fmtBRL()`.
 **Verificado via Playwright contra o servidor real**: card renderiza corretamente com os
 valores reais dos dados sintéticos, zero erro de console. 248/248 testes passando.
 
+### Coleta Databricks — Dashboard: ponto de atenção nos rankings de Workspace/Usuário (2026-08-28)
+
+Pedido do usuário: cruzar as anomalias já detectadas (aba "Orçamentos e Anomalias") com
+os rankings "Por Workspace"/"Por Usuário" da aba Dashboard, sinalizando direto onde o
+usuário já está olhando em vez de exigir trocar de aba pra descobrir que algo está
+anômalo.
+
+**Sem endpoint novo** — `DatabricksDashboardView` (componente-pai) ganhou uma
+`useQuery({queryKey:['databricks-anomalias'], queryFn: getDatabricksAnomalias})` própria,
+com a MESMA `queryKey` já usada por `AnomaliasCard` (aba Orçamentos) — React Query
+compartilha o cache entre as duas, sem round-trip extra quando as duas abas já foram
+visitadas na mesma sessão.
+
+**Cruzamento simples via `Set`**: `workspacesComAnomalia` (filtra `custo_diario` por
+`escopo_tipo==='workspace'`, coleta os `escopo_valor`) e `usuariosComAnomalia` (coleta
+`usuarios[].usuario` direto — já vem no mesmo formato de label usado por `por_usuario`,
+incluindo `'Não identificado'`, sem precisar do sentinel `__vazio__` usado só pro
+drill-down). Anomalia de escopo `'global'` não marca nenhum workspace específico
+(não é sobre um workspace só) — deliberadamente não usada aqui.
+
+**`RankingCard` ganhou `atencao?: boolean` por item + prop `onVerAnomalia`**: quando
+`true`, renderiza um ⚠️ antes do label, com `title` explicando e `onClick` com
+`e.stopPropagation()` (pra não disparar o `onToggle` de drill-down do item ao clicar
+só no ícone) chamando `onVerAnomalia`, que troca pra aba "Orçamentos e Anomalias"
+(`setDbxTab('orcamentos')`) — o detalhe completo (Z-score, % de crescimento) já mora lá,
+não duplicado no ranking.
+
+**Verificado via Playwright contra o servidor real** (dados sintéticos desta sessão): 3
+dos 4 workspaces (`ws-dev-brsouth`, `ws-prod-brsouth`, `ws-analytics-sp`) aparecem com ⚠️,
+batendo com as 3 anomalias de escopo workspace já confirmadas antes nesta sessão (a 4ª,
+de escopo global, corretamente não marca nenhum item); clicar no ícone navega pra
+"Orçamentos e Anomalias" corretamente. Zero erro de console. 1 teste novo em
+`DatabricksDashboardView.test.tsx` (ícone aparece só nos itens com anomalia, ausente nos
+sem, clique navega de aba).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

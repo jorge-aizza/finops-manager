@@ -45,13 +45,20 @@ function fmtDBU(v: number): string {
 // exibição, o valor real pra filtrar é o sentinel '__vazio__' (ver DatabricksResumoFiltros).
 // Clicar num item chama onToggle — mesmo item selecionado de novo remove o filtro
 // (toggle), consistente com o padrão de chips removíveis abaixo do período.
-function RankingCard({ title, color, items, hint, activeValue, onToggle }: {
+// `atencao` (opcional por item) cruza com o motor de Anomaly Detection (ver
+// _computeAnomaliasDatabricks, server.js) — item marcado quando aparece em
+// custo_diario (escopo workspace) ou usuarios da resposta de /anomalias. Ícone
+// clicável (com stopPropagation pra não disparar o onToggle do drill-down do item)
+// leva direto pra aba "Orçamentos e Anomalias" via onVerAnomalia — o detalhe completo
+// (Z-score, % de crescimento) já mora lá, não duplicado aqui.
+function RankingCard({ title, color, items, hint, activeValue, onToggle, onVerAnomalia }: {
   title: string
   color: string
-  items: { custo: number; label: string; value: string }[]
+  items: { custo: number; label: string; value: string; atencao?: boolean }[]
   hint?: string
   activeValue?: string | null
   onToggle?: (value: string) => void
+  onVerAnomalia?: () => void
 }) {
   const max = Math.max(1, ...items.map((i) => i.custo))
   return (
@@ -80,8 +87,17 @@ function RankingCard({ title, color, items, hint, activeValue, onToggle }: {
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 2 }}>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%' }}>
-                  {item.label}
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  {item.atencao && (
+                    <span
+                      title="Anomalia de consumo detectada — clique para ver detalhes em Orçamentos e Anomalias"
+                      onClick={(e) => { e.stopPropagation(); onVerAnomalia?.() }}
+                      style={{ flexShrink: 0, cursor: onVerAnomalia ? 'pointer' : undefined }}
+                    >
+                      ⚠️
+                    </span>
+                  )}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.label}</span>
                 </span>
                 {i < 3 && <span style={{ fontWeight: 700, color }}>{fmtBRL(item.custo)}</span>}
               </div>
@@ -227,6 +243,17 @@ export default function DatabricksDashboardView() {
   function toggleFiltro(campo: keyof DatabricksResumoFiltros, valor: string) {
     setFiltros((f) => (f[campo] === valor ? { ...f, [campo]: undefined } : { ...f, [campo]: valor }))
   }
+
+  // Cruza os rankings "Por Workspace"/"Por Usuário" com o motor de Anomaly Detection —
+  // mesma queryKey já usada por AnomaliasCard (aba Orçamentos e Anomalias), então React
+  // Query compartilha o cache entre as duas abas sem refazer a chamada. Anomalia de
+  // escopo 'global' não marca nenhum workspace específico (não é sobre um workspace só).
+  const anomaliasQuery = useQuery({ queryKey: ['databricks-anomalias'], queryFn: getDatabricksAnomalias })
+  const workspacesComAnomalia = new Set(
+    (anomaliasQuery.data?.custo_diario || []).filter((a) => a.escopo_tipo === 'workspace').map((a) => a.escopo_valor),
+  )
+  const usuariosComAnomalia = new Set((anomaliasQuery.data?.usuarios || []).map((u) => u.usuario))
+  function verAnomalias() { setDbxTab('orcamentos') }
 
   const budgetsQuery = useQuery({ queryKey: ['databricks-budgets'], queryFn: listDatabricksBudgets })
   const [budgetModalOpen, setBudgetModalOpen] = useState(false)
@@ -389,14 +416,19 @@ export default function DatabricksDashboardView() {
 
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                 🔍 Clique num item de Workspace, SKU, Usuário, Job, Cluster ou Warehouse para detalhar os demais números por esse filtro — clique de novo pra remover.
+                {' '}⚠️ marca itens com anomalia de consumo detectada — clique no ícone pra ver o detalhe.
               </div>
               <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
                 <RankingCard
                   title="Por Workspace"
                   color="var(--accent)"
-                  items={resumo.por_workspace.map((w) => ({ custo: w.custo, label: w.workspace_id, value: w.workspace_id }))}
+                  items={resumo.por_workspace.map((w) => ({
+                    custo: w.custo, label: w.workspace_id, value: w.workspace_id,
+                    atencao: workspacesComAnomalia.has(w.workspace_id),
+                  }))}
                   activeValue={filtros.workspace_id ?? null}
                   onToggle={(v) => toggleFiltro('workspace_id', v)}
+                  onVerAnomalia={verAnomalias}
                 />
                 <RankingCard
                   title="Por SKU"
@@ -408,10 +440,14 @@ export default function DatabricksDashboardView() {
                 <RankingCard
                   title="Por Usuário"
                   color="var(--green,#22c55e)"
-                  items={resumo.por_usuario.map((u) => ({ custo: u.custo, label: u.usuario, value: u.usuario === 'Não identificado' ? '__vazio__' : u.usuario }))}
+                  items={resumo.por_usuario.map((u) => ({
+                    custo: u.custo, label: u.usuario, value: u.usuario === 'Não identificado' ? '__vazio__' : u.usuario,
+                    atencao: usuariosComAnomalia.has(u.usuario),
+                  }))}
                   hint="Usuário vem de identity_metadata.run_as (System Tables)"
                   activeValue={filtros.usuario ?? null}
                   onToggle={(v) => toggleFiltro('usuario', v)}
+                  onVerAnomalia={verAnomalias}
                 />
                 <RankingCard
                   title="Por Job"
