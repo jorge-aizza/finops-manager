@@ -781,7 +781,17 @@ az webapp log tail --resource-group rg-finops --name finops-manager</pre>
     <div class="chk-cat">Portal Público (se ativado)</div>
     <div class="chk"><div class="chk-box"></div><p><code>subscription_ids</code> configurados nas definições do Portal — sem isso, nenhum dado é exposto</p></div>
     <div class="chk"><div class="chk-box"></div><p><code>solicitar_identificacao=true</code> ou <code>dominios_aceitos</code> configurado para restringir acesso</p></div>
+    <div class="chk-cat">Coleta Automática — Azure (se usada)</div>
+    <div class="chk"><div class="chk-box"></div><p>Service Principal criado no Azure com roles <strong>Reader</strong> + <strong>Storage Blob Data Reader</strong> nas subscriptions desejadas</p></div>
+    <div class="chk"><div class="chk-box"></div><p>Conexão testada com sucesso em <strong>Coleta Azure → Service Principals → Testar</strong> antes de agendar</p></div>
+    <div class="chk-cat">Coleta Automática — Databricks (se usada)</div>
+    <div class="chk"><div class="chk-box"></div><p>Um <strong>Account Admin</strong> habilitou os schemas de System Tables (<code>system.billing.*</code>) em Catalog Explorer — não vêm habilitados por padrão em nenhuma conta</p></div>
+    <div class="chk"><div class="chk-box"></div><p>Credencial (Service Principal de conta em modo OAuth M2M, ou PAT de workspace) com <code>USE SCHEMA</code> + <code>SELECT</code> em <code>system.billing.usage</code> e <code>system.billing.list_prices</code></p></div>
+    <div class="chk"><div class="chk-box"></div><p><strong>Testar</strong> confirma cada System Table individualmente (não só o SQL Warehouse) antes de agendar a coleta</p></div>
+    <div class="chk"><div class="chk-box"></div><p>Para usar <strong>Quotas Genie</strong>: conexão em modo OAuth M2M marcada como <strong>padrão</strong> — PAT não tem escopo de conta suficiente para essa feature</p></div>
   </div>
+
+  <div class="note"><div class="note-lbl">Passo a passo detalhado</div><p>Este guia cobre a instalação e o deploy do servidor. Para o passo a passo de configuração da Coleta Automática (Azure e Databricks) dentro do sistema já em execução — criação de Service Principal, System Tables, agendamento, importação manual, Quotas Genie — consulte o <strong>Manual do Usuário</strong> (<code>docs-usuario.html</code>), Seções 10 a 14.</p></div>
 
   <div class="subsec">Comandos úteis pós-implantação</div>
 <pre><span class="c"># Verificar sintaxe dos arquivos principais</span>

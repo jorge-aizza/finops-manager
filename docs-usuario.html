@@ -141,17 +141,21 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
   <div class="toc-title">Índice</div>
   <div class="toc-grid">
     <div class="toc-item"><span class="toc-num">01</span><span class="toc-label">Visão Geral do Sistema</span></div>
-    <div class="toc-item"><span class="toc-num">07</span><span class="toc-label">Configurar Estimativa (Overlay)</span></div>
-    <div class="toc-item"><span class="toc-num">02</span><span class="toc-label">Login e Autenticação</span></div>
-    <div class="toc-item"><span class="toc-num">08</span><span class="toc-label">Horário Livre</span></div>
-    <div class="toc-item"><span class="toc-num">03</span><span class="toc-label">Dashboard e Projetos FinOps</span></div>
     <div class="toc-item"><span class="toc-num">09</span><span class="toc-label">Reservas Cloud</span></div>
+    <div class="toc-item"><span class="toc-num">02</span><span class="toc-label">Login e Autenticação</span></div>
+    <div class="toc-item"><span class="toc-num">10</span><span class="toc-label">Coleta Automática — Azure</span></div>
+    <div class="toc-item"><span class="toc-num">03</span><span class="toc-label">Dashboard e Projetos FinOps</span></div>
+    <div class="toc-item"><span class="toc-num">11</span><span class="toc-label">Coleta Automática — Databricks</span></div>
     <div class="toc-item"><span class="toc-num">04</span><span class="toc-label">Importação de Custos Azure</span></div>
-    <div class="toc-item"><span class="toc-num">10</span><span class="toc-label">Coleta Automática</span></div>
+    <div class="toc-item"><span class="toc-num">12</span><span class="toc-label">Dashboard Databricks</span></div>
     <div class="toc-item"><span class="toc-num">05</span><span class="toc-label">Calculadora de Custos — Buscar</span></div>
-    <div class="toc-item"><span class="toc-num">11</span><span class="toc-label">Portal Público</span></div>
+    <div class="toc-item"><span class="toc-num">13</span><span class="toc-label">Governança e Anomalias (Databricks)</span></div>
     <div class="toc-item"><span class="toc-num">06</span><span class="toc-label">Tabela de Billing</span></div>
-    <div class="toc-item"><span class="toc-num">12</span><span class="toc-label">Regras de Negócio (Referência)</span></div>
+    <div class="toc-item"><span class="toc-num">14</span><span class="toc-label">Quotas Genie (Databricks)</span></div>
+    <div class="toc-item"><span class="toc-num">07</span><span class="toc-label">Configurar Estimativa (Overlay)</span></div>
+    <div class="toc-item"><span class="toc-num">15</span><span class="toc-label">Portal Público</span></div>
+    <div class="toc-item"><span class="toc-num">08</span><span class="toc-label">Horário Livre</span></div>
+    <div class="toc-item"><span class="toc-num">16</span><span class="toc-label">Regras de Negócio (Referência)</span></div>
   </div>
 </div>
 
@@ -170,7 +174,9 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
         <tr><td>Projetos / Ações</td><td>Gerenciamento de iniciativas FinOps com acompanhamento de status e retorno</td><td>Analistas / Gestores</td></tr>
         <tr><td>Calculadora de Custos</td><td>Análise de billing por recurso, cálculo de custo/hora e estimativa de chargeback</td><td>Analistas técnicos</td></tr>
         <tr><td>Importação de Custos</td><td>Upload de extratos de billing Azure (CSV/Parquet) para o banco de dados</td><td>Administradores</td></tr>
-        <tr><td>Coleta Automática</td><td>Coleta periódica de custos via Azure API (sem upload manual)</td><td>Administradores</td></tr>
+        <tr><td>Coleta Automática — Azure</td><td>Coleta periódica de custos via Azure API (sem upload manual)</td><td>Administradores</td></tr>
+        <tr><td>Coleta Automática — Databricks</td><td>Coleta periódica de consumo via System Tables do Unity Catalog (OAuth M2M ou PAT)</td><td>Administradores</td></tr>
+        <tr><td>Dashboard Databricks</td><td>Consumo por workspace/SKU/usuário/job/cluster/warehouse, DBUs, orçamentos internos, detecção de anomalias e Quotas Genie</td><td>Analistas / Gestores</td></tr>
         <tr><td>Price List</td><td>Sincronização de preços de tabela da Azure para comparação com billing real</td><td>Administradores</td></tr>
         <tr><td>Reservas Cloud</td><td>Controle de instâncias reservadas com alertas de vencimento</td><td>Analistas / Gestores</td></tr>
         <tr><td>Portal Público</td><td>Versão sem autenticação da calculadora para usuários externos</td><td>Usuários externos</td></tr>
@@ -474,26 +480,156 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
 
 <!-- S10 -->
 <div class="sec">
-  <div class="sec-hdr"><div class="sec-num">10</div><div class="sec-ttl">Coleta Automática</div></div>
+  <div class="sec-hdr"><div class="sec-num">10</div><div class="sec-ttl">Coleta Automática — Azure</div></div>
 
-  <p>A Coleta Automática elimina a necessidade de exportar e importar arquivos CSV manualmente. O sistema busca os dados de billing diretamente da Azure Management API usando Service Principals configurados pelo administrador.</p>
+  <p>A Coleta Automática elimina a necessidade de exportar e importar arquivos CSV manualmente. O sistema busca os dados de billing diretamente da Azure Management API usando Service Principals configurados pelo administrador. A tela fica em <strong>Coleta Azure</strong>, no menu lateral.</p>
 
   <div class="subsec">Configurar um Service Principal</div>
   <div class="steps">
     <div class="step"><div class="step-num">1</div><div class="step-body"><p>No Azure, crie um App Registration e anote o <strong>Tenant ID</strong>, <strong>Client ID</strong> e gere um <strong>Client Secret</strong>.</p></div></div>
     <div class="step"><div class="step-num">2</div><div class="step-body"><p>Atribua as roles <strong>Reader</strong> e <strong>Storage Blob Data Reader</strong> ao Service Principal nas subscriptions desejadas.</p></div></div>
-    <div class="step"><div class="step-num">3</div><div class="step-body"><p>No FinOps Manager, acesse <strong>Configurações → Coleta Automática → + Adicionar SP</strong>.</p></div></div>
-    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Informe Tenant ID, Client ID e Client Secret. As credenciais são encriptadas com AES-256 antes de serem salvas.</p></div></div>
-    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Clique em <strong>Testar credenciais</strong> para verificar a conexão.</p></div></div>
-    <div class="step"><div class="step-num">6</div><div class="step-body"><p>Configure o <strong>Agendador</strong>: horário e dias de execução automática.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>No FinOps Manager, acesse <strong>Coleta Azure → Service Principals → + Adicionar SP</strong>.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Informe nome, Tenant ID, Client ID e Client Secret, o modo de coleta (Assinaturas específicas ou por Billing Account/Profile) e marque <strong>Ativo</strong>. As credenciais são encriptadas com AES-256 antes de serem salvas.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Clique em <strong>Testar</strong> para verificar a conexão antes de salvar.</p></div></div>
+    <div class="step"><div class="step-num">6</div><div class="step-body"><p>No card <strong>Agendamento</strong>, defina horário e dias de execução automática, e a granularidade (7/15/30 dias ou período livre).</p></div></div>
   </div>
+
+  <div class="subsec">Coleta via Storage Account (alternativa)</div>
+  <p>Para ambientes com exportação automática do Azure Cost Management já configurada para uma Storage Account, cadastre a conta em <strong>Storage Accounts</strong> (nome da conta, container, prefixo do blob) vinculada a um Service Principal com role <strong>Storage Blob Data Reader</strong>. O agendador varre os blobs novos periodicamente, sem precisar de acesso via Management API.</p>
+
+  <div class="subsec">Cobertura, Histórico e Diagnóstico</div>
+  <p>O card <strong>Cobertura por Mês</strong> mostra uma grade com o percentual de dias com dados por subscription/mês (verde ≥95%, laranja 70–94%, vermelho &lt;70%) — clique numa célula para detalhar por subscription, ou use os botões <strong>▶ Coletar Agora</strong>/<strong>Agendar Pendente</strong> diretamente na célula. <strong>Histórico de Execuções</strong> lista cada coleta com origem (⏰ agendada / 👤 manual), duração, contagem de registros e um selo de <strong>Validação</strong> (✅ OK / ⚠ Aviso / ❌ Falha) — clique em "Revalidar" para reprocessar a checagem de integridade de uma execução antiga. <strong>Diagnóstico</strong> e <strong>Limpar Dados</strong> (expurgo por período, arquivo ou tudo) ficam disponíveis para investigar e corrigir problemas de importação.</p>
 
   <div class="note"><div class="note-lbl">Circuit Breaker</div><p>O sistema possui proteção automática contra falhas consecutivas: após 3 erros seguidos, a coleta é pausada por 5 minutos antes de tentar novamente. Isso evita sobrecarga na Azure API em caso de problemas de conectividade.</p></div>
 </div>
 
 <!-- S11 -->
 <div class="sec">
-  <div class="sec-hdr"><div class="sec-num">11</div><div class="sec-ttl">Portal Público</div></div>
+  <div class="sec-hdr"><div class="sec-num">11</div><div class="sec-ttl">Coleta Automática — Databricks</div></div>
+
+  <p>O billing do Azure nunca traz identidade de usuário nem o catálogo de produto interno do Databricks (ex: distinguir uso pago de <code>GENIE_FREE_USAGE</code>) — essa granularidade só existe nas <strong>System Tables</strong> do próprio Databricks (<code>system.billing.usage</code> + <code>system.billing.list_prices</code>, no Unity Catalog), uma fonte de dados separada, com autenticação própria. A tela fica em <strong>Coleta Azure → card "Coleta Databricks"</strong>, ao lado da coleta Azure — arquitetura equivalente (conexão → coleta agendada → tabela própria → dashboard).</p>
+
+  <div class="subsec">Dois modos de autenticação</div>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Modo</th><th>Quando usar</th><th>Requer</th></tr></thead>
+      <tbody>
+        <tr><td><strong>OAuth M2M</strong> (Service Principal de conta)</td><td>Padrão recomendado — não amarra a coleta a uma pessoa</td><td>Acesso de <strong>Account Admin</strong> na conta Databricks para criar o Service Principal</td></tr>
+        <tr><td><strong>PAT</strong> (Personal Access Token)</td><td>Alternativa quando não há Account Admin disponível</td><td>Um token gerado por qualquer usuário/Service Principal de <em>workspace</em> com grants nas System Tables</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Os dois modos leem exatamente as mesmas tabelas — a única diferença é o nível da credencial. Funcionalidades que chamam APIs de <strong>nível de conta</strong> (Quotas Genie — ver Seção 14) exigem obrigatoriamente OAuth M2M; um PAT não serve para elas.</p>
+
+  <div class="subsec">Configurar conexão — modo OAuth M2M</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>No console da conta Databricks, um <strong>Account Admin</strong> cria um Service Principal a nível de conta e gera um Client Secret.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Em <strong>Catalog Explorer → System Tables</strong>, um Account Admin habilita explicitamente os schemas necessários — <strong>não vêm habilitados por padrão</strong> em nenhuma conta.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Conceda ao Service Principal <code>USE SCHEMA</code> + <code>SELECT</code> em <code>system.billing.usage</code> e <code>system.billing.list_prices</code>.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>No FinOps Manager, <strong>Coleta Databricks → + Nova Conexão</strong>: selecione modo <strong>OAuth M2M</strong> e informe Account ID, Client ID, Client Secret, o host de um workspace (usado para executar as queries) e o ID de um SQL Warehouse.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Marque <strong>Ativo</strong> e, se for a única conexão, <strong>Padrão</strong>.</p></div></div>
+  </div>
+
+  <div class="subsec">Configurar conexão — modo PAT</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Gere um Personal Access Token em qualquer workspace (User Settings → Developer → Access Tokens), usando um usuário ou Service Principal de workspace com <code>USE SCHEMA</code> + <code>SELECT</code> nas mesmas duas tabelas acima.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>No FinOps Manager, selecione modo <strong>PAT</strong> — os campos Account ID/Client ID/Client Secret somem; preencha apenas <strong>Token</strong>, host do workspace e ID do SQL Warehouse.</p></div></div>
+  </div>
+
+  <div class="note"><div class="note-lbl">Não existe "token da API" avulso</div><p>No modo OAuth M2M não há token para colar manualmente — Client ID + Client Secret são as credenciais do Service Principal, e o sistema troca essas credenciais por um token de acesso automaticamente, a cada execução.</p></div>
+
+  <div class="subsec">Testar Conexão</div>
+  <p>O botão <strong>Testar</strong> não faz apenas <code>SELECT 1</code> — ele verifica <em>individualmente</em> cada System Table exigida (<code>system.billing.usage</code>, <code>system.billing.list_prices</code>). O erro retornado aponta a causa exata: <code>TABLE_OR_VIEW_NOT_FOUND</code> significa que o schema não foi habilitado na conta (passo 2 acima); <code>PERMISSION_DENIED</code>/<code>ACCESS_DENIED</code> significa que falta o grant na credencial (passo 3).</p>
+
+  <div class="subsec">Agendamento e coleta manual</div>
+  <p>Assim como na Coleta Azure, configure horário/dias de execução e granularidade no card de Agendamento, ou dispare uma coleta pontual em <strong>Coletar Agora</strong> informando o intervalo de datas. O progresso aparece em tempo real no monitor da tela.</p>
+
+  <div class="subsec">Importação Manual (CSV)</div>
+  <p>Para quem não tem/não quer configurar coleta automática, o card <strong>📥 Importação Manual</strong> aceita um <code>.csv</code> (até 100 MB) com os mesmos nomes de campo internos que a coleta ao vivo produz: <code>workspace_id</code>, <code>sku_name</code>, <code>produto_origem</code>, <code>usage_date</code>, <code>usage_unit</code>, <code>usage_quantity</code>, <code>usuario</code>, <code>preco_unitario</code>, <code>custo_estimado</code> e, opcionalmente, <code>usage_metadata</code>/<code>custom_tags</code> (string JSON). Apenas <code>workspace_id</code>, <code>sku_name</code> e <code>usage_date</code> são obrigatórios — linhas sem esses três campos são ignoradas e contabilizadas no resultado.</p>
+
+  <div class="subsec">Limpar Dados (Expurgo)</div>
+  <p>O botão <strong>🗑 Limpar Dados</strong>, no card Histórico de Execuções, remove registros de <code>databricks_consumo</code> por <strong>workspace</strong>, por período, ou tudo — útil para descartar dados de teste antes de uma coleta de produção. Exige confirmação de preview antes de habilitar o botão de confirmar.</p>
+
+  <div class="note"><div class="note-lbl">Granularidade por recurso</div><p>Cada linha coletada representa um recurso individual (job, cluster, workspace, SKU, tags) — não um total agregado por dia. Isso permite que dois recursos com tags diferentes (ex: dois jobs de projetos distintos) rodando no mesmo dia/workspace/SKU sejam contabilizados corretamente, sem misturar o custo de um no outro.</p></div>
+</div>
+
+<!-- S12 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">12</div><div class="sec-ttl">Dashboard Databricks</div></div>
+
+  <p>Acesse pelo menu lateral <strong>Databricks</strong>, um grupo com 3 sub-abas: <strong>Dashboard</strong>, <strong>Orçamentos e Anomalias</strong> e <strong>Quotas</strong>. Alternar entre elas não recarrega a página — o filtro de período e os dados ficam por aba.</p>
+
+  <div class="subsec">Aba Dashboard</div>
+  <p>Mostra KPIs do período selecionado, um gráfico de <strong>Tendência Mensal</strong> em barras com <strong>previsão de 3 meses</strong> (regressão linear sobre o histórico, exibida com textura hachurada + borda tracejada para diferenciar do custo real), e seis rankings (Top 10 cada): <strong>Por Workspace</strong>, <strong>Por SKU</strong>, <strong>Por Usuário</strong>, <strong>Por Job</strong>, <strong>Por Cluster</strong> e <strong>Por Warehouse</strong> — os três últimos vêm do mesmo dado já coletado (<code>usage_metadata</code>), sem nenhuma coleta adicional.</p>
+
+  <div class="subsec">DBUs Consumidos (pagos vs. free)</div>
+  <p>Um card específico mostra o volume em <strong>DBUs</strong> (a unidade nativa de processamento Databricks), separado entre free-tier e pago. Diferente do card de custo em R$ — onde o free-tier sempre aparece como R$ 0,00 por definição —, este card revela o <em>volume real</em> consumido de graça, informação que fica invisível olhando só o valor financeiro.</p>
+
+  <div class="subsec">Drill-down (filtro cruzado)</div>
+  <p>Clique em qualquer item de um ranking (um workspace, uma SKU, um usuário, um job, um cluster ou um warehouse) para reconsultar <strong>todos os outros gráficos</strong> já escopados a esse item — igual a uma ferramenta de BI. Um chip "Detalhando por: ..." aparece abaixo do seletor de período; clique nele ou em "Limpar filtros" para remover. Clicar de novo no mesmo item remove o filtro (toggle).</p>
+
+  <div class="subsec">Ponto de atenção (⚠️) nos rankings</div>
+  <p>Quando o motor de detecção de anomalias (Seção 13) encontra um workspace ou usuário fora do padrão, o item correspondente nos rankings <strong>Por Workspace</strong>/<strong>Por Usuário</strong> ganha um ícone ⚠️ ao lado do nome. Clique no ícone para navegar direto para a aba <strong>Orçamentos e Anomalias</strong> e ver o detalhe (Z-score, % de crescimento).</p>
+</div>
+
+<!-- S13 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">13</div><div class="sec-ttl">Governança e Anomalias (Databricks)</div></div>
+
+  <p>Sub-aba <strong>Orçamentos e Anomalias</strong>, dentro do menu Databricks. Reúne orçamentos internos (calculados sobre o consumo já coletado) e a detecção automática de padrões fora do esperado.</p>
+
+  <div class="subsec">Orçamentos internos</div>
+  <p>Diferente das Quotas Genie (Seção 14), estes orçamentos são <strong>calculados pelo FinOps Manager</strong> sobre <code>databricks_consumo</code> — apenas alertam, nunca bloqueiam nada no Databricks.</p>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Clique em <strong>+ Novo Orçamento</strong>.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Defina o <strong>escopo</strong>: Global (toda a conta), por <strong>Workspace</strong>, ou por <strong>Tag</strong> (escolha uma chave já vista nos dados, ex: <code>projeto</code>/<code>time</code>/<code>centro_custo</code>, e um valor).</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Informe o <strong>valor mensal</strong> (R$) e, opcionalmente, ajuste os <strong>thresholds</strong> de Atenção e Crítico (padrão 75% e 90%).</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Salve. Um popup de alerta aparece automaticamente ao entrar no sistema quando o consumo do mês corrente ultrapassa o threshold configurado — cada alerta pode ser dispensado individualmente na sessão.</p></div></div>
+  </div>
+
+  <div class="subsec">Detecção de Anomalias</div>
+  <p>Dois tipos de anomalia são calculados automaticamente, sem configuração:</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Tipo</th><th>Método</th><th>Threshold</th></tr></thead>
+      <tbody>
+        <tr><td>Custo diário fora do padrão</td><td>Z-score sobre uma janela de 35 dias (global e por workspace)</td><td>|Z| ≥ 2,5</td></tr>
+        <tr><td>Usuário com crescimento fora do padrão</td><td>% de crescimento entre a janela recente (7 dias) e a histórica (4 semanas anteriores)</td><td>≥ 100% de crescimento, com piso de R$ 50 no custo recente</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Anomalias são reavaliadas periodicamente; um alerta por e-mail (quando SMTP está configurado — ver README/CLAUDE.md) e o popup no login respeitam um cooldown de 24h por anomalia, para não repetir o mesmo aviso a cada verificação enquanto o problema persistir.</p>
+</div>
+
+<!-- S14 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">14</div><div class="sec-ttl">Quotas Genie (Databricks)</div></div>
+
+  <p>Sub-aba <strong>Quotas</strong>, dentro do menu Databricks. Diferente dos Orçamentos internos (Seção 13, só alerta), as Quotas Genie usam a <strong>Budgets API nativa do Databricks</strong> (nível de conta) — o limite é aplicado pelo próprio Databricks, não pelo FinOps Manager, e pode efetivamente <strong>bloquear o acesso ao Genie</strong> quando o teto é cruzado.</p>
+
+  <div class="warn"><div class="warn-lbl">Requer Account Admin</div><p>Esta feature só funciona com uma conexão em modo <strong>OAuth M2M</strong> marcada como <strong>padrão</strong> (Seção 11) — PAT não tem o escopo de nível de conta necessário. Sem essa conexão, a tela mostra um erro explicando exatamente o que falta.</p></div>
+
+  <div class="subsec">Criar uma quota</div>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Clique em <strong>+ Nova Quota Genie</strong>.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><p>Informe um nome, e opcionalmente restrinja por <strong>Workspace IDs</strong> (lista separada por vírgula) e/ou <strong>tags</strong> (pares chave/valor).</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Defina o <strong>limite em US$</strong> (a Budgets API do Databricks trabalha em dólar, diferente do restante do sistema, que é BRL).</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><p>Escolha o <strong>escopo</strong>: <em>Compartilhado</em> (soma de todos) ou <em>Por usuário</em> (necessário para configurar limites individuais — ver abaixo).</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><p>Escolha a <strong>ação</strong>: <em>Alertar por e-mail</em> ou <strong>Bloquear acesso ao Genie</strong>. A segunda exige marcar um checkbox explícito de confirmação antes de habilitar o botão de salvar.</p></div></div>
+  </div>
+
+  <div class="subsec">Limites individuais por usuário/grupo (overrides)</div>
+  <p>Disponível apenas com escopo <strong>Por usuário</strong> — a documentação oficial do Databricks confirma que overrides são ignorados em orçamentos de escopo compartilhado. Busque por e-mail exato (usuário) ou nome exato (grupo) — a busca localiza o <code>principal_id</code> real via SCIM da conta Databricks — e defina um valor (US$) próprio para aquele usuário/grupo. Limite de 20 overrides por quota.</p>
+
+  <div class="subsec">Editar e Excluir</div>
+  <p>Use o botão <strong>✏ Editar</strong> na listagem para alterar uma quota já criada (nome, workspaces, tags, limite, escopo, ação, overrides) — a edição substitui a configuração inteira. Ao editar uma quota de bloqueio, o checkbox de confirmação precisa ser marcado novamente, mesmo que a quota já bloqueasse antes. <strong>Excluir</strong> remove a quota da conta Databricks imediatamente.</p>
+
+  <div class="note"><div class="note-lbl">🧪 Modo demonstração</div><p>Quando não há nenhuma conexão OAuth M2M configurada como padrão, a tela exibe um banner "Modo demonstração" e opera sobre dados fictícios (persistidos localmente) — permite validar a estrutura de criar/editar/excluir quotas antes de ter acesso de Account Admin. Assim que uma conexão OAuth M2M real for marcada como padrão, a tela passa a usar a Budgets API real automaticamente, sem nenhuma ação manual.</p></div>
+</div>
+
+<!-- S15 -->
+<div class="sec">
+  <div class="sec-hdr"><div class="sec-num">15</div><div class="sec-ttl">Portal Público</div></div>
 
   <p>O Portal Público é uma versão sem autenticação da Calculadora de Custos. Permite que usuários externos (sem conta no sistema) consultem custos Azure de subscriptions autorizadas pelo administrador.</p>
 
@@ -513,9 +649,9 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
   <p>Campos configurados pelo administrador (taxa de imposto, taxa de condomínio, horário livre) aparecem preenchidos e bloqueados no portal público — o usuário vê os valores mas não pode alterá-los. Campos não configurados pelo admin ficam editáveis pelo usuário.</p>
 </div>
 
-<!-- S12 -->
+<!-- S16 -->
 <div class="sec">
-  <div class="sec-hdr"><div class="sec-num">12</div><div class="sec-ttl">Regras de Negócio — Referência</div></div>
+  <div class="sec-hdr"><div class="sec-num">16</div><div class="sec-ttl">Regras de Negócio — Referência</div></div>
 
   <p>Esta seção detalha as regras de cálculo aplicadas pelo sistema. É útil para auditores, analistas técnicos e equipes de FinOps que precisam validar os valores calculados.</p>
 
