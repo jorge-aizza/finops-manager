@@ -59,15 +59,22 @@ const normalizeResumo = (r: DatabricksResumo): DatabricksResumo => ({
   por_sku: r.por_sku.map((s) => ({ ...s, custo: Number(s.custo) })),
   por_usuario: r.por_usuario.map((u) => ({ ...u, custo: Number(u.custo) })),
   free_vs_pago: { free: Number(r.free_vs_pago.free), pago: Number(r.free_vs_pago.pago) },
+  por_job: (r.por_job || []).map((j) => ({ ...j, custo: Number(j.custo) })),
+  por_cluster: (r.por_cluster || []).map((c) => ({ ...c, custo: Number(c.custo) })),
+  por_warehouse: (r.por_warehouse || []).map((w) => ({ ...w, custo: Number(w.custo) })),
 })
 
-// filtros = drill-down (dashboard): clicar num item de Workspace/SKU/Usuário reconsulta
-// TODOS os cards já escopados pelo servidor (ver GET /databricks-coleta/resumo) — não é
-// filtro client-side, já que o endpoint só devolve agregados, nunca linhas cruas.
+// filtros = drill-down (dashboard): clicar num item de Workspace/SKU/Usuário/Job/Cluster/
+// Warehouse reconsulta TODOS os cards já escopados pelo servidor (ver GET
+// /databricks-coleta/resumo) — não é filtro client-side, já que o endpoint só devolve
+// agregados, nunca linhas cruas.
 export interface DatabricksResumoFiltros {
   workspace_id?: string
   sku_name?: string
   usuario?: string // '__vazio__' representa a linha "Não identificado"
+  job_id?: string
+  cluster_id?: string
+  warehouse_id?: string
 }
 
 export const getDatabricksResumo = (data_inicio?: string, data_fim?: string, filtros?: DatabricksResumoFiltros) => {
@@ -76,6 +83,9 @@ export const getDatabricksResumo = (data_inicio?: string, data_fim?: string, fil
   if (filtros?.workspace_id) q.set('workspace_id', filtros.workspace_id)
   if (filtros?.sku_name) q.set('sku_name', filtros.sku_name)
   if (filtros?.usuario) q.set('usuario', filtros.usuario)
+  if (filtros?.job_id) q.set('job_id', filtros.job_id)
+  if (filtros?.cluster_id) q.set('cluster_id', filtros.cluster_id)
+  if (filtros?.warehouse_id) q.set('warehouse_id', filtros.warehouse_id)
   const qs = q.toString()
   return apiFetch<DatabricksResumo>('GET', '/databricks-coleta/resumo' + (qs ? '?' + qs : '')).then(normalizeResumo)
 }

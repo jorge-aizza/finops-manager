@@ -6,6 +6,10 @@ export interface DatabricksResumoMes {
   custo: number
 }
 
+// por_job/por_cluster/por_warehouse (2026-08-28) — zero coleta nova: agregados sobre
+// usage_metadata (JSONB) já capturado por recurso desde a Fase 2. Sem nome amigável pra
+// cluster/warehouse (usage_metadata não traz cluster_name — só node_type; nome de
+// verdade precisaria de uma coleta nova contra system.compute.clusters, fora de escopo).
 export interface DatabricksResumo {
   periodo: { inicio: string; fim: string }
   tem_dados: boolean
@@ -15,6 +19,9 @@ export interface DatabricksResumo {
   por_sku: { sku_name: string; custo: number }[]
   por_usuario: { usuario: string; custo: number }[]
   free_vs_pago: { free: number; pago: number }
+  por_job: { job_id: string; job_name: string | null; custo: number }[]
+  por_cluster: { cluster_id: string; custo: number }[]
+  por_warehouse: { warehouse_id: string; custo: number }[]
 }
 
 // escopo_tipo 'tag' filtra por custom_tags->>tag_key = tag_valor (projeto/time/centro de

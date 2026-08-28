@@ -7488,7 +7488,7 @@ app.put('/api/databricks-coleta/config/:id/agendamento', authMiddleware, dbMiddl
 // sem necessidade do cache de 5min usado lá (YAGNI aqui).
 app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    let { data_inicio, data_fim, workspace_id, sku_name, usuario } = req.query;
+    let { data_inicio, data_fim, workspace_id, sku_name, usuario, job_id, cluster_id, warehouse_id } = req.query;
     if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
       const fim = new Date();
       const ini = new Date(fim);
@@ -7498,19 +7498,37 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
     }
     let where = `usage_date >= $1 AND usage_date <= $2`;
     const params = [data_inicio, data_fim];
-    // Drill-down (dashboard): clicar num item de Workspace/SKU/Usuário reconsulta TODAS
-    // as agregações abaixo já escopadas — cada card passa a mostrar a composição DENTRO
-    // do filtro ativo (ex: SKUs só daquele workspace), não uma seleção client-side sobre
-    // um /resumo genérico (o endpoint só devolve agregados, nunca as linhas cruas).
-    // 'usuario' precisa de um sentinel pro caso "Não identificado" (usage_metadata sem
-    // run_as vira usuario='' no banco) — usuario='' via querystring vira ausente
-    // (`?usuario=` é indistinguível de omitido em vários clientes), então o card usa
-    // '__vazio__' explicitamente pra esse caso.
+    // Drill-down (dashboard): clicar num item de Workspace/SKU/Usuário/Job/Cluster/Warehouse
+    // reconsulta TODAS as agregações abaixo já escopadas — cada card passa a mostrar a
+    // composição DENTRO do filtro ativo (ex: SKUs só daquele job), não uma seleção
+    // client-side sobre um /resumo genérico (o endpoint só devolve agregados, nunca as
+    // linhas cruas). 'usuario' precisa de um sentinel pro caso "Não identificado"
+    // (usage_metadata sem run_as vira usuario='' no banco) — usuario='' via querystring
+    // vira ausente (`?usuario=` é indistinguível de omitido em vários clientes), então o
+    // card usa '__vazio__' explicitamente pra esse caso.
     if (workspace_id) { params.push(workspace_id); where += ` AND workspace_id = $${params.length}`; }
     if (sku_name) { params.push(sku_name); where += ` AND sku_name = $${params.length}`; }
     if (usuario) { params.push(usuario === '__vazio__' ? '' : usuario); where += ` AND COALESCE(usuario,'') = $${params.length}`; }
+    if (job_id) { params.push(job_id); where += ` AND usage_metadata->>'job_id' = $${params.length}`; }
+    if (cluster_id) { params.push(cluster_id); where += ` AND usage_metadata->>'cluster_id' = $${params.length}`; }
+    if (warehouse_id) { params.push(warehouse_id); where += ` AND usage_metadata->>'warehouse_id' = $${params.length}`; }
 
-    const [rTotal, rMes, rWs, rSku, rUser, rFree] = await Promise.all([
+    // por_job/por_cluster/por_warehouse — zero coleta nova: usage_metadata (JSONB, já
+    // capturado por recurso desde a granularidade por-recurso) já traz job_id/job_name/
+    // cluster_id/warehouse_id quando aplicável (confirmado na documentação oficial do
+    // schema de system.billing.usage, pesquisada 2026-08-28) — só faltava a agregação.
+    // Filtra por `usage_metadata->>'chave' IS NOT NULL`, não pelo operador de existência
+    // de chave (`?`) — usage_metadata é uma STRUCT no Databricks, então job_id/cluster_id/
+    // warehouse_id SEMPRE existem como campo, só variam entre um valor real e `null`
+    // quando não aplicável (ex: linha de storage não tem job_id). `?` (existência de
+    // chave) retornaria true pra toda linha mesmo quando o valor é null, empurrando um
+    // bucket gigante "job_id: null" pro topo do ranking — bug real encontrado testando
+    // contra os dados sintéticos desta sessão (job_id sempre presente como chave, null
+    // quando o produto não é JOBS). Sem nome amigável pra cluster/warehouse
+    // (usage_metadata não traz cluster_name, só node_type; nome de verdade precisaria de
+    // uma coleta nova contra system.compute.clusters, fora de escopo desta rodada) — job
+    // usa job_name quando disponível, cluster/warehouse mostram só o id.
+    const [rTotal, rMes, rWs, rSku, rUser, rFree, rJob, rCluster, rWarehouse] = await Promise.all([
       pool.query(`SELECT COALESCE(SUM(custo_estimado),0) AS total, COUNT(*) AS linhas FROM databricks_consumo WHERE ${where}`, params),
       pool.query(`SELECT to_char(usage_date,'YYYY-MM') AS mes, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 1`, params),
       pool.query(`SELECT workspace_id, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
@@ -7522,6 +7540,12 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
            COALESCE(SUM(custo_estimado) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS pago
          FROM databricks_consumo WHERE ${where}`, params
       ),
+      pool.query(`SELECT usage_metadata->>'job_id' AS job_id, MAX(usage_metadata->>'job_name') AS job_name, SUM(custo_estimado) AS custo
+        FROM databricks_consumo WHERE ${where} AND usage_metadata->>'job_id' IS NOT NULL GROUP BY 1 ORDER BY 3 DESC LIMIT 10`, params),
+      pool.query(`SELECT usage_metadata->>'cluster_id' AS cluster_id, SUM(custo_estimado) AS custo
+        FROM databricks_consumo WHERE ${where} AND usage_metadata->>'cluster_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
+      pool.query(`SELECT usage_metadata->>'warehouse_id' AS warehouse_id, SUM(custo_estimado) AS custo
+        FROM databricks_consumo WHERE ${where} AND usage_metadata->>'warehouse_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
     ]);
 
     res.json({
@@ -7533,6 +7557,9 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
       por_sku: rSku.rows,
       por_usuario: rUser.rows.map(r => ({ usuario: r.usuario || 'Não identificado', custo: r.custo })),
       free_vs_pago: rFree.rows[0],
+      por_job: rJob.rows,
+      por_cluster: rCluster.rows,
+      por_warehouse: rWarehouse.rows,
     });
   } catch (e) { _dbErr(res, e); }
 });

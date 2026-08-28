@@ -1598,6 +1598,64 @@ Sources: [Manage budgets for Unity AI Gateway](https://docs.databricks.com/aws/e
 [Budgets API — Get budget](https://docs.databricks.com/api/account/budgets/get),
 [Budgets API — List](https://docs.databricks.com/api/account/budgets)
 
+### Coleta Databricks — Dashboard: Custo por Job/Cluster/Warehouse (2026-08-28)
+
+Pedido do usuário depois de descobrir (pesquisa na documentação oficial, ver "Quotas Genie"
+acima) que `system.billing.usage.usage_metadata` já traz `job_id`/`job_name`/`cluster_id`/
+`warehouse_id` — dado que **já coletamos** desde a granularidade por-recurso (Fase 2), só
+nunca tinha sido agregado. **Zero coleta nova** — diferente de inventário de Jobs/Clusters
+(que exigiria `system.lakeflow.jobs`/`system.compute.clusters`, fora de escopo desta
+rodada), isto é só mais 3 queries de agregação sobre dado que já está em
+`databricks_consumo`, mesmo padrão de `por_workspace`/`por_sku`/`por_usuario`.
+
+**`GET /api/databricks-coleta/resumo` ganhou `por_job`/`por_cluster`/`por_warehouse`** +
+3 novos filtros de drill-down (`job_id`/`cluster_id`/`warehouse_id`), aplicados no mesmo
+`where` compartilhado por todas as agregações da rota — clicar num job, por exemplo,
+reconsulta workspace/SKU/usuário/cluster/warehouse já escopados a esse job (confirmado via
+Playwright: card "Por Warehouse" mostra "Sem dados no período" corretamente quando o job
+selecionado nunca usou SQL Warehouse).
+
+**Bug real encontrado e corrigido durante a verificação — bucket "null" gigante no topo do
+ranking**: o filtro inicial usava `usage_metadata ? 'job_id'` (operador JSONB de
+**existência de chave**), mas `usage_metadata` é uma STRUCT no Databricks — `job_id`/
+`cluster_id`/`warehouse_id` **sempre existem como campo**, só variam entre um valor real e
+`null` quando não aplicável (ex: uma linha de storage não tem `job_id`, mas o campo em si
+está presente, só nulo). `?` retorna `true` pra toda linha independente do valor, então
+`GROUP BY usage_metadata->>'job_id'` produzia um bucket `job_id: null` somando TODO o custo
+das linhas sem job (R$ 73 mil, maior que qualquer job real de ~R$ 100) — encontrado testando
+contra os dados sintéticos desta sessão (o gerador sempre inclui a chave `job_id` no JSON,
+`null` quando o produto não é JOBS, replicando fielmente o comportamento real de uma STRUCT
+Databricks serializada). Corrigido trocando pra `usage_metadata->>'job_id' IS NOT NULL`
+(extrai o valor e testa null) nos 3 filtros — únicos itens com valor real aparecem no
+ranking, sem bucket fantasma.
+
+**Segundo bug real encontrado e corrigido — o `queryKey` do React Query não incluía os 3
+filtros novos**: `resumoQuery` (`DatabricksDashboardView.tsx`) continuava com
+`['databricks-resumo', periodo.inicio, periodo.fim, filtros.workspace_id, filtros.sku_name,
+filtros.usuario]` — sem `filtros.job_id`/`cluster_id`/`warehouse_id` na chave, clicar num
+item de Job/Cluster/Warehouse atualizava o estado (o chip "Detalhando por: Job: ..."
+aparecia) mas o React Query **nunca refazia a consulta**, já que pra ele nada relevante
+tinha mudado na chave — os outros cards continuavam mostrando os números não-filtrados,
+silenciosamente incoerentes com o chip exibido. Encontrado pelo próprio teste novo (a
+asserção de que a query seria chamada com `job_id` never disparava) antes de reportar a
+feature como pronta — corrigido incluindo os 3 campos na `queryKey`.
+
+**Sem nome amigável pra Cluster/Warehouse** — `usage_metadata` não traz `cluster_name`
+(só `node_type`) nem nenhum nome de warehouse; mostrar isso exigiria a coleta de inventário
+(`system.compute.clusters`) ainda fora de escopo. Job usa `job_name` quando presente
+(`MAX(usage_metadata->>'job_name')` — um job pode ter o nome ausente em execuções antigas,
+`MAX` pega qualquer valor não-nulo do grupo), caindo pro `job_id` cru quando ausente.
+
+**Confirmado: SQL Warehouse não tem system table de inventário** (pesquisado na
+documentação oficial) — "essas tabelas [system.compute.*] só cobrem all-purpose e jobs
+compute, não serverless nem SQL warehouses". Custo por warehouse continua possível (via
+`usage_metadata.warehouse_id`, implementado aqui), mas nome/dono/tamanho do warehouse só
+via a Warehouses REST API de verdade (`GET /api/2.0/sql/warehouses`) — não implementado.
+
+**Verificado via Playwright contra o servidor real** (dados sintéticos desta sessão):
+3 cards novos populados corretamente após o fix do bucket null; drill-down por Job
+reconsulta e escopa todos os outros cards, incluindo o estado vazio do card Warehouse.
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

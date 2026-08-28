@@ -170,6 +170,9 @@ const FILTRO_LABELS: Record<keyof DatabricksResumoFiltros, string> = {
   workspace_id: 'Workspace',
   sku_name: 'SKU',
   usuario: 'Usuário',
+  job_id: 'Job',
+  cluster_id: 'Cluster',
+  warehouse_id: 'Warehouse',
 }
 function labelFiltroValor(campo: keyof DatabricksResumoFiltros, valor: string): string {
   if (campo === 'usuario' && valor === '__vazio__') return 'Não identificado'
@@ -184,7 +187,7 @@ export default function DatabricksDashboardView() {
   const [filtros, setFiltros] = useState<DatabricksResumoFiltros>({})
 
   const resumoQuery = useQuery({
-    queryKey: ['databricks-resumo', periodo.inicio, periodo.fim, filtros.workspace_id, filtros.sku_name, filtros.usuario],
+    queryKey: ['databricks-resumo', periodo.inicio, periodo.fim, filtros.workspace_id, filtros.sku_name, filtros.usuario, filtros.job_id, filtros.cluster_id, filtros.warehouse_id],
     queryFn: () => getDatabricksResumo(periodo.inicio, periodo.fim, filtros),
   })
 
@@ -328,7 +331,7 @@ export default function DatabricksDashboardView() {
           </div>
 
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            🔍 Clique num item de Workspace, SKU ou Usuário para detalhar os demais números por esse filtro — clique de novo pra remover.
+            🔍 Clique num item de Workspace, SKU, Usuário, Job, Cluster ou Warehouse para detalhar os demais números por esse filtro — clique de novo pra remover.
           </div>
           <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
             <RankingCard
@@ -352,6 +355,30 @@ export default function DatabricksDashboardView() {
               hint="Usuário vem de identity_metadata.run_as (System Tables)"
               activeValue={filtros.usuario ?? null}
               onToggle={(v) => toggleFiltro('usuario', v)}
+            />
+            <RankingCard
+              title="Por Job"
+              color="var(--orange,#ff8c42)"
+              items={resumo.por_job.map((j) => ({ custo: j.custo, label: j.job_name || j.job_id, value: j.job_id }))}
+              hint="Job/nome vêm de usage_metadata (System Tables) — só aparece quando a linha de billing veio de job compute"
+              activeValue={filtros.job_id ?? null}
+              onToggle={(v) => toggleFiltro('job_id', v)}
+            />
+            <RankingCard
+              title="Por Cluster"
+              color="var(--accent)"
+              items={resumo.por_cluster.map((c) => ({ custo: c.custo, label: c.cluster_id, value: c.cluster_id }))}
+              hint="Sem nome amigável — inventário de clusters (dono, tags) ainda não é coletado, só o ID"
+              activeValue={filtros.cluster_id ?? null}
+              onToggle={(v) => toggleFiltro('cluster_id', v)}
+            />
+            <RankingCard
+              title="Por Warehouse"
+              color="var(--blue,#4da6ff)"
+              items={resumo.por_warehouse.map((w) => ({ custo: w.custo, label: w.warehouse_id, value: w.warehouse_id }))}
+              hint="Só SQL Warehouse — Databricks não tem system table de inventário pra warehouses"
+              activeValue={filtros.warehouse_id ?? null}
+              onToggle={(v) => toggleFiltro('warehouse_id', v)}
             />
           </div>
         </>

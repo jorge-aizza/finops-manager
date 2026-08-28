@@ -20,6 +20,7 @@ function makeResumo(overrides: Partial<DatabricksResumo> = {}): DatabricksResumo
     por_sku: [{ sku_name: 'PREMIUM_ALL_PURPOSE_COMPUTE', custo: 9000 }, { sku_name: 'GENIE_FREE_USAGE', custo: 0 }],
     por_usuario: [{ usuario: 'joao@empresa.com', custo: 6000 }, { usuario: 'Não identificado', custo: 2000 }],
     free_vs_pago: { free: 3000, pago: 12000 },
+    por_job: [], por_cluster: [], por_warehouse: [],
     ...overrides,
   }
 }
@@ -96,6 +97,27 @@ describe('DatabricksDashboardView', () => {
     // clicar de novo no mesmo item remove o filtro (toggle)
     await user.click(screen.getByText('ws-prod'))
     await waitFor(() => expect(screen.queryByText('Detalhando por:')).not.toBeInTheDocument())
+  })
+
+  it('mostra Por Job/Cluster/Warehouse (agregado sobre usage_metadata) e permite drill-down por job', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo({
+      por_job: [{ job_id: '123', job_name: 'ETL Noturno', custo: 4000 }, { job_id: '456', job_name: null, custo: 1000 }],
+      por_cluster: [{ cluster_id: 'cl-abc', custo: 3000 }],
+      por_warehouse: [{ warehouse_id: 'wh-xyz', custo: 2000 }],
+    }))
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    expect(screen.getByText('ETL Noturno')).toBeInTheDocument()
+    expect(screen.getByText('456')).toBeInTheDocument() // sem job_name, cai pro job_id
+    expect(screen.getByText('cl-abc')).toBeInTheDocument()
+    expect(screen.getByText('wh-xyz')).toBeInTheDocument()
+
+    await user.click(screen.getByText('ETL Noturno'))
+    await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), { job_id: '123' },
+    ))
   })
 
   it('lista orçamentos existentes na tabela', async () => {
