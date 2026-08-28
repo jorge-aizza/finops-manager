@@ -538,7 +538,18 @@ function genieEscopoLabel(b: GenieBudget): string {
 function GenieBudgetsCard() {
   const queryClient = useQueryClient()
   const [modalOpen, setModalOpen] = useState(false)
+  const [editingBudget, setEditingBudget] = useState<GenieBudget | null>(null)
   const budgetsQuery = useQuery({ queryKey: ['genie-budgets'], queryFn: listGenieBudgets })
+
+  function handleEdit(b: GenieBudget) {
+    setEditingBudget(b)
+    setModalOpen(true)
+  }
+
+  function handleClose() {
+    setModalOpen(false)
+    setEditingBudget(null)
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteGenieBudget(id),
@@ -559,7 +570,7 @@ function GenieBudgetsCard() {
       <div className="card-header">
         <span className="card-title">🧞 Quotas Genie (Databricks nativo)</span>
         <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>{budgetsQuery.data?.length ?? 0}</span>
-        <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => setModalOpen(true)}>
+        <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingBudget(null); setModalOpen(true) }}>
           Nova Quota Genie
         </button>
       </div>
@@ -594,9 +605,14 @@ function GenieBudgetsCard() {
                         : <span className="badge">✉ Alerta</span>}
                     </td>
                     <td>
-                      <button className="btn-icon delete" title="Excluir" onClick={() => handleDelete(b)}>
-                        <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
-                      </button>
+                      <div className="table-actions">
+                        <button className="btn-icon" title="Editar" onClick={() => handleEdit(b)}>
+                          <svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" /></svg>
+                        </button>
+                        <button className="btn-icon delete" title="Excluir" onClick={() => handleDelete(b)}>
+                          <svg viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V2h4v2M5 4l1 9h4l1-9" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -608,7 +624,7 @@ function GenieBudgetsCard() {
           </table>
         </div>
       )}
-      {modalOpen && <GenieBudgetModal onClose={() => setModalOpen(false)} />}
+      {modalOpen && <GenieBudgetModal budget={editingBudget} onClose={handleClose} />}
     </div>
   )
 }

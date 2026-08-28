@@ -1746,6 +1746,48 @@ Databricks de verdade (sem conta disponível neste ambiente, mesma ressalva de s
 só a mecânica de UI (adicionar/remover/validar) foi confirmada, com dados mockados nos
 testes automatizados.
 
+### Coleta Databricks — edição de Quotas Genie (2026-08-28)
+
+Pedido do usuário: "e posso configurar por aqui também?", sobre quotas Genie já
+existentes na conta (criadas pela nossa tela ou direto no console do Databricks). A v1
+anterior só tinha Create/List/Delete — editar exigia excluir e recriar, porque a
+pesquisa inicial não tinha confirmado um endpoint de atualização. Pesquisado de novo a
+pedido explícito ("por favor") e confirmado: **existe sim** — `PUT
+/api/2.1/accounts/{account_id}/budgets/{budget_id}`, só não apareceu na primeira
+varredura da documentação.
+
+**PUT é substituição total, não PATCH parcial** — mesmo payload do POST de criação, só
+que no path `/budgets/{id}` e incluindo `budget_configuration_id` no corpo. Validação e
+montagem do payload extraídas pra `_validarGenieBudgetPayload(body, accountId)`
+(server.js), compartilhada entre `POST` e o novo `PUT /genie-budgets/:id` — mesmas duas
+regras de negócio valem pros dois (guard-rail de `BLOCK_USAGE`/`confirmar_bloqueio`,
+overrides só com escopo "por usuário").
+
+**`GenieBudgetModal.tsx` ganhou um prop opcional `budget`** — quando presente, todos os
+campos são pré-preenchidos a partir do budget real (nome, workspace IDs, tags, limite,
+escopo, ação, e-mail de destino, overrides existentes) e o "Salvar" chama
+`updateGenieBudget(id, input)` em vez de `createGenieBudget(input)`. **Overrides já
+existentes não têm nome/e-mail na resposta da API** (só `principal_id`, per a
+documentação) — mostrados como `"ID: <principal_id>"` até serem removidos; overrides
+novos adicionados durante a mesma edição mostram o nome real (resolvido pela busca
+SCIM). **Checkbox de confirmação de bloqueio sempre começa desmarcado, mesmo editando
+uma quota que já bloqueia** — decisão deliberada: cada alteração salva numa quota de
+bloqueio exige reconfirmação explícita, não herda a confirmação da criação original.
+
+**Botão "Editar" novo em `GenieBudgetsCard`** (`DatabricksDashboardView.tsx`), ao lado
+do "Excluir" já existente — abre o mesmo modal com `budget={b}`; "Nova Quota Genie"
+continua abrindo com `budget={null}` (`editingBudget` resetado explicitamente nos dois
+pontos de entrada, pra não vazar estado de uma edição anterior pra um "Novo" seguinte).
+
+**Verificado**: `tsc -b`, testes novos (3 em `GenieBudgetModal.test.tsx` — pré-
+preenchimento completo, chamada de `updateGenieBudget` com o id certo em vez de
+`createGenieBudget`, reconfirmação de bloqueio exigida ao editar; 1 em
+`DatabricksDashboardView.test.tsx` — botão "Editar" abre o modal pré-preenchido), e a
+rota `PUT /genie-budgets/:id` confirmada registrada contra o servidor real (mesmo erro
+de credencial do GET, não um 404 de rota inexistente — prova que o roteamento está
+correto). **Não validado**: um ciclo de edição completo contra uma conta Databricks
+real (nenhuma disponível neste ambiente, mesma ressalva de sempre).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

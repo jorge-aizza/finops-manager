@@ -66,6 +66,7 @@ export interface GenieBudgetAlertConfiguration {
   quantity_threshold: string
   scope_type: GenieScopeType
   action_configurations: GenieBudgetActionConfiguration[]
+  principal_overrides?: GenieBudgetPrincipalOverride[]
 }
 
 export interface GenieBudgetFilter {

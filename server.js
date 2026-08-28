@@ -7902,62 +7902,85 @@ app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, as
   }
 });
 
+// Validação + montagem do payload — compartilhado entre POST (criar) e PUT (atualizar,
+// 2026-08-28): a Budgets API não tem PATCH parcial, PUT é substituição total do budget
+// (mesmo payload de criação, só que no path /budgets/{id} em vez de /budgets). Extraído
+// pra não duplicar as duas validações (BLOCK_USAGE/confirmar_bloqueio e overrides só com
+// escopo per-user) entre as duas rotas.
+function _validarGenieBudgetPayload(body, accountId) {
+  const { display_name, workspace_ids, tags, threshold, confirmar_bloqueio, principal_overrides } = body;
+  if (!display_name || !threshold?.quantity_threshold || !threshold?.scope_type || !threshold?.action_type) {
+    return { error: 'display_name e threshold (quantity_threshold, scope_type, action_type) são obrigatórios' };
+  }
+  // Guard-rail: BLOCK_USAGE bloqueia acesso real ao Genie assim que o threshold é
+  // cruzado — aplicado pelo próprio Databricks, sem nenhuma checagem nossa depois de
+  // criado/atualizado. Exige confirmação explícita no BODY da requisição (não só um
+  // confirm() no frontend) — quem chamar essa rota direto (curl/script) também precisa
+  // declarar ciência, mesmo padrão já usado pro segundo gate do Expurgo de dados.
+  if (threshold.action_type === 'BLOCK_USAGE' && !confirmar_bloqueio) {
+    return { error: 'Threshold com ação BLOCK_USAGE requer confirmar_bloqueio:true no payload — essa ação bloqueia acesso real ao Genie assim que o limite é cruzado.' };
+  }
+  // Overrides (limite individual por usuário/grupo) só fazem sentido com escopo "por
+  // usuário" — a documentação do Databricks é explícita: overrides são ignorados
+  // silenciosamente em budgets de escopo compartilhado. Bloqueado aqui com uma mensagem
+  // clara em vez de deixar o admin descobrir isso só depois de salvar.
+  const temOverrides = Array.isArray(principal_overrides) && principal_overrides.length > 0;
+  if (temOverrides && threshold.scope_type !== 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER') {
+    return { error: 'Overrides por usuário/grupo só valem com escopo "Por usuário" — o Databricks os ignora silenciosamente em budgets de escopo compartilhado.' };
+  }
+
+  const filter = {};
+  if (Array.isArray(workspace_ids) && workspace_ids.length) filter.workspace_id = { operator: 'IN', values: workspace_ids };
+  if (Array.isArray(tags) && tags.length) filter.tags = tags.map(t => ({ key: t.key, value: { operator: 'IN', values: [t.value] } }));
+
+  const actionConfig = { action_type: threshold.action_type };
+  if (threshold.action_type === 'EMAIL_NOTIFICATION' && threshold.email_target) actionConfig.target = threshold.email_target;
+
+  const alertConfig = {
+    time_period: 'MONTH',
+    trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
+    quantity_type: 'LIST_PRICE_DOLLARS_USD',
+    quantity_threshold: String(threshold.quantity_threshold),
+    scope_type: threshold.scope_type,
+    action_configurations: [actionConfig],
+  };
+  if (temOverrides) {
+    alertConfig.principal_overrides = principal_overrides.map(p => ({
+      principal_id: Number(p.principal_id),
+      override_threshold: String(p.override_threshold),
+    }));
+  }
+
+  return {
+    value: {
+      display_name,
+      account_id: accountId,
+      resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+      filter,
+      alert_configurations: [alertConfig],
+    },
+  };
+}
+
 app.post('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { display_name, workspace_ids, tags, threshold, confirmar_bloqueio, principal_overrides } = req.body;
-    if (!display_name || !threshold?.quantity_threshold || !threshold?.scope_type || !threshold?.action_type) {
-      return res.status(400).json({ error: 'display_name e threshold (quantity_threshold, scope_type, action_type) são obrigatórios' });
-    }
-    // Guard-rail: BLOCK_USAGE bloqueia acesso real ao Genie assim que o threshold é
-    // cruzado — aplicado pelo próprio Databricks, sem nenhuma checagem nossa depois de
-    // criado. Exige confirmação explícita no BODY da requisição (não só um confirm() no
-    // frontend) — quem chamar essa rota direto (curl/script) também precisa declarar
-    // ciência, mesmo padrão já usado pro segundo gate do Expurgo de dados.
-    if (threshold.action_type === 'BLOCK_USAGE' && !confirmar_bloqueio) {
-      return res.status(400).json({ error: 'Threshold com ação BLOCK_USAGE requer confirmar_bloqueio:true no payload — essa ação bloqueia acesso real ao Genie assim que o limite é cruzado.' });
-    }
-    // Overrides (limite individual por usuário/grupo) só fazem sentido com escopo "por
-    // usuário" — a documentação do Databricks é explícita: overrides são ignorados
-    // silenciosamente em budgets de escopo compartilhado. Bloqueado aqui com uma
-    // mensagem clara em vez de deixar o admin descobrir isso só depois de criar.
-    const temOverrides = Array.isArray(principal_overrides) && principal_overrides.length > 0;
-    if (temOverrides && threshold.scope_type !== 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER') {
-      return res.status(400).json({ error: 'Overrides por usuário/grupo só valem com escopo "Por usuário" — o Databricks os ignora silenciosamente em budgets de escopo compartilhado.' });
-    }
-
     const { accountId, token } = await _getDbxAccountCredentials();
-    const filter = {};
-    if (Array.isArray(workspace_ids) && workspace_ids.length) filter.workspace_id = { operator: 'IN', values: workspace_ids };
-    if (Array.isArray(tags) && tags.length) filter.tags = tags.map(t => ({ key: t.key, value: { operator: 'IN', values: [t.value] } }));
+    const v = _validarGenieBudgetPayload(req.body, accountId);
+    if (v.error) return res.status(400).json({ error: v.error });
+    const data = await _dbxBudgetsFetch(accountId, token, '/budgets', { method: 'POST', body: JSON.stringify({ budget: v.value }) });
+    res.json(data.budget || data);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 
-    const actionConfig = { action_type: threshold.action_type };
-    if (threshold.action_type === 'EMAIL_NOTIFICATION' && threshold.email_target) actionConfig.target = threshold.email_target;
-
-    const alertConfig = {
-      time_period: 'MONTH',
-      trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
-      quantity_type: 'LIST_PRICE_DOLLARS_USD',
-      quantity_threshold: String(threshold.quantity_threshold),
-      scope_type: threshold.scope_type,
-      action_configurations: [actionConfig],
-    };
-    if (temOverrides) {
-      alertConfig.principal_overrides = principal_overrides.map(p => ({
-        principal_id: Number(p.principal_id),
-        override_threshold: String(p.override_threshold),
-      }));
-    }
-
-    const payload = {
-      budget: {
-        display_name,
-        account_id: accountId,
-        resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
-        filter,
-        alert_configurations: [alertConfig],
-      },
-    };
-    const data = await _dbxBudgetsFetch(accountId, token, '/budgets', { method: 'POST', body: JSON.stringify(payload) });
+// PUT — substituição total (a Budgets API não tem PATCH parcial). budget_configuration_id
+// vai no corpo além do path, como a documentação exige.
+app.put('/api/databricks-coleta/genie-budgets/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { accountId, token } = await _getDbxAccountCredentials();
+    const v = _validarGenieBudgetPayload(req.body, accountId);
+    if (v.error) return res.status(400).json({ error: v.error });
+    v.value.budget_configuration_id = req.params.id;
+    const data = await _dbxBudgetsFetch(accountId, token, `/budgets/${encodeURIComponent(req.params.id)}`, { method: 'PUT', body: JSON.stringify({ budget: v.value }) });
     res.json(data.budget || data);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

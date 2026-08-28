@@ -6,6 +6,10 @@ export const listGenieBudgets = () => apiFetch<GenieBudget[]>('GET', '/databrick
 export const createGenieBudget = (input: GenieBudgetInput) =>
   apiFetch<GenieBudget>('POST', '/databricks-coleta/genie-budgets', input)
 
+// PUT — substituição total (a Budgets API do Databricks não tem PATCH parcial).
+export const updateGenieBudget = (id: string, input: GenieBudgetInput) =>
+  apiFetch<GenieBudget>('PUT', `/databricks-coleta/genie-budgets/${encodeURIComponent(id)}`, input)
+
 export const deleteGenieBudget = (id: string) =>
   apiFetch<{ ok: boolean }>('DELETE', `/databricks-coleta/genie-budgets/${encodeURIComponent(id)}`)
 

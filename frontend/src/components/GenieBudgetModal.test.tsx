@@ -13,11 +13,11 @@ const createdBudget: GenieBudget = {
   alert_configurations: [],
 }
 
-function renderWithClient() {
+function renderWithClient(budget: GenieBudget | null = null) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
-      <GenieBudgetModal onClose={vi.fn()} />
+      <GenieBudgetModal budget={budget} onClose={vi.fn()} />
     </QueryClientProvider>,
   )
 }
@@ -175,5 +175,61 @@ describe('GenieBudgetModal', () => {
 
     await user.click(screen.getByTitle('Remover'))
     expect(screen.queryByText('Maria Souza')).not.toBeInTheDocument()
+  })
+
+  describe('modo edição', () => {
+    const budgetExistente: GenieBudget = {
+      budget_configuration_id: 'gb-existente', display_name: 'Quota Existente', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+      filter: { workspace_id: { values: [111, 222] }, tags: [{ key: 'projeto', value: { values: ['finops-core'] } }] },
+      alert_configurations: [{
+        quantity_threshold: '750', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER',
+        action_configurations: [{ action_type: 'EMAIL_NOTIFICATION', target: 'finops@vivo.com.br' }],
+        principal_overrides: [{ principal_id: 12345, override_threshold: '50' }],
+      }],
+    }
+
+    it('pré-preenche todos os campos a partir do budget existente', () => {
+      renderWithClient(budgetExistente)
+
+      expect(screen.getByText('🧞 Editar Quota Genie')).toBeInTheDocument()
+      expect(screen.getByLabelText('Nome')).toHaveValue('Quota Existente')
+      expect(screen.getByLabelText('Workspace IDs (opcional, separados por vírgula)')).toHaveValue('111, 222')
+      expect(screen.getByPlaceholderText('chave')).toHaveValue('projeto')
+      expect(screen.getByPlaceholderText('valor')).toHaveValue('finops-core')
+      expect(screen.getByLabelText('Limite mensal (US$)')).toHaveValue(750)
+      expect(screen.getByLabelText('Escopo do limite')).toHaveValue('ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
+      expect(screen.getByLabelText('E-mail de destino (opcional)')).toHaveValue('finops@vivo.com.br')
+      // override existente não tem nome/e-mail na resposta da API — mostra o ID
+      expect(screen.getByText('ID: 12345')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Salvar alterações' })).toBeInTheDocument()
+    })
+
+    it('salvar chama updateGenieBudget com o id do budget, não createGenieBudget', async () => {
+      const user = userEvent.setup()
+      vi.mocked(genieBudgetsApi.updateGenieBudget).mockResolvedValue(budgetExistente)
+      renderWithClient(budgetExistente)
+
+      await user.click(screen.getByRole('button', { name: 'Salvar alterações' }))
+
+      expect(genieBudgetsApi.updateGenieBudget).toHaveBeenCalledWith('gb-existente', expect.objectContaining({
+        display_name: 'Quota Existente',
+        workspace_ids: [111, 222],
+      }))
+      expect(genieBudgetsApi.createGenieBudget).not.toHaveBeenCalled()
+    })
+
+    it('editar uma quota que já bloqueia exige reconfirmar o checkbox de bloqueio', async () => {
+      const bloqueioExistente: GenieBudget = {
+        ...budgetExistente,
+        alert_configurations: [{
+          ...budgetExistente.alert_configurations[0],
+          action_configurations: [{ action_type: 'BLOCK_USAGE' }],
+        }],
+      }
+      renderWithClient(bloqueioExistente)
+
+      expect(screen.getByText('⚠ Esta ação bloqueia acesso real ao Genie')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Salvar com bloqueio/ })).toBeDisabled()
+    })
   })
 })

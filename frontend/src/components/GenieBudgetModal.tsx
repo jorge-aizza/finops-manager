@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { createGenieBudget, searchGeniePrincipals } from '../api/genieBudgets'
-import type { GenieActionType, GenieBudgetTagInput, GeniePrincipal, GenieScopeType } from '../types/genieBudgets'
+import { createGenieBudget, searchGeniePrincipals, updateGenieBudget } from '../api/genieBudgets'
+import type { GenieActionType, GenieBudget, GenieBudgetTagInput, GeniePrincipal, GenieScopeType } from '../types/genieBudgets'
 
 interface Props {
+  budget?: GenieBudget | null
   onClose: () => void
 }
 
@@ -13,32 +14,46 @@ interface OverrideRow {
   override_threshold: string
 }
 
-// Cria uma quota Genie via Databricks Account Budgets API (resource_type=
+// Cria (ou edita — PUT é substituição total, a Budgets API não tem PATCH parcial) uma
+// quota Genie via Databricks Account Budgets API (resource_type=
 // BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY) — a Databricks aplica isso de verdade,
-// inclusive podendo BLOQUEAR acesso ao Genie (action_type=BLOCK_USAGE). Sem edição
-// nesta v1 (múltiplos thresholds compartilhados — a API suporta até 4 — ficaram de
-// fora, dado o risco de configurar algo tão sensível sem poder validar contra uma
-// conta real; overrides individuais por usuário/grupo, sim, foram implementados).
-export default function GenieBudgetModal({ onClose }: Props) {
+// inclusive podendo BLOQUEAR acesso ao Genie (action_type=BLOCK_USAGE). Múltiplos
+// thresholds compartilhados (a API suporta até 4) continuam fora do escopo — só o
+// primeiro threshold é editável por aqui, dado o risco de configurar algo tão sensível
+// sem poder validar contra uma conta real.
+export default function GenieBudgetModal({ budget, onClose }: Props) {
+  const isEdit = !!budget
+  const alertaExistente = budget?.alert_configurations?.[0]
   const queryClient = useQueryClient()
-  const [nome, setNome] = useState('')
-  const [workspaceIdsRaw, setWorkspaceIdsRaw] = useState('')
-  const [tags, setTags] = useState<GenieBudgetTagInput[]>([])
-  const [valor, setValor] = useState('')
-  const [scopeType, setScopeType] = useState<GenieScopeType>('ALERT_CONFIGURATION_SCOPE_TYPE_SHARED')
-  const [actionType, setActionType] = useState<GenieActionType>('EMAIL_NOTIFICATION')
-  const [emailTarget, setEmailTarget] = useState('')
+  const [nome, setNome] = useState(budget?.display_name || '')
+  const [workspaceIdsRaw, setWorkspaceIdsRaw] = useState(budget?.filter?.workspace_id?.values?.join(', ') || '')
+  const [tags, setTags] = useState<GenieBudgetTagInput[]>(
+    budget?.filter?.tags?.map((t) => ({ key: t.key, value: t.value?.values?.[0] || '' })) || [],
+  )
+  const [valor, setValor] = useState(alertaExistente?.quantity_threshold || '')
+  const [scopeType, setScopeType] = useState<GenieScopeType>((alertaExistente?.scope_type as GenieScopeType) || 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED')
+  const [actionType, setActionType] = useState<GenieActionType>((alertaExistente?.action_configurations?.[0]?.action_type as GenieActionType) || 'EMAIL_NOTIFICATION')
+  const [emailTarget, setEmailTarget] = useState(alertaExistente?.action_configurations?.[0]?.target || '')
+  // Sempre começa desmarcado, mesmo editando uma quota que já bloqueia — exige uma
+  // confirmação nova a cada alteração salva, não só na criação original.
   const [confirmarBloqueio, setConfirmarBloqueio] = useState(false)
 
   // Overrides — limite individual por usuário (busca por e-mail) ou grupo (busca por
   // nome) via Account SCIM API, resolvendo pro principal_id numérico que a Budgets API
   // exige. Só faz sentido (e só é aceito pelo servidor) com escopo "Por usuário" — ver
-  // guard-rail em POST /genie-budgets.
+  // guard-rail em POST/PUT /genie-budgets. Overrides já existentes (vindos de `budget`)
+  // não têm nome/e-mail na resposta da API — só principal_id —, então mostram "ID: N"
+  // até serem removidos; novos overrides adicionados na mesma sessão de edição mostram
+  // o nome real (resolvido pela busca).
   const [overrideTipo, setOverrideTipo] = useState<'user' | 'group'>('user')
   const [overrideQuery, setOverrideQuery] = useState('')
   const [overrideResultados, setOverrideResultados] = useState<GeniePrincipal[]>([])
   const [overrideBuscando, setOverrideBuscando] = useState(false)
-  const [overrides, setOverrides] = useState<OverrideRow[]>([])
+  const [overrides, setOverrides] = useState<OverrideRow[]>(
+    alertaExistente?.principal_overrides?.map((o) => ({
+      principal_id: o.principal_id, nome: `ID: ${o.principal_id}`, override_threshold: o.override_threshold,
+    })) || [],
+  )
 
   const workspaceIds = workspaceIdsRaw.split(',').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => !isNaN(n))
   const isPerUser = scopeType === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER'
@@ -87,39 +102,42 @@ export default function GenieBudgetModal({ onClose }: Props) {
   const podeConfirmar = !!nome && !!valor && parseFloat(valor) > 0 && (!isBloqueio || confirmarBloqueio) && overridesValidos
 
   const salvarMutation = useMutation({
-    mutationFn: () => createGenieBudget({
-      display_name: nome,
-      workspace_ids: workspaceIds,
-      tags: tags.filter((t) => t.key && t.value),
-      threshold: {
-        quantity_threshold: valor,
-        scope_type: scopeType,
-        action_type: actionType,
-        email_target: actionType === 'EMAIL_NOTIFICATION' ? (emailTarget || undefined) : undefined,
-      },
-      confirmar_bloqueio: isBloqueio ? true : undefined,
-      principal_overrides: isPerUser && overrides.length
-        ? overrides.map((o) => ({ principal_id: o.principal_id, override_threshold: o.override_threshold }))
-        : undefined,
-    }),
+    mutationFn: () => {
+      const input = {
+        display_name: nome,
+        workspace_ids: workspaceIds,
+        tags: tags.filter((t) => t.key && t.value),
+        threshold: {
+          quantity_threshold: valor,
+          scope_type: scopeType,
+          action_type: actionType,
+          email_target: actionType === 'EMAIL_NOTIFICATION' ? (emailTarget || undefined) : undefined,
+        },
+        confirmar_bloqueio: isBloqueio ? true : undefined,
+        principal_overrides: isPerUser && overrides.length
+          ? overrides.map((o) => ({ principal_id: o.principal_id, override_threshold: o.override_threshold }))
+          : undefined,
+      }
+      return budget ? updateGenieBudget(budget.budget_configuration_id, input) : createGenieBudget(input)
+    },
     onSuccess: () => {
-      window.showToast?.('Quota Genie criada no Databricks.', 'success')
+      window.showToast?.(isEdit ? 'Quota Genie atualizada no Databricks.' : 'Quota Genie criada no Databricks.', 'success')
       queryClient.invalidateQueries({ queryKey: ['genie-budgets'] })
       onClose()
     },
-    onError: (e: Error) => window.showToast?.('Erro ao criar quota Genie: ' + e.message, 'error'),
+    onError: (e: Error) => window.showToast?.(`Erro ao ${isEdit ? 'atualizar' : 'criar'} quota Genie: ` + e.message, 'error'),
   })
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal">
         <div className="modal-header">
-          <span>🧞 Nova Quota Genie</span>
+          <span>🧞 {isEdit ? 'Editar Quota Genie' : 'Nova Quota Genie'}</span>
           <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 14 }}>
-            Cria um orçamento nativo no Databricks (Unity AI Gateway) — o próprio Databricks aplica o limite, não o FinOps Manager. Valores em <strong>USD</strong> (moeda usada pela API de billing do Databricks).
+            {isEdit ? 'Atualiza' : 'Cria'} um orçamento nativo no Databricks (Unity AI Gateway) — o próprio Databricks aplica o limite, não o FinOps Manager. Valores em <strong>USD</strong> (moeda usada pela API de billing do Databricks).
           </div>
           <div className="form-group">
             <label htmlFor="gb-nome">Nome</label>
@@ -248,7 +266,11 @@ export default function GenieBudgetModal({ onClose }: Props) {
             disabled={salvarMutation.isPending || !podeConfirmar}
             onClick={() => salvarMutation.mutate()}
           >
-            {salvarMutation.isPending ? 'Salvando...' : isBloqueio ? 'Criar quota com bloqueio' : 'Salvar'}
+            {salvarMutation.isPending
+              ? 'Salvando...'
+              : isBloqueio
+                ? (isEdit ? 'Salvar com bloqueio' : 'Criar quota com bloqueio')
+                : (isEdit ? 'Salvar alterações' : 'Salvar')}
           </button>
         </div>
       </div>

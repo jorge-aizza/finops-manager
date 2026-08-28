@@ -157,6 +157,29 @@ describe('DatabricksDashboardView', () => {
     expect(screen.getByText('🚫 Bloqueia')).toBeInTheDocument()
   })
 
+  it('botão Editar abre o modal de Quota Genie pré-preenchido com os dados do budget', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+      {
+        budget_configuration_id: 'gb-9', display_name: 'Quota pra Editar', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+        alert_configurations: [{
+          quantity_threshold: '300', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED',
+          action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }],
+        }],
+      },
+    ])
+    const user = userEvent.setup()
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    await screen.findByText('Quota pra Editar')
+    await user.click(screen.getByRole('button', { name: 'Editar' }))
+
+    expect(await screen.findByText('🧞 Editar Quota Genie')).toBeInTheDocument()
+    expect(screen.getByLabelText('Nome')).toHaveValue('Quota pra Editar')
+    expect(screen.getByLabelText('Limite mensal (US$)')).toHaveValue(300)
+  })
+
   it('mostra a mensagem de erro do servidor quando a conexão padrão não é OAuth M2M (aba Quotas)', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     vi.mocked(genieBudgetsApi.listGenieBudgets).mockRejectedValue(new Error('A conexão padrão usa modo PAT — quotas Genie exigem OAuth M2M com Account Admin.'))
