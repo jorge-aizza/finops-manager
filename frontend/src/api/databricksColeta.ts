@@ -61,9 +61,23 @@ const normalizeResumo = (r: DatabricksResumo): DatabricksResumo => ({
   free_vs_pago: { free: Number(r.free_vs_pago.free), pago: Number(r.free_vs_pago.pago) },
 })
 
-export const getDatabricksResumo = (data_inicio?: string, data_fim?: string) => {
-  const qs = data_inicio && data_fim ? `?data_inicio=${data_inicio}&data_fim=${data_fim}` : ''
-  return apiFetch<DatabricksResumo>('GET', '/databricks-coleta/resumo' + qs).then(normalizeResumo)
+// filtros = drill-down (dashboard): clicar num item de Workspace/SKU/Usuário reconsulta
+// TODOS os cards já escopados pelo servidor (ver GET /databricks-coleta/resumo) — não é
+// filtro client-side, já que o endpoint só devolve agregados, nunca linhas cruas.
+export interface DatabricksResumoFiltros {
+  workspace_id?: string
+  sku_name?: string
+  usuario?: string // '__vazio__' representa a linha "Não identificado"
+}
+
+export const getDatabricksResumo = (data_inicio?: string, data_fim?: string, filtros?: DatabricksResumoFiltros) => {
+  const q = new URLSearchParams()
+  if (data_inicio && data_fim) { q.set('data_inicio', data_inicio); q.set('data_fim', data_fim) }
+  if (filtros?.workspace_id) q.set('workspace_id', filtros.workspace_id)
+  if (filtros?.sku_name) q.set('sku_name', filtros.sku_name)
+  if (filtros?.usuario) q.set('usuario', filtros.usuario)
+  const qs = q.toString()
+  return apiFetch<DatabricksResumo>('GET', '/databricks-coleta/resumo' + (qs ? '?' + qs : '')).then(normalizeResumo)
 }
 
 const BUDGET_NUM_FIELDS: (keyof DatabricksBudget)[] = ['valor_mensal']

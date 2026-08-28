@@ -1333,6 +1333,95 @@ justamente limpar dados antigos que o dashboard normal talvez nem esteja mostran
 registros, exato) e depois "tudo" (100 registros restantes) — os dois modos confirmados removendo
 exatamente o número previsto, tabela zerada no final. Modal renderizado via Playwright sem erro de console.
 
+### Coleta Databricks — Dashboard: tendência em barras + forecast, e drill-down (2026-08-27)
+
+Pedido do usuário: (1) trocar o gráfico "Tendência Mensal" de linha pra barra, com uma previsão de custo
+baseada na tendência de consumo; (2) poder clicar num campo (Workspace/SKU/Usuário) e ver os outros gráficos
+se reajustarem ao filtro — drill-down.
+
+**Forecast — regressão linear, não média móvel**: `frontend/src/lib/forecastLinear.ts` (função pura,
+testável — `forecastLinear.test.ts`, 8 casos: tendência de alta, de queda, plana, dados insuficientes,
+lista vazia, virada de ano, `mesesPrever=0`). Mínimos quadrados sobre `(índice do mês, custo)`, projeta 3
+meses à frente a partir do último mês real. Custo previsto nunca fica negativo (`Math.max(0, ...)`) — uma
+tendência de queda forte não deveria produzir "custo negativo" no gráfico. Com menos de 2 meses de
+histórico não há tendência calculável — retorna só o histórico, sem previsão (sem "inventar" uma reta com 1
+ponto só).
+
+**Gráfico de barras, sem lib nova** — mesma decisão já tomada pro resto do dashboard (`RankingCard`, barras
+CSS): `MonthlyBarChart` é um `<svg>` próprio em `DatabricksDashboardView.tsx`, sem `recharts`/`d3`. Barras de
+previsão usam **textura hachurada + borda tracejada** (`<pattern id="dbxForecastHatch">`, 45°) em vez de só
+uma cor mais clara — é a distinção categórica "real vs. previsto" (não uma questão de magnitude), então a
+regra do skill `dataviz` de reservar textura pro caso CVD/impressão se aplica bem: quem não distingue a cor
+mais clara do roxo sólido ainda vê a hachura. Legenda "Real"/"Previsão (tendência linear, 3 meses)" sempre
+visível quando há previsão (nunca cor sozinha carregando o significado). Rótulo de valor só nas barras de
+previsão + na última barra real (regra do skill "rótulos seletivos, nunca em todo ponto") — o histórico
+completo continua acessível via tooltip nativo (`<title>` em cada barra).
+
+**Drill-down — filtro no servidor, não client-side**: `GET /api/databricks-coleta/resumo` só devolve
+agregados (`SUM(custo_estimado) GROUP BY ...`), nunca as linhas cruas de `databricks_consumo` — filtrar no
+cliente não é possível sem essas linhas. Adicionados 3 params opcionais (`workspace_id`, `sku_name`,
+`usuario`), aplicados ao `WHERE` de **todas as 6 queries** do endpoint (total, por mês, por workspace, por
+SKU, por usuário, free×pago) — clicar num item de Workspace, por exemplo, reconsulta tudo já escopado
+àquele workspace: o próprio card "Por Workspace" passa a mostrar só aquele item (confirmando o filtro
+ativo), e os cards de SKU/Usuário/Tendência Mensal mostram a composição DENTRO daquele workspace. Mesmo
+padrão de drill-down usado em ferramentas de BI (Power BI, Looker) — não é uma seleção visual isolada, é uma
+nova consulta escopada.
+
+`usuario` precisa de um sentinel (`__vazio__`) pro caso "Não identificado" — o servidor mapeia
+`usage_metadata` sem `run_as` pra `usuario=''` no banco, e `?usuario=` (string vazia) é indistinguível de
+"parâmetro omitido" em vários pontos do stack (Express `req.query`, `URLSearchParams`), então o card usa o
+sentinel explicitamente; o servidor faz `usuario === '__vazio__' ? '' : usuario` antes de comparar com
+`COALESCE(usuario,'')`.
+
+**Frontend**: `RankingCard` (`DatabricksDashboardView.tsx`) ganhou `activeValue`/`onToggle` — cada item virou
+clicável (toggle: clicar de novo no mesmo item remove o filtro), com destaque visual via `color-mix(in srgb,
+${color} 15%, transparent)` no item ativo. **Deliberadamente não usa o padrão `${color}+'22'` (sufixo de
+alfa hex)** já usado em outras telas — aqui `color` é sempre um token `var(--accent)`/`var(--blue,#4da6ff)`/
+`var(--green,#22c55e)`, e concatenar um sufixo hex a um `var(...)` é exatamente o bug real já documentado
+acima (Cobertura, Reservas/Ações/Estimativas) — `color-mix()` aceita `var()` como argumento sem esse
+problema (a função é resolvida em tempo de paint, não por concatenação de string). Itens de ranking agora
+carregam `{label, value}` em vez de derivar o valor de filtro do texto exibido — necessário porque "Não
+identificado" (rótulo) e `__vazio__` (valor real de filtro) são coisas diferentes só na dimensão Usuário.
+
+Chips de filtro ativo ("Detalhando por: Workspace: ws-x ✕") abaixo do seletor de período — clicar no chip ou
+em "Limpar filtros" reseta. Dropdown de workspaces do modal "Novo Orçamento" usa uma **query separada**
+(`workspacesQuery`, range fixo `2015-01-01` → hoje, sem os filtros de drill-down) — se reaproveitasse
+`resumoQuery.data.por_workspace`, um drill-down ativo por workspace reduziria essa lista a 1 item só,
+quebrando a criação de orçamento pra outros workspaces enquanto o usuário estivesse filtrando o dashboard.
+
+**Verificado via Playwright contra o servidor real** (com os dados sintéticos gerados nesta sessão — 4
+workspaces, 9 SKUs, 6 usuários, ver mais abaixo): barras de previsão aparecem com hachura + legenda; clicar
+em `ws-ml-platform` no card "Por Workspace" atualiza total/tendência/SKU/usuário pro escopo do workspace,
+mostra o chip removível, e o item clicado fica destacado; clicar de novo remove o filtro. Zero erro de
+console. Efeito colateral encontrado e corrigido durante a verificação: o popup de alerta de orçamento
+(`DatabricksBudgetAlertModal`, já existente da Fase 3) abre automaticamente ao entrar na tela quando há
+orçamento estourado — não é um bug novo, só precisou ser fechado no fluxo de teste antes de interagir com o
+dashboard por trás dele.
+
+### Coleta Databricks — dados de teste sintéticos (2026-08-27)
+
+A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),
+cobrindo 4 workspaces, 9 SKUs (7 pagas + 2 free-tier), 4 produtos (JOBS/INTERACTIVE/SQL/MODEL_SERVING) e 6
+usuários — usado pra popular e verificar visualmente o dashboard (Fase 3), o drill-down e o forecast acima.
+Gerado por um script Node **temporário** (escrito no scratchpad da sessão, não commitado — pedido explícito
+do usuário foi "delete o script e mande só os dados") e importado via `POST /api/databricks-coleta/import`
+(Importação Manual, já existente). 5 orçamentos de teste também foram criados via API (4 por workspace + 1
+global) pra exercitar `GET /alertas` com dados reais — 3 deles cruzam o threshold de 75% de propósito, pra
+confirmar que o popup de alerta dispara.
+
+**Pegadinha de encoding real, achada e corrigida durante a geração**: 2 dos 5 nomes de orçamento com acento
+("Produção", "Orçamento") vieram corrompidos no banco (`Produ��o`) ao serem criados via `curl -d '{"nome":
+"Produção"...}'` no Git Bash do Windows — o argumento passado à linha de comando pro binário nativo `curl.exe`
+não preserva UTF-8 nesse ambiente (mojibake, não um bug do servidor). Confirmado lendo a resposta salva em
+arquivo (não só o terminal, que também poderia estar exibindo errado) — os bytes gravados no Postgres
+realmente estavam errados. Corrigido reenviando via `curl --data-binary @arquivo.json` (arquivo UTF-8 real,
+não argv) em vez de `-d '<json inline>'` — nenhuma mudança de código foi necessária, é uma pegadinha de
+ambiente/ferramenta a lembrar em qualquer teste futuro que envolva acentos via `curl` neste terminal.
+
+Este conjunto de dados **não foi removido** ao final (diferente da rodada de testes anterior) — o usuário
+pediu explicitamente pra manter os dados desta vez, só descartando o script gerador. Usar o Expurgo de Dados
+(seção acima) quando quiser limpar antes de dados reais chegarem via coleta/import de produção.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

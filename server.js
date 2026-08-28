@@ -7428,7 +7428,7 @@ app.put('/api/databricks-coleta/config/:id/agendamento', authMiddleware, dbMiddl
 // sem necessidade do cache de 5min usado lá (YAGNI aqui).
 app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    let { data_inicio, data_fim } = req.query;
+    let { data_inicio, data_fim, workspace_id, sku_name, usuario } = req.query;
     if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
       const fim = new Date();
       const ini = new Date(fim);
@@ -7436,8 +7436,19 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
       data_fim = fim.toISOString().slice(0, 10);
       data_inicio = ini.toISOString().slice(0, 10);
     }
-    const where = `usage_date >= $1 AND usage_date <= $2`;
+    let where = `usage_date >= $1 AND usage_date <= $2`;
     const params = [data_inicio, data_fim];
+    // Drill-down (dashboard): clicar num item de Workspace/SKU/Usuário reconsulta TODAS
+    // as agregações abaixo já escopadas — cada card passa a mostrar a composição DENTRO
+    // do filtro ativo (ex: SKUs só daquele workspace), não uma seleção client-side sobre
+    // um /resumo genérico (o endpoint só devolve agregados, nunca as linhas cruas).
+    // 'usuario' precisa de um sentinel pro caso "Não identificado" (usage_metadata sem
+    // run_as vira usuario='' no banco) — usuario='' via querystring vira ausente
+    // (`?usuario=` é indistinguível de omitido em vários clientes), então o card usa
+    // '__vazio__' explicitamente pra esse caso.
+    if (workspace_id) { params.push(workspace_id); where += ` AND workspace_id = $${params.length}`; }
+    if (sku_name) { params.push(sku_name); where += ` AND sku_name = $${params.length}`; }
+    if (usuario) { params.push(usuario === '__vazio__' ? '' : usuario); where += ` AND COALESCE(usuario,'') = $${params.length}`; }
 
     const [rTotal, rMes, rWs, rSku, rUser, rFree] = await Promise.all([
       pool.query(`SELECT COALESCE(SUM(custo_estimado),0) AS total, COUNT(*) AS linhas FROM databricks_consumo WHERE ${where}`, params),

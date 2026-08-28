@@ -64,14 +64,34 @@ describe('DatabricksDashboardView', () => {
     const user = userEvent.setup()
     renderWithClient()
     await screen.findByText('Custo Total no Período')
-    await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledTimes(1))
 
     await user.clear(screen.getByLabelText('De'))
     await user.type(screen.getByLabelText('De'), '2026-01-01')
     await user.click(screen.getByRole('button', { name: 'Buscar' }))
 
-    await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledTimes(2))
-    expect(databricksColetaApi.getDatabricksResumo).toHaveBeenLastCalledWith('2026-01-01', expect.any(String))
+    // Não conta chamadas totais (a view dispara uma 2ª query, sem filtro de período,
+    // só pra popular a lista de workspaces do dropdown de orçamento — ver
+    // workspacesQuery em DatabricksDashboardView.tsx) — confirma só que a query
+    // principal foi refeita com o novo período e os filtros de drill-down (vazios).
+    await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledWith('2026-01-01', expect.any(String), {}))
+  })
+
+  it('drill-down: clicar num workspace filtra por ele e mostra chip removível', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    await user.click(screen.getByText('ws-prod'))
+    await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), { workspace_id: 'ws-prod' },
+    ))
+    expect(await screen.findByText('Detalhando por:')).toBeInTheDocument()
+    expect(screen.getByText('Workspace: ws-prod ✕')).toBeInTheDocument()
+
+    // clicar de novo no mesmo item remove o filtro (toggle)
+    await user.click(screen.getByText('ws-prod'))
+    await waitFor(() => expect(screen.queryByText('Detalhando por:')).not.toBeInTheDocument())
   })
 
   it('lista orçamentos existentes na tabela', async () => {
