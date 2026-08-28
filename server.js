@@ -7603,7 +7603,9 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
       pool.query(
         `SELECT
            COALESCE(SUM(custo_estimado) FILTER (WHERE sku_name ILIKE '%FREE%' OR custo_estimado = 0), 0) AS free,
-           COALESCE(SUM(custo_estimado) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS pago
+           COALESCE(SUM(custo_estimado) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS pago,
+           COALESCE(SUM(usage_quantity) FILTER (WHERE sku_name ILIKE '%FREE%' OR custo_estimado = 0), 0) AS dbu_free,
+           COALESCE(SUM(usage_quantity) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS dbu_pago
          FROM databricks_consumo WHERE ${where}`, params
       ),
       pool.query(`SELECT usage_metadata->>'job_id' AS job_id, MAX(usage_metadata->>'job_name') AS job_name, SUM(custo_estimado) AS custo
@@ -7622,7 +7624,8 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
       por_workspace: rWs.rows,
       por_sku: rSku.rows,
       por_usuario: rUser.rows.map(r => ({ usuario: r.usuario || 'Não identificado', custo: r.custo })),
-      free_vs_pago: rFree.rows[0],
+      free_vs_pago: { free: rFree.rows[0].free, pago: rFree.rows[0].pago },
+      dbus_free_vs_pago: { free: rFree.rows[0].dbu_free, pago: rFree.rows[0].dbu_pago },
       por_job: rJob.rows,
       por_cluster: rCluster.rows,
       por_warehouse: rWarehouse.rows,

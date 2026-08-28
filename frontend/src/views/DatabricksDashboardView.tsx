@@ -26,6 +26,13 @@ function fmtBRL(v: number): string {
   return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+// DBU = Databricks Unit — unidade nativa de consumo (usage_quantity), não moeda.
+// databricks_consumo só guarda linhas de billing Databricks (nunca infra Azure), então
+// somar usage_quantity sem filtrar por usage_unit é seguro aqui.
+function fmtDBU(v: number): string {
+  return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' DBU'
+}
+
 // Cor sequencial fixa por card de ranking (magnitude dentro de UMA categoria —
 // não é uma paleta categórica comparando entidades entre si, então um hue só
 // por card, não um por barra, segue a regra do skill dataviz: "cor segue a
@@ -261,6 +268,11 @@ export default function DatabricksDashboardView() {
   const totalFreePago = totalFree + totalPago
   const pctFree = totalFreePago > 0 ? Math.round((totalFree / totalFreePago) * 100) : 0
 
+  const dbuFree = resumo?.dbus_free_vs_pago.free ?? 0
+  const dbuPago = resumo?.dbus_free_vs_pago.pago ?? 0
+  const dbuTotal = dbuFree + dbuPago
+  const pctDbuFree = dbuTotal > 0 ? Math.round((dbuFree / dbuTotal) * 100) : 0
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div className="view-hero">
@@ -340,6 +352,35 @@ export default function DatabricksDashboardView() {
                   <div style={{ width: (100 - pctFree) + '%', background: 'var(--accent)' }} title={`Pago: ${fmtBRL(totalPago)}`} />
                 </div>
               )}
+
+              <div className="card">
+                <div className="card-header"><span className="card-title">DBUs Consumidos</span></div>
+                <div style={{ padding: '0 20px 8px', fontSize: 12, color: 'var(--text-muted)' }}>
+                  Unidade nativa do Databricks (DBU) — quanto foi consumido, independente do valor cobrado.
+                </div>
+                <div className="stats-grid" style={{ padding: '0 20px 16px' }}>
+                  <div className="stat-card">
+                    <div className="stat-label">Total de DBUs</div>
+                    <div className="stat-value">{fmtDBU(dbuTotal)}</div>
+                  </div>
+                  <div className="stat-card green-card">
+                    <div className="stat-label">DBUs Free-tier</div>
+                    <div className="stat-value green">{fmtDBU(dbuFree)}</div>
+                    <div className="stat-sub">{pctDbuFree}% do consumo</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-label">DBUs Pagos</div>
+                    <div className="stat-value">{fmtDBU(dbuPago)}</div>
+                    <div className="stat-sub">{100 - pctDbuFree}% do consumo</div>
+                  </div>
+                </div>
+                {dbuTotal > 0 && (
+                  <div style={{ margin: '0 20px 16px', display: 'flex', height: 10, borderRadius: 5, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                    <div style={{ width: pctDbuFree + '%', background: 'var(--green,#22c55e)' }} title={`Free-tier: ${fmtDBU(dbuFree)}`} />
+                    <div style={{ width: (100 - pctDbuFree) + '%', background: 'var(--accent)' }} title={`Pago: ${fmtDBU(dbuPago)}`} />
+                  </div>
+                )}
+              </div>
 
               <div className="card">
                 <div className="card-header"><span className="card-title">Tendência Mensal</span></div>

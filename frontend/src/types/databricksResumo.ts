@@ -19,6 +19,10 @@ export interface DatabricksResumo {
   por_sku: { sku_name: string; custo: number }[]
   por_usuario: { usuario: string; custo: number }[]
   free_vs_pago: { free: number; pago: number }
+  // dbus_free_vs_pago (2026-08-28) — mesma heurística free/pago (sku_name ILIKE '%FREE%'
+  // OU custo_estimado=0) aplicada sobre usage_quantity (DBUs) em vez de custo_estimado
+  // (R$) — quantas unidades de DBU foram consumidas, não quanto custaram.
+  dbus_free_vs_pago: { free: number; pago: number }
   por_job: { job_id: string; job_name: string | null; custo: number }[]
   por_cluster: { cluster_id: string; custo: number }[]
   por_warehouse: { warehouse_id: string; custo: number }[]

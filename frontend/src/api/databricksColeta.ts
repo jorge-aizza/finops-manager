@@ -59,6 +59,7 @@ const normalizeResumo = (r: DatabricksResumo): DatabricksResumo => ({
   por_sku: r.por_sku.map((s) => ({ ...s, custo: Number(s.custo) })),
   por_usuario: r.por_usuario.map((u) => ({ ...u, custo: Number(u.custo) })),
   free_vs_pago: { free: Number(r.free_vs_pago.free), pago: Number(r.free_vs_pago.pago) },
+  dbus_free_vs_pago: { free: Number(r.dbus_free_vs_pago.free), pago: Number(r.dbus_free_vs_pago.pago) },
   por_job: (r.por_job || []).map((j) => ({ ...j, custo: Number(j.custo) })),
   por_cluster: (r.por_cluster || []).map((c) => ({ ...c, custo: Number(c.custo) })),
   por_warehouse: (r.por_warehouse || []).map((w) => ({ ...w, custo: Number(w.custo) })),

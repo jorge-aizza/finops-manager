@@ -29,6 +29,7 @@ const mockResumo: DatabricksResumo = {
   por_sku: [],
   por_usuario: [],
   free_vs_pago: { free: 0, pago: 602.85 },
+  dbus_free_vs_pago: { free: 0, pago: 60.285 },
   por_job: [], por_cluster: [], por_warehouse: [],
 }
 

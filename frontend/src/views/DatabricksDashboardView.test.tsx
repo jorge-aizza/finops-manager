@@ -20,6 +20,7 @@ function makeResumo(overrides: Partial<DatabricksResumo> = {}): DatabricksResumo
     por_sku: [{ sku_name: 'PREMIUM_ALL_PURPOSE_COMPUTE', custo: 9000 }, { sku_name: 'GENIE_FREE_USAGE', custo: 0 }],
     por_usuario: [{ usuario: 'joao@empresa.com', custo: 6000 }, { usuario: 'Não identificado', custo: 2000 }],
     free_vs_pago: { free: 3000, pago: 12000 },
+    dbus_free_vs_pago: { free: 10, pago: 90 },
     por_job: [], por_cluster: [], por_warehouse: [],
     ...overrides,
   }
@@ -65,6 +66,14 @@ describe('DatabricksDashboardView', () => {
     expect(screen.getByText('ws-prod')).toBeInTheDocument()
     expect(screen.getByText('PREMIUM_ALL_PURPOSE_COMPUTE')).toBeInTheDocument()
     expect(screen.getByText('joao@empresa.com')).toBeInTheDocument()
+
+    // dbus_free_vs_pago: 10/(10+90) = 10%
+    expect(screen.getByText('DBUs Consumidos')).toBeInTheDocument()
+    expect(screen.getByText('100,00 DBU')).toBeInTheDocument()
+    expect(screen.getByText('10,00 DBU')).toBeInTheDocument()
+    expect(screen.getByText('90,00 DBU')).toBeInTheDocument()
+    expect(screen.getByText('10% do consumo')).toBeInTheDocument()
+    expect(screen.getByText('90% do consumo')).toBeInTheDocument()
   })
 
   it('busca um novo período ao trocar as datas e clicar em "Buscar"', async () => {

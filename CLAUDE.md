@@ -1840,6 +1840,37 @@ local de verdade, não um mock de teste. Banner de demonstração confirmado vis
 Playwright. 2 testes novos em `DatabricksDashboardView.test.tsx` (banner aparece com
 `_demo:true`, não aparece sem).
 
+### Coleta Databricks — Dashboard: DBUs Consumidos (pagos vs. free) (2026-08-28)
+
+Pedido do usuário: mostrar consumo em **DBUs** (a unidade nativa do Databricks), não só
+em R$ — o card de custo Free-tier/Pago já existente esconde totalmente o volume quando o
+custo é zero (free-tier sempre custa R$ 0,00 por definição, mas ainda consome DBUs de
+verdade).
+
+**Reaproveita a mesma agregação, só troca a coluna somada**: a query de `free_vs_pago`
+em `GET /api/databricks-coleta/resumo` já filtrava por `sku_name ILIKE '%FREE%' OR
+custo_estimado = 0` e somava `custo_estimado`; ganhou 2 colunas extras (`dbu_free`/
+`dbu_pago`) somando `usage_quantity` com o mesmo filtro, na mesma query — sem round-trip
+adicional ao Postgres. Resposta ganhou `dbus_free_vs_pago: {free, pago}`, paralelo ao
+`free_vs_pago` já existente.
+
+**Por que somar `usage_quantity` sem filtrar por `usage_unit`**: `databricks_consumo` só
+guarda linhas de billing Databricks (nunca infra Azure, que fica em `azure_costs`, tabela
+separada) — todo o consumo capturado aqui já é nativamente denominado em DBU. Filtrar por
+`usage_unit = 'DBU'` seria uma defesa contra um cenário que não existe nesta tabela.
+
+**Achado real confirmando o valor da feature, nos próprios dados sintéticos desta
+sessão**: `free_vs_pago` mostra R$ 0,00 de custo free-tier (esperado — free-tier sempre
+custa zero), mas `dbus_free_vs_pago` mostra 3.270,39 DBUs consumidos de graça (11% do
+total) — exatamente a informação que ficava invisível olhando só o card de custo em R$.
+
+**Frontend**: novo card "DBUs Consumidos" entre a barra de custo Free/Pago e a Tendência
+Mensal — mesmo layout (3 stat-cards + barra de proporção), reaproveitando o padrão visual
+já validado, só com `fmtDBU()` (número + sufixo "DBU") em vez de `fmtBRL()`.
+
+**Verificado via Playwright contra o servidor real**: card renderiza corretamente com os
+valores reais dos dados sintéticos, zero erro de console. 248/248 testes passando.
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),
