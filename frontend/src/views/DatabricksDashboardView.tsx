@@ -99,7 +99,7 @@ function RankingCard({ title, color, items, hint, activeValue, onToggle, onVerAn
                   )}
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.label}</span>
                 </span>
-                {i < 3 && <span style={{ fontWeight: 700, color }}>{fmtBRL(item.custo)}</span>}
+                <span style={{ fontWeight: 700, color, flexShrink: 0, marginLeft: 6 }}>{fmtBRL(item.custo)}</span>
               </div>
               <div style={{ height: 6, borderRadius: 3, background: 'var(--bg)', overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: pct + '%', background: color, borderRadius: 3 }} />

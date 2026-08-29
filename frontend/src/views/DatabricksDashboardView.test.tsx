@@ -76,6 +76,21 @@ describe('DatabricksDashboardView', () => {
     expect(screen.getByText('90% do consumo')).toBeInTheDocument()
   })
 
+  it('bug real corrigido — mostra o valor de TODOS os itens do ranking, não só os 3 primeiros', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo({
+      por_workspace: [
+        { workspace_id: 'ws-1', custo: 4000 }, { workspace_id: 'ws-2', custo: 3000 },
+        { workspace_id: 'ws-3', custo: 2000 }, { workspace_id: 'ws-4', custo: 1000 },
+      ],
+    }))
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    // ws-4 é o 4º item — antes da correção, `{i < 3 && ...}` escondia o valor dele
+    expect(screen.getByText('ws-4')).toBeInTheDocument()
+    expect(screen.getByText('R$ 1.000,00')).toBeInTheDocument()
+  })
+
   it('marca ⚠️ nos itens de Workspace/Usuário com anomalia detectada e leva pra aba Orçamentos ao clicar', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
     vi.mocked(databricksColetaApi.getDatabricksAnomalias).mockResolvedValue({

@@ -2031,6 +2031,21 @@ DOM enquanto a promise está pendente, depois resolve e confirma o valor novo ap
 os 18 testes Databricks pré-existentes continuam passando sem alteração. `pm2 restart`
 aplicado pra carregar o build novo do frontend.
 
+**Segundo bug real reportado pelo usuário logo em seguida — os rankings (Por Workspace/
+SKU/Usuário/Job/Cluster/Warehouse) só mostravam o valor em R$ dos 3 primeiros itens**:
+`RankingCard` tinha `{i < 3 && <span>{fmtBRL(item.custo)}</span>}` — resquício da decisão
+original de "rótulos seletivos" (skill `dataviz`, pensada pra evitar poluição visual em
+gráficos densos), mas numa lista de ranking (não um scatter/linha com muitos pontos
+próximos) isso só escondia informação real sem ganho nenhum de legibilidade — item 4 em
+diante mostrava só a barra, sem o número, obrigando a inferir o valor pela régua visual.
+Corrigido removendo a condição — todo item agora mostra `fmtBRL(item.custo)`, consistente
+com a versão "executiva" já aplicada à Tendência Mensal (rótulo sempre visível, sem
+precisar de hover/inferência). Confirmado com uma reprodução HTML estática (Playwright,
+usando os nomes de SKU mais longos do próprio ranking, ex: `STANDARD_ALL_PURPOSE_COMPUTE`)
+que o valor à direita não quebra linha nem colide com o label truncado à esquerda mesmo no
+pior caso de nome longo. Teste novo em `DatabricksDashboardView.test.tsx` (ranking de 4
+itens, confirma que o 4º mostra `R$ 1.000,00` — antes da correção ficava invisível).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),
