@@ -76,6 +76,11 @@ export interface DatabricksResumoFiltros {
   job_id?: string
   cluster_id?: string
   warehouse_id?: string
+  // mes (clique numa barra da Tendência Mensal, 'YYYY-MM') — igual aos demais filtros de
+  // drill-down, escopa o KPI de total e os 6 rankings pra aquele mês; a própria série
+  // por_mes (o gráfico) NÃO é afetada por este filtro (ver GET /resumo, server.js) —
+  // continua mostrando todos os meses do período pra manter o contexto/comparação.
+  mes?: string
 }
 
 export const getDatabricksResumo = (data_inicio?: string, data_fim?: string, filtros?: DatabricksResumoFiltros) => {
@@ -87,6 +92,7 @@ export const getDatabricksResumo = (data_inicio?: string, data_fim?: string, fil
   if (filtros?.job_id) q.set('job_id', filtros.job_id)
   if (filtros?.cluster_id) q.set('cluster_id', filtros.cluster_id)
   if (filtros?.warehouse_id) q.set('warehouse_id', filtros.warehouse_id)
+  if (filtros?.mes) q.set('mes', filtros.mes)
   const qs = q.toString()
   return apiFetch<DatabricksResumo>('GET', '/databricks-coleta/resumo' + (qs ? '?' + qs : '')).then(normalizeResumo)
 }

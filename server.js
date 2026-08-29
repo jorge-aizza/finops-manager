@@ -7554,7 +7554,7 @@ app.put('/api/databricks-coleta/config/:id/agendamento', authMiddleware, dbMiddl
 // sem necessidade do cache de 5min usado lá (YAGNI aqui).
 app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    let { data_inicio, data_fim, workspace_id, sku_name, usuario, job_id, cluster_id, warehouse_id } = req.query;
+    let { data_inicio, data_fim, workspace_id, sku_name, usuario, job_id, cluster_id, warehouse_id, mes } = req.query;
     if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
       const fim = new Date();
       const ini = new Date(fim);
@@ -7579,6 +7579,20 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
     if (cluster_id) { params.push(cluster_id); where += ` AND usage_metadata->>'cluster_id' = $${params.length}`; }
     if (warehouse_id) { params.push(warehouse_id); where += ` AND usage_metadata->>'warehouse_id' = $${params.length}`; }
 
+    // mes (clique numa barra da Tendência Mensal) — aplicado a TUDO exceto à própria
+    // query rMes: selecionar um mês detalha o KPI de total e os cards de Workspace/SKU/
+    // Usuário/Job/Cluster/Warehouse pra aquele mês especificamente, mas o gráfico de
+    // tendência continua mostrando todos os meses do período (senão colapsaria pra 1
+    // barra só ao selecionar, perdendo o contexto que o gráfico existe pra dar — clicar
+    // de novo no mesmo mês, ou no chip "Detalhando por", remove o filtro e mostra o
+    // total do período de novo).
+    let whereMes = where;
+    let paramsMes = params;
+    if (mes && /^\d{4}-\d{2}$/.test(mes)) {
+      paramsMes = [...params, mes];
+      whereMes = where + ` AND to_char(usage_date,'YYYY-MM') = $${paramsMes.length}`;
+    }
+
     // por_job/por_cluster/por_warehouse — zero coleta nova: usage_metadata (JSONB, já
     // capturado por recurso desde a granularidade por-recurso) já traz job_id/job_name/
     // cluster_id/warehouse_id quando aplicável (confirmado na documentação oficial do
@@ -7595,30 +7609,30 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
     // uma coleta nova contra system.compute.clusters, fora de escopo desta rodada) — job
     // usa job_name quando disponível, cluster/warehouse mostram só o id.
     const [rTotal, rMes, rWs, rSku, rUser, rFree, rJob, rCluster, rWarehouse] = await Promise.all([
-      pool.query(`SELECT COALESCE(SUM(custo_estimado),0) AS total, COUNT(*) AS linhas FROM databricks_consumo WHERE ${where}`, params),
+      pool.query(`SELECT COALESCE(SUM(custo_estimado),0) AS total, COUNT(*) AS linhas FROM databricks_consumo WHERE ${whereMes}`, paramsMes),
       pool.query(
         `SELECT to_char(usage_date,'YYYY-MM') AS mes, SUM(custo_estimado) AS custo,
                 COALESCE(SUM(custo_estimado) FILTER (WHERE sku_name ILIKE '%FREE%' OR custo_estimado = 0), 0) AS free,
                 COALESCE(SUM(custo_estimado) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS pago
          FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 1`, params
       ),
-      pool.query(`SELECT workspace_id, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
-      pool.query(`SELECT sku_name, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
-      pool.query(`SELECT NULLIF(usuario,'') AS usuario, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
+      pool.query(`SELECT workspace_id, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${whereMes} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
+      pool.query(`SELECT sku_name, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${whereMes} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
+      pool.query(`SELECT NULLIF(usuario,'') AS usuario, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${whereMes} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
       pool.query(
         `SELECT
            COALESCE(SUM(custo_estimado) FILTER (WHERE sku_name ILIKE '%FREE%' OR custo_estimado = 0), 0) AS free,
            COALESCE(SUM(custo_estimado) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS pago,
            COALESCE(SUM(usage_quantity) FILTER (WHERE sku_name ILIKE '%FREE%' OR custo_estimado = 0), 0) AS dbu_free,
            COALESCE(SUM(usage_quantity) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS dbu_pago
-         FROM databricks_consumo WHERE ${where}`, params
+         FROM databricks_consumo WHERE ${whereMes}`, paramsMes
       ),
       pool.query(`SELECT usage_metadata->>'job_id' AS job_id, MAX(usage_metadata->>'job_name') AS job_name, SUM(custo_estimado) AS custo
-        FROM databricks_consumo WHERE ${where} AND usage_metadata->>'job_id' IS NOT NULL GROUP BY 1 ORDER BY 3 DESC LIMIT 10`, params),
+        FROM databricks_consumo WHERE ${whereMes} AND usage_metadata->>'job_id' IS NOT NULL GROUP BY 1 ORDER BY 3 DESC LIMIT 10`, paramsMes),
       pool.query(`SELECT usage_metadata->>'cluster_id' AS cluster_id, SUM(custo_estimado) AS custo
-        FROM databricks_consumo WHERE ${where} AND usage_metadata->>'cluster_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
+        FROM databricks_consumo WHERE ${whereMes} AND usage_metadata->>'cluster_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
       pool.query(`SELECT usage_metadata->>'warehouse_id' AS warehouse_id, SUM(custo_estimado) AS custo
-        FROM databricks_consumo WHERE ${where} AND usage_metadata->>'warehouse_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
+        FROM databricks_consumo WHERE ${whereMes} AND usage_metadata->>'warehouse_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
     ]);
 
     res.json({

@@ -1958,6 +1958,79 @@ apresentação sobre um payload já coberto pelos testes automatizados; `pm2 res
 pra carregar a mudança de `server.js` (processo gerenciado por PM2, sem watch/reload
 automático).
 
+### Coleta Databricks — Dashboard: drill-down clicando num mês da Tendência Mensal (2026-08-28)
+
+Pedido do usuário, logo após a versão empilhada acima: poder clicar num mês do gráfico e
+ver os cards abaixo (Workspace/SKU/Usuário/Job/Cluster/Warehouse, e o KPI de total) se
+detalharem pra aquele mês — clicar de novo no mesmo mês volta a mostrar o total do
+período. Mesmo mecanismo de drill-down que Workspace/SKU/Usuário/Job/Cluster/Warehouse já
+tinham (ver "Dashboard: tendência em barras + forecast, e drill-down" acima) — mês vira
+só mais uma dimensão de filtro, reaproveitando a mesma arquitetura ponta a ponta.
+
+**`GET /api/databricks-coleta/resumo` ganhou o parâmetro `mes` ('YYYY-MM')** — mas,
+diferente dos outros 6 filtros (que já se aplicavam a TODAS as 9 queries, incluindo a
+própria `rMes`), este precisa ser excluído especificamente da query `rMes`: aplicar o
+filtro de mês nela mesma faria a série do gráfico colapsar pra 1 barra só assim que o
+usuário selecionasse um mês, destruindo o propósito do gráfico (comparar a tendência ao
+longo do tempo) exatamente no momento em que o usuário está interagindo com ele. Resolvido
+com duas variantes de `where`/`params`: a base (`where`/`params`, sem o filtro de mês) usada
+só por `rMes`, e `whereMes`/`paramsMes` (base + `AND to_char(usage_date,'YYYY-MM') = $N`
+quando `mes` está presente) usada pelas outras 8 queries (`rTotal`, `rWs`, `rSku`, `rUser`,
+`rFree`, `rJob`, `rCluster`, `rWarehouse`) — o gráfico sempre mostra todos os meses do
+período; tudo mais reflete o mês selecionado quando há um.
+
+**Frontend**: `DatabricksResumoFiltros` (`api/databricksColeta.ts`) ganhou `mes?: string`,
+incluído no `queryKey` do `resumoQuery` e no mecanismo genérico de chips "Detalhando por:"
+já existente (`FILTRO_LABELS`/`labelFiltroValor` — só precisou de 2 linhas novas, o resto
+do componente de chip/toggle/"Limpar filtros" já era genérico o suficiente pra cobrir mais
+uma chave sem mudança). `labelFiltroValor` reaproveita `mesLabel()` (já usado pelos eixos
+do gráfico) pra mostrar "ago/26" no chip em vez do `'2026-08'` cru.
+
+**`MonthlyBarChart` ganhou `mesSelecionado`/`onSelectMes`** — cada barra REAL (não as de
+previsão — não há consumo real ainda pra detalhar um mês futuro) vira clicável
+(`cursor:pointer`, tooltip explicando a ação). Feedback visual da seleção: um contorno
+(`stroke`) ao redor da barra inteira (pago+free empilhados) do mês ativo, e as DEMAIS
+barras (reais e de previsão) caem pra `opacity:0.35` — foco na barra selecionada sem
+esconder o resto da série, a mesma técnica já usada pelo destaque de item ativo em
+`RankingCard`. Toggle client-side simples: clicar a barra chama `toggleFiltro('mes', d.mes)`
+(a mesma função já usada pelos outros 6 filtros — clicar o mesmo valor de novo limpa o
+campo), sem estado novo dedicado a "selecionado" — `mesSelecionado` é só `filtros.mes`.
+
+**Verificado**: `tsc -b` limpo; teste novo em `DatabricksDashboardView.test.tsx` (clicar
+"ago/26" chama `getDatabricksResumo(..., {mes:'2026-08'})`, mostra o chip "Mês: ago/26 ✕",
+clicar de novo remove o chip) passou de primeira; os 2 testes de drill-down por Workspace/
+Job pré-existentes continuam passando sem alteração (a query `where` deles ganhou uma
+variante nova mas o comportamento com `mes` ausente é idêntico ao anterior). Visual
+confirmado com uma reprodução HTML estática interativa (clique real via `dispatchEvent`,
+Playwright) — 3 screenshots (padrão → mês selecionado com contorno+dimming → clique de
+novo volta ao padrão) confirmam o ciclo completo. `pm2 restart` aplicado pra carregar a
+mudança de `server.js`.
+
+**Bug real reportado pelo usuário logo em seguida — clicar num mês (ou em qualquer outro
+filtro de drill-down) fazia "a página voltar pro início"**: `resumoQuery`
+(`DatabricksDashboardView.tsx`) não tinha `placeholderData` — no TanStack Query v5, mudar a
+`queryKey` (que já inclui todos os filtros de drill-down, incluindo `mes`) registra uma
+entrada NOVA no cache; sem `placeholderData`, `data` vira `undefined` enquanto a busca
+nova corre. Como `resumo` (`= resumoQuery.data`) controla a renderização do bloco inteiro
+de KPIs/Tendência Mensal/rankings (`{resumo && resumo.tem_dados && (...)}`), esse bloco
+inteiro desaparecia por um instante a cada clique de drill-down — o documento encolhia
+drasticamente, e o browser é forçado a recuar o scroll pra caber na página mais curta
+(o navegador não consegue manter uma posição de scroll além do fim do documento) — o
+efeito é indistinguível de "a página voltar pro topo", mesmo sem nenhum código chamando
+`scrollTo`. Provavelmente já afetava TODOS os filtros de drill-down (workspace/sku/
+usuário/job/cluster/warehouse) desde que foram introduzidos, não só o de mês — só ficou
+mais evidente/incômodo agora com mais um jeito de disparar o filtro. Corrigido com
+`placeholderData: keepPreviousData` (import de `@tanstack/react-query`) — mantém os dados
+antigos visíveis (só `resumoQuery.isFetching` fica `true`, já exibido como "Carregando...")
+até a resposta nova chegar, sem colapso de altura, sem pulo de scroll.
+
+**Verificado**: `tsc -b` limpo; teste novo em `DatabricksDashboardView.test.tsx` reproduz o
+bug de propósito (mocka a 2ª chamada de `getDatabricksResumo` com uma Promise que só
+resolve manualmente — confirma que `R$ 15.000,00`/`Custo Total no Período` continuam no
+DOM enquanto a promise está pendente, depois resolve e confirma o valor novo aparece) —
+os 18 testes Databricks pré-existentes continuam passando sem alteração. `pm2 restart`
+aplicado pra carregar o build novo do frontend.
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

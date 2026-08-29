@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteDatabricksBudget, getDatabricksAnomalias, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
 import { deleteGenieBudget, listGenieBudgets } from '../api/genieBudgets'
 import type { DatabricksBudget, DatabricksResumoMes } from '../types/databricksResumo'
@@ -130,7 +130,19 @@ function mesLabel(mes: string): string {
 // (pedido do usuário): rótulo de valor total em toda barra, não só nas seletivas, e
 // legenda sempre visível — todo número visível de cara, sem precisar de hover; o
 // breakdown Pago/Free de cada mês real continua disponível no tooltip nativo (<title>).
-function MonthlyBarChart({ data }: { data: DatabricksResumoMes[] }) {
+//
+// Clicável (pedido do usuário) — cada barra de mês REAL vira mais um filtro de
+// drill-down, igual aos já existentes de Workspace/SKU/Usuário/Job/Cluster/Warehouse:
+// clicar detalha o KPI de total e os 6 rankings abaixo pra aquele mês; clicar de novo no
+// mesmo mês (ou no chip "Detalhando por") remove o filtro e volta a mostrar o total do
+// período. Barras de previsão não são clicáveis — não há consumo real ainda pra detalhar.
+// O mês selecionado ganha um contorno de destaque; os demais (reais e previsão) ficam com
+// opacidade reduzida — foco visual na barra ativa sem esconder o resto da série.
+function MonthlyBarChart({ data, mesSelecionado, onSelectMes }: {
+  data: DatabricksResumoMes[]
+  mesSelecionado?: string | null
+  onSelectMes?: (mes: string) => void
+}) {
   if (data.length === 0) return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '0 20px 16px' }}>Sem dados no período.</div>
 
   const serie = forecastLinear(data, 3)
@@ -163,11 +175,25 @@ function MonthlyBarChart({ data }: { data: DatabricksResumoMes[] }) {
           const gap = free > 0 && pago > 0 ? 2 : 0
           const pagoH = (pago / max) * plotH
           const freeH = free > 0 ? (free / max) * plotH : 0
-          const topY = baseY - (pagoH + gap + freeH)
+          const totalH = pagoH + gap + freeH
+          const topY = baseY - totalH
           const breakdown = free > 0 ? ` — Pago: ${fmtBRL(pago)} · Free: ${fmtBRL(free)}` : ''
-          const titulo = `${mesLabel(d.mes)}: ${fmtBRL(d.custo)}${d.previsto ? ' (previsão — tendência linear)' : breakdown}`
+          const selecionavel = !d.previsto && !!onSelectMes
+          const selecionado = mesSelecionado === d.mes
+          const opacidade = mesSelecionado && !selecionado ? 0.35 : 1
+          const titulo = `${mesLabel(d.mes)}: ${fmtBRL(d.custo)}${d.previsto ? ' (previsão — tendência linear)' : breakdown}${selecionavel ? (selecionado ? ' — clique para remover o filtro' : ' — clique para detalhar este mês') : ''}`
           return (
-            <g key={d.mes}>
+            <g
+              key={d.mes}
+              style={{ opacity: opacidade, cursor: selecionavel ? 'pointer' : 'default', transition: 'opacity .15s' }}
+              onClick={selecionavel ? () => onSelectMes!(d.mes) : undefined}
+            >
+              {selecionado && (
+                <rect
+                  x={x - 3} y={topY - 3} width={barW + 6} height={Math.max(1, totalH) + 6} rx={4}
+                  fill="none" stroke="var(--text)" strokeWidth={1.5}
+                />
+              )}
               {(pago > 0 || d.previsto) && (
                 <rect
                   x={x} y={baseY - pagoH} width={barW} height={Math.max(1, pagoH)} rx={2}
@@ -189,7 +215,7 @@ function MonthlyBarChart({ data }: { data: DatabricksResumoMes[] }) {
                   {fmtBRL(d.custo)}
                 </text>
               )}
-              <text x={x + barW / 2} y={H - PAD_BOTTOM + 14} fontSize={10} fill="var(--text-muted)" textAnchor="middle">
+              <text x={x + barW / 2} y={H - PAD_BOTTOM + 14} fontSize={10} fontWeight={selecionado ? 700 : 400} fill={selecionado ? 'var(--text)' : 'var(--text-muted)'} textAnchor="middle">
                 {mesLabel(d.mes)}
               </text>
             </g>
@@ -227,9 +253,11 @@ const FILTRO_LABELS: Record<keyof DatabricksResumoFiltros, string> = {
   job_id: 'Job',
   cluster_id: 'Cluster',
   warehouse_id: 'Warehouse',
+  mes: 'Mês',
 }
 function labelFiltroValor(campo: keyof DatabricksResumoFiltros, valor: string): string {
   if (campo === 'usuario' && valor === '__vazio__') return 'Não identificado'
+  if (campo === 'mes') return mesLabel(valor)
   return valor
 }
 
@@ -247,8 +275,18 @@ export default function DatabricksDashboardView() {
   const [filtros, setFiltros] = useState<DatabricksResumoFiltros>({})
 
   const resumoQuery = useQuery({
-    queryKey: ['databricks-resumo', periodo.inicio, periodo.fim, filtros.workspace_id, filtros.sku_name, filtros.usuario, filtros.job_id, filtros.cluster_id, filtros.warehouse_id],
+    queryKey: ['databricks-resumo', periodo.inicio, periodo.fim, filtros.workspace_id, filtros.sku_name, filtros.usuario, filtros.job_id, filtros.cluster_id, filtros.warehouse_id, filtros.mes],
     queryFn: () => getDatabricksResumo(periodo.inicio, periodo.fim, filtros),
+    // Bug real reportado pelo usuário — clicar num filtro de drill-down (mês, workspace,
+    // sku...) fazia a página "voltar pro topo": cada combinação de filtros é uma entrada
+    // NOVA no cache do React Query (queryKey muda), então sem placeholderData o `data`
+    // vira `undefined` enquanto a nova busca corre — o bloco inteiro de KPIs/gráfico/
+    // rankings (todo `resumo && resumo.tem_dados && (...)`) sumia da tela por um instante,
+    // o documento encolhia, e o browser era forçado a recuar o scroll pra caber na página
+    // mais curta (efeito idêntico a "ir pro topo"). `keepPreviousData` mantém os dados
+    // antigos visíveis (só `isFetching` fica true) até a resposta nova chegar — sem
+    // colapso de altura, sem pulo de scroll.
+    placeholderData: keepPreviousData,
   })
 
   // Lista de workspaces pro dropdown de orçamento — query PRÓPRIA, com range bem largo
@@ -434,11 +472,15 @@ export default function DatabricksDashboardView() {
 
               <div className="card">
                 <div className="card-header"><span className="card-title">Tendência Mensal</span></div>
-                <MonthlyBarChart data={resumo.por_mes} />
+                <MonthlyBarChart
+                  data={resumo.por_mes}
+                  mesSelecionado={filtros.mes ?? null}
+                  onSelectMes={(mes) => toggleFiltro('mes', mes)}
+                />
               </div>
 
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                🔍 Clique num item de Workspace, SKU, Usuário, Job, Cluster ou Warehouse para detalhar os demais números por esse filtro — clique de novo pra remover.
+                🔍 Clique numa barra de mês na Tendência Mensal, ou num item de Workspace, SKU, Usuário, Job, Cluster ou Warehouse, para detalhar os demais números por esse filtro — clique de novo pra remover.
                 {' '}⚠️ marca itens com anomalia de consumo detectada — clique no ícone pra ver o detalhe.
               </div>
               <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>

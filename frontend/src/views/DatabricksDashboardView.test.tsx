@@ -134,6 +134,55 @@ describe('DatabricksDashboardView', () => {
     await waitFor(() => expect(screen.queryByText('Detalhando por:')).not.toBeInTheDocument())
   })
 
+  it('bug real corrigido — conteúdo não some (nem "pula pro topo") enquanto um filtro de drill-down recarrega', async () => {
+    // getDatabricksResumo é compartilhado por DOIS useQuery deste componente
+    // (resumoQuery E workspacesQuery, que busca com data_inicio fixo '2015-01-01' pro
+    // dropdown de orçamento) — discrimina pela data em vez de pela ordem de chamada, ou
+    // um mock por-ordem (mockResolvedValueOnce/mockReturnValueOnce) seria consumido pela
+    // query "errada" dependendo de qual dispara primeiro.
+    let resolveSegunda: (v: DatabricksResumo) => void = () => {}
+    const segunda = new Promise<DatabricksResumo>((resolve) => { resolveSegunda = resolve })
+    let resumoChamadas = 0
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockImplementation((inicio) => {
+      if (inicio === '2015-01-01') return Promise.resolve(makeResumo()) // workspacesQuery
+      resumoChamadas++
+      return resumoChamadas === 1 ? Promise.resolve(makeResumo()) : segunda
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('R$ 15.000,00')
+
+    await user.click(screen.getByText('ws-prod'))
+    // Enquanto a 2ª busca ainda não resolveu, o conteúdo anterior continua montado —
+    // sem `placeholderData: keepPreviousData` o `data` vira `undefined` durante o
+    // refetch, o bloco inteiro de KPIs/gráfico/rankings desaparece, o documento encolhe
+    // e o browser é forçado a recuar o scroll (efeito relatado pelo usuário como "a
+    // página volta pro início" ao clicar num mês/item pra detalhar).
+    expect(screen.getByText('R$ 15.000,00')).toBeInTheDocument()
+    expect(screen.getByText('Custo Total no Período')).toBeInTheDocument()
+
+    resolveSegunda(makeResumo({ total_custo: 6000, por_workspace: [{ workspace_id: 'ws-prod', custo: 6000 }] }))
+    await screen.findByText('R$ 6.000,00')
+  })
+
+  it('drill-down: clicar numa barra de mês na Tendência Mensal filtra por ele (clique de novo remove)', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    await user.click(screen.getByText('ago/26'))
+    await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), { mes: '2026-08' },
+    ))
+    expect(await screen.findByText('Detalhando por:')).toBeInTheDocument()
+    expect(screen.getByText('Mês: ago/26 ✕')).toBeInTheDocument()
+
+    // clicar de novo no mesmo mês remove o filtro (volta a mostrar o total do período)
+    await user.click(screen.getByText('ago/26'))
+    await waitFor(() => expect(screen.queryByText('Detalhando por:')).not.toBeInTheDocument())
+  })
+
   it('mostra Por Job/Cluster/Warehouse (agregado sobre usage_metadata) e permite drill-down por job', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo({
       por_job: [{ job_id: '123', job_name: 'ETL Noturno', custo: 4000 }, { job_id: '456', job_name: null, custo: 1000 }],
