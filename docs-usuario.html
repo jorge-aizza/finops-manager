@@ -540,6 +540,7 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
 
   <div class="subsec">Testar Conexão</div>
   <p>O botão <strong>Testar</strong> não faz apenas <code>SELECT 1</code> — ele verifica <em>individualmente</em> cada System Table exigida (<code>system.billing.usage</code>, <code>system.billing.list_prices</code>). O erro retornado aponta a causa exata: <code>TABLE_OR_VIEW_NOT_FOUND</code> significa que o schema não foi habilitado na conta (passo 2 acima); <code>PERMISSION_DENIED</code>/<code>ACCESS_DENIED</code> significa que falta o grant na credencial (passo 3).</p>
+  <p>Um segundo grupo, opcional, testa <code>system.lakeflow.job_run_timeline</code> e <code>system.lakeflow.jobs</code> — schema separado de <code>system.billing</code>, precisa ser habilitado à parte por um account admin. Se esse grupo falhar, o custo por recurso continua funcionando normalmente; só o card <strong>Execuções de Job</strong> (Seção 12) fica vazio.</p>
 
   <div class="subsec">Agendamento e coleta manual</div>
   <p>Assim como na Coleta Azure, configure horário/dias de execução e granularidade no card de Agendamento, ou dispare uma coleta pontual em <strong>Coletar Agora</strong> informando o intervalo de datas. O progresso aparece em tempo real no monitor da tela.</p>
@@ -561,6 +562,11 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
 
   <div class="subsec">Aba Dashboard</div>
   <p>Mostra KPIs do período selecionado, um gráfico de <strong>Tendência Mensal</strong> em barras com <strong>previsão de 3 meses</strong> (regressão linear sobre o histórico, exibida com textura hachurada + borda tracejada para diferenciar do custo real), e seis rankings (Top 10 cada): <strong>Por Workspace</strong>, <strong>Por SKU</strong>, <strong>Por Usuário</strong>, <strong>Por Job</strong>, <strong>Por Cluster</strong> e <strong>Por Warehouse</strong> — os três últimos vêm do mesmo dado já coletado (<code>usage_metadata</code>), sem nenhuma coleta adicional.</p>
+
+  <div class="subsec">Execuções de Job — tempo e custo</div>
+  <p>Logo abaixo dos rankings, uma tabela lista as execuções recentes de Job (mais recentes primeiro, até 200 por período): <strong>Job</strong>, <strong>Run</strong>, <strong>Início</strong>, <strong>Duração</strong>, <strong>Status</strong> (✅ Sucesso / ❌ Falhou / ⏱ Timeout / ⊘ Cancelado, entre outros) e <strong>Custo</strong>. Clicar num job em "Por Job" também filtra esta tabela.</p>
+  <p>A duração e o status vêm de um schema diferente do usado para custo (<code>system.lakeflow</code>, ver Seção 11) — por isso é possível ver o custo por job funcionando normalmente enquanto esta tabela fica vazia, se esse schema não estiver habilitado na conta.</p>
+  <div class="note"><div class="note-lbl">Custo "—" não é custo zero</div><p>Nem toda execução tem custo correlacionável: o Databricks só associa o identificador da execução ao billing quando o job roda em job compute ou serverless compute — jobs em cluster all-purpose não têm essa correlação. Nesses casos a coluna Custo mostra <code>—</code> (sem dado), nunca <code>R$ 0,00</code> (que sugeriria "rodou de graça").</p></div>
 
   <div class="subsec">DBUs Consumidos (pagos vs. free)</div>
   <p>Um card específico mostra o volume em <strong>DBUs</strong> (a unidade nativa de processamento Databricks), separado entre free-tier e pago. Diferente do card de custo em R$ — onde o free-tier sempre aparece como R$ 0,00 por definição —, este card revela o <em>volume real</em> consumido de graça, informação que fica invisível olhando só o valor financeiro.</p>

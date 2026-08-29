@@ -5,6 +5,7 @@ import { deleteGenieBudget, listGenieBudgets } from '../api/genieBudgets'
 import type { DatabricksBudget, DatabricksResumoMes } from '../types/databricksResumo'
 import type { GenieBudget } from '../types/genieBudgets'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
+import DatabricksJobRunsCard from '../components/DatabricksJobRunsCard'
 import GenieBudgetModal from '../components/GenieBudgetModal'
 import { forecastLinear } from '../lib/forecastLinear'
 import { setDatabricksTabListener } from '../bridge'
@@ -539,6 +540,8 @@ export default function DatabricksDashboardView() {
                   onToggle={(v) => toggleFiltro('warehouse_id', v)}
                 />
               </div>
+
+              <DatabricksJobRunsCard periodo={periodo} jobId={filtros.job_id} />
             </>
           )}
         </>

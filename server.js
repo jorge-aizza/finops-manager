@@ -5756,6 +5756,50 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE databricks_coleta_historico ADD COLUMN IF NOT EXISTS validacao_status VARCHAR(20)`);
   await run(`ALTER TABLE databricks_coleta_historico ADD COLUMN IF NOT EXISTS validacao_json JSONB`);
 
+  // ── databricks_job_runs — tempo de execução + status de cada run de Job (2026-08-29,
+  // pedido do usuário: "coletar o tempo que um Job executou e quanto custou"). Fonte:
+  // system.lakeflow.job_run_timeline (duração real, result_state) JOIN system.lakeflow.jobs
+  // (nome do job — SCD2, sem nome próprio em job_run_timeline) — pesquisado na documentação
+  // oficial do Databricks (WebSearch/WebFetch, 2026-08-29), NÃO validado contra uma conta
+  // real (mesma ressalva de sempre nesta feature). Custo por run NÃO é armazenado aqui —
+  // computado em leitura via JOIN com databricks_consumo.usage_metadata->>'job_run_id'
+  // (campo já capturado desde a Fase 2 via to_json(usage_metadata), sem nenhuma mudança na
+  // coleta de billing) — ver GET /api/databricks-coleta/job-runs.
+  // UNIQUE por (workspace_id,job_id,run_id): job_run_timeline emite múltiplas linhas
+  // (slices) pra runs >1h — a coleta agrega (SUM de duração, MIN/MAX de início/fim) ANTES
+  // de gravar, então cada run vira uma única linha aqui, nunca duplicada por slice.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_job_runs (
+      id                SERIAL PRIMARY KEY,
+      workspace_id      VARCHAR(200) NOT NULL,
+      job_id            VARCHAR(100) NOT NULL,
+      run_id            VARCHAR(100) NOT NULL,
+      job_name          VARCHAR(300),
+      run_name          VARCHAR(300),
+      run_type          VARCHAR(50),
+      trigger_type      VARCHAR(50),
+      iniciado_em       TIMESTAMP,
+      concluido_em      TIMESTAMP,
+      duracao_segundos  NUMERIC(14,2),
+      result_state      VARCHAR(30),
+      termination_code  VARCHAR(60),
+      config_id         INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
+      criado_em         TIMESTAMP DEFAULT NOW(),
+      atualizado_em     TIMESTAMP DEFAULT NOW(),
+      UNIQUE (workspace_id, job_id, run_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_databricks_job_runs_iniciado ON databricks_job_runs (iniciado_em)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_databricks_job_runs_job ON databricks_job_runs (job_id)`);
+  // Functional index pro JOIN de custo por run (GET /job-runs) — job_run_id só existe pra
+  // uma fração das linhas de billing (jobs em all-purpose cluster nunca populam esse campo,
+  // mesma limitação documentada da Azure Retail Prices/usage_metadata.job_id), então o
+  // índice parcial (WHERE ... IS NOT NULL) fica pequeno mesmo em tabelas grandes.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_databricks_consumo_job_run_id ON databricks_consumo ((usage_metadata->>'job_run_id'))
+    WHERE usage_metadata->>'job_run_id' IS NOT NULL
+  `);
+
   // ── databricks_budgets — Fase 3: orçamento mensal opcional, global ou por
   // workspace (workspace_id NULL = todos). Base do alerta em GET .../alertas.
   await pool.query(`
@@ -7085,6 +7129,13 @@ app.delete('/api/databricks-coleta/config/:id', authMiddleware, dbMiddleware, as
 // Service Principal precisa de USE SCHEMA + SELECT nessas tabelas. Nomes fixos (não vêm do
 // request), então interpolar na query é seguro — não é entrada de usuário.
 const _DBX_REQUIRED_TABLES = ['system.billing.usage', 'system.billing.list_prices'];
+// System Tables da feature de tempo+custo de execução de Job (2026-08-29) — schema
+// `system.lakeflow` é habilitado separadamente de `system.billing` por um account admin
+// (Catalog Explorer → System Tables tem uma entrada própria pra "Job runtime" /lakeflow).
+// Tratadas como OPCIONAIS (não derrubam "Conexão OK" se ausentes) — billing/custo por
+// recurso (Fases 1-3, já em produção) não depende delas; só o card de "Execuções de Job"
+// (duração + status) fica vazio sem esse schema habilitado.
+const _DBX_OPTIONAL_TABLES = ['system.lakeflow.job_run_timeline', 'system.lakeflow.jobs'];
 
 // Diagnóstico — a mensagem de erro É o propósito da rota (mesmo padrão de
 // POST /api/azure-coleta/sps/:id/testar), não genericizar com _dbErr aqui.
@@ -7113,12 +7164,28 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
       }
     }
 
+    const tabelasOpcionais = {};
+    for (const tabela of _DBX_OPTIONAL_TABLES) {
+      try {
+        await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, `SELECT 1 FROM ${tabela} LIMIT 1`);
+        tabelasOpcionais[tabela] = { ok: true, message: 'Acessível.' };
+      } catch (eTab) {
+        tabelasOpcionais[tabela] = { ok: false, message: eTab.message };
+      }
+    }
+    const opcionaisOk = Object.values(tabelasOpcionais).every(t => t.ok);
+
     res.json({
       ok: todasOk,
       message: todasOk
         ? 'Conexão com Databricks OK — autenticação, SQL Warehouse e System Tables validados.'
         : 'Autenticação e SQL Warehouse OK, mas uma ou mais System Tables não estão acessíveis — veja detalhes.',
       tabelas,
+      tabelas_opcionais: tabelasOpcionais,
+      opcionais_ok: opcionaisOk,
+      opcionais_aviso: opcionaisOk
+        ? null
+        : 'Duração/status de execuções de Job (system.lakeflow) não disponível — schema não habilitado ou sem grant. Custo por recurso continua funcionando normalmente.',
     });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -7185,6 +7252,71 @@ async function _processarLinhasDatabricks(histId, configId, origem, periodoInici
     origem === 'import' ? msgFinal : `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
     'coleta_concluida'
   ).catch(() => {});
+}
+
+// Execuções de Job (duração + status) — system.lakeflow.job_run_timeline (imutável;
+// runs >1h emitem múltiplas linhas/"slices", cada uma um pedaço do intervalo total,
+// mesmo run_id repetido) JOIN system.lakeflow.jobs (SCD2 — job_run_timeline não traz o
+// NOME do job, só job_id; jobs precisa da linha mais recente não-deletada por job_id).
+// Agrega por run ANTES de gravar (SUM da duração das slices; MIN/MAX pra início/fim
+// reais; MAX em result_state/termination_code ignora NULL e sobra só o valor real, que a
+// documentação confirma populado apenas na ÚLTIMA slice de runs longos) — cada run vira
+// exatamente 1 linha em databricks_job_runs, nunca duplicada por slice. NÃO VALIDADO
+// contra uma conta Databricks real — sintaxe/nomes de coluna conforme documentação
+// oficial pesquisada em 2026-08-29 (WebSearch/WebFetch contra docs.databricks.com/aws/en/
+// admin/system-tables/jobs); ajustar se a primeira execução real reportar erro de coluna.
+async function _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configId) {
+  const sql = `
+    WITH runs AS (
+      SELECT workspace_id, job_id, run_id,
+             MAX(run_type)     AS run_type,
+             MAX(trigger_type) AS trigger_type,
+             MAX(run_name)     AS run_name,
+             MIN(period_start_time) AS iniciado_em,
+             MAX(period_end_time)   AS concluido_em,
+             SUM(unix_timestamp(period_end_time) - unix_timestamp(period_start_time)) AS duracao_segundos,
+             MAX(result_state)     AS result_state,
+             MAX(termination_code) AS termination_code
+      FROM system.lakeflow.job_run_timeline
+      WHERE CAST(period_start_time AS DATE) >= :data_inicio AND CAST(period_start_time AS DATE) <= :data_fim
+      GROUP BY workspace_id, job_id, run_id
+    ),
+    jobs_latest AS (
+      SELECT job_id, name,
+             ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY change_time DESC) AS rn
+      FROM system.lakeflow.jobs
+      WHERE delete_time IS NULL
+    )
+    SELECT r.workspace_id, r.job_id, r.run_id, r.run_type, r.trigger_type, r.run_name,
+           r.iniciado_em, r.concluido_em, r.duracao_segundos, r.result_state, r.termination_code,
+           j.name AS job_name
+    FROM runs r
+    LEFT JOIN jobs_latest j ON j.job_id = r.job_id AND j.rn = 1
+  `;
+  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
+    { name: 'data_inicio', value: startDate, type: 'DATE' },
+    { name: 'data_fim', value: endDate, type: 'DATE' },
+  ]);
+  const linhas = _parseDatabricksResult(raw);
+
+  let ins = 0, upd = 0;
+  for (const l of linhas) {
+    const r = await pool.query(
+      `INSERT INTO databricks_job_runs (workspace_id,job_id,run_id,job_name,run_name,run_type,trigger_type,iniciado_em,concluido_em,duracao_segundos,result_state,termination_code,config_id,atualizado_em)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+       ON CONFLICT (workspace_id,job_id,run_id) DO UPDATE SET
+         job_name=EXCLUDED.job_name, run_name=EXCLUDED.run_name, run_type=EXCLUDED.run_type,
+         trigger_type=EXCLUDED.trigger_type, iniciado_em=EXCLUDED.iniciado_em, concluido_em=EXCLUDED.concluido_em,
+         duracao_segundos=EXCLUDED.duracao_segundos, result_state=EXCLUDED.result_state,
+         termination_code=EXCLUDED.termination_code, config_id=EXCLUDED.config_id, atualizado_em=NOW()
+       RETURNING (xmax = 0) AS inserted`,
+      [l.workspace_id, l.job_id, l.run_id, l.job_name || null, l.run_name || null, l.run_type || null,
+       l.trigger_type || null, l.iniciado_em || null, l.concluido_em || null, l.duracao_segundos || null,
+       l.result_state || null, l.termination_code || null, configId]
+    );
+    if (r.rows[0]?.inserted) ins++; else upd++;
+  }
+  return { total: linhas.length, ins, upd };
 }
 
 async function _executarColetaDatabricks(configId, startDate, endDate, origem = 'manual') {
@@ -7254,6 +7386,25 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
 
     const msgFinal = `Databricks — ${linhas.length} linha(s) | ${startDate}→${endDate}`;
     await _processarLinhasDatabricks(histId, configId, origem, startDate, endDate, linhas, msgFinal);
+
+    // Execuções de Job (tempo + status) — pedido do usuário (2026-08-29): "coletar o
+    // tempo que um Job executou e quanto custou". Best-effort — roda DEPOIS da coleta de
+    // billing (que já vale a pena mesmo se isto falhar) e NUNCA derruba a coleta
+    // principal: system.lakeflow é um schema separado de system.billing, habilitado
+    // independentemente por um account admin — uma conta pode ter billing habilitado sem
+    // ter lakeflow, e vice-versa.
+    try {
+      _dbxColetaProgresso.fase = 'Consultando execuções de Job (system.lakeflow)...';
+      _logColetaDbx('Consultando system.lakeflow.job_run_timeline + system.lakeflow.jobs...');
+      const runsInfo = await _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configId);
+      _logColetaDbx(`Execuções de Job: ${runsInfo.total} run(s) — ${runsInfo.ins} novo(s), ${runsInfo.upd} atualizado(s)`);
+      await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
+        [` | Job Runs: ${runsInfo.total} (${runsInfo.ins} novo(s))`, histId]).catch(() => {});
+    } catch (eRuns) {
+      _logColetaDbx(`Job Runs: não coletado — ${eRuns.message}`);
+      await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
+        [` | Job Runs: indisponível (${eRuns.message.slice(0, 120)})`, histId]).catch(() => {});
+    }
 
   } catch (err) {
     _logColetaDbx(`ERRO: ${err.message}`);
@@ -7783,6 +7934,54 @@ app.get('/api/databricks-coleta/tags/:chave/valores', authMiddleware, dbMiddlewa
       [req.params.chave]
     );
     res.json(r.rows.map(row => row.valor).filter(v => v != null));
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Execuções de Job — tempo + custo (2026-08-29, pedido do usuário) ───────────────────
+// Lista databricks_job_runs (coletado de system.lakeflow.job_run_timeline — ver
+// _coletarJobRunsDatabricks) com o custo de cada run calculado em LEITURA via subquery
+// correlacionada contra databricks_consumo.usage_metadata->>'job_run_id' (campo já
+// capturado desde a Fase 2, sem nenhuma mudança na coleta de billing — índice funcional
+// parcial em idx_databricks_consumo_job_run_id cobre esse JOIN). `custo_estimado` retorna
+// `null` (não 0) quando não há nenhuma linha de billing com esse job_run_id — a
+// documentação oficial confirma que usage_metadata.job_run_id só é populado pra jobs em
+// job compute/serverless compute, NUNCA pra jobs num cluster all-purpose; 0 sugeriria
+// "rodou de graça", null deixa claro que o dado simplesmente não está disponível.
+// Range padrão menor (7 dias, não os 6 meses do /resumo) — job runs são por EXECUÇÃO
+// (podem ser centenas por dia num workspace ativo), volume bem maior que billing diário.
+app.get('/api/databricks-coleta/job-runs', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    let { data_inicio, data_fim, job_id, workspace_id, result_state } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 7);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `jr.iniciado_em >= $1 AND jr.iniciado_em < $2::date + INTERVAL '1 day'`;
+    const params = [data_inicio, data_fim];
+    if (job_id) { params.push(job_id); where += ` AND jr.job_id = $${params.length}`; }
+    if (workspace_id) { params.push(workspace_id); where += ` AND jr.workspace_id = $${params.length}`; }
+    if (result_state) { params.push(result_state); where += ` AND jr.result_state = $${params.length}`; }
+
+    const r = await pool.query(
+      `SELECT jr.workspace_id, jr.job_id, jr.run_id, jr.job_name, jr.run_name, jr.run_type, jr.trigger_type,
+              jr.iniciado_em, jr.concluido_em, jr.duracao_segundos, jr.result_state, jr.termination_code,
+              (SELECT SUM(dc.custo_estimado) FROM databricks_consumo dc
+                WHERE dc.usage_metadata ->> 'job_run_id' = jr.run_id) AS custo_estimado
+       FROM databricks_job_runs jr
+       WHERE ${where}
+       ORDER BY jr.iniciado_em DESC
+       LIMIT 200`,
+      params
+    );
+    res.json({
+      periodo: { inicio: data_inicio, fim: data_fim },
+      tem_dados: r.rows.length > 0,
+      total: r.rows.length,
+      runs: r.rows,
+    });
   } catch (e) { _dbErr(res, e); }
 });
 

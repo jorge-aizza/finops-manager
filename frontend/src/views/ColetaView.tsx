@@ -207,7 +207,19 @@ export default function ColetaView() {
       const detalhes = r.tabelas
         ? ' — ' + Object.entries(r.tabelas).map(([t, v]) => `${v.ok ? '✅' : '❌'} ${t}${v.ok ? '' : ' (' + v.message + ')'}`).join('; ')
         : ''
+      // tabelas_opcionais (system.lakeflow) — alimenta só "Execuções de Job" (tempo+
+      // status), nunca derruba r.ok; mostrado como um segundo toast informativo pra não
+      // misturar com o resultado principal (billing/custo por recurso).
+      const detalhesOpcionais = r.tabelas_opcionais
+        ? ' — ' + Object.entries(r.tabelas_opcionais).map(([t, v]) => `${v.ok ? '✅' : '❌'} ${t}${v.ok ? '' : ' (' + v.message + ')'}`).join('; ')
+        : ''
       window.showToast?.(r.message + detalhes, r.ok ? 'success' : 'error')
+      if (r.tabelas_opcionais) {
+        window.showToast?.(
+          (r.opcionais_ok ? 'Execuções de Job (duração/status): disponível' : r.opcionais_aviso || 'Execuções de Job indisponível') + detalhesOpcionais,
+          r.opcionais_ok ? 'success' : 'error',
+        )
+      }
     },
     onError: (e: Error) => window.showToast?.('Erro ao testar: ' + e.message, 'error'),
   })

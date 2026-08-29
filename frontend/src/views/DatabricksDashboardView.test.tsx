@@ -40,6 +40,9 @@ beforeEach(() => {
   window.showToast = vi.fn()
   vi.mocked(databricksColetaApi.listDatabricksBudgets).mockResolvedValue([])
   vi.mocked(databricksColetaApi.getDatabricksAnomalias).mockResolvedValue({ custo_diario: [], usuarios: [] })
+  vi.mocked(databricksColetaApi.getDatabricksJobRuns).mockResolvedValue({
+    periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: false, total: 0, runs: [],
+  })
   vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([])
   // `bridge.ts` mantém currentDatabricksTab como estado de módulo (singleton) — sem
   // resetar aqui, um teste que troca de aba (Orçamentos/Quotas) vaza pro próximo.
@@ -215,6 +218,48 @@ describe('DatabricksDashboardView', () => {
 
     await user.click(screen.getByText('ETL Noturno'))
     await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), { job_id: '123' },
+    ))
+  })
+
+  it('mostra Execuções de Job com duração/status/custo, "—" quando não há custo correlacionado, e refiltra ao clicar num job', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo({
+      por_job: [{ job_id: '123', job_name: 'ETL Noturno', custo: 4000 }],
+    }))
+    vi.mocked(databricksColetaApi.getDatabricksJobRuns).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-25' },
+      tem_dados: true,
+      total: 2,
+      runs: [
+        {
+          workspace_id: 'ws-prod', job_id: '123', run_id: 'run-1', job_name: 'ETL Noturno', run_name: null,
+          run_type: 'JOB_RUN', trigger_type: 'CRON', iniciado_em: '2026-08-24T02:00:00Z', concluido_em: '2026-08-24T02:45:00Z',
+          duracao_segundos: 2700, result_state: 'SUCCEEDED', termination_code: 'SUCCESS', custo_estimado: 12.5,
+        },
+        {
+          workspace_id: 'ws-prod', job_id: '123', run_id: 'run-2', job_name: 'ETL Noturno', run_name: null,
+          run_type: 'JOB_RUN', trigger_type: 'CRON', iniciado_em: '2026-08-23T02:00:00Z', concluido_em: '2026-08-23T02:50:00Z',
+          duracao_segundos: 3000, result_state: 'FAILED', termination_code: 'RUN_EXECUTION_ERROR', custo_estimado: null,
+        },
+      ],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    expect(await screen.findByText('Execuções de Job — Tempo e Custo')).toBeInTheDocument()
+    expect(screen.getByText('45m 0s')).toBeInTheDocument() // 2700s
+    expect(screen.getByText('50m 0s')).toBeInTheDocument() // 3000s
+    expect(screen.getByText('R$ 12,50')).toBeInTheDocument()
+    expect(screen.getByText('✅ Sucesso')).toBeInTheDocument()
+    expect(screen.getByText('❌ Falhou')).toBeInTheDocument()
+    // run-2 não tem custo correlacionado — "—", nunca "R$ 0,00" (confundiria com "grátis")
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+
+    // "ETL Noturno" aparece 2x agora: no ranking "Por Job" E na tabela de execuções —
+    // clica no primeiro (o item clicável do ranking, que dispara o drill-down).
+    await user.click(screen.getAllByText('ETL Noturno')[0])
+    await waitFor(() => expect(databricksColetaApi.getDatabricksJobRuns).toHaveBeenCalledWith(
       expect.any(String), expect.any(String), { job_id: '123' },
     ))
   })

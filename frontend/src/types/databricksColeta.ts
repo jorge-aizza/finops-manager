@@ -51,10 +51,17 @@ export interface TestarDatabricksTabela {
 // Tables exigidas (system.billing.usage/system.billing.list_prices) testada individualmente,
 // pra diferenciar "credencial errada" de "schema system.billing não habilitado na conta" ou
 // "Service Principal sem grant nas tabelas" (mesmo warehouse, causas raiz bem diferentes).
+// tabelas_opcionais (2026-08-29) — system.lakeflow.job_run_timeline/jobs, usadas só pela
+// feature de "Execuções de Job" (tempo + status). Opcionais de propósito: um schema
+// separado de system.billing, pode estar desabilitado sem afetar custo por recurso —
+// `opcionais_ok=false` não derruba `ok` (a conexão continua "OK" pro básico).
 export interface TestarDatabricksResponse {
   ok: boolean
   message: string
   tabelas?: Record<string, TestarDatabricksTabela>
+  tabelas_opcionais?: Record<string, TestarDatabricksTabela>
+  opcionais_ok?: boolean
+  opcionais_aviso?: string | null
 }
 
 // Fase 2 — coleta real + agendamento

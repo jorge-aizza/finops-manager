@@ -2046,6 +2046,92 @@ que o valor à direita não quebra linha nem colide com o label truncado à esqu
 pior caso de nome longo. Teste novo em `DatabricksDashboardView.test.tsx` (ranking de 4
 itens, confirma que o 4º mostra `R$ 1.000,00` — antes da correção ficava invisível).
 
+### Coleta Databricks — Execuções de Job: tempo de execução + custo (2026-08-29)
+
+Pedido do usuário: pesquisar a documentação oficial do Databricks sobre coletar quanto
+tempo um Job rodou e quanto custou, e implementar. `databricks_consumo` (Fase 2) já dava
+custo por job (via `usage_metadata->>'job_id'`, ranking "Por Job") mas nunca DURAÇÃO —
+`system.billing.usage` não tem essa informação, só custo. Pesquisado via WebSearch/WebFetch
+contra `docs.databricks.com` (mesmo padrão já usado pra Quotas Genie): a duração/status de
+cada execução vive em **outro schema de System Tables**, `system.lakeflow` — separado de
+`system.billing`, com 6 tabelas (`jobs`, `job_tasks`, `job_run_timeline`,
+`job_task_run_timeline`, `pipelines`, `pipeline_update_timeline`), das quais só 2 eram
+necessárias aqui.
+
+**Tabelas usadas**:
+- `system.lakeflow.job_run_timeline` (imutável) — `job_id`, `run_id`, `period_start_time`/
+  `period_end_time`, `result_state` (SUCCEEDED/FAILED/SKIPPED/CANCELLED/TIMED_OUT/ERROR/
+  BLOCKED), `termination_code`, `run_type`, `trigger_type`, `run_name`. **Runs >1h emitem
+  múltiplas linhas** ("slices") com o MESMO `run_id`, cada uma um pedaço do intervalo total
+  (a partir de 2026-01-19 alinhadas a fronteiras de hora cheia) — a duração real é a SOMA
+  das slices, não uma linha só; `result_state`/`termination_code` só vêm populados na
+  ÚLTIMA slice (as demais ficam `NULL`).
+- `system.lakeflow.jobs` (SCD2) — só usada pra pegar `name` (job_run_timeline NÃO traz o
+  nome do job, só `job_id`); linha mais recente por `job_id` via `ROW_NUMBER() OVER
+  (PARTITION BY job_id ORDER BY change_time DESC)`, filtrando `delete_time IS NULL`.
+
+**Custo por run — zero mudança na coleta de billing já existente**: a documentação
+confirmou que `usage_metadata.job_run_id` (não só `job_id`) já existe em
+`system.billing.usage` — e `_executarColetaDatabricks` já captura `usage_metadata`
+INTEIRO via `to_json(u.usage_metadata)` desde a Fase 2 (decisão de não apostar em nomes de
+campo específicos — ver "Granularidade por recurso" acima). Ou seja, `job_run_id` **já
+estava sendo coletado e gravado** em `databricks_consumo.usage_metadata`, só nunca lido.
+Custo por run é computado em LEITURA (`GET /job-runs`), via subquery correlacionada
+`usage_metadata->>'job_run_id' = run_id`, coberta por um índice funcional parcial
+(`idx_databricks_consumo_job_run_id`, `WHERE ... IS NOT NULL` — pequeno mesmo em tabelas
+grandes, já que a doc confirma que a maioria das linhas de billing nunca tem esse campo).
+**`custo_estimado` retorna `null`, nunca `0`, quando não há linha de billing correlacionável**
+— a documentação é explícita que `usage_metadata.job_run_id` só é populado pra jobs em
+job compute/serverless compute, nunca em cluster all-purpose; `0` sugeriria "rodou de
+graça", `null` deixa claro que o dado simplesmente não existe pra aquele run.
+
+**Nova tabela `databricks_job_runs`** — uma linha por run (não por slice): a coleta agrega
+ANTES de gravar (`SUM` da duração das slices, `MIN`/`MAX` pra início/fim reais, `MAX` em
+`result_state`/`termination_code` ignora `NULL` e sobra só o valor real de qualquer slice
+que o tenha). `UNIQUE (workspace_id, job_id, run_id)` — upsert idempotente, run nunca
+duplica mesmo re-coletando o mesmo período.
+
+**Coleta best-effort, nunca derruba a coleta principal de billing**: `_coletarJobRunsDatabricks`
+roda DEPOIS de `_processarLinhasDatabricks` dentro de `_executarColetaDatabricks`, dentro
+de um try/catch próprio — `system.lakeflow` é habilitado independentemente de
+`system.billing` por um account admin (Catalog Explorer → System Tables tem uma entrada
+própria pra cada schema), então uma conta pode ter billing OK e lakeflow indisponível, ou
+vice-versa. Uma falha aqui só anexa `" | Job Runs: indisponível (motivo)"` à mensagem do
+histórico — a coleta de custo por recurso (já em produção) continua funcionando normalmente.
+Não roda no fluxo de Importação Manual (CSV) — formato de import é só billing, sem
+equivalente de execução de job.
+
+**"Testar Conexão" ganhou uma segunda checagem, opcional**: `_DBX_OPTIONAL_TABLES`
+(`system.lakeflow.job_run_timeline`, `system.lakeflow.jobs`) testadas do mesmo jeito que
+`_DBX_REQUIRED_TABLES` (`SELECT 1 FROM tabela LIMIT 1`), mas em `tabelas_opcionais` —
+`opcionais_ok=false` **não** derruba o `ok` principal da rota, já que billing/custo por
+recurso não depende delas. Frontend (`ColetaView.tsx`'s `testarDbxMutation`) mostra um
+segundo toast informativo só sobre a disponibilidade de "Execuções de Job", separado do
+toast principal de billing — evita confundir "conexão básica quebrada" com "só falta
+habilitar mais um schema pra uma feature adicional".
+
+**Frontend**: `DatabricksJobRunsCard.tsx` — novo card "Execuções de Job — Tempo e Custo" no
+Dashboard, logo após os 6 rankings, reaproveitando o mesmo `periodo` e o filtro de
+drill-down `job_id` já existentes (clicar num job em "Por Job" também escopa esta lista,
+sem seletor de período próprio). Tabela: Job / Run / Início / Duração / Status (badge
+colorido por `result_state`) / Custo (`—` quando `null`, com tooltip explicando o motivo).
+`GET /job-runs` tem range padrão de 7 dias (não os 6 meses do `/resumo`) e `LIMIT 200` —
+execuções de Job são por EXECUÇÃO (podem ser centenas/dia num workspace ativo), volume bem
+maior que billing diário; aviso "mostrando as 200 mais recentes" quando o limite é atingido.
+
+**⚠️ NÃO VALIDADO contra uma conta Databricks real** (mesma ressalva de sempre nesta
+feature) — schema/nomes de coluna conforme documentação oficial pesquisada em 2026-08-29;
+a primeira coleta real pode expor um nome de coluna ou uma nuance de tipo (ex:
+`unix_timestamp()` sobre `period_end_time`/`period_start_time`) que precise de ajuste.
+Verificado o que dá pra verificar sem conta real: `node --check`, `tsc -b`, migração
+(`databricks_job_runs` + 2 índices) aplicada com `pm2 restart` sem erro no log e sem
+crash-loop (uptime estável, contador de restarts do PM2 parado), rota
+`GET /api/databricks-coleta/job-runs` respondendo 401 sem token (prova que o Express
+terminou de subir depois do `ensureAzureColetaTable()`, que teria lançado exceção e
+impedido o boot se a migração tivesse falhado). Teste novo em
+`DatabricksDashboardView.test.tsx` cobre o card com dados mockados (duração formatada,
+badge de status, `—` para custo nulo, drill-down por job).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

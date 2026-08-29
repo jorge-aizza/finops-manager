@@ -7,6 +7,7 @@ import type {
   DatabricksAlerta, DatabricksAnomalias, DatabricksBudget, DatabricksBudgetInput, DatabricksResumo,
 } from '../types/databricksResumo'
 import type { HistoricoItem, PurgeResult } from '../types/coleta'
+import type { DatabricksJobRunsResposta } from '../types/databricksJobRuns'
 
 const NUM_FIELDS: (keyof DatabricksConfig)[] = ['granularidade_dias', 'dia_execucao', 'hora_execucao']
 const normalize = (c: DatabricksConfig) => numFields(c, NUM_FIELDS)
@@ -187,3 +188,31 @@ export const getDatabricksTagValues = (chave: string) => apiFetch<string[]>('GET
 // number de verdade (agregados em SQL/JS no servidor, nunca uma coluna NUMERIC de topo
 // devolvida crua) — sem necessidade de numFields aqui.
 export const getDatabricksAnomalias = () => apiFetch<DatabricksAnomalias>('GET', '/databricks-coleta/anomalias')
+
+// Execuções de Job — tempo + custo (2026-08-29, pedido do usuário). Números (duracao_segundos/
+// custo_estimado) vêm de colunas NUMERIC do Postgres (databricks_job_runs) ou de um SUM
+// agregado sobre NUMERIC (custo_estimado, subquery correlacionada em server.js) — ambos
+// voltam como string via `pg`, mesmo motivo de sempre (ver normalize.ts). `custo_estimado`
+// preserva `null` explicitamente (Number(null) seria 0, que mentiria "custo zero" quando na
+// verdade é "sem dado de billing pra correlacionar" — ver nota no tipo).
+export interface DatabricksJobRunsFiltros {
+  job_id?: string
+  workspace_id?: string
+  result_state?: string
+}
+export const getDatabricksJobRuns = (data_inicio?: string, data_fim?: string, filtros?: DatabricksJobRunsFiltros) => {
+  const q = new URLSearchParams()
+  if (data_inicio && data_fim) { q.set('data_inicio', data_inicio); q.set('data_fim', data_fim) }
+  if (filtros?.job_id) q.set('job_id', filtros.job_id)
+  if (filtros?.workspace_id) q.set('workspace_id', filtros.workspace_id)
+  if (filtros?.result_state) q.set('result_state', filtros.result_state)
+  const qs = q.toString()
+  return apiFetch<DatabricksJobRunsResposta>('GET', '/databricks-coleta/job-runs' + (qs ? '?' + qs : '')).then((r) => ({
+    ...r,
+    runs: r.runs.map((run) => ({
+      ...run,
+      duracao_segundos: run.duracao_segundos == null ? null : Number(run.duracao_segundos),
+      custo_estimado: run.custo_estimado == null ? null : Number(run.custo_estimado),
+    })),
+  }))
+}
