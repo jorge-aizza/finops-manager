@@ -15,7 +15,7 @@ function makeResumo(overrides: Partial<DatabricksResumo> = {}): DatabricksResumo
     periodo: { inicio: '2026-02-25', fim: '2026-08-25' },
     tem_dados: true,
     total_custo: 15000,
-    por_mes: [{ mes: '2026-07', custo: 7000 }, { mes: '2026-08', custo: 8000 }],
+    por_mes: [{ mes: '2026-07', custo: 7000, free: 1000, pago: 6000 }, { mes: '2026-08', custo: 8000, free: 2000, pago: 6000 }],
     por_workspace: [{ workspace_id: 'ws-prod', custo: 10000 }, { workspace_id: 'ws-dev', custo: 5000 }],
     por_sku: [{ sku_name: 'PREMIUM_ALL_PURPOSE_COMPUTE', custo: 9000 }, { sku_name: 'GENIE_FREE_USAGE', custo: 0 }],
     por_usuario: [{ usuario: 'joao@empresa.com', custo: 6000 }, { usuario: 'Não identificado', custo: 2000 }],

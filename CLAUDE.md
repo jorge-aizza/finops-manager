@@ -1906,6 +1906,58 @@ de escopo global, corretamente não marca nenhum item); clicar no ícone navega 
 `DatabricksDashboardView.test.tsx` (ícone aparece só nos itens com anomalia, ausente nos
 sem, clique navega de aba).
 
+### Coleta Databricks — Dashboard: Tendência Mensal empilhada em Pago/Free + versão "executiva" (2026-08-28)
+
+Pedido do usuário: o gráfico de Tendência Mensal (barras + forecast) era monocromático
+(roxo sólido pra real, hachurado pra previsão) — não dava pra ver de onde vinha o
+consumo de cada mês, e só a última barra real + as de previsão mostravam o valor
+numérico (rótulos seletivos, regra do skill `dataviz`) — pedido explícito foi "mostrar
+o consumo das cores também" e deixar o gráfico "mais executivo" (todo número visível
+de cara, sem precisar de hover).
+
+**`GET /api/databricks-coleta/resumo` ganhou `free`/`pago` por mês** — a query `rMes`
+(que já devolvia só `mes`/`custo`) ganhou 2 colunas com a MESMA heurística já usada por
+`free_vs_pago`/`dbus_free_vs_pago` (`sku_name ILIKE '%FREE%' OU custo_estimado=0`), só
+agrupada por mês em vez do período inteiro — nenhuma query nova, zero round-trip
+adicional ao Postgres. `DatabricksResumoMes` (tipo TS) ganhou os 2 campos; `normalizeResumo`
+(`api/databricksColeta.ts`) normaliza os dois pra `number` (mesmo motivo de sempre —
+`NUMERIC` do Postgres volta como string via `pg`).
+
+**Barras reais agora empilhadas (Pago roxo embaixo, Free verde em cima)** — as barras de
+**previsão continuam um bloco único hachurado** representando o total projetado: não há
+como prever a proporção Pago/Free com confiança a partir de só 2 números por mês
+(diferente do total, que já tem 6+ meses de histórico pra regressão linear). `MonthlyBarChart`
+recebe `DatabricksResumoMes[]` (antes só `{mes,custo}`) e monta um `Map` mes→{free,pago}
+pra casar com a série já estendida pelo forecast (`forecastLinear` preserva campos extras
+via spread, mas o tipo de retorno `MesCustoPrevisto` não os declara — o `Map` evita
+depender disso silenciosamente). Gap de 2px entre os dois segmentos empilhados quando
+ambos são >0 (regra do skill `dataviz`: "2px surface gap between fills — stacked segments
+e barras adjacentes"); mês 100% pago não desenha o retângulo verde (evita uma tira de 0px
+sem sentido); mês com qualquer parcela free ganha o breakdown Pago/Free no tooltip nativo
+(`<title>`), pago-only mantém só o total.
+
+**Versão "executiva"**: rótulo de valor total agora aparece em TODA barra com custo > 0
+(antes: só previsão + última barra real) — o pedido do usuário aqui é o oposto direto da
+regra geral do skill `dataviz` ("rótulos seletivos, nunca em todo ponto"), mas com só 6-9
+barras no período padrão não há risco real de colisão de texto, e o objetivo explícito é
+uma leitura tipo slide/relatório, sem precisar de hover pra ver os números. Rótulo em
+negrito (`font-weight:700`) e cor `var(--text)` (não mais `var(--text-muted)`) pra maior
+contraste. Legenda ganhou um 2º item "Free" (verde, só aparece se algum mês real tiver
+free>0) ao lado do já existente "Pago"/"Previsão" (renomeado de "Real" pra "Pago", já que
+agora representa especificamente o segmento roxo, não mais a barra inteira). Adicionada
+uma linha de base (`<line>`, `var(--border)`) sob as barras — âncora visual discreta,
+mesmo espírito de "recessive grid/axes" do skill.
+
+**Verificado**: `tsc -b` limpo, 2 fixtures de teste (`DatabricksDashboardView.test.tsx`,
+`DatabricksExpurgoModal.test.tsx`) atualizadas com `free`/`pago` por mês (campos agora
+obrigatórios no tipo) — 17 testes Databricks passando (nenhuma asserção de texto quebrou
+com os novos rótulos sempre visíveis). Visual confirmado com uma reprodução HTML estática
++ Playwright (claro e escuro, dados variados incluindo meses 100% pago e meses com parcela
+free) — não contra o servidor real via login, já que é puramente uma mudança de
+apresentação sobre um payload já coberto pelos testes automatizados; `pm2 restart` aplicado
+pra carregar a mudança de `server.js` (processo gerenciado por PM2, sem watch/reload
+automático).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

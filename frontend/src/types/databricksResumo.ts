@@ -4,6 +4,11 @@
 export interface DatabricksResumoMes {
   mes: string   // 'YYYY-MM'
   custo: number
+  // free/pago (2026-08-28) — mesma heurística de free_vs_pago (sku_name ILIKE '%FREE%' OU
+  // custo_estimado=0), agora por mês — alimenta o breakdown de cores da Tendência Mensal
+  // (MonthlyBarChart, DatabricksDashboardView.tsx) em vez de só o total.
+  free: number
+  pago: number
 }
 
 // por_job/por_cluster/por_warehouse (2026-08-28) — zero coleta nova: agregados sobre

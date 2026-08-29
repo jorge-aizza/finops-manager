@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteDatabricksBudget, getDatabricksAnomalias, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
 import { deleteGenieBudget, listGenieBudgets } from '../api/genieBudgets'
-import type { DatabricksBudget } from '../types/databricksResumo'
+import type { DatabricksBudget, DatabricksResumoMes } from '../types/databricksResumo'
 import type { GenieBudget } from '../types/genieBudgets'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
 import GenieBudgetModal from '../components/GenieBudgetModal'
@@ -119,53 +119,73 @@ function mesLabel(mes: string): string {
 }
 
 // Barras (não linha) a pedido do usuário, com forecast de 3 meses (regressão linear —
-// ver frontend/src/lib/forecastLinear.ts) anexado como barras extras. Forecast usa
-// textura hachurada + borda tracejada (não só uma cor mais clara) — é a distinção
-// categórica "real vs. previsto", não uma questão de magnitude, então a regra do
-// skill dataviz de usar textura pro caso CVD/impressão se aplica bem aqui: quem não
-// distingue as duas cores ainda vê a hachura. Rótulos de valor só nas barras de
-// previsão + na última barra real (regra "rótulos seletivos, nunca em todo ponto") —
-// o histórico completo já está disponível via tooltip nativo (<title>).
-function MonthlyBarChart({ data }: { data: { mes: string; custo: number }[] }) {
+// ver frontend/src/lib/forecastLinear.ts) anexado como barras extras. Barras reais
+// empilhadas em Pago (roxo) + Free (verde) — pedido do usuário pra mostrar de onde vem
+// o consumo por mês, não só o total (o forecast não separa pago/free — não há como
+// prever essa proporção com confiança a partir de 2 números por mês, então a barra de
+// previsão continua um bloco único hachurado representando o total projetado). Textura
+// hachurada + borda tracejada pro previsto (não só uma cor mais clara) — distinção
+// categórica "real vs. previsto", segue a regra do skill dataviz de reservar textura pro
+// caso CVD/impressão: quem não distingue as cores ainda vê a hachura. Versão "executiva"
+// (pedido do usuário): rótulo de valor total em toda barra, não só nas seletivas, e
+// legenda sempre visível — todo número visível de cara, sem precisar de hover; o
+// breakdown Pago/Free de cada mês real continua disponível no tooltip nativo (<title>).
+function MonthlyBarChart({ data }: { data: DatabricksResumoMes[] }) {
   if (data.length === 0) return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '0 20px 16px' }}>Sem dados no período.</div>
 
   const serie = forecastLinear(data, 3)
   const temPrevisao = serie.some((d) => d.previsto)
+  const temFree = data.some((d) => d.free > 0)
+  const splitPorMes = new Map(data.map((d) => [d.mes, { free: d.free, pago: d.pago }]))
 
-  const W = 640, H = 190, PAD_TOP = 26, PAD_BOTTOM = 30, PAD_SIDE = 10
+  const W = 640, H = 200, PAD_TOP = 30, PAD_BOTTOM = 30, PAD_SIDE = 10
   const plotH = H - PAD_TOP - PAD_BOTTOM
   const max = Math.max(1, ...serie.map((d) => d.custo))
   const slot = (W - PAD_SIDE * 2) / serie.length
   const barW = Math.max(6, slot * 0.55)
-  const destacar = data.length - 1 // última barra real
+  const baseY = H - PAD_BOTTOM
 
   return (
     <div style={{ padding: '0 20px 16px' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 210 }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 220 }}>
         <defs>
           <pattern id="dbxForecastHatch" width={6} height={6} patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
             <rect width={6} height={6} fill="var(--accent)" fillOpacity={0.10} />
             <line x1={0} y1={0} x2={0} y2={6} stroke="var(--accent)" strokeWidth={2} strokeOpacity={0.4} />
           </pattern>
         </defs>
+        <line x1={PAD_SIDE} y1={baseY} x2={W - PAD_SIDE} y2={baseY} stroke="var(--border)" strokeWidth={1} />
         {serie.map((d, i) => {
           const x = PAD_SIDE + i * slot + (slot - barW) / 2
-          const h = (d.custo / max) * plotH
-          const y = H - PAD_BOTTOM - h
-          const mostrarValor = d.previsto || i === destacar
+          const split = d.previsto ? null : splitPorMes.get(d.mes)
+          const pago = split ? split.pago : d.custo
+          const free = split ? split.free : 0
+          const gap = free > 0 && pago > 0 ? 2 : 0
+          const pagoH = (pago / max) * plotH
+          const freeH = free > 0 ? (free / max) * plotH : 0
+          const topY = baseY - (pagoH + gap + freeH)
+          const breakdown = free > 0 ? ` — Pago: ${fmtBRL(pago)} · Free: ${fmtBRL(free)}` : ''
+          const titulo = `${mesLabel(d.mes)}: ${fmtBRL(d.custo)}${d.previsto ? ' (previsão — tendência linear)' : breakdown}`
           return (
             <g key={d.mes}>
-              <rect
-                x={x} y={y} width={barW} height={Math.max(1, h)} rx={3}
-                fill={d.previsto ? 'url(#dbxForecastHatch)' : 'var(--accent)'}
-                stroke={d.previsto ? 'var(--accent)' : 'none'}
-                strokeWidth={d.previsto ? 1.5 : 0}
-                strokeDasharray={d.previsto ? '3,2' : undefined}
-              >
-                <title>{mesLabel(d.mes)}: {fmtBRL(d.custo)}{d.previsto ? ' (previsão — tendência linear)' : ''}</title>
-              </rect>
-              {mostrarValor && (
-                <text x={x + barW / 2} y={Math.max(10, y - 6)} fontSize={9.5} fill="var(--text-muted)" textAnchor="middle">
+              {(pago > 0 || d.previsto) && (
+                <rect
+                  x={x} y={baseY - pagoH} width={barW} height={Math.max(1, pagoH)} rx={2}
+                  fill={d.previsto ? 'url(#dbxForecastHatch)' : 'var(--accent)'}
+                  stroke={d.previsto ? 'var(--accent)' : 'none'}
+                  strokeWidth={d.previsto ? 1.5 : 0}
+                  strokeDasharray={d.previsto ? '3,2' : undefined}
+                >
+                  <title>{titulo}</title>
+                </rect>
+              )}
+              {free > 0 && (
+                <rect x={x} y={baseY - pagoH - gap - freeH} width={barW} height={Math.max(1, freeH)} rx={2} fill="var(--green)">
+                  <title>{titulo}</title>
+                </rect>
+              )}
+              {d.custo > 0.005 && (
+                <text x={x + barW / 2} y={Math.max(10, topY - 6)} fontSize={9.5} fontWeight={700} fill="var(--text)" textAnchor="middle">
                   {fmtBRL(d.custo)}
                 </text>
               )}
@@ -176,12 +196,15 @@ function MonthlyBarChart({ data }: { data: { mes: string; custo: number }[] }) {
           )
         })}
       </svg>
-      {temPrevisao && (
-        <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
-          <span><span style={{ display: 'inline-block', width: 10, height: 10, background: 'var(--accent)', borderRadius: 2, marginRight: 4, verticalAlign: -1 }} />Real</span>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: 'var(--accent)', borderRadius: 2, marginRight: 4, verticalAlign: -1 }} />Pago</span>
+        {temFree && (
+          <span><span style={{ display: 'inline-block', width: 10, height: 10, background: 'var(--green)', borderRadius: 2, marginRight: 4, verticalAlign: -1 }} />Free</span>
+        )}
+        {temPrevisao && (
           <span><span style={{ display: 'inline-block', width: 10, height: 10, border: '1.5px dashed var(--accent)', background: 'color-mix(in srgb, var(--accent) 10%, transparent)', borderRadius: 2, marginRight: 4, verticalAlign: -1 }} />Previsão (tendência linear, 3 meses)</span>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   )
 }

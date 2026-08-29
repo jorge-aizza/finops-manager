@@ -21,7 +21,7 @@ const mockResumo: DatabricksResumo = {
   periodo: { inicio: '2015-01-01', fim: '2026-08-27' },
   tem_dados: true,
   total_custo: 602.85,
-  por_mes: [{ mes: '2026-08', custo: 602.85 }],
+  por_mes: [{ mes: '2026-08', custo: 602.85, free: 0, pago: 602.85 }],
   por_workspace: [
     { workspace_id: 'ws-prod-brsouth', custo: 247.42 },
     { workspace_id: 'ws-teste-verificacao', custo: 7.84 },

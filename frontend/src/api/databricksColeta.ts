@@ -54,7 +54,7 @@ export const excluirAgendamentoDatabricks = (id: number) =>
 const normalizeResumo = (r: DatabricksResumo): DatabricksResumo => ({
   ...r,
   total_custo: Number(r.total_custo),
-  por_mes: r.por_mes.map((m) => ({ ...m, custo: Number(m.custo) })),
+  por_mes: r.por_mes.map((m) => ({ ...m, custo: Number(m.custo), free: Number(m.free), pago: Number(m.pago) })),
   por_workspace: r.por_workspace.map((w) => ({ ...w, custo: Number(w.custo) })),
   por_sku: r.por_sku.map((s) => ({ ...s, custo: Number(s.custo) })),
   por_usuario: r.por_usuario.map((u) => ({ ...u, custo: Number(u.custo) })),

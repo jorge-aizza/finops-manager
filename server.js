@@ -7596,7 +7596,12 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
     // usa job_name quando disponível, cluster/warehouse mostram só o id.
     const [rTotal, rMes, rWs, rSku, rUser, rFree, rJob, rCluster, rWarehouse] = await Promise.all([
       pool.query(`SELECT COALESCE(SUM(custo_estimado),0) AS total, COUNT(*) AS linhas FROM databricks_consumo WHERE ${where}`, params),
-      pool.query(`SELECT to_char(usage_date,'YYYY-MM') AS mes, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 1`, params),
+      pool.query(
+        `SELECT to_char(usage_date,'YYYY-MM') AS mes, SUM(custo_estimado) AS custo,
+                COALESCE(SUM(custo_estimado) FILTER (WHERE sku_name ILIKE '%FREE%' OR custo_estimado = 0), 0) AS free,
+                COALESCE(SUM(custo_estimado) FILTER (WHERE NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)), 0) AS pago
+         FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 1`, params
+      ),
       pool.query(`SELECT workspace_id, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
       pool.query(`SELECT sku_name, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
       pool.query(`SELECT NULLIF(usuario,'') AS usuario, SUM(custo_estimado) AS custo FROM databricks_consumo WHERE ${where} GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, params),
