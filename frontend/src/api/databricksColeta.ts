@@ -30,10 +30,14 @@ export const setDatabricksConfigAtivo = (id: number, ativo: boolean) =>
 export const setDatabricksConfigPadrao = (id: number) =>
   apiFetch<{ ok: boolean }>('PATCH', '/databricks-coleta/config/' + id + '/padrao')
 
-// Chamada real ao Databricks (token OAuth + SELECT 1 via SQL Warehouse) — timeout maior,
-// mesmo padrão de testarSP (api/coleta.ts).
+// Chamada real ao Databricks (token OAuth + SELECT 1 via SQL Warehouse, mais 4 checagens de
+// System Tables) — timeout generoso (3 min): o servidor agora faz polling de verdade
+// (_databricksRunQuery, server.js) em vez de tratar um SQL Warehouse frio (cold start —
+// documentado como levando de dezenas de segundos a poucos minutos pra ligar) como erro.
+// Um timeout curto aqui derrubaria a checagem bem no cenário exato que o polling foi
+// corrigido pra suportar.
 export const testarDatabricksConfig = (id: number) =>
-  apiFetch<TestarDatabricksResponse>('POST', '/databricks-coleta/config/' + id + '/testar', undefined, 40000)
+  apiFetch<TestarDatabricksResponse>('POST', '/databricks-coleta/config/' + id + '/testar', undefined, 180000)
 
 // ── Fase 2 — coleta real + agendamento ──────────────────────────
 export const coletarDatabricks = (id: number, data_inicio: string, data_fim: string) =>

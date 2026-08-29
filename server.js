@@ -6983,21 +6983,50 @@ async function _databricksGetToken(accountId, clientId, clientSecret) {
 }
 
 // Executa uma query SQL via Statement Execution API contra o warehouse configurado —
-// usado pelo teste de conexão (SELECT 1) e, na Fase 2, pelas queries reais de billing.
-// `parameters` — array de {name, value, type} — usa placeholders `:nome` na SQL em vez
-// de concatenar valores direto na string, mesma prática de parametrização já usada em
-// toda query Postgres deste arquivo (aqui obrigatório mesmo pra um sistema externo: a
-// Fase 2 passa datas vindas do agendador OU de um gatilho manual via API, nunca confiar
-// em concatenação de string pra isso).
+// usado pelo teste de conexão (SELECT 1) e, na Fase 2, pelas queries reais de billing e
+// execuções de Job. `parameters` — array de {name, value, type} — usa placeholders `:nome`
+// na SQL em vez de concatenar valores direto na string, mesma prática de parametrização já
+// usada em toda query Postgres deste arquivo (aqui obrigatório mesmo pra um sistema
+// externo: a Fase 2 passa datas vindas do agendador OU de um gatilho manual via API, nunca
+// confiar em concatenação de string pra isso).
+//
+// Bug real encontrado e corrigido (2026-08-29, auditoria pedida pelo usuário contra a
+// documentação oficial): `wait_timeout: '30s'` + `_parseDatabricksResult` lançando erro
+// pra qualquer `status.state` != 'SUCCEEDED' significava que uma query que não terminasse
+// dentro de 30s (SQL Warehouse frio começando do zero — cold start documentado como
+// levando de dezenas de segundos a poucos minutos —, ou um scan grande de
+// system.billing.usage num período longo) derrubava a coleta inteira com "não concluiu",
+// mesmo a query estando genuinamente ainda em execução no lado do Databricks (o parâmetro
+// default do endpoint é justamente deixar a query rodando em background quando o timeout
+// de espera é atingido — `on_wait_timeout: 'CONTINUE'`, comportamento padrão da API). A
+// documentação oficial (docs.databricks.com/api/workspace/statementexecution) confirma
+// `GET /api/2.0/sql/statements/{statement_id}` como o endpoint de polling — mesma forma de
+// resposta (status/manifest/result) do POST inicial. Corrigido: `wait_timeout` no máximo
+// permitido pela API ('50s', faixa válida é 0 ou 5-50) pra minimizar quantas vezes o
+// polling é sequer necessário, e polling de verdade (a cada 3s, até 5 min) quando o estado
+// inicial vem `PENDING`/`RUNNING` em vez de tratar isso como falha.
+const _DBX_POLL_INTERVAL_MS = 3000;
+const _DBX_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+
 async function _databricksRunQuery(workspaceHost, warehouseId, token, sql, parameters = []) {
   const host = (workspaceHost || '').replace(/\/+$/, '');
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const resp = await _dbxFetch(`${host}/api/2.0/sql/statements`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ warehouse_id: warehouseId, statement: sql, wait_timeout: '30s', parameters }),
-  }, 35000);
+    headers,
+    body: JSON.stringify({ warehouse_id: warehouseId, statement: sql, wait_timeout: '50s', parameters }),
+  }, 55000);
   if (!resp.ok) { const e = await resp.text(); throw new Error(`Query Databricks falhou (${resp.status}): ${e}`); }
-  return _safeRespJson(resp);
+  let result = await _safeRespJson(resp);
+
+  const inicio = Date.now();
+  while (['PENDING', 'RUNNING'].includes(result?.status?.state) && Date.now() - inicio < _DBX_POLL_TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, _DBX_POLL_INTERVAL_MS));
+    const pollResp = await _dbxFetch(`${host}/api/2.0/sql/statements/${result.statement_id}`, { headers }, 15000);
+    if (!pollResp.ok) { const e = await pollResp.text(); throw new Error(`Consulta de status da query Databricks falhou (${pollResp.status}): ${e}`); }
+    result = await _safeRespJson(pollResp);
+  }
+  return result;
 }
 
 // Converte a resposta da Statement Execution API (colunas + linhas em array) em objetos
@@ -7005,7 +7034,11 @@ async function _databricksRunQuery(workspaceHost, warehouseId, token, sql, param
 function _parseDatabricksResult(result) {
   const state = result?.status?.state;
   if (state !== 'SUCCEEDED') {
-    throw new Error(`Query Databricks não concluiu (status: ${state || 'desconhecido'})${result?.status?.error?.message ? ' — ' + result.status.error.message : ''}`);
+    const aindaRodando = state === 'PENDING' || state === 'RUNNING';
+    const motivo = aindaRodando
+      ? 'query ainda em execução após 5 minutos de espera (SQL Warehouse pode estar sobrecarregado, ou o período selecionado é grande demais) — tente novamente ou reduza o intervalo de datas'
+      : (result?.status?.error?.message || 'sem detalhes retornados pela API');
+    throw new Error(`Query Databricks não concluiu (status: ${state || 'desconhecido'}) — ${motivo}`);
   }
   const cols = (result.manifest?.schema?.columns || []).map(c => c.name);
   const rows = result.result?.data_array || [];
@@ -7197,8 +7230,10 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
 // — granularidade que azure_costs nunca vai ter (sem identidade de usuário nem SKU
 // nativo do Databricks). NÃO VALIDADO contra uma conta Databricks real neste ambiente —
 // mesma ressalva de _databricksGetToken/_databricksRunQuery. A sintaxe de acesso aos
-// campos STRUCT (identity_metadata.run_as, pricing.default) e os nomes exatos de
-// coluna podem precisar de ajuste na primeira execução real.
+// campos STRUCT (identity_metadata.run_as, pricing.effective_list.default — este último
+// confirmado 2026-08-29 contra a query de exemplo oficial da Databricks pra "Total Dollar
+// Cost", ver nota na query abaixo) e os nomes exatos de coluna podem precisar de ajuste na
+// primeira execução real.
 // Grava `linhas` (mesmo shape nos dois chamadores — ver _executarColetaDatabricks e
 // _processarImportDatabricks: workspace_id/sku_name/produto_origem/usage_date/
 // usage_unit/usage_quantity/usuario/preco_unitario/custo_estimado/usage_metadata_json/
@@ -7354,6 +7389,21 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
     // de campo errado quebraria a query inteira. to_json() captura o que existir de
     // verdade, sem apostar num caminho específico, e serve como chave de agrupamento
     // (MAP não pode ir em GROUP BY no Spark SQL — precisa ser uma STRING).
+    //
+    // Bug real encontrado e corrigido (2026-08-29, auditoria pedida pelo usuário contra a
+    // documentação oficial): usava `p.pricing.default` — a doc descreve esse campo como
+    // "preço de tabela base pra estimativas de longo prazo", NÃO o campo usado pra calcular
+    // custo real. A query de exemplo oficial da Databricks pra "Total Dollar Cost"
+    // (docs.databricks.com/aws/en/admin/system-tables/pricing) usa
+    // `pricing.effective_list.default` — "resolve o preço de lista e o promocional, e
+    // contém o preço de lista efetivo usado pra calcular o custo". Sem isso, qualquer SKU
+    // com preço promocional ativo tinha o custo estimado systematicamente errado (usando o
+    // preço de tabela cheio em vez do efetivo). `COALESCE(...,p.pricing.default)` mantém um
+    // fallback só por segurança, caso `effective_list` venha nulo pra algum SKU específico.
+    // Join trocado de `usage_start_time` pra `usage_end_time` na mesma correção, batendo
+    // exatamente com a query de exemplo oficial (usage_quantity e o preço vigente no fim do
+    // período de uso, não no início — só importa pra registros que cruzam uma mudança de
+    // preço no meio do intervalo, caso raro, mas sem motivo pra divergir do padrão oficial).
     const sql = `
       SELECT
         u.workspace_id                                 AS workspace_id,
@@ -7365,13 +7415,13 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
         to_json(u.usage_metadata)                       AS usage_metadata_json,
         to_json(u.custom_tags)                          AS custom_tags_json,
         SUM(u.usage_quantity)                           AS usage_quantity,
-        MAX(p.pricing.default)                          AS preco_unitario,
-        SUM(u.usage_quantity * COALESCE(p.pricing.default, 0)) AS custo_estimado
+        MAX(COALESCE(p.pricing.effective_list.default, p.pricing.default)) AS preco_unitario,
+        SUM(u.usage_quantity * COALESCE(p.pricing.effective_list.default, p.pricing.default, 0)) AS custo_estimado
       FROM system.billing.usage u
       LEFT JOIN system.billing.list_prices p
         ON u.sku_name = p.sku_name AND u.cloud = p.cloud
-        AND u.usage_start_time >= p.price_start_time
-        AND (p.price_end_time IS NULL OR u.usage_start_time < p.price_end_time)
+        AND u.usage_end_time >= p.price_start_time
+        AND (p.price_end_time IS NULL OR u.usage_end_time < p.price_end_time)
       WHERE u.usage_date >= :data_inicio AND u.usage_date <= :data_fim
       GROUP BY u.workspace_id, u.sku_name, u.billing_origin_product, u.usage_date, u.usage_unit,
                u.identity_metadata.run_as, to_json(u.usage_metadata), to_json(u.custom_tags)

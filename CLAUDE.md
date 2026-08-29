@@ -2132,6 +2132,95 @@ impedido o boot se a migração tivesse falhado). Teste novo em
 `DatabricksDashboardView.test.tsx` cobre o card com dados mockados (duração formatada,
 badge de status, `—` para custo nulo, drill-down por job).
 
+### Auditoria contra a documentação oficial do Databricks — 2 bugs reais encontrados e corrigidos (2026-08-29)
+
+Pedido do usuário: revalidar TODA a integração Databricks contra a documentação oficial e
+identificar lacunas pra "Controle de Custos". Reconfirmado (sem mudança necessária):
+schema de `system.billing.usage`/`system.billing.list_prices` (todos os campos usados
+batem — `workspace_id`, `sku_name`, `billing_origin_product`, `usage_date`, `usage_unit`,
+`usage_quantity`, `identity_metadata.run_as`, `usage_metadata`, `custom_tags`), schema de
+`system.lakeflow.job_run_timeline`/`jobs` (verificado na mesma sessão, ver seção acima),
+endpoint OAuth M2M de conta (`https://accounts.azuredatabricks.net/oidc/accounts/{id}/v1/token`
+— confirmado batendo exatamente com a documentação oficial), e a limitação de
+`system.compute.*` (não cobre SQL Warehouses nem serverless — confirmado explicitamente:
+"These tables only includes records for all-purpose and jobs compute. They do not contain
+records for serverless compute or SQL warehouses").
+
+**Bug real #1 — fórmula de custo usava o campo errado do preço de tabela**: a query de
+billing (`_executarColetaDatabricks`) usava `p.pricing.default`. A documentação oficial
+descreve esse campo como "preço de tabela base pra estimativas de longo prazo" — **não** o
+campo pra calcular custo real. A própria query de exemplo oficial da Databricks pra "Total
+Dollar Cost" (`docs.databricks.com/aws/en/admin/system-tables/pricing`) usa
+`pricing.effective_list.default`: "resolve o preço de lista e o promocional, e contém o
+preço de lista efetivo usado pra calcular o custo". Sem essa correção, qualquer SKU com
+preço promocional ativo (comum — a Databricks roda promoções por SKU/região com frequência)
+tinha o custo estimado sistematicamente errado, usando o preço cheio em vez do efetivo —
+um erro de custo real, não cosmético, na feature cujo propósito inteiro é medir custo.
+Corrigido pra `COALESCE(p.pricing.effective_list.default, p.pricing.default, 0)` (fallback
+de segurança só caso `effective_list` venha nulo pra algum SKU específico) — mesma correção
+aplicada em `preco_unitario` e `custo_estimado`. Join trocado de `usage_start_time` pra
+`usage_end_time`, batendo exatamente com a query de exemplo oficial (só importa pra
+registros que cruzam uma mudança de preço no meio do intervalo de uso, caso raro, mas sem
+motivo pra divergir do padrão documentado).
+
+**Bug real #2 — timeout de 30s tratado como falha definitiva, não como "ainda rodando"**:
+`_databricksRunQuery` usava `wait_timeout: '30s'` e `_parseDatabricksResult` lançava erro
+pra qualquer `status.state` diferente de `'SUCCEEDED'`. A documentação oficial da
+Statement Execution API é explícita: quando o tempo de espera é atingido, o comportamento
+padrão (`on_wait_timeout: 'CONTINUE'`, o default) é deixar a query **continuar rodando em
+background** no lado do Databricks — o chamador precisa fazer *polling* em
+`GET /api/2.0/sql/statements/{statement_id}` até um estado terminal. Sem isso, um SQL
+Warehouse frio (cold start documentado como levando de dezenas de segundos a poucos
+minutos pra ligar) ou uma query de billing sobre um período grande derrubava a coleta
+inteira com "não concluiu" mesmo a query estando genuinamente a caminho de terminar com
+sucesso — a pior falha possível numa feature de coleta agendada: intermitente, e mais
+provável exatamente no primeiro uso real (warehouse mais chance de estar frio numa conexão
+recém-configurada). Corrigido: `wait_timeout` no máximo permitido pela API (`'50s'`, faixa
+válida documentada é `0` ou `5-50`) pra reduzir quantas vezes o polling é sequer
+necessário, e polling de verdade (a cada 3s, até 5 min de espera total) quando o estado
+inicial retorna `PENDING`/`RUNNING`. `_parseDatabricksResult` também ganhou uma mensagem de
+erro diferenciada pra esse caso ("ainda em execução após 5 minutos" vs. um erro real de
+SQL/permissão). **Efeito colateral corrigido em conjunto**: o timeout do fetch do frontend
+pra "Testar Conexão" (`testarDatabricksConfig`, 40s) subiu pra 3 minutos — sem isso, o
+frontend abortaria a requisição exatamente no cenário (cold start) que o polling do backend
+foi corrigido pra suportar, trocando um erro do backend por um erro de timeout do
+navegador, sem ganho nenhum. `coletarDatabricks` (gatilho de coleta manual) não precisou de
+ajuste — a rota já responde imediatamente e roda a coleta em background (`_dbxColetaEmExecucao`),
+sempre foi fire-and-forget do lado do cliente.
+
+**Lacunas identificadas pra "Controle de Custos" — nenhuma implementada ainda, aguardando
+decisão do usuário sobre prioridade** (ver `system.compute`/`system.query`/`system.serving`/
+`system.ai_gateway`, todos confirmados existentes e não usados hoje):
+- **Utilização de cluster / detecção de ociosidade** (`system.compute.node_timeline` —
+  métricas de CPU/memória minuto a minuto pra all-purpose e jobs compute) — hoje o sistema
+  mostra CUSTO por cluster, mas não se aquele cluster está super-dimensionado ou ocioso.
+  Essa é a diferença entre "visibilidade de custo" (o que já temos) e "otimização de custo"
+  (rightsizing) — um dos dois pilares clássicos de FinOps que ainda falta.
+- **Custo/performance por query em SQL Warehouse** (`system.query.history`) — hoje só
+  temos custo agregado por warehouse (`Por Warehouse`); não há visão de qual QUERY ou qual
+  USUÁRIO específico consumiu mais dentro de um warehouse, nem tempo de execução de query
+  (equivalente ao que "Execuções de Job" acabou de trazer pra Jobs, mas pra SQL).
+- **Gasto com Model Serving / AI Gateway** (`system.serving.endpoint_usage`,
+  `system.ai_gateway.external_model_spend` — literalmente "estimated USD spend for requests
+  routed to external models") — Quotas Genie (já implementado) CONTROLA limites de uso do
+  Genie via a Budgets API nativa, mas não existe hoje nenhuma visão de CONSUMO real de
+  Model Serving/AI Gateway pra outros endpoints além do Genie — área de custo crescente em
+  contas Databricks modernas (GenAI).
+- **Otimização de storage** (`system.storage.predictive_optimization_operations_history`)
+  — fora do escopo de custo de compute, mas relevante pra TCO geral de Databricks.
+
+Nenhuma dessas foi implementada nesta rodada — são apresentadas como opções pro usuário
+decidir prioridade, não implementadas preventivamente, dado o tamanho de cada uma
+(rightsizing de cluster e custo-por-query são, cada um, do tamanho da feature de
+"Execuções de Job" que acabou de ser construída).
+
+**Verificado**: `node --check`, `tsc -b`, `pm2 restart` sem erro/crash-loop. As duas
+correções (fórmula de preço, polling) não têm cobertura de teste automatizado possível
+neste ambiente (dependem de uma resposta real da Statement Execution API — mockar o
+comportamento de polling seria testar o mock, não a lógica real) — mesma limitação já
+documentada pra toda a Coleta Databricks; primeira validação de verdade só na primeira
+coleta contra uma conta Databricks real.
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),
