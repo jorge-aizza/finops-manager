@@ -9,6 +9,7 @@ import EstimativasView from './views/EstimativasView'
 import DashboardView from './views/DashboardView'
 import CalculadoraView from './views/CalculadoraView'
 import DatabricksDashboardView from './views/DatabricksDashboardView'
+import InventarioView from './views/InventarioView'
 import DatabricksBudgetAlertModal from './components/DatabricksBudgetAlertModal'
 
 const queryClient = new QueryClient({
@@ -25,6 +26,7 @@ const VIEWS: Record<string, ComponentType> = {
   dashboard: DashboardView,
   calculadora: CalculadoraView,
   databricks: DatabricksDashboardView,
+  inventario: InventarioView,
 }
 
 export default function App() {

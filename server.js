@@ -5430,6 +5430,19 @@ function _logColetaDbx(msg) {
   console.log('[ColetaDbx] ' + msg);
 }
 
+// Estado independente (Inventário/Auditoria de Recursos Azure, 2026-08-30) — mesmo
+// espírito de _dbxColetaEmExecucao: não compete com a coleta de billing nem com a
+// Databricks, tabelas e circuit breaker (_cbFetch, compartilhado com o resto do Azure,
+// já que isso também é Azure Management API) próprios.
+let _invColetaEmExecucao = false;
+let _invColetaIniciadaEm = null;
+let _invColetaProgresso  = { fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
+function _logColetaInv(msg) {
+  _invColetaProgresso.log.push({ ts: new Date().toISOString().slice(11, 19), msg });
+  if (_invColetaProgresso.log.length > 200) _invColetaProgresso.log.shift();
+  console.log('[ColetaInv] ' + msg);
+}
+
 // ── Circuit Breaker — Azure Cost Management API ────────────────────────────────
 const _CB_STATES       = Object.freeze({ CLOSED: 'CLOSED', OPEN: 'OPEN', HALF_OPEN: 'HALF_OPEN' });
 const _CB_MAX_FAILURES = 3;
@@ -5997,6 +6010,93 @@ async function ensureAzureColetaTable() {
     }
   }
 
+  // ── Inventário + Auditoria de Recursos Azure (2026-08-30, pedido do usuário) ──────────
+  // "Ontem tinha X recursos, hoje tenho X+1 — quem criou, quando, quanto custa." Fonte:
+  // Azure Activity Log (Microsoft.Insights/eventtypes/management, mesma credencial ARM já
+  // usada pra Cost Management — role Reader já cobre `Microsoft.Insights/eventtypes/*`,
+  // nenhuma permissão nova precisa ser concedida ao Service Principal). Custo NÃO é
+  // armazenado aqui — correlacionado em leitura com azure_costs por resource_id (dado que
+  // já coletamos todo dia).
+  //
+  // Duas tabelas com propósitos deliberadamente diferentes (pedido do usuário — "inventário
+  // + auditoria"):
+  // - azure_recursos_inventario: 1 linha PERMANENTE por recurso (quem criou/quando nunca é
+  //   apagado por retenção — só o log de eventos abaixo é). Serve de "o que existe hoje".
+  // - azure_recursos_auditoria_eventos: log bruto, 1 linha por evento detectado
+  //   (CRIAÇÃO/ATUALIZAÇÃO/EXCLUSÃO), sujeito ao período de retenção configurável — é o que
+  //   cresce sem limite ao longo do tempo, então precisa de limpeza periódica.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_inventario_config (
+      id                 SERIAL PRIMARY KEY,
+      ativo              BOOLEAN DEFAULT false,
+      retencao_dias      INTEGER DEFAULT 180,
+      sp_id              INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL,
+      subscription_ids   TEXT,
+      ultimo_evento_em   TIMESTAMP,
+      criado_em          TIMESTAMP DEFAULT NOW(),
+      atualizado_em      TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_recursos_inventario (
+      id                SERIAL PRIMARY KEY,
+      subscription_id   VARCHAR(200) NOT NULL,
+      resource_id       TEXT NOT NULL,
+      resource_type     VARCHAR(300),
+      resource_group    VARCHAR(300),
+      nome              VARCHAR(500),
+      criado_por        VARCHAR(300),
+      criado_em         TIMESTAMP,
+      atualizado_por    VARCHAR(300),
+      atualizado_em     TIMESTAMP,
+      excluido_por      VARCHAR(300),
+      excluido_em       TIMESTAMP,
+      ativo             BOOLEAN DEFAULT true,
+      detectado_em      TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  // UNIQUE via índice (não constraint inline) — resource_id é TEXT sem limite, e um índice
+  // btree comum já é suficiente pra UPSERT (ON CONFLICT precisa de um índice único, não
+  // necessariamente uma constraint declarada no CREATE TABLE).
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_recursos_inv_uniq ON azure_recursos_inventario (subscription_id, resource_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_recursos_auditoria_eventos (
+      id                SERIAL PRIMARY KEY,
+      subscription_id   VARCHAR(200) NOT NULL,
+      resource_id       TEXT NOT NULL,
+      resource_type     VARCHAR(300),
+      resource_group    VARCHAR(300),
+      acao              VARCHAR(20) NOT NULL,
+      autor             VARCHAR(300),
+      quando             TIMESTAMP NOT NULL,
+      operation_name    VARCHAR(300),
+      correlation_id    VARCHAR(100),
+      criado_em         TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_aud_quando ON azure_recursos_auditoria_eventos (quando)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_aud_resource ON azure_recursos_auditoria_eventos (resource_id)`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_inventario_coleta_historico (
+      id                  SERIAL PRIMARY KEY,
+      iniciado_em         TIMESTAMP DEFAULT NOW(),
+      concluido_em        TIMESTAMP,
+      status              VARCHAR(20) DEFAULT 'executando',
+      origem              VARCHAR(20),
+      periodo_inicio      TIMESTAMP,
+      periodo_fim         TIMESTAMP,
+      eventos_processados INTEGER DEFAULT 0,
+      recursos_novos      INTEGER DEFAULT 0,
+      recursos_atualizados INTEGER DEFAULT 0,
+      recursos_excluidos  INTEGER DEFAULT 0,
+      mensagem            TEXT
+    )
+  `);
+
   // Corrige linhas órfãs de 'executando' — nada as atualiza depois de um
   // restart/crash do processo (o `_coletaEmExecucao`/`_dbxColetaEmExecucao`
   // em memória volta a false num processo novo, mas a linha gravada no banco
@@ -6008,6 +6108,7 @@ async function ensureAzureColetaTable() {
   // anterior que morreu no meio (deploy, pm2 restart, crash).
   await run(`UPDATE azure_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
   await run(`UPDATE databricks_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
+  await run(`UPDATE azure_inventario_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
 
   _coletaTableReady = true;
 }
@@ -6599,6 +6700,7 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
   // Auto-recover: if scheduler timer was lost (e.g. startup race), restart it
   if (!_agendadorTimer && pool) _iniciarAgendador();
   if (!_alertasEmailTimer && pool) _iniciarAlertasEmail();
+  if (!_invAgendadorTimer && pool) _iniciarInventarioAgendador();
   try {
     await ensureAzureColetaTable();
     const cols = `id,tipo,origem,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem`;
@@ -6768,6 +6870,145 @@ app.post('/api/azure-coleta/historico/:id/validar', authMiddleware, dbMiddleware
       `SELECT validacao_status, validacao_json FROM azure_coleta_historico WHERE id=$1`, [id]
     );
     res.json(updated[0] || {});
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INVENTÁRIO + AUDITORIA DE RECURSOS AZURE (2026-08-30, pedido do usuário)
+// ══════════════════════════════════════════════════════════════════════════════
+// Mesmo nível de acesso que /api/azure-coleta/sps* e /api/databricks-coleta/config*
+// (só authMiddleware+dbMiddleware, sem adminMiddleware) — consistente com o resto da
+// família de rotas de Coleta neste arquivo.
+
+app.get('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    let r = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
+    if (!r.rows.length) r = await pool.query(`INSERT INTO azure_inventario_config DEFAULT VALUES RETURNING *`);
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { ativo, retencao_dias, sp_id, subscription_ids } = req.body;
+    await ensureAzureColetaTable();
+    let r = await pool.query(`SELECT id FROM azure_inventario_config ORDER BY id LIMIT 1`);
+    if (!r.rows.length) r = await pool.query(`INSERT INTO azure_inventario_config DEFAULT VALUES RETURNING id`);
+    const id = r.rows[0].id;
+    await pool.query(
+      `UPDATE azure_inventario_config SET ativo=$1, retencao_dias=$2, sp_id=$3, subscription_ids=$4, atualizado_em=NOW() WHERE id=$5`,
+      [!!ativo, Number(retencao_dias) > 0 ? Number(retencao_dias) : 180, sp_id || null, subscription_ids || null, id]
+    );
+    if (ativo) _iniciarInventarioAgendador();
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/azure-inventario/coletar', authMiddleware, dbMiddleware, async (_req, res) => {
+  if (_invColetaEmExecucao) return res.status(409).json({ error: 'Coleta de Inventário já em execução' });
+  res.json({ ok: true, message: 'Coleta de Inventário iniciada' });
+  _coletarInventarioAzure('manual').catch(e => console.error('[Inventario] Erro:', e.message));
+});
+
+app.get('/api/azure-inventario/status', authMiddleware, dbMiddleware, async (_req, res) => {
+  res.json({ em_execucao: _invColetaEmExecucao, iniciada_em: _invColetaIniciadaEm, progresso: _invColetaProgresso });
+});
+
+app.get('/api/azure-inventario/coleta-historico', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const r = await pool.query(`SELECT * FROM azure_inventario_coleta_historico ORDER BY iniciado_em DESC LIMIT 50`);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/azure-inventario/coleta-historico', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    await pool.query(`TRUNCATE TABLE azure_inventario_coleta_historico RESTART IDENTITY`);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Inventário — lista de recursos conhecidos (permanente, nunca afetado pela retenção).
+// Custo correlacionado em LEITURA com azure_costs por resource_id (já coletado todo dia,
+// nenhuma coleta nova precisa disso).
+app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const { subscription_id, ativo, criado_por, data_inicio, data_fim } = req.query;
+    let where = '1=1';
+    const params = [];
+    if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
+    if (ativo === 'true') where += ` AND ri.ativo = true`;
+    else if (ativo === 'false') where += ` AND ri.ativo = false`;
+    if (criado_por) { params.push('%' + criado_por + '%'); where += ` AND ri.criado_por ILIKE $${params.length}`; }
+    if (data_inicio) { params.push(data_inicio); where += ` AND ri.criado_em >= $${params.length}`; }
+    if (data_fim) { params.push(data_fim); where += ` AND ri.criado_em < $${params.length}::date + INTERVAL '1 day'`; }
+
+    const r = await pool.query(
+      `SELECT ri.*,
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE ac.resource_id = ri.resource_id), 0) AS custo_acumulado
+       FROM azure_recursos_inventario ri
+       WHERE ${where}
+       ORDER BY ri.criado_em DESC NULLS LAST
+       LIMIT 500`,
+      params
+    );
+    res.json({ total: r.rows.length, recursos: r.rows });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Auditoria — log bruto de eventos (sujeito à retenção configurável).
+app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    let { data_inicio, data_fim, resource_id, acao, subscription_id } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `quando >= $1 AND quando < $2::date + INTERVAL '1 day'`;
+    const params = [data_inicio, data_fim];
+    if (resource_id) { params.push(resource_id); where += ` AND resource_id = $${params.length}`; }
+    if (acao) { params.push(acao); where += ` AND acao = $${params.length}`; }
+    if (subscription_id) { params.push(subscription_id); where += ` AND subscription_id = $${params.length}`; }
+
+    const r = await pool.query(
+      `SELECT * FROM azure_recursos_auditoria_eventos WHERE ${where} ORDER BY quando DESC LIMIT 300`,
+      params
+    );
+    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, total: r.rows.length, eventos: r.rows });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Crescimento — contagem diária de resource_id distintos, ZERO coleta nova (já vem de
+// azure_costs, coletado todo dia pela Coleta Azure existente). Serve pro gráfico "ontem
+// tinha X, hoje tenho X+1" independente do Activity Log estar configurado ou não — a
+// contagem funciona com o que já existe; só "quem criou" depende do Inventário/Auditoria.
+app.get('/api/azure-inventario/crescimento', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    let { data_inicio, data_fim, subscription_id } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `cost_date >= $1 AND cost_date <= $2 AND resource_id IS NOT NULL AND resource_id <> ''`;
+    const params = [data_inicio, data_fim];
+    if (subscription_id) { params.push(subscription_id); where += ` AND subscription_id = $${params.length}`; }
+
+    const r = await pool.query(
+      `SELECT cost_date, COUNT(DISTINCT resource_id) AS recursos FROM azure_costs WHERE ${where} GROUP BY cost_date ORDER BY cost_date`,
+      params
+    );
+    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, dias: r.rows });
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -8936,6 +9177,213 @@ async function _safeRespJson(resp) {
   try { return JSON.parse(txt); } catch (_) { return {}; }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// INVENTÁRIO + AUDITORIA DE RECURSOS AZURE (2026-08-30, pedido do usuário)
+// ══════════════════════════════════════════════════════════════════════════════
+// "Ontem tinha X recursos, hoje tenho X+1 — quem criou, quando, quanto custa." Fonte:
+// Azure Activity Log (Microsoft.Insights/eventtypes/management) — mesma credencial ARM
+// (Service Principal com role Reader) já usada pra Cost Management; `Reader` já cobre
+// `Microsoft.Insights/eventtypes/*`, nenhuma role nova precisa ser concedida.
+//
+// $filter da API é MUITO restrito (confirmado na documentação oficial,
+// learn.microsoft.com/rest/api/monitor/activity-logs/list) — só aceita
+// `eventTimestamp ge/le` + no máximo UMA condição extra (resourceGroupName eq,
+// resourceUri eq, resourceProvider eq ou correlationId eq). Não dá pra filtrar por
+// `status`/`operationName` no servidor — filtragem por essas duas é sempre client-side,
+// depois de buscar TODOS os eventos do intervalo.
+//
+// Retenção nativa da API é 90 dias — por isso a janela de coleta nunca busca mais que 89
+// dias pra trás (margem de segurança de 1 dia), e por isso um recurso criado antes da
+// primeira coleta deste sistema nunca vai ter `criado_por` conhecido (dado que não existe
+// mais na fonte).
+function _classificarEventoAtividade(operationName) {
+  const op = (operationName || '').toLowerCase();
+  if (op.endsWith('/delete')) return 'delete';
+  if (op.endsWith('/write')) return 'write'; // criação OU atualização — decidido por UPSERT (xmax) no chamador, não dá pra saber pelo nome da operação sozinho
+  return null; // ignora ações que não são escrita/exclusão (ex: /read, /action)
+}
+
+// Busca paginada (segue `nextLink`) — NÃO VALIDADO contra uma assinatura Azure real (mesma
+// ressalva de toda integração nova nesta sessão) — sintaxe conforme documentação oficial
+// pesquisada em 2026-08-30. `$select` reduz o payload só aos campos que usamos.
+async function _activityLogFetchEventos(token, subscriptionId, desdeISO, ateISO) {
+  const filtro = `eventTimestamp ge '${desdeISO}' and eventTimestamp le '${ateISO}'`;
+  const select = 'eventName,operationName,status,eventTimestamp,resourceId,resourceGroupName,resourceType,caller,correlationId';
+  let url = `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01&$filter=${encodeURIComponent(filtro)}&$select=${encodeURIComponent(select)}`;
+  const eventos = [];
+  let paginas = 0;
+  while (url && paginas < 50) { // guarda-corpo contra paginação anômala/infinita
+    const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Activity Log falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+    for (const ev of (data.value || [])) eventos.push(ev);
+    url = data.nextLink || null;
+    paginas++;
+  }
+  return eventos;
+}
+
+// Remove eventos de auditoria mais antigos que a retenção configurada — NUNCA toca em
+// azure_recursos_inventario (permanente por design, ver comentário na criação da tabela em
+// ensureAzureColetaTable). Chamado ao final de toda coleta bem-sucedida.
+async function _purgarAuditoriaInventario(retencaoDias) {
+  const dias = Number(retencaoDias) > 0 ? Number(retencaoDias) : 180;
+  const r = await pool.query(`DELETE FROM azure_recursos_auditoria_eventos WHERE quando < NOW() - ($1 || ' days')::interval`, [dias]);
+  if (r.rowCount > 0) _logColetaInv(`Retenção: ${r.rowCount} evento(s) de auditoria removido(s) (> ${dias} dias)`);
+}
+
+// Coleta incremental (watermark `ultimo_evento_em` em azure_inventario_config) — cada
+// execução busca só o que aconteceu desde a última vez, nunca refaz o intervalo inteiro.
+// Fire-and-forget (não relança erro pro chamador) — mesmo padrão de
+// _executarColetaDatabricks: o histórico + log já capturam a falha, quem chama (rota
+// manual ou o agendador) só dispara e segue, acompanhando via GET /status.
+async function _coletarInventarioAzure(origem = 'manual') {
+  if (_invColetaEmExecucao) throw new Error('Coleta de Inventário já em execução');
+  if (!pool) throw new Error('Banco não conectado');
+  _invColetaEmExecucao = true;
+  _invColetaIniciadaEm = new Date();
+  _invColetaProgresso = { fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
+  let histId;
+  try {
+    await ensureAzureColetaTable();
+    const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
+    if (!cfgRow.rows.length) throw new Error('Inventário não configurado');
+    const cfg = cfgRow.rows[0];
+    if (!cfg.ativo) throw new Error('Inventário desativado');
+    if (!cfg.sp_id) throw new Error('Nenhum Service Principal configurado para o Inventário');
+
+    const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
+    if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
+    const spCfg = spRow.rows[0];
+    const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
+    const token = await getToken();
+
+    const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    if (!subs.length) throw new Error('Nenhuma subscription configurada (nem no Inventário, nem no Service Principal escolhido)');
+
+    const agora = new Date();
+    const MAX_JANELA_MS = 89 * 24 * 60 * 60 * 1000;
+    let desde = cfg.ultimo_evento_em ? new Date(cfg.ultimo_evento_em) : new Date(agora.getTime() - 24 * 60 * 60 * 1000);
+    if (agora.getTime() - desde.getTime() > MAX_JANELA_MS) desde = new Date(agora.getTime() - MAX_JANELA_MS);
+    const desdeISO = desde.toISOString();
+    const ateISO = agora.toISOString();
+
+    const hist = await pool.query(
+      `INSERT INTO azure_inventario_coleta_historico (status,origem,periodo_inicio,periodo_fim) VALUES ('executando',$1,$2,$3) RETURNING id`,
+      [origem, desdeISO, ateISO]
+    );
+    histId = hist.rows[0].id;
+    _logColetaInv(`Inventário — ${desdeISO} → ${ateISO} | ${subs.length} subscription(s)`);
+
+    let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0;
+    _invColetaProgresso.sub_total = subs.length;
+
+    for (let i = 0; i < subs.length; i++) {
+      const subId = subs[i];
+      _invColetaProgresso.sub_idx = i + 1;
+      _invColetaProgresso.sub_atual = subId;
+      _invColetaProgresso.fase = `[${i + 1}/${subs.length}] Consultando Activity Log — ${subId}`;
+      let eventos;
+      try {
+        eventos = await _activityLogFetchEventos(token, subId, desdeISO, ateISO);
+      } catch (eSub) {
+        _logColetaInv(`  ✗ ${subId}: ${eSub.message}`);
+        continue;
+      }
+      _logColetaInv(`  ${subId}: ${eventos.length} evento(s) retornado(s)`);
+
+      for (const ev of eventos) {
+        if ((ev.status?.value || '') !== 'Succeeded') continue;
+        const acaoBruta = _classificarEventoAtividade(ev.operationName?.value);
+        if (!acaoBruta) continue;
+        const resourceId = ev.resourceId;
+        if (!resourceId) continue;
+
+        const autor = ev.caller || null;
+        const quando = ev.eventTimestamp || null;
+        const resourceType = ev.resourceType?.value || null;
+        const resourceGroup = ev.resourceGroupName || null;
+        const opName = ev.operationName?.value || null;
+        totalEventos++;
+
+        if (acaoBruta === 'delete') {
+          await pool.query(
+            `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,excluido_por,excluido_em,ativo)
+             VALUES ($1,$2,$3,$4,$5,$6,false)
+             ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
+               excluido_por=EXCLUDED.excluido_por, excluido_em=EXCLUDED.excluido_em, ativo=false`,
+            [subId, resourceId, resourceType, resourceGroup, autor, quando]
+          );
+          totalExcluidos++;
+          await pool.query(
+            `INSERT INTO azure_recursos_auditoria_eventos (subscription_id,resource_id,resource_type,resource_group,acao,autor,quando,operation_name,correlation_id)
+             VALUES ($1,$2,$3,$4,'EXCLUSAO',$5,$6,$7,$8)`,
+            [subId, resourceId, resourceType, resourceGroup, autor, quando, opName, ev.correlationId || null]
+          );
+        } else {
+          const nome = resourceId.split('/').pop();
+          const r = await pool.query(
+            `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,criado_por,criado_em,atualizado_por,atualizado_em,ativo)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,true)
+             ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
+               atualizado_por=EXCLUDED.atualizado_por, atualizado_em=EXCLUDED.atualizado_em,
+               resource_type=EXCLUDED.resource_type, resource_group=EXCLUDED.resource_group, ativo=true
+             RETURNING (xmax = 0) AS inserted`,
+            [subId, resourceId, resourceType, resourceGroup, nome, autor, quando]
+          );
+          const acao = r.rows[0]?.inserted ? 'CRIACAO' : 'ATUALIZACAO';
+          if (acao === 'CRIACAO') totalNovos++; else totalAtualizados++;
+          await pool.query(
+            `INSERT INTO azure_recursos_auditoria_eventos (subscription_id,resource_id,resource_type,resource_group,acao,autor,quando,operation_name,correlation_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [subId, resourceId, resourceType, resourceGroup, acao, autor, quando, opName, ev.correlationId || null]
+          );
+        }
+        _invColetaProgresso.eventos = totalEventos;
+        _invColetaProgresso.novos = totalNovos;
+        _invColetaProgresso.atualizados = totalAtualizados;
+        _invColetaProgresso.excluidos = totalExcluidos;
+      }
+    }
+
+    await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em=$1, atualizado_em=NOW() WHERE id=$2`, [ateISO, cfg.id]);
+    const msg = `${totalEventos} evento(s) | ${totalNovos} novo(s), ${totalAtualizados} atualizado(s), ${totalExcluidos} excluído(s)`;
+    _logColetaInv(`Concluído: ${msg}`);
+    await pool.query(
+      `UPDATE azure_inventario_coleta_historico SET status='concluido',concluido_em=NOW(),eventos_processados=$1,recursos_novos=$2,recursos_atualizados=$3,recursos_excluidos=$4,mensagem=$5 WHERE id=$6`,
+      [totalEventos, totalNovos, totalAtualizados, totalExcluidos, msg, histId]
+    );
+    await _purgarAuditoriaInventario(cfg.retencao_dias);
+  } catch (err) {
+    _logColetaInv(`ERRO: ${err.message}`);
+    if (histId) await pool.query(
+      `UPDATE azure_inventario_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1 WHERE id=$2`,
+      [err.message, histId]
+    ).catch(() => {});
+  } finally {
+    _invColetaEmExecucao = false;
+    _invColetaIniciadaEm = null;
+  }
+}
+
+// Intervalo próprio (mesmo espírito de _iniciarAlertasEmail) — não acoplado ao agendador
+// de billing de 5 em 5 min; detecção de novos recursos não precisa dessa urgência, e o
+// Activity Log tem no mínimo alguns minutos de atraso de submissão mesmo na origem.
+let _invAgendadorTimer = null;
+function _iniciarInventarioAgendador() {
+  if (_invAgendadorTimer || !pool) return;
+  const tick = async () => {
+    if (_invColetaEmExecucao) return;
+    try {
+      const cfgRow = await pool.query(`SELECT ativo FROM azure_inventario_config ORDER BY id LIMIT 1`);
+      if (!cfgRow.rows.length || !cfgRow.rows[0].ativo) return;
+      await _coletarInventarioAzure('agendado');
+    } catch (e) { console.warn('[Inventario] Tick falhou:', e.message); }
+  };
+  setTimeout(tick, 150 * 1000);
+  _invAgendadorTimer = setInterval(tick, 60 * 60 * 1000); // a cada hora
+}
+
 // ── Helpers de Coleta via API ─────────────────────────────────────────────────
 
 async function _listarSubsBillingProfile(token, billingAccountId, billingProfileId) {
@@ -10073,6 +10521,7 @@ app.get('/health', (_req, res) => {
       try { await ensurePriceListTable(); } catch (e) { console.warn('[PriceList] Tabela será criada no primeiro sync:', e.message); }
       _iniciarAgendador();
       _iniciarAlertasEmail();
+      _iniciarInventarioAgendador();
       // Carrega caches persistentes imediatamente do banco (sem query pesada)
       pool.query(`SELECT ws_name, parent_rg FROM azure_ws_cache`).then(r => {
         if (r.rows.length) {
@@ -10152,6 +10601,7 @@ app.get('/health', (_req, res) => {
           console.log('  Banco reconectado com sucesso.');
           _iniciarAgendador();
           _iniciarAlertasEmail();
+          _iniciarInventarioAgendador();
         }
       } catch (e2) {
         console.error('  Falha ao reconectar:', e2.message);

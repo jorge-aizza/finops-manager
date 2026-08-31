@@ -2367,6 +2367,87 @@ Este conjunto de dados **não foi removido** ao final (diferente da rodada de te
 pediu explicitamente pra manter os dados desta vez, só descartando o script gerador. Usar o Expurgo de Dados
 (seção acima) quando quiser limpar antes de dados reais chegarem via coleta/import de produção.
 
+### Inventário + Auditoria de Recursos Azure (2026-08-30)
+
+Pedido do usuário: "ontem tinha X recursos, hoje tenho X+1 — quem criou, quando foi criado
+e o custo que ele tem". Pesquisado (WebSearch/WebFetch contra learn.microsoft.com, mesmo
+padrão de rigor já usado pra Databricks) qual API do Azure dá essa granularidade — nem
+Cost Management billing (sem identidade/timestamp de criação) nem Azure Resource Graph
+(inventário só, sem auditoria — ou Change Analysis, retenção nativa de só 14 dias) davam
+o "quem criou" com confiança. **Azure Activity Log** (`Microsoft.Insights/eventtypes/
+management`) é a fonte certa: log de auditoria nativo do Azure Resource Manager, com
+`caller` (quem), `eventTimestamp` (quando), `resourceId`, `operationName` — e o achado
+mais importante: a permissão exigida (`Microsoft.Insights/eventtypes/values/read`) já é
+coberta pela role **Reader**, que o Service Principal da Coleta Azure já tem hoje — zero
+permissão nova precisa ser concedida à Vivo.
+
+**Duas tabelas com propósitos deliberadamente diferentes** — pedido explícito do usuário
+("inventário + auditoria"), resolve uma tensão real de design: se o log de eventos fosse a
+única fonte e sofresse limpeza por retenção, um recurso criado há mais tempo que a
+retenção perderia "quem criou/quando" pra sempre.
+- `azure_recursos_inventario` — **1 linha PERMANENTE por recurso**, nunca afetada pela
+  retenção: `criado_por`/`criado_em` (gravados só na primeira vez, nunca sobrescritos
+  depois — o `ON CONFLICT DO UPDATE` explicitamente omite essas duas colunas do SET),
+  `atualizado_por`/`atualizado_em` (toda vez que o resource_id já existe), `excluido_por`/
+  `excluido_em`/`ativo=false` (quando detectada uma exclusão — mantido como "tombstone" em
+  vez de apagar a linha, já que "isto existiu e foi excluído por X em Y" também é
+  inventário/auditoria válido). Custo NÃO é armazenado aqui — correlacionado em LEITURA
+  com `azure_costs` por `resource_id` (dado que a Coleta Azure já coleta todo dia).
+- `azure_recursos_auditoria_eventos` — log bruto, 1 linha por evento (CRIACAO/
+  ATUALIZACAO/EXCLUSAO), sujeito ao **período de retenção configurável** (`retencao_dias`,
+  padrão 180) — é essa tabela que cresce sem limite e precisa de limpeza periódica
+  (`_purgarAuditoriaInventario`, chamado ao final de toda coleta bem-sucedida).
+
+**$filter da Activity Log API é muito mais restrito do que uma query SQL comum** —
+confirmado na documentação oficial (learn.microsoft.com/rest/api/monitor/activity-logs/list):
+só aceita `eventTimestamp ge/le` + no máximo UMA condição extra (`resourceGroupName eq`,
+`resourceUri eq`, `resourceProvider eq` ou `correlationId eq`) — **não dá pra filtrar por
+`status` nem `operationName` no servidor**. `_activityLogFetchEventos` busca TODOS os
+eventos do intervalo (paginado via `nextLink`) e filtra client-side por
+`status.value === 'Succeeded'` e `operationName` terminando em `/write` (criação OU
+atualização — decidido por UPSERT+`xmax` no PostgreSQL, não dá pra saber pelo nome da
+operação sozinho) ou `/delete`.
+
+**Coleta incremental via watermark** (`ultimo_evento_em` em `azure_inventario_config`) —
+cada execução busca só o que aconteceu desde a última vez, nunca refaz o intervalo
+inteiro; limitado a no máximo 89 dias pra trás (retenção nativa do Activity Log é 90 dias
+— margem de segurança de 1 dia). Um recurso criado antes da primeira coleta deste sistema
+nunca vai ter `criado_por` conhecido (o dado já não existe mais na fonte quando isso
+acontece).
+
+**Intervalo próprio** (`_iniciarInventarioAgendador`, a cada hora) — mesmo espírito de
+`_iniciarAlertasEmail`: não acoplado ao agendador de billing de 5 em 5 min (detecção de
+novos recursos não tem essa urgência, e o Activity Log já tem alguns minutos de atraso de
+submissão na própria origem). Reaproveita a MESMA credencial (Service Principal) já
+cadastrada em Coleta Azure (`azure_coleta_config`, via FK `sp_id`) — sem cadastro de
+credencial novo.
+
+**Frontend**: nova view de topo `InventarioView.tsx` (rota `inventario`, item de menu
+simples "Inventário" entre "Coleta Azure" e o grupo "Databricks" — não um sub-grupo como
+Databricks, escopo mais simples aqui não justificou isso), 3 abas via estado local (não
+precisou do canal de bridge usado pelo Dashboard/Databricks, já que é uma view única sem
+concorrência com outra tela): **Recursos** (inventário, filtro por ativo/excluído/criado
+por, custo acumulado), **Auditoria** (log de eventos, filtro por ação/período), e
+**Configuração** (ativar/desativar, escolher Service Principal, subscriptions, dias de
+retenção, "Coletar Agora", histórico de execuções). Gráfico de **Crescimento de Recursos**
+(contagem diária de `resource_id` distintos, barra SVG simples sem lib nova) fica sempre
+visível no topo, independente da aba — **zero coleta nova**, já vem de `azure_costs`
+(Coleta Azure já existente), funciona mesmo sem o Inventário/Auditoria configurado —
+resolve a metade "ontem tinha X, hoje tenho X+1" do pedido original sem depender do
+Activity Log estar configurado.
+
+**Verificado**: `node --check`, `tsc -b`, migração (4 tabelas + 5 índices) aplicada com
+`pm2 restart` sem erro/crash-loop (uptime estável, contador de restart do PM2 parado)
+contra o ambiente real (`finops_dev`, com coleta Azure ao vivo rodando em paralelo), as 6
+rotas novas respondendo 401 sem token, build do frontend limpo, 259 testes da suíte
+inteira passando (5 novos em `InventarioView.test.tsx`: crescimento+recursos, custo
+acumulado formatado, "desconhecido" quando `criado_por` é null, badge de ação na
+Auditoria, formulário de configuração pré-preenchido e salvando, "Coletar Agora"). **NÃO
+VALIDADO contra uma assinatura Azure real** (mesma ressalva de toda integração nova nesta
+sessão) — a sintaxe exata do `$filter`/`$select` e os nomes de campo da resposta
+(`caller`, `resourceType.value`, etc.) conferem com a documentação oficial pesquisada em
+2026-08-30, mas a primeira coleta real pode expor um ajuste necessário.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
