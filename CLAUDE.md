@@ -2305,6 +2305,44 @@ de coluna/sintaxe conforme documentação oficial pesquisada em 2026-08-29, mas 
 coleta real pode expor um ajuste necessário (mesmo padrão de risco já aceito desde a Fase 1
 da Coleta Databricks).
 
+### Quotas Genie — busca de usuário/grupo por substring, confirmado sync com Entra ID (2026-08-29)
+
+Usuário perguntou como a busca de usuário/grupo dos overrides de Quotas Genie se relaciona
+com o Microsoft Entra ID — esclarecido que **não há chamada direta ao Entra ID/Microsoft
+Graph**: a busca lê a **Account SCIM API do próprio Databricks** (`_dbxScimFetch`, mesmo
+token OAuth M2M de conta já usado pela Budgets API), um diretório que pertence à conta
+Databricks, não ao Entra ID. Usuário confirmou em seguida que a conta Databricks da Vivo
+**já tem provisionamento SCIM configurado a partir do Entra ID** (prática comum em contas
+Databricks no Azure, configurada no console da conta Databricks — infraestrutura fora
+deste sistema) — ou seja, o diretório que a Account SCIM API expõe já é um espelho
+sincronizado dos usuários/grupos reais do Entra ID da Vivo.
+
+**Mudança feita a pedido do usuário ("pode aplicar")**: com um diretório real (e
+potencialmente grande, via sync do Entra ID) por trás da busca, exigir o valor EXATO
+completo (filtro `eq`, como estava) deixa de ser prático — o admin raramente sabe o
+e-mail/nome completo de cor. Pesquisado na documentação oficial da Account SCIM API que o
+operador `co` ("contains") é suportado — confirmado explicitamente pra `displayName`
+(grupos) e `userName` (usuários; `emails.value` não tem esse suporte confirmado na doc).
+Trocado `GET /genie-principals`: `emails.value eq "valor"` → `userName co "valor"` pra
+usuários (em contas provisionadas via Entra ID, `userName` normalmente já É o e-mail/UPN,
+então continua funcionando como "busca por e-mail" na prática, só que agora por trecho) e
+`displayName eq` → `displayName co` pra grupos. Adicionado `count=25` na chamada SCIM
+(máximo documentado é 100) — a busca é pra uma lista curta de opções pro admin escolher,
+não uma listagem paginada completa.
+
+**Frontend**: `GenieBudgetModal.tsx` — placeholder trocado de "e-mail exato"/"nome exato do
+grupo" pra "parte do e-mail"/"parte do nome do grupo", refletindo o novo comportamento.
+Modo demonstração (`_GENIE_DEMO_PRINCIPALS`) já filtrava por `.includes()` (substring) desde
+que foi criado — não precisou de nenhuma mudança, já se comportava como o modo real passou
+a se comportar agora.
+
+**Verificado**: `node --check`, `tsc -b`, `pm2 restart` sem erro/crash-loop, rota
+`GET /genie-principals` respondendo 401 sem token, 13 testes em `GenieBudgetModal.test.tsx`
+atualizados (placeholders novos) e passando. **NÃO VALIDADO contra a busca SCIM real** —
+mesma ressalva de sempre nesta feature (sem conta Databricks disponível neste ambiente pra
+confirmar que `userName co` retorna os resultados esperados contra o diretório sincronizado
+de verdade da Vivo).
+
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 
 A pedido do usuário, geradas ~1.260 linhas de consumo simulado em `databricks_consumo` (2026-06 a 2026-08),

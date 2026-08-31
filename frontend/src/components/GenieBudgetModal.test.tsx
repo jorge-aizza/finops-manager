@@ -130,7 +130,7 @@ describe('GenieBudgetModal', () => {
     await user.type(screen.getByLabelText('Limite mensal (US$)'), '100')
     await user.selectOptions(screen.getByLabelText('Escopo do limite'), 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
 
-    await user.type(screen.getByPlaceholderText('e-mail exato'), 'joao@vivo.com.br')
+    await user.type(screen.getByPlaceholderText('parte do e-mail'), 'joao@vivo.com.br')
     await user.click(screen.getByRole('button', { name: 'Buscar' }))
     expect(genieBudgetsApi.searchGeniePrincipals).toHaveBeenCalledWith('user', 'joao@vivo.com.br')
 
@@ -156,7 +156,7 @@ describe('GenieBudgetModal', () => {
 
     await user.selectOptions(screen.getByLabelText('Escopo do limite'), 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
     await user.selectOptions(screen.getByDisplayValue('Usuário'), 'group')
-    await user.type(screen.getByPlaceholderText('nome exato do grupo'), 'Time de Dados')
+    await user.type(screen.getByPlaceholderText('parte do nome do grupo'), 'Time de Dados')
     await user.click(screen.getByRole('button', { name: 'Buscar' }))
 
     expect(genieBudgetsApi.searchGeniePrincipals).toHaveBeenCalledWith('group', 'Time de Dados')
@@ -168,7 +168,7 @@ describe('GenieBudgetModal', () => {
     renderWithClient()
 
     await user.selectOptions(screen.getByLabelText('Escopo do limite'), 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
-    await user.type(screen.getByPlaceholderText('e-mail exato'), 'maria@vivo.com.br')
+    await user.type(screen.getByPlaceholderText('parte do e-mail'), 'maria@vivo.com.br')
     await user.click(screen.getByRole('button', { name: 'Buscar' }))
     await user.click(await screen.findByText(/Maria Souza/))
     expect(screen.getByText('Maria Souza')).toBeInTheDocument()

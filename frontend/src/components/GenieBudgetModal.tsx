@@ -38,9 +38,13 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
   // confirmação nova a cada alteração salva, não só na criação original.
   const [confirmarBloqueio, setConfirmarBloqueio] = useState(false)
 
-  // Overrides — limite individual por usuário (busca por e-mail) ou grupo (busca por
-  // nome) via Account SCIM API, resolvendo pro principal_id numérico que a Budgets API
-  // exige. Só faz sentido (e só é aceito pelo servidor) com escopo "Por usuário" — ver
+  // Overrides — limite individual por usuário (busca por parte do e-mail) ou grupo (busca
+  // por parte do nome) via Account SCIM API, resolvendo pro principal_id numérico que a
+  // Budgets API exige. Busca por substring (`co`, não `eq`) — a conta Databricks da Vivo
+  // já tem provisionamento SCIM configurado a partir do Entra ID (confirmado pelo usuário,
+  // 2026-08-29), então o diretório real tem muitos usuários/grupos; exigir o valor exato
+  // completo não seria prático. Só faz sentido (e só é aceito pelo servidor) com escopo
+  // "Por usuário" — ver
   // guard-rail em POST/PUT /genie-budgets. Overrides já existentes (vindos de `budget`)
   // não têm nome/e-mail na resposta da API — só principal_id —, então mostram "ID: N"
   // até serem removidos; novos overrides adicionados na mesma sessão de edição mostram
@@ -184,7 +188,7 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
                 <input
                   value={overrideQuery}
                   onChange={(e) => setOverrideQuery(e.target.value)}
-                  placeholder={overrideTipo === 'user' ? 'e-mail exato' : 'nome exato do grupo'}
+                  placeholder={overrideTipo === 'user' ? 'parte do e-mail' : 'parte do nome do grupo'}
                   style={{ flex: 1 }}
                   onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), buscarPrincipal())}
                 />

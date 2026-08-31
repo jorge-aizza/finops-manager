@@ -8701,10 +8701,22 @@ app.get('/api/databricks-coleta/genie-principals', authMiddleware, dbMiddleware,
     }
     const { accountId, token } = await _getDbxAccountCredentials();
     const resource = tipo === 'group' ? 'Groups' : 'Users';
-    const filterField = tipo === 'group' ? 'displayName' : 'emails.value';
+    // Busca por substring (`co`, "contains"), não mais match exato (`eq`) — confirmado
+    // pelo usuário (2026-08-29) que a conta Databricks da Vivo já tem provisionamento
+    // SCIM configurado a partir do Entra ID (fora do nosso app — configurado no console
+    // da conta Databricks/Azure AD), então o diretório real tem muito mais usuários/grupos
+    // do que os poucos usados nos testes: exigir o e-mail/nome completo e exato pra achar
+    // alguém deixaria de ser prático. `userName` (não `emails.value`) pro filtro de
+    // usuário — confirmado suportado com `co` na documentação oficial da Account SCIM API
+    // (`userName co "doe"`); `emails.value` não tem esse suporte confirmado. Em contas
+    // provisionadas via Entra ID, `userName` normalmente já é o e-mail/UPN do usuário, então
+    // continua funcionando como busca "por e-mail" na prática. `count=25` (máximo
+    // documentado é 100) — resultado é uma lista curta pro usuário escolher, não uma
+    // listagem paginada completa.
+    const filterField = tipo === 'group' ? 'displayName' : 'userName';
     const filterVal = String(query).replace(/"/g, '\\"');
-    const filter = encodeURIComponent(`${filterField} eq "${filterVal}"`);
-    const data = await _dbxScimFetch(accountId, token, `/scim/v2/${resource}?filter=${filter}`);
+    const filter = encodeURIComponent(`${filterField} co "${filterVal}"`);
+    const data = await _dbxScimFetch(accountId, token, `/scim/v2/${resource}?filter=${filter}&count=25`);
     const resultados = (data.Resources || []).map(r => ({
       id: r.id,
       nome: r.displayName || r.userName || r.emails?.[0]?.value || r.id,

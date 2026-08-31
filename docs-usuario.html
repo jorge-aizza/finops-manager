@@ -640,7 +640,8 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
   </div>
 
   <div class="subsec">Limites individuais por usuário/grupo (overrides)</div>
-  <p>Disponível apenas com escopo <strong>Por usuário</strong> — a documentação oficial do Databricks confirma que overrides são ignorados em orçamentos de escopo compartilhado. Busque por e-mail exato (usuário) ou nome exato (grupo) — a busca localiza o <code>principal_id</code> real via SCIM da conta Databricks — e defina um valor (US$) próprio para aquele usuário/grupo. Limite de 20 overrides por quota.</p>
+  <p>Disponível apenas com escopo <strong>Por usuário</strong> — a documentação oficial do Databricks confirma que overrides são ignorados em orçamentos de escopo compartilhado. Busque por parte do e-mail (usuário) ou parte do nome (grupo) — a busca localiza o <code>principal_id</code> real via SCIM da conta Databricks — e defina um valor (US$) próprio para aquele usuário/grupo. Limite de 20 overrides por quota.</p>
+  <div class="note"><div class="note-lbl">Sincronização com o Entra ID</div><p>A busca lê o diretório de usuários/grupos da própria conta Databricks (Account SCIM), não o Microsoft Entra ID diretamente. Se a conta Databricks tiver provisionamento SCIM configurado a partir do Entra ID (comum em contas Databricks no Azure, configurado no console da conta Databricks — fora deste sistema), esse diretório é um espelho sincronizado do Entra ID, e a busca aqui reflete os mesmos usuários e grupos.</p></div>
 
   <div class="subsec">Editar e Excluir</div>
   <p>Use o botão <strong>✏ Editar</strong> na listagem para alterar uma quota já criada (nome, workspaces, tags, limite, escopo, ação, overrides) — a edição substitui a configuração inteira. Ao editar uma quota de bloqueio, o checkbox de confirmação precisa ser marcado novamente, mesmo que a quota já bloqueasse antes. <strong>Excluir</strong> remove a quota da conta Databricks imediatamente.</p>
