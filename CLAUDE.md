@@ -2592,6 +2592,69 @@ ev.resource_id.split('/').pop()` (fallback preservado pro caso raro de `nome` ai
 Tipo e nome aparecem na aba Auditoria), `npm run frontend:build`, `pm2 restart` sem erro/crash-loop contra
 o ambiente real, rota respondendo 401 sem token.
 
+**Bug real encontrado e corrigido — coleta incremental do Inventário travada desde a 2ª execução, sempre
+falhando com "start time cannot be greater than end time" (400 da Activity Log) (2026-08-31)**: reportado
+indiretamente pelo usuário ao perguntar por que `custo_acumulado` continuava zerado mesmo após o fix de
+case-insensitivity documentado acima. Investigação com acesso direto ao banco (`.finops_setup` decriptado
+com a mesma lógica de `server.js`, script descartável fora do repo) revelou dois bugs empilhados, ambos na
+coluna `azure_inventario_config.ultimo_evento_em` (o watermark "até onde já coletei"):
+- **Bug #1**: a coluna nasceu `TIMESTAMP` (sem timezone). O código escreve/lê esse valor via objetos JS
+  `Date` (não só comparação SQL server-side, como as outras colunas `TIMESTAMP` do arquivo) — node-postgres
+  reparseia um `TIMESTAMP` sem tz usando o construtor LOCAL do JS (`new Date(y,m,d,h,mi,s,ms)`), dependente
+  de `process.env.TZ='America/Sao_Paulo'` (setado no topo do arquivo) em vez de UTC. Cada leitura "somava"
+  3h de volta ao valor gravado — confirmado empiricamente: nos logs, o `ate` de um tick virava o `desde` do
+  tick seguinte sempre exatamente +3:00:00:00 maior. Corrigido trocando a coluna pra `TIMESTAMPTZ` (node-pg
+  parseia OID timestamptz corretamente como instante absoluto, independente do TZ do processo — confirmado
+  com um script de roundtrip isolado, escrita→leitura, diff de 0ms).
+- **Bug #2, achado só depois de reiniciar o servidor várias vezes com o fix acima já aplicado e o erro
+  CONTINUAR**: a migração `ALTER COLUMN ... TYPE TIMESTAMPTZ USING ultimo_evento_em AT TIME ZONE 'UTC'`
+  não era idempotente — roda no boot, sem guard, então repete em TODO restart. Na 1ª vez, com a coluna ainda
+  `TIMESTAMP`, a conversão é correta (trata o naive como UTC). Mas a partir da 2ª vez, com a coluna JÁ
+  `timestamptz`, `timestamptz AT TIME ZONE 'UTC'` muda de significado: converte o instante absoluto pro
+  "relógio de parede em UTC" (vira um `TIMESTAMP` naive de novo, mesmos dígitos, já que a zona é UTC) — e o
+  `ALTER COLUMN TYPE TIMESTAMPTZ` seguinte reinterpreta esse naive usando o timezone da SESSÃO do Postgres
+  (`America/Sao_Paulo`, não UTC) pra converter de volta — somando +3h de novo, a cada RESTART (não a cada
+  leitura, diferente do Bug #1). Como o ambiente teve vários restarts seguidos durante o próprio diagnóstico
+  do Bug #1, o valor foi ficando cada vez mais deslocado pro futuro, mascarando o primeiro fix. Corrigido
+  guardando a conversão com uma checagem de tipo antes (`information_schema.columns`) — só converte se a
+  coluna ainda não for `timestamptz` — e um reset único e idempotente (`UPDATE ... SET ultimo_evento_em=NULL
+  WHERE ultimo_evento_em > NOW()`, só casa valores corrompidos/futuros — nunca mexe num watermark válido).
+  **Verificado ao vivo**: após o fix, dois ticks consecutivos da hora completaram com sucesso e progressão
+  monotônica correta (`15:05:42 → 16:05:43`, depois `16:05:43 → 17:05:42`, ambos com milhares de eventos
+  retornados da Activity Log e processados) — a coleta incremental estava travada desde a ativação da
+  feature (2026-08-30) e só voltou a funcionar aqui.
+
+**"Custo direto" quase sempre zerado pra VMs/discos/NICs de cluster Databricks não é um bug de JOIN — é
+estrutural, e ganhou um número alternativo mais útil (2026-08-31, pedido do usuário)**: mesmo com os dois
+bugs acima corrigidos, investigação com dados reais mostrou que **97% dos recursos ativos dentro de RGs
+gerenciados por Databricks (`managed-rg-adbx-*`/`databricks-rg-*`) continuam com `custo_acumulado=0`** — não
+por bug, mas porque a Azure recria essas instâncias (VM/disco/NIC de nó de cluster) em questão de HORAS
+(confirmado comparando resource_ids reais: os capturados numa coleta às 14h já não são os mesmos capturados
+2 dias antes no billing), e o Cost Management publica dados com ~2-3 dias de atraso — o resource_id exato
+quase nunca sobrevive tempo suficiente pra aparecer no billing antes de ser substituído por outro. Isso é
+esperado, não corrigível por uma query melhor (usuário observou corretamente: "muito complexo" tentar
+capturar isso recurso-a-recurso). Em vez disso, `GET /api/azure-inventario/recurso-detalhe` ganhou
+`custo_resource_group`/`resource_group_recursos` — soma de `azure_costs` por `subscription_id`+
+`UPPER(resource_group_name)` (todo o RG, não só este resource_id) + contagem de resource_ids distintos que
+já passaram por ali. `RecursoDetalheModal.tsx` relabelou o card pra "Custo direto" e, quando ele é zero mas
+o RG tem custo, mostra uma nota explicando o porquê e o número do RG inteiro — sempre calculado (não só pra
+RGs Databricks), dá contexto útil pra qualquer recurso.
+
+**Bug visual real reportado pelo usuário e corrigido no mesmo modal — texto longo (nome de Resource Group)
+cortado**: `RecursoDetalheModal.tsx` reaproveitava a classe global `.stats-grid` (`grid-template-columns:
+repeat(4, 1fr)`, pensada pra dashboards com exatamente 4 stat-cards) com só 3 cards — criava uma 4ª coluna
+vazia, espremendo os 3 reais em ~1/4 da largura do modal cada. Combinado com `.stat-value` (30px, sem
+`word-break`) e `.stat-card{overflow:hidden}` (ambos do design system, pensados pra números curtos tipo "R$
+1.234"), um Resource Group longo (`databricks-rg-dbw-nfcom-test-kagiyxcvcpfli`) ficava cortado. Corrigido só
+nesta instância (inline style, sem tocar a classe global): `gridTemplateColumns:'repeat(3,1fr)'` batendo com
+os 3 cards reais, `overflow:'visible'` nos cards, `wordBreak:'break-word'` nos valores, fonte do card de
+custo reduzida de 30px pra 20px (mesmo risco de overflow pra valores maiores tipo "R$ 12.345,67").
+
+**Verificado**: `node --check`, `tsc -b`, `npx vitest run src/views/InventarioView.test.tsx` (11/11 — 1
+teste novo cobrindo a nota de custo do RG quando o direto é zero), `npm run frontend:build`, `pm2 restart`
+sem erro/crash-loop contra o ambiente real, rota respondendo 401 sem token, dois ticks hourly consecutivos
+da coleta de Inventário completando com sucesso pela primeira vez desde a ativação da feature.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

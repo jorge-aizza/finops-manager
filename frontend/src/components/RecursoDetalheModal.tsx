@@ -49,20 +49,30 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all', marginTop: 2 }}>{data.recurso.resource_id}</div>
               </div>
 
-              <div className="stats-grid" style={{ marginBottom: 16 }}>
-                <div className="stat-card">
+              <div className="stats-grid" style={{ marginBottom: 16, gridTemplateColumns: 'repeat(3, 1fr)' }}>
+                <div className="stat-card" style={{ overflow: 'visible' }}>
                   <div className="stat-label">Tipo</div>
-                  <div className="stat-value" style={{ fontSize: 13 }}>{data.recurso.resource_type || '—'}</div>
+                  <div className="stat-value" style={{ fontSize: 13, lineHeight: 1.3, wordBreak: 'break-word' }}>{data.recurso.resource_type || '—'}</div>
                 </div>
-                <div className="stat-card">
+                <div className="stat-card" style={{ overflow: 'visible' }}>
                   <div className="stat-label">Resource Group</div>
-                  <div className="stat-value" style={{ fontSize: 13 }}>{data.recurso.resource_group || '—'}</div>
+                  <div className="stat-value" style={{ fontSize: 13, lineHeight: 1.3, wordBreak: 'break-word' }}>{data.recurso.resource_group || '—'}</div>
                 </div>
-                <div className="stat-card">
-                  <div className="stat-label">Custo acumulado</div>
-                  <div className="stat-value">{fmtBRL(data.recurso.custo_acumulado)}</div>
+                <div className="stat-card" style={{ overflow: 'visible' }}>
+                  <div className="stat-label">Custo direto</div>
+                  <div className="stat-value" style={{ fontSize: 20, wordBreak: 'break-word' }}>{fmtBRL(data.recurso.custo_acumulado)}</div>
                 </div>
               </div>
+
+              {data.recurso.custo_acumulado === 0 && data.custo_resource_group > 0 && (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', marginBottom: 16 }}>
+                  💡 Custo direto zerado, mas o Resource Group <strong style={{ color: 'var(--text)' }}>{data.recurso.resource_group}</strong> acumulou{' '}
+                  <strong style={{ color: 'var(--text)' }}>{fmtBRL(data.custo_resource_group)}</strong> em {data.resource_group_recursos} recurso{data.resource_group_recursos !== 1 ? 's' : ''} diferentes.
+                  Isso é normal pra VMs/discos/NICs de cluster (Databricks, AKS) — a Azure recria essas instâncias em questão de horas,
+                  então o resource_id exato raramente sobrevive tempo suficiente até o billing ser publicado (~2-3 dias de atraso). O custo do
+                  Resource Group inteiro é o número que reflete o ambiente de verdade.
+                </div>
+              )}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, marginBottom: 16 }}>
                 <div>Criado por <strong>{data.recurso.criado_por || 'desconhecido'}</strong> em {fmtData(data.recurso.criado_em)}</div>

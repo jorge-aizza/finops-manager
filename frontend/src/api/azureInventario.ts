@@ -109,5 +109,7 @@ export const getAzureRecursoDetalhe = (resourceId: string, subscriptionId: strin
     recurso: { ...r.recurso, custo_acumulado: Number(r.recurso.custo_acumulado) },
     eventos: r.eventos,
     custo_diario: r.custo_diario.map((d) => ({ ...d, custo: Number(d.custo) })),
+    custo_resource_group: Number(r.custo_resource_group),
+    resource_group_recursos: Number(r.resource_group_recursos),
   }))
 }

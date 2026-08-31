@@ -122,4 +122,10 @@ export interface AzureRecursoDetalheResposta {
   recurso: AzureRecursoInventario
   eventos: AzureAuditoriaEvento[]
   custo_diario: { cost_date: string; custo: number }[]
+  // Custo de TODO o Resource Group (não só deste resource_id) — pedido do usuário: o custo
+  // direto por recurso fica zerado pra VMs/discos efêmeros de cluster Databricks (a Azure
+  // recria essas instâncias em horas, o resource_id exato raramente sobrevive até o billing
+  // ser publicado, ~2-3 dias depois). O RG agrega todo o ambiente, sempre populado.
+  custo_resource_group: number
+  resource_group_recursos: number
 }

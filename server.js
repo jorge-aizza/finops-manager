@@ -6033,11 +6033,44 @@ async function ensureAzureColetaTable() {
       retencao_dias      INTEGER DEFAULT 180,
       sp_id              INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL,
       subscription_ids   TEXT,
-      ultimo_evento_em   TIMESTAMP,
+      ultimo_evento_em   TIMESTAMPTZ,
       criado_em          TIMESTAMP DEFAULT NOW(),
       atualizado_em      TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Migração pra TIMESTAMPTZ (2026-08-31) — coluna nasceu como TIMESTAMP (sem timezone). Como
+  // o código escreve/lê `ultimo_evento_em` via objetos JS Date (não só comparação SQL
+  // server-side como as outras colunas TIMESTAMP do arquivo), node-postgres reparseia um
+  // TIMESTAMP sem tz usando o construtor LOCAL do JS (Date(y,m,d,h,mi,s,ms), dependente de
+  // `process.env.TZ='America/Sao_Paulo'`, setado no topo deste arquivo) em vez de UTC — cada
+  // leitura "somava" 3h de volta ao valor gravado, fazendo o watermark derivar pra frente do
+  // relógio real a cada tick e a coleta falhar com "start time > end time" contra o Activity
+  // Log indefinidamente.
+  //
+  // BUG REAL #2, encontrado só depois de reiniciar o servidor várias vezes com o fix acima já
+  // aplicado e o erro CONTINUAR: `ALTER COLUMN ... USING ultimo_evento_em AT TIME ZONE 'UTC'`
+  // não é idempotente — rodava de novo em TODO restart (esta função roda no boot, sem guard).
+  // Na 1ª vez, com a coluna ainda TIMESTAMP, a conversão é correta (trata o naive como UTC).
+  // Mas a partir da 2ª vez, com a coluna JÁ timestamptz, `timestamptz AT TIME ZONE 'UTC'`
+  // muda de significado: converte o instante absoluto pro "relógio de parede em UTC" (vira um
+  // TIMESTAMP naive de novo, com os mesmos dígitos, já que a zona é UTC) — e o `ALTER COLUMN
+  // TYPE TIMESTAMPTZ` seguinte reinterpreta esse naive usando o timezone da SESSÃO do Postgres
+  // (America/Sao_Paulo, não UTC) pra converter de volta — somando +3h de novo, a cada restart
+  // (não a cada leitura). Corrigido guardando a conversão com uma checagem de tipo antes —
+  // só converte se a coluna ainda não for timestamptz.
+  const _invColType = await pool.query(
+    `SELECT data_type FROM information_schema.columns WHERE table_name='azure_inventario_config' AND column_name='ultimo_evento_em'`
+  );
+  if (_invColType.rows[0]?.data_type !== 'timestamp with time zone') {
+    await pool.query(`ALTER TABLE azure_inventario_config ALTER COLUMN ultimo_evento_em TYPE TIMESTAMPTZ USING ultimo_evento_em AT TIME ZONE 'UTC'`).catch(() => {});
+  }
+  // Reset único (2026-08-31) — o valor já foi deslocado +3h em cada um dos vários restarts
+  // durante o diagnóstico do bug #2 acima (multiplicador exato desconhecido); não dá pra
+  // "desfazer" com confiança, então zera de vez — a próxima coleta cai no fallback de 24h de
+  // lookback, mesmo comportamento de uma ativação nova. Idempotente via a flag `atualizado_em`
+  // (só roda enquanto o valor ainda estiver setado — depois do reset, `ultimo_evento_em IS NULL`
+  // e este UPDATE não casa mais nenhuma linha).
+  await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em = NULL WHERE ultimo_evento_em IS NOT NULL AND ultimo_evento_em > NOW()`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_recursos_inventario (
       id                SERIAL PRIMARY KEY,
@@ -7090,13 +7123,25 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
     const { resource_id, subscription_id } = req.query;
     if (!resource_id || !subscription_id) return res.status(400).json({ error: 'resource_id e subscription_id são obrigatórios' });
 
-    const [recursoR, eventosR, custoR] = await Promise.all([
-      pool.query(
-        `SELECT ri.*,
-           COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado
-         FROM azure_recursos_inventario ri WHERE ri.subscription_id=$1 AND ri.resource_id=$2`,
-        [subscription_id, resource_id]
-      ),
+    const recursoR = await pool.query(
+      `SELECT ri.*,
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado
+       FROM azure_recursos_inventario ri WHERE ri.subscription_id=$1 AND ri.resource_id=$2`,
+      [subscription_id, resource_id]
+    );
+    if (!recursoR.rows.length) return res.status(404).json({ error: 'Recurso não encontrado no inventário' });
+    const recurso = recursoR.rows[0];
+
+    // Custo do Resource Group inteiro — além do custo DIRETO do resource_id (que fica
+    // sistematicamente zerado pra VMs/discos/NICs efêmeros de cluster Databricks, já que a
+    // Azure recria essas instâncias em questão de horas: o resource_id exato pouco raramente
+    // sobrevive tempo suficiente pra aparecer no billing, que tem ~2-3 dias de atraso pra ser
+    // publicado). O RG agrega TODO o ambiente (todas as VMs/discos que já passaram por ali),
+    // então é o número que reflete custo real, mesmo quando o recurso individual nunca teve
+    // billing próprio. Pedido do usuário — "custo direto por recurso é zero e é muito
+    // complexo tentar capturar isso do jeito que já temos os consumos". Sempre calculado
+    // (não só pra RGs Databricks) — dá contexto útil pra qualquer recurso.
+    const [eventosR, custoR, custoRGR] = await Promise.all([
       pool.query(
         `SELECT * FROM azure_recursos_auditoria_eventos WHERE subscription_id=$1 AND resource_id=$2 ORDER BY quando ASC LIMIT 200`,
         [subscription_id, resource_id]
@@ -7107,10 +7152,22 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
          GROUP BY cost_date ORDER BY cost_date`,
         [resource_id]
       ),
+      recurso.resource_group
+        ? pool.query(
+            `SELECT COALESCE(SUM(cost_in_billing_currency),0) AS custo, COUNT(DISTINCT resource_id) AS recursos
+             FROM azure_costs WHERE subscription_id=$1 AND UPPER(resource_group_name) = UPPER($2)`,
+            [subscription_id, recurso.resource_group]
+          )
+        : Promise.resolve({ rows: [{ custo: 0, recursos: 0 }] }),
     ]);
-    if (!recursoR.rows.length) return res.status(404).json({ error: 'Recurso não encontrado no inventário' });
 
-    res.json({ recurso: recursoR.rows[0], eventos: eventosR.rows, custo_diario: custoR.rows });
+    res.json({
+      recurso,
+      eventos: eventosR.rows,
+      custo_diario: custoR.rows,
+      custo_resource_group: custoRGR.rows[0].custo,
+      resource_group_recursos: parseInt(custoRGR.rows[0].recursos, 10) || 0,
+    });
   } catch (e) { _dbErr(res, e); }
 });
 

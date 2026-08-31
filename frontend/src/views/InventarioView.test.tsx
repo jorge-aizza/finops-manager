@@ -206,6 +206,8 @@ describe('InventarioView', () => {
         { id: 1, subscription_id: 'sub-1', resource_id: 'r1', resource_type: null, resource_group: null, nome: null, acao: 'CRIACAO', autor: 'joao@vivo.com.br', quando: '2026-08-20T10:00:00Z', operation_name: null, correlation_id: null, criado_em: '' },
       ],
       custo_diario: [{ cost_date: '2026-08-20', custo: 5.5 }],
+      custo_resource_group: 123.45,
+      resource_group_recursos: 1,
     })
     const user = userEvent.setup()
     renderWithClient()
@@ -217,5 +219,37 @@ describe('InventarioView', () => {
     expect(azureInventarioApi.getAzureRecursoDetalhe).toHaveBeenCalledWith(
       '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste', 'sub-1',
     )
+  })
+
+  it('modal de detalhe mostra o custo do Resource Group quando o custo direto do recurso é zero', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-dbw-teste/providers/Microsoft.Network/networkInterfaces/nic-efemera',
+        resource_type: 'Microsoft.Network/networkInterfaces', resource_group: 'databricks-rg-dbw-teste', nome: 'nic-efemera',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-31T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-31T10:05:00Z', custo_acumulado: 0,
+      }],
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
+      recurso: {
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-dbw-teste/providers/Microsoft.Network/networkInterfaces/nic-efemera',
+        resource_type: 'Microsoft.Network/networkInterfaces', resource_group: 'databricks-rg-dbw-teste', nome: 'nic-efemera',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-31T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-31T10:05:00Z', custo_acumulado: 0,
+      },
+      eventos: [],
+      custo_diario: [],
+      custo_resource_group: 2500.75,
+      resource_group_recursos: 34,
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByText('nic-efemera'))
+
+    expect(await screen.findByText('Detalhe do Recurso')).toBeInTheDocument()
+    expect(screen.getByText(/Custo direto zerado, mas o Resource Group/)).toBeInTheDocument()
+    expect(screen.getByText('R$ 2.500,75')).toBeInTheDocument()
+    expect(screen.getByText(/34 recursos diferentes/)).toBeInTheDocument()
   })
 })
