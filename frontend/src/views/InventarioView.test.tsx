@@ -80,7 +80,7 @@ describe('InventarioView', () => {
       total: 1,
       eventos: [{
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
-        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', acao: 'CRIACAO', autor: 'joao@vivo.com.br',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste', acao: 'CRIACAO', autor: 'joao@vivo.com.br',
         quando: '2026-08-20T10:00:00Z', operation_name: 'Microsoft.Compute/virtualMachines/write', correlation_id: null, criado_em: '',
       }],
     })
@@ -89,6 +89,8 @@ describe('InventarioView', () => {
     await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
     expect(await screen.findByText('✚ Criação')).toBeInTheDocument()
     expect(screen.getByText('joao@vivo.com.br')).toBeInTheDocument()
+    expect(screen.getByText('vm-teste')).toBeInTheDocument()
+    expect(screen.getByText('Microsoft.Compute/virtualMachines')).toBeInTheDocument()
   })
 
   it('aba Configuração pré-preenche o formulário e permite salvar', async () => {
@@ -201,7 +203,7 @@ describe('InventarioView', () => {
         excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
       },
       eventos: [
-        { id: 1, subscription_id: 'sub-1', resource_id: 'r1', resource_type: null, resource_group: null, acao: 'CRIACAO', autor: 'joao@vivo.com.br', quando: '2026-08-20T10:00:00Z', operation_name: null, correlation_id: null, criado_em: '' },
+        { id: 1, subscription_id: 'sub-1', resource_id: 'r1', resource_type: null, resource_group: null, nome: null, acao: 'CRIACAO', autor: 'joao@vivo.com.br', quando: '2026-08-20T10:00:00Z', operation_name: null, correlation_id: null, criado_em: '' },
       ],
       custo_diario: [{ cost_date: '2026-08-20', custo: 5.5 }],
     })

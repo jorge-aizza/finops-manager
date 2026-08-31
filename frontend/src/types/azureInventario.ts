@@ -86,6 +86,9 @@ export interface AzureAuditoriaEvento {
   operation_name: string | null
   correlation_id: string | null
   criado_em: string
+  // Nome amigável do recurso (join com azure_recursos_inventario.nome) — null se o recurso
+  // ainda não estiver no inventário (raro — mesma coleta grava as duas tabelas juntas).
+  nome: string | null
 }
 
 // Crescimento — contagem diária de resource_id distintos, derivada de azure_costs (zero

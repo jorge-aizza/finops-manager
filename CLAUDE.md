@@ -2566,6 +2566,32 @@ bugs eram puramente SQL/server.js), `pm2 restart` sem erro/crash-loop contra o a
 ~1,45M linhas em `azure_costs`, coleta Azure ao vivo rodando em paralelo), índice novo confirmado criado
 via log (`idx_azure_costs_resource_id_upper ✅`), rota `/recurso-detalhe` respondendo 401 sem token.
 
+**Aba Auditoria ganhou coluna Tipo + nome real do recurso (2026-08-31, pedido do usuário: "Preciso nas
+coletas Informe o nome de Recurso e Type... e quem fez a alteração")**: a tabela de eventos
+(`GET /api/azure-inventario/auditoria`) já retornava `resource_type` desde a criação da feature, mas o
+frontend nunca renderizava essa coluna — só Quando/Ação/Recurso/Autor/Operação. "Recurso" também usava um
+nome derivado no cliente (`ev.resource_id.split('/').pop()`) em vez do `nome` real já salvo em
+`azure_recursos_inventario` (a mesma fonte que a aba Recursos usa) — na prática dá o mesmo resultado na
+maioria dos casos (as duas lógicas fazem o mesmo split), mas depender do dado real em vez de reimplementar
+a mesma lógica no cliente é mais robusto (ex: recursos com nome corrigido pelo backfill do bug de "nome
+ausente" documentado acima já aparecem certos aqui também, sem duplicar a lógica de fallback). "Quem fez a
+alteração" já existia como coluna "Autor" desde o início — não precisou de mudança.
+
+Corrigido com um `LEFT JOIN` novo em `GET /api/azure-inventario/auditoria`
+(`azure_recursos_auditoria_eventos e LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id =
+e.subscription_id AND ri.resource_id = e.resource_id`) trazendo `ri.nome` — **exact match aqui é seguro**
+(diferente do JOIN com `azure_costs` corrigido acima, que precisou de `UPPER()` por vir de fontes Azure
+diferentes com casing divergente): as duas tabelas deste JOIN são gravadas na MESMA iteração de
+`_coletarInventarioAzure`, a partir da MESMA variável `resourceId` do Activity Log — nunca podem divergir
+em casing entre si. `AzureAuditoriaEvento` (tipo TS) ganhou o campo `nome: string | null`; a coluna "Tipo"
+nova usa `ev.resource_type` (já vinha do servidor, só não era exibido); "Recurso" agora usa `ev.nome ||
+ev.resource_id.split('/').pop()` (fallback preservado pro caso raro de `nome` ainda não populado).
+
+**Verificado**: `node --check`, `tsc -b`, `npx vitest run src/views/InventarioView.test.tsx` (10/10 —
+2 testes existentes atualizados com o campo `nome` novo no mock, mais 2 asserções novas confirmando que
+Tipo e nome aparecem na aba Auditoria), `npm run frontend:build`, `pm2 restart` sem erro/crash-loop contra
+o ambiente real, rota respondendo 401 sem token.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

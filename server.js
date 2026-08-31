@@ -6978,14 +6978,21 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
       data_fim = fim.toISOString().slice(0, 10);
       data_inicio = ini.toISOString().slice(0, 10);
     }
-    let where = `quando >= $1 AND quando < $2::date + INTERVAL '1 day'`;
+    let where = `e.quando >= $1 AND e.quando < $2::date + INTERVAL '1 day'`;
     const params = [data_inicio, data_fim];
-    if (resource_id) { params.push(resource_id); where += ` AND resource_id = $${params.length}`; }
-    if (acao) { params.push(acao); where += ` AND acao = $${params.length}`; }
-    if (subscription_id) { params.push(subscription_id); where += ` AND subscription_id = $${params.length}`; }
+    if (resource_id) { params.push(resource_id); where += ` AND e.resource_id = $${params.length}`; }
+    if (acao) { params.push(acao); where += ` AND e.acao = $${params.length}`; }
+    if (subscription_id) { params.push(subscription_id); where += ` AND e.subscription_id = $${params.length}`; }
 
+    // LEFT JOIN pro nome amigável do recurso (`ri.nome` — mesma string que a aba Recursos já
+    // mostra) — exact match é seguro aqui (não o mesmo risco de casing do JOIN com azure_costs):
+    // as duas tabelas são gravadas na MESMA iteração de _coletarInventarioAzure, a partir da
+    // MESMA variável `resourceId` (Activity Log), nunca de fontes divergentes.
     const r = await pool.query(
-      `SELECT * FROM azure_recursos_auditoria_eventos WHERE ${where} ORDER BY quando DESC LIMIT 300`,
+      `SELECT e.*, ri.nome
+       FROM azure_recursos_auditoria_eventos e
+       LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = e.subscription_id AND ri.resource_id = e.resource_id
+       WHERE ${where} ORDER BY e.quando DESC LIMIT 300`,
       params
     );
     res.json({ periodo: { inicio: data_inicio, fim: data_fim }, total: r.rows.length, eventos: r.rows });

@@ -304,7 +304,7 @@ export default function InventarioView() {
           {auditoriaQuery.data && auditoriaQuery.data.total > 0 && (
             <div className="table-wrapper">
               <table className="data-table">
-                <thead><tr><th>Quando</th><th>Ação</th><th>Recurso</th><th>Autor</th><th>Operação</th></tr></thead>
+                <thead><tr><th>Quando</th><th>Ação</th><th>Recurso</th><th>Tipo</th><th>Autor</th><th>Operação</th></tr></thead>
                 <tbody>
                   {auditoriaQuery.data.eventos.map((ev) => {
                     const b = ACAO_BADGE[ev.acao]
@@ -312,7 +312,8 @@ export default function InventarioView() {
                       <tr key={ev.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: ev.resource_id, subscriptionId: ev.subscription_id })}>
                         <td style={{ fontSize: 12 }}>{fmtData(ev.quando)}</td>
                         <td><span style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 600 }}>{b.label}</span></td>
-                        <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--accent)' }} title={ev.resource_id}>{ev.resource_id.split('/').pop()}</td>
+                        <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--accent)' }} title={ev.resource_id}>{ev.nome || ev.resource_id.split('/').pop()}</td>
+                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{ev.resource_type || '—'}</td>
                         <td style={{ fontSize: 12 }} title={ev.autor || ''}>{ev.autor || 'desconhecido'}</td>
                         <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{ev.operation_name || '—'}</td>
                       </tr>
