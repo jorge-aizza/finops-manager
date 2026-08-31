@@ -2523,6 +2523,49 @@ recursos quanto em custo —, e clicar num recurso abre o modal com a linha do t
 confirma que `getAzureRecursoDetalhe` é chamado com `resource_id`+`subscription_id`
 corretos).
 
+**Dois bugs reais reportados pelo usuário ao testar com dados reais e corrigidos (2026-08-31) — "Preciso
+que traga o Nome do Recurso e me ajuste o custo pois estão zerados"**:
+
+- **Custo zerado**: `GET /api/azure-inventario/recursos` e `GET /api/azure-inventario/recurso-detalhe`
+  correlacionavam custo com `azure_costs` por igualdade exata de string
+  (`ac.resource_id = ri.resource_id`). Azure é conhecido por devolver o mesmo resource ID com casing
+  diferente entre serviços distintos (Cost Management export vs. Activity Log) — `resource_id` em
+  `azure_costs` é gravado como veio do export, sem normalização nenhuma (confirmado lendo `_mapRow`/
+  `_mapRowCSV`), enquanto `azure_recursos_inventario.resource_id` vem do campo `resourceId` do Activity
+  Log. Quando a grafia diverge (comum — ex: nome do recurso em maiúsculo num serviço e minúsculo no
+  outro), o JOIN por igualdade exata não bate nunca, e `custo_acumulado`/`custo_diario` ficam sempre `0`
+  mesmo com billing real existindo pro recurso. Corrigido nos 3 pontos (subquery de `custo_acumulado` em
+  `/recursos`, mesma subquery em `/recurso-detalhe`, e a query de `custo_diario` em `/recurso-detalhe`)
+  trocando pra `UPPER(ac.resource_id) = UPPER(ri.resource_id)`/`UPPER(resource_id)=UPPER($1)`. Novo índice
+  funcional `idx_azure_costs_resource_id_upper ON azure_costs(UPPER(resource_id))` (criado em background,
+  mesmo padrão não-bloqueante de todos os outros índices de `azure_costs`) — necessário pra manter
+  performance: a subquery correlacionada roda por linha (até 500 vezes em `/recursos`) contra uma tabela de
+  ~1,45M registros.
+- **Nome do recurso ausente**: o handler de evento de EXCLUSÃO em `_coletarInventarioAzure` nunca
+  calculava/gravava `nome` no INSERT — só o handler de CRIAÇÃO/ATUALIZAÇÃO fazia
+  `resourceId.split('/').pop()`. Um recurso cuja PRIMEIRA detecção pelo coletor é um evento de exclusão
+  (comum: recurso criado antes da cobertura do Activity Log — retenção nativa de só 90 dias — ou antes de
+  o Inventário ter sido ativado) ficava com `nome` permanentemente `NULL`, e o frontend (`r.nome ||
+  r.resource_id`) caía pro resource ID completo do ARM (longo, ilegível) em vez de um nome amigável.
+  Corrigido calculando `nome` também no handler de exclusão, com `ON CONFLICT DO UPDATE SET
+  nome=COALESCE(azure_recursos_inventario.nome, EXCLUDED.nome)` — nunca sobrescreve um nome já conhecido
+  vindo de um evento de criação/atualização anterior, só preenche quando estava faltando. Acompanhado de
+  um backfill idempotente (`UPDATE azure_recursos_inventario SET nome = regexp_replace(resource_id, '^.*/',
+  '') WHERE nome IS NULL`, roda a cada boot, sem custo pra quem já não tem NULL) — corrige as linhas que já
+  ficaram sem nome antes deste fix, sem esperar um evento novo pra cada uma.
+
+**Achado à parte durante a verificação, não corrigido nesta rodada (fora do escopo do que foi pedido)**:
+o log do agendador (`_iniciarInventarioAgendador`) mostrou `start time: ...15:20:53 cannot be greater than
+end time: ...12:28:30` — o watermark `ultimo_evento_em` parece estar sendo interpretado com um offset de
+~3h em relação ao "agora" calculado pra fim do intervalo (mesma magnitude do fuso Brasil, UTC-3), fazendo
+`inicio > fim` e a coleta falhar com 400 do Activity Log a cada tick. Não investigado a fundo nem corrigido
+agora — só documentado aqui pra não se perder, já que apareceu nos logs durante a verificação deste fix.
+
+**Verificado**: `node --check`, `cd frontend && npx tsc -b` (sem mudança de frontend necessária — os dois
+bugs eram puramente SQL/server.js), `pm2 restart` sem erro/crash-loop contra o ambiente real (`finops_dev`,
+~1,45M linhas em `azure_costs`, coleta Azure ao vivo rodando em paralelo), índice novo confirmado criado
+via log (`idx_azure_costs_resource_id_upper ✅`), rota `/recurso-detalhe` respondendo 401 sem token.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

@@ -1950,6 +1950,7 @@ async function ensureAzureCostsTable() {
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_service      ON azure_costs(consumed_service)`, 'idx_azure_costs_service');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_meter_cat    ON azure_costs(meter_category)`, 'idx_azure_costs_meter_cat');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_resource_id  ON azure_costs(resource_id)`, 'idx_azure_costs_resource_id');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_resource_id_upper ON azure_costs(UPPER(resource_id))`, 'idx_azure_costs_resource_id_upper');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_importado    ON azure_costs(importado_em)`, 'idx_azure_costs_importado');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg       ON azure_costs(subscription_id, resource_group_name)`, 'idx_azure_costs_sub_rg');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_date     ON azure_costs(subscription_id, cost_date)`, 'idx_azure_costs_sub_date');
@@ -6061,6 +6062,11 @@ async function ensureAzureColetaTable() {
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_recursos_inv_uniq ON azure_recursos_inventario (subscription_id, resource_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
+  // Backfill idempotente (2026-08-31): linhas cuja primeira detecção foi um evento de EXCLUSÃO
+  // nunca tiveram `nome` preenchido (bug corrigido no handler de delete abaixo) — recalcula pra
+  // quem já ficou NULL antes da correção. split_part com '/' reverso não existe em SQL puro, então
+  // usa regexp pra pegar o último segmento do resource_id (mesma lógica de resourceId.split('/').pop()).
+  await pool.query(`UPDATE azure_recursos_inventario SET nome = regexp_replace(resource_id, '^.*/', '') WHERE nome IS NULL`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_recursos_auditoria_eventos (
@@ -6949,7 +6955,7 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
 
     const r = await pool.query(
       `SELECT ri.*,
-         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE ac.resource_id = ri.resource_id), 0) AS custo_acumulado
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado
        FROM azure_recursos_inventario ri
        WHERE ${where}
        ORDER BY ri.criado_em DESC NULLS LAST
@@ -7080,7 +7086,7 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
     const [recursoR, eventosR, custoR] = await Promise.all([
       pool.query(
         `SELECT ri.*,
-           COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE ac.resource_id = ri.resource_id), 0) AS custo_acumulado
+           COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado
          FROM azure_recursos_inventario ri WHERE ri.subscription_id=$1 AND ri.resource_id=$2`,
         [subscription_id, resource_id]
       ),
@@ -7090,7 +7096,7 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
       ),
       pool.query(
         `SELECT cost_date, SUM(cost_in_billing_currency) AS custo FROM azure_costs
-         WHERE resource_id=$1 AND cost_date >= CURRENT_DATE - INTERVAL '90 days'
+         WHERE UPPER(resource_id)=UPPER($1) AND cost_date >= CURRENT_DATE - INTERVAL '90 days'
          GROUP BY cost_date ORDER BY cost_date`,
         [resource_id]
       ),
@@ -9396,12 +9402,14 @@ async function _coletarInventarioAzure(origem = 'manual') {
         totalEventos++;
 
         if (acaoBruta === 'delete') {
+          const nomeDel = resourceId.split('/').pop();
           await pool.query(
-            `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,excluido_por,excluido_em,ativo)
-             VALUES ($1,$2,$3,$4,$5,$6,false)
+            `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,excluido_por,excluido_em,ativo)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,false)
              ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
+               nome=COALESCE(azure_recursos_inventario.nome, EXCLUDED.nome),
                excluido_por=EXCLUDED.excluido_por, excluido_em=EXCLUDED.excluido_em, ativo=false`,
-            [subId, resourceId, resourceType, resourceGroup, autor, quando]
+            [subId, resourceId, resourceType, resourceGroup, nomeDel, autor, quando]
           );
           totalExcluidos++;
           await pool.query(
