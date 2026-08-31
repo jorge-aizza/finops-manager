@@ -140,6 +140,13 @@ export interface AzureRecursoInventario {
   ativo: boolean
   detectado_em: string
   custo_acumulado: number
+  // Nome resolvido via Microsoft Graph (azure_autores_cache) — `criado_por`/`atualizado_por`/
+  // `excluido_por` do Activity Log quase sempre trazem um Object ID puro (GUID), não um nome
+  // amigável. null enquanto não resolvido (ou sem permissão Directory.Read.All concedida) —
+  // frontend cai pro GUID cru nesse caso.
+  criado_por_nome: string | null
+  atualizado_por_nome: string | null
+  excluido_por_nome: string | null
 }
 
 export type AzureAuditoriaAcao = 'CRIACAO' | 'ATUALIZACAO' | 'EXCLUSAO'
@@ -160,6 +167,8 @@ export interface AzureAuditoriaEvento {
   // Nome amigável do recurso (join com azure_recursos_inventario.nome) — null se o recurso
   // ainda não estiver no inventário (raro — mesma coleta grava as duas tabelas juntas).
   nome: string | null
+  // Nome do autor resolvido via Microsoft Graph (azure_autores_cache) — ver AzureRecursoInventario.
+  autor_nome: string | null
 }
 
 // Crescimento — contagem diária de resource_id distintos, derivada de azure_costs (zero

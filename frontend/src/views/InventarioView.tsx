@@ -7,7 +7,7 @@ import {
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureCrescimento, getAzureInventarioComparativo,
   getAzureAnomaliasCrescimento, getAzureOrcamentosInventario, getAzureOrcamentosInventarioAlertas,
-  excluirAzureOrcamentoInventario, getAzureTagsFaltantes,
+  excluirAzureOrcamentoInventario, getAzureTagsFaltantes, resolverAutoresInventario,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureOrcamentoInventario, AzureOrcamentoSeveridade } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -240,6 +240,16 @@ export default function InventarioView() {
     },
   })
 
+  const resolverAutoresMutation = useMutation({
+    mutationFn: resolverAutoresInventario,
+    onSuccess: (r) => {
+      window.showToast?.(r.resolvidos > 0 ? `${r.resolvidos} nome(s) resolvido(s).` : 'Nenhum nome novo pra resolver.', 'success')
+      queryClient.invalidateQueries({ queryKey: ['azure-inv-recursos'] })
+      queryClient.invalidateQueries({ queryKey: ['azure-inv-auditoria'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao resolver nomes: ' + e.message, 'error'),
+  })
+
   return (
     <div className="view active">
       <div className="view-hero">
@@ -307,12 +317,12 @@ export default function InventarioView() {
                       <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--accent)' }} title={r.resource_id}>{r.nome || r.resource_id}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.resource_type || '—'}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.resource_group || '—'}</td>
-                      <td style={{ fontSize: 12 }} title={r.criado_por || ''}>{r.criado_por || 'desconhecido'}</td>
+                      <td style={{ fontSize: 12 }} title={r.criado_por || ''}>{r.criado_por_nome || r.criado_por || 'desconhecido'}</td>
                       <td style={{ fontSize: 12 }}>{fmtData(r.criado_em)}</td>
                       <td>
                         {r.ativo
                           ? <span style={{ color: 'var(--green,#22c55e)', fontSize: 11 }}>● Ativo</span>
-                          : <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={r.excluido_por ? `Excluído por ${r.excluido_por} em ${fmtData(r.excluido_em)}` : ''}>○ Excluído</span>}
+                          : <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={r.excluido_por ? `Excluído por ${r.excluido_por_nome || r.excluido_por} em ${fmtData(r.excluido_em)}` : ''}>○ Excluído</span>}
                       </td>
                       <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtBRL(r.custo_acumulado)}</td>
                     </tr>
@@ -357,7 +367,7 @@ export default function InventarioView() {
                         <td><span style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 600 }}>{b.label}</span></td>
                         <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--accent)' }} title={ev.resource_id}>{ev.nome || ev.resource_id.split('/').pop()}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{ev.resource_type || '—'}</td>
-                        <td style={{ fontSize: 12 }} title={ev.autor || ''}>{ev.autor || 'desconhecido'}</td>
+                        <td style={{ fontSize: 12 }} title={ev.autor || ''}>{ev.autor_nome || ev.autor || 'desconhecido'}</td>
                         <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{ev.operation_name || '—'}</td>
                       </tr>
                     )
@@ -542,12 +552,16 @@ export default function InventarioView() {
           <div className="card" style={{ margin: '16px 20px' }}>
             <div className="card-header">
               <span className="card-title">Configuração</span>
-              <button className="btn-primary" style={{ marginLeft: 'auto' }} disabled={coletarMutation.isPending || statusQuery.data?.em_execucao} onClick={() => coletarMutation.mutate()}>
+              <button className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 11 }} disabled={resolverAutoresMutation.isPending} onClick={() => resolverAutoresMutation.mutate()} title="Resolve GUID de Criado por/Autor pro nome real via Microsoft Graph — exige Directory.Read.All concedida no Entra ID">
+                {resolverAutoresMutation.isPending ? 'Resolvendo...' : '🪪 Resolver Nomes'}
+              </button>
+              <button className="btn-primary" disabled={coletarMutation.isPending || statusQuery.data?.em_execucao} onClick={() => coletarMutation.mutate()}>
                 {statusQuery.data?.em_execucao ? 'Coletando...' : '▶ Coletar Agora'}
               </button>
             </div>
             <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
               Fonte: Azure Activity Log — usa a mesma credencial (Service Principal com role Reader) já configurada em Coleta Azure. Nenhuma permissão nova precisa ser concedida.
+              "Criado por"/"Autor" traz um ID (GUID) do Activity Log — pra resolver pro nome real, clique em <strong>🪪 Resolver Nomes</strong> (roda automaticamente após cada coleta também), o que exige a permissão de aplicativo <strong>Directory.Read.All</strong> concedida a esta Service Principal no Entra ID (App registration → API permissions → Microsoft Graph).
             </div>
             <div style={{ padding: '0 20px 16px', display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560 }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

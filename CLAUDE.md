@@ -2723,6 +2723,63 @@ sem SMTP real configurado neste ambiente) nem os cálculos de anomalia/orçament
 reais suficientes pra cruzar o threshold de 5 dias de histórico (a coleta de Inventário
 começou em 2026-08-30, ainda não tem 35 dias de janela completa).
 
+### Inventário — nome do autor via Microsoft Graph (2026-08-31, pedido do usuário: "Nos dados
+o criador e modificador tras o ID consegue trazer o nome e não o Id")
+
+Investigação com dados reais confirmou o problema: 6.426 de 6.445 eventos (34 autores
+distintos) trazem um Object ID puro do Activity Log (`caller`), quase certamente Service
+Principals (Databricks provisionando seus próprios recursos gerenciados, a própria Coleta
+Azure) — só 1 autor já vinha como e-mail. O Activity Log não tem "nome amigável" pra Object
+ID nenhum — resolver isso exige o **Microsoft Graph** (endpoint e escopo totalmente
+diferentes do ARM já usado pro resto da coleta), com uma permissão de aplicativo **NOVA**
+(`Directory.Read.All`) que só um admin do Entra ID pode conceder. Perguntado explicitamente
+via `AskUserQuestion` antes de escrever qualquer código (mesmo padrão já usado antes nesta
+sessão pra Quotas Genie — nunca assumir um novo grant de permissão sem confirmar) — usuário
+escolheu implementar.
+
+**`_graphGetToken`** — mesmo fluxo `client_credentials` de `_managementGetToken`, só troca
+`scope` pra `https://graph.microsoft.com/.default`. Reusa a MESMA Service Principal já
+configurada em `azure_inventario_config.sp_id` — nenhuma credencial nova, só a permissão.
+
+**`_graphResolveAutores()`** — resolve em lote via `POST
+https://graph.microsoft.com/v1.0/directoryObjects/getByIds` (até 1000 IDs por chamada,
+resolve usuário/Service Principal/grupo numa única requisição, sem precisar saber de
+antemão o tipo de cada GUID). Busca todo `criado_por`/`atualizado_por`/`excluido_por`/`autor`
+distinto que bate no formato de GUID e ainda não está em `azure_autores_cache` (nova
+tabela: `guid` PK, `nome`, `tipo`, `resolvido_em`) — e-mails/UPNs já legíveis não entram
+nessa busca (`~* '^[0-9a-f]{8}-...'`, filtro de formato). Chamado automaticamente ao final
+de toda coleta de Inventário bem-sucedida (best-effort — nunca deriva a coleta principal já
+persistida se o Graph falhar, ex: permissão ainda não concedida) + exposto como rota manual
+`POST /api/azure-inventario/resolver-autores` (`res.status(400).json({error:e.message})`,
+não `_dbErr` — mesmo padrão "erro cru é o propósito da rota" já usado pelas rotas `/testar`,
+já que o erro mais provável (403 `Authorization_RequestDenied`) é exatamente a informação
+que o usuário precisa ver pra saber que falta conceder a permissão).
+
+**Read-path**: `GET /recursos`, `GET /recurso-detalhe` e `GET /auditoria` ganharam `LEFT
+JOIN azure_autores_cache` (3 joins na tabela de inventário — um por coluna de autor — e 1 no
+log de eventos) expondo `criado_por_nome`/`atualizado_por_nome`/`excluido_por_nome`/
+`autor_nome`, sempre `null` até serem resolvidos. Frontend usa o mesmo padrão de fallback já
+estabelecido pro resto da tela (`nome || resource_id`): `criado_por_nome || criado_por ||
+'desconhecido'`, em `InventarioView.tsx` (tabelas Recursos/Auditoria) e
+`RecursoDetalheModal.tsx` (cabeçalho + timeline). Botão **🪪 Resolver Nomes** novo na aba
+Configuração (ao lado de "Coletar Agora") dispara a rota manual — útil pra popular o cache
+dos 34 GUIDs já conhecidos imediatamente após o admin conceder a permissão, sem esperar o
+próximo ciclo de coleta.
+
+**Verificado end-to-end contra o ambiente real, inclusive o caminho de erro**: `node
+--check`, `tsc -b`, suíte completa do frontend (268/268 — 1 falha de timeout em
+`AcoesView.test.tsx` sob carga do full-run, não reproduz isolado, arquivo não tocado nesta
+sessão — flaky pré-existente, não regressão), `npm run frontend:build`, `pm2 restart` sem
+erro/crash-loop, migração da tabela nova aplicada sem exceção. Chamando `POST
+/resolver-autores` direto contra o servidor real (token JWT forjado com o mesmo
+`JWT_SECRET` padrão inseguro já usado neste ambiente de dev, só pra teste) confirmou o
+caminho de erro exato e esperado: `400 {"error":"Microsoft Graph falhou (403):
+{...Authorization_RequestDenied: Insufficient privileges to complete the operation...}"}` —
+prova que a troca de token, a chamada ao Graph e a propagação do erro real (não um erro
+genérico) funcionam ponta a ponta; só falta o admin conceder `Directory.Read.All` no App
+registration da Service Principal (Entra ID → App registrations → API permissions →
+Microsoft Graph → Application permissions) pra os nomes começarem a aparecer de verdade.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

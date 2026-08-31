@@ -151,3 +151,9 @@ export const getAzureTagsFaltantes = (subscriptionId?: string) => {
   const q = subscriptionId ? '?subscription_id=' + encodeURIComponent(subscriptionId) : ''
   return apiFetch<AzureTagsFaltantesResposta>('GET', '/azure-inventario/tags-faltantes' + q)
 }
+
+// Resolve GUID→nome (criado_por/atualizado_por/autor) via Microsoft Graph — trigger manual,
+// além da resolução automática ao final de toda coleta bem-sucedida. Falha (400) quando a
+// permissão Directory.Read.All ainda não foi concedida à Service Principal no Entra ID.
+export const resolverAutoresInventario = () =>
+  apiFetch<{ resolvidos: number; pendentes: number }>('POST', '/azure-inventario/resolver-autores')

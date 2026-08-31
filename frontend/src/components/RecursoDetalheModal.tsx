@@ -75,12 +75,12 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
               )}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, marginBottom: 16 }}>
-                <div>Criado por <strong>{data.recurso.criado_por || 'desconhecido'}</strong> em {fmtData(data.recurso.criado_em)}</div>
+                <div>Criado por <strong>{data.recurso.criado_por_nome || data.recurso.criado_por || 'desconhecido'}</strong> em {fmtData(data.recurso.criado_em)}</div>
                 {data.recurso.atualizado_em && (
-                  <div>Última atualização por <strong>{data.recurso.atualizado_por || 'desconhecido'}</strong> em {fmtData(data.recurso.atualizado_em)}</div>
+                  <div>Última atualização por <strong>{data.recurso.atualizado_por_nome || data.recurso.atualizado_por || 'desconhecido'}</strong> em {fmtData(data.recurso.atualizado_em)}</div>
                 )}
                 {!data.recurso.ativo && (
-                  <div style={{ color: 'var(--red,#ff4d6a)' }}>Excluído por <strong>{data.recurso.excluido_por || 'desconhecido'}</strong> em {fmtData(data.recurso.excluido_em)}</div>
+                  <div style={{ color: 'var(--red,#ff4d6a)' }}>Excluído por <strong>{data.recurso.excluido_por_nome || data.recurso.excluido_por || 'desconhecido'}</strong> em {fmtData(data.recurso.excluido_em)}</div>
                 )}
               </div>
 
@@ -96,7 +96,7 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                   return (
                     <div key={ev.id} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
                       <span style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 600, flexShrink: 0 }}>{b.label}</span>
-                      <span style={{ flex: 1 }}>{ev.autor || 'desconhecido'}</span>
+                      <span style={{ flex: 1 }}>{ev.autor_nome || ev.autor || 'desconhecido'}</span>
                       <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{fmtData(ev.quando)}</span>
                     </div>
                   )

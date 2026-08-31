@@ -6181,6 +6181,21 @@ async function ensureAzureColetaTable() {
   // não cobrem GROUP BY subscription_id+resource_group+dia com eficiência.
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_aud_sub_rg_quando ON azure_recursos_auditoria_eventos (subscription_id, resource_group, quando)`);
 
+  // Cache de nomes resolvidos via Microsoft Graph (2026-08-31, pedido do usuário: "consegue
+  // trazer o nome e não o ID?") — `criado_por`/`atualizado_por`/`autor` do Activity Log quase
+  // sempre trazem um Object ID puro (Service Principal ou usuário), nunca um nome amigável —
+  // confirmado com dados reais: 6.426 de 6.445 eventos são GUID puro, só 1 já vinha como
+  // e-mail. Resolver exige o Microsoft Graph (não o ARM já usado pro resto da coleta), com
+  // uma permissão de aplicativo NOVA (Directory.Read.All) — ver _graphResolveAutores.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_autores_cache (
+      guid          VARCHAR(100) PRIMARY KEY,
+      nome          VARCHAR(300),
+      tipo          VARCHAR(50),
+      resolvido_em  TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
   _coletaTableReady = true;
 }
 
@@ -7124,8 +7139,12 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
 
     const r = await pool.query(
       `SELECT ri.*,
-         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado,
+         cac1.nome AS criado_por_nome, cac2.nome AS atualizado_por_nome, cac3.nome AS excluido_por_nome
        FROM azure_recursos_inventario ri
+       LEFT JOIN azure_autores_cache cac1 ON cac1.guid = ri.criado_por
+       LEFT JOIN azure_autores_cache cac2 ON cac2.guid = ri.atualizado_por
+       LEFT JOIN azure_autores_cache cac3 ON cac3.guid = ri.excluido_por
        WHERE ${where}
        ORDER BY ri.criado_em DESC NULLS LAST
        LIMIT 500`,
@@ -7158,9 +7177,10 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
     // as duas tabelas são gravadas na MESMA iteração de _coletarInventarioAzure, a partir da
     // MESMA variável `resourceId` (Activity Log), nunca de fontes divergentes.
     const r = await pool.query(
-      `SELECT e.*, ri.nome
+      `SELECT e.*, ri.nome, cac.nome AS autor_nome
        FROM azure_recursos_auditoria_eventos e
        LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = e.subscription_id AND ri.resource_id = e.resource_id
+       LEFT JOIN azure_autores_cache cac ON cac.guid = e.autor
        WHERE ${where} ORDER BY e.quando DESC LIMIT 300`,
       params
     );
@@ -7261,8 +7281,13 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
 
     const recursoR = await pool.query(
       `SELECT ri.*,
-         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado
-       FROM azure_recursos_inventario ri WHERE ri.subscription_id=$1 AND ri.resource_id=$2`,
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado,
+         cac1.nome AS criado_por_nome, cac2.nome AS atualizado_por_nome, cac3.nome AS excluido_por_nome
+       FROM azure_recursos_inventario ri
+       LEFT JOIN azure_autores_cache cac1 ON cac1.guid = ri.criado_por
+       LEFT JOIN azure_autores_cache cac2 ON cac2.guid = ri.atualizado_por
+       LEFT JOIN azure_autores_cache cac3 ON cac3.guid = ri.excluido_por
+       WHERE ri.subscription_id=$1 AND ri.resource_id=$2`,
       [subscription_id, resource_id]
     );
     if (!recursoR.rows.length) return res.status(404).json({ error: 'Recurso não encontrado no inventário' });
@@ -7279,7 +7304,9 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
     // (não só pra RGs Databricks) — dá contexto útil pra qualquer recurso.
     const [eventosR, custoR, custoRGR] = await Promise.all([
       pool.query(
-        `SELECT * FROM azure_recursos_auditoria_eventos WHERE subscription_id=$1 AND resource_id=$2 ORDER BY quando ASC LIMIT 200`,
+        `SELECT e.*, cac.nome AS autor_nome FROM azure_recursos_auditoria_eventos e
+         LEFT JOIN azure_autores_cache cac ON cac.guid = e.autor
+         WHERE e.subscription_id=$1 AND e.resource_id=$2 ORDER BY e.quando ASC LIMIT 200`,
         [subscription_id, resource_id]
       ),
       pool.query(
@@ -9685,6 +9712,31 @@ async function _managementGetToken(tenantId, clientId, clientSecret) {
   return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
 }
 
+// Mesmo fluxo client_credentials de _managementGetToken, mas pro recurso do Microsoft
+// Graph (não o ARM) — usado só pra resolver GUID→nome de autores do Activity Log (ver
+// _graphResolveAutores). Exige a permissão de aplicativo Directory.Read.All concedida no
+// Entra ID pra esta Service Principal — sem isso, o token até é emitido (client_credentials
+// sempre emite um token), mas toda chamada ao Graph retorna 403 (verificado no momento da
+// chamada, não aqui).
+async function _graphGetToken(tenantId, clientId, clientSecret) {
+  const resp = await _cbFetch(
+    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials', client_id: clientId,
+        client_secret: clientSecret, scope: 'https://graph.microsoft.com/.default'
+      }).toString(),
+    },
+    { timeoutMs: 30_000, countCbFailure: false }
+  );
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Microsoft Graph falhou (${resp.status}): ${e}`); }
+  const tkData = await _safeRespJson(resp);
+  if (!tkData.access_token) throw new Error('Token Microsoft Graph: resposta sem access_token');
+  return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
+}
+
 // Retorna função getToken() que renova automaticamente 10 min antes do vencimento
 function _makeTokenGetter(tenantId, clientId, clientSecret) {
   let _tok = null, _exp = 0;
@@ -9762,6 +9814,66 @@ async function _purgarAuditoriaInventario(retencaoDias) {
   const r = await pool.query(`DELETE FROM azure_recursos_auditoria_eventos WHERE quando < NOW() - ($1 || ' days')::interval`, [dias]);
   if (r.rowCount > 0) _logColetaInv(`Retenção: ${r.rowCount} evento(s) de auditoria removido(s) (> ${dias} dias)`);
 }
+
+// Resolve GUID→nome via Microsoft Graph (`directoryObjects/getByIds`, batch — até 1000 IDs
+// por chamada, resolve usuário/Service Principal/grupo numa única requisição, sem precisar
+// saber de antemão o tipo de cada um). Best-effort — chamado automaticamente ao final de
+// toda coleta de Inventário bem-sucedida (não bloqueia a coleta principal se falhar, ex:
+// Directory.Read.All ainda não concedida) e também exposto como rota manual pra popular o
+// cache dos GUIDs já conhecidos sem esperar o próximo ciclo. Reusa a MESMA Service Principal
+// já configurada pro Inventário — só troca o token (Graph, não ARM).
+async function _graphResolveAutores() {
+  const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
+  const cfg = cfgRow.rows[0];
+  if (!cfg || !cfg.sp_id) throw new Error('Inventário sem Service Principal configurado');
+  const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
+  if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
+  const spCfg = spRow.rows[0];
+  const { token } = await _graphGetToken(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
+
+  const rIds = await pool.query(`
+    SELECT DISTINCT autor FROM (
+      SELECT criado_por AS autor FROM azure_recursos_inventario WHERE criado_por IS NOT NULL
+      UNION SELECT atualizado_por FROM azure_recursos_inventario WHERE atualizado_por IS NOT NULL
+      UNION SELECT excluido_por FROM azure_recursos_inventario WHERE excluido_por IS NOT NULL
+      UNION SELECT autor FROM azure_recursos_auditoria_eventos WHERE autor IS NOT NULL
+    ) t
+    WHERE autor ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND autor NOT IN (SELECT guid FROM azure_autores_cache)
+  `);
+  const ids = rIds.rows.map(r => r.autor);
+  if (!ids.length) return { resolvidos: 0, pendentes: 0 };
+
+  let resolvidos = 0;
+  for (let i = 0; i < ids.length; i += 1000) {
+    const chunk = ids.slice(i, i + 1000);
+    const resp = await _cbFetch('https://graph.microsoft.com/v1.0/directoryObjects/getByIds', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: chunk }),
+    }, { timeoutMs: 30_000, countCbFailure: false });
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Microsoft Graph falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+    for (const obj of (data.value || [])) {
+      const nome = obj.displayName || obj.userPrincipalName || null;
+      if (!nome || !obj.id) continue;
+      const tipo = (obj['@odata.type'] || '').replace('#microsoft.graph.', '') || 'desconhecido';
+      await pool.query(
+        `INSERT INTO azure_autores_cache (guid, nome, tipo, resolvido_em) VALUES ($1,$2,$3,NOW())
+         ON CONFLICT (guid) DO UPDATE SET nome=EXCLUDED.nome, tipo=EXCLUDED.tipo, resolvido_em=NOW()`,
+        [obj.id, nome, tipo]
+      );
+      resolvidos++;
+    }
+  }
+  return { resolvidos, pendentes: ids.length - resolvidos };
+}
+
+app.post('/api/azure-inventario/resolver-autores', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    res.json(await _graphResolveAutores());
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 
 // Coleta incremental (watermark `ultimo_evento_em` em azure_inventario_config) — cada
 // execução busca só o que aconteceu desde a última vez, nunca refaz o intervalo inteiro.
@@ -9887,6 +9999,13 @@ async function _coletarInventarioAzure(origem = 'manual') {
       [totalEventos, totalNovos, totalAtualizados, totalExcluidos, msg, histId]
     );
     await _purgarAuditoriaInventario(cfg.retencao_dias);
+    // Best-effort — nunca derruba a coleta principal (já concluída e persistida acima).
+    // Falha esperada até o admin conceder Directory.Read.All no Entra ID (ver
+    // _graphResolveAutores); só loga, não vira status='erro' no histórico desta coleta.
+    try {
+      const rGraph = await _graphResolveAutores();
+      if (rGraph.resolvidos > 0) _logColetaInv(`Nomes resolvidos (Graph): ${rGraph.resolvidos}`);
+    } catch (eGraph) { _logColetaInv(`Resolução de nomes (Graph) indisponível: ${eGraph.message}`); }
   } catch (err) {
     _logColetaInv(`ERRO: ${err.message}`);
     if (histId) await pool.query(
