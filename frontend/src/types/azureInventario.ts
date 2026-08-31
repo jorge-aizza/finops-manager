@@ -150,6 +150,9 @@ export interface AzureRecursoInventario {
   ativo: boolean
   detectado_em: string
   custo_acumulado: number
+  // Custo de todo o Resource Group (fallback) — ver AzureRecursoDetalheResposta.custo_resource_group,
+  // mesmo conceito, só que pré-computado em lote pra lista inteira (não 1 query por linha).
+  custo_resource_group: number
   // Nome resolvido via Microsoft Graph (azure_autores_cache) — `criado_por`/`atualizado_por`/
   // `excluido_por` do Activity Log quase sempre trazem um Object ID puro (GUID), não um nome
   // amigável. null enquanto não resolvido (ou sem permissão Directory.Read.All concedida) —

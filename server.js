@@ -7153,7 +7153,39 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
        LIMIT 500`,
       params
     );
-    res.json({ total: r.rows.length, recursos: r.rows });
+
+    // Fallback de custo por Resource Group — mesmo motivo já documentado no endpoint de
+    // detalhe (`/recurso-detalhe`): custo direto por resource_id fica zerado pra ~97% dos
+    // recursos ativos (confirmado com dados reais), porque VMs/discos/NICs de cluster
+    // Databricks são recriados pela Azure em questão de horas e o billing tem ~2-3 dias de
+    // atraso pra ser publicado — o resource_id exato quase nunca sobrevive até aparecer no
+    // billing. Sem esse fallback TAMBÉM na LISTA (não só no modal de detalhe), a tabela
+    // inteira de Recursos parecia "toda zerada", mesmo a maioria dos RGs tendo custo real.
+    // 1 query agregada pelos RGs distintos da PÁGINA atual (não 1 subquery correlacionada
+    // por linha, que seria até 500 queries) — muito mais barato, RGs se repetem bastante
+    // entre recursos do mesmo ambiente.
+    const rgKeys = new Set();
+    for (const row of r.rows) {
+      if (row.resource_group) rgKeys.add(row.subscription_id + '::' + row.resource_group.toUpperCase());
+    }
+    const custoPorRg = new Map();
+    if (rgKeys.size) {
+      const rgRows = await pool.query(
+        `SELECT subscription_id, UPPER(resource_group_name) AS rg, SUM(cost_in_billing_currency) AS custo
+         FROM azure_costs
+         WHERE resource_group_name IS NOT NULL
+           AND (subscription_id || '::' || UPPER(resource_group_name)) = ANY($1::text[])
+         GROUP BY 1, 2`,
+        [[...rgKeys]]
+      );
+      for (const row of rgRows.rows) custoPorRg.set(row.subscription_id + '::' + row.rg, parseFloat(row.custo));
+    }
+    const recursos = r.rows.map(row => ({
+      ...row,
+      custo_resource_group: row.resource_group ? (custoPorRg.get(row.subscription_id + '::' + row.resource_group.toUpperCase()) || 0) : 0,
+    }));
+
+    res.json({ total: recursos.length, recursos });
   } catch (e) { _dbErr(res, e); }
 });
 

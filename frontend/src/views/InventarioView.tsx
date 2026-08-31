@@ -250,7 +250,7 @@ export default function InventarioView() {
             {recursosQuery.data && <span className="badge">{recursosQuery.data.total}{recursosQuery.data.total >= 500 ? '+' : ''}</span>}
           </div>
           <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-            Permanente — nunca é apagado pela retenção configurável (só o log de Auditoria é). Custo acumulado correlacionado com a Coleta Azure por resource_id.
+            Permanente — nunca é apagado pela retenção configurável (só o log de Auditoria é). Custo correlacionado com a Coleta Azure por resource_id — quando o recurso individual nunca teve billing próprio (comum pra VMs/discos/NICs efêmeros de cluster Databricks), mostra o custo <span style={{ color: 'var(--orange,#ff8c42)' }}>~aproximado do Resource Group inteiro</span> em vez de zero.
           </div>
           <div style={{ display: 'flex', gap: 8, padding: '0 20px 12px', flexWrap: 'wrap' }}>
             <select value={filtroAtivo} onChange={(e) => setFiltroAtivo(e.target.value as typeof filtroAtivo)}>
@@ -268,9 +268,11 @@ export default function InventarioView() {
           {recursosQuery.data && recursosQuery.data.total > 0 && (
             <div className="table-wrapper">
               <table className="data-table">
-                <thead><tr><th>Recurso</th><th>Tipo</th><th>RG</th><th>Criado por</th><th>Criado em</th><th>Status</th><th style={{ textAlign: 'right' }}>Custo acumulado</th></tr></thead>
+                <thead><tr><th>Recurso</th><th>Tipo</th><th>RG</th><th>Criado por</th><th>Criado em</th><th>Status</th><th style={{ textAlign: 'right' }}>Custo</th></tr></thead>
                 <tbody>
-                  {recursosQuery.data.recursos.map((r) => (
+                  {recursosQuery.data.recursos.map((r) => {
+                    const usaFallbackRg = r.custo_acumulado === 0 && r.custo_resource_group > 0
+                    return (
                     <tr key={r.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: r.resource_id, subscriptionId: r.subscription_id })}>
                       <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--accent)' }} title={r.resource_id}>{r.nome || r.resource_id}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.resource_type || '—'}</td>
@@ -282,9 +284,15 @@ export default function InventarioView() {
                           ? <span style={{ color: 'var(--green,#22c55e)', fontSize: 11 }}>● Ativo</span>
                           : <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={r.excluido_por ? `Excluído por ${r.excluido_por_nome || r.excluido_por} em ${fmtData(r.excluido_em)}` : ''}>○ Excluído</span>}
                       </td>
-                      <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtBRL(r.custo_acumulado)}</td>
+                      <td
+                        style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--orange,#ff8c42)' : undefined }}
+                        title={usaFallbackRg ? `Custo direto deste recurso é zero (comum pra recursos efêmeros de cluster) — mostrando o custo total do Resource Group "${r.resource_group}" no lugar` : ''}
+                      >
+                        {usaFallbackRg ? '~' : ''}{fmtBRL(usaFallbackRg ? r.custo_resource_group : r.custo_acumulado)}
+                      </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

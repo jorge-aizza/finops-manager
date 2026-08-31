@@ -2857,6 +2857,34 @@ aba, nenhuma regressão nos 267 restantes), `npm run frontend:build` (bundle enc
 `server.js` nesta rodada — não precisou de `pm2 restart` (Express serve os arquivos
 estáticos de `frontend/dist` diretamente, sem precisar reiniciar o processo Node).
 
+**Custo ainda zerado na aba Recursos — bug real, causa diferente do já corrigido (2026-08-31,
+pedido do usuário: "o custo esta aparecendo zerado ainda pode validar")**: o fallback de
+custo por Resource Group (já implementado e funcionando desde antes — ver `custo_resource_group`
+em `GET /recurso-detalhe` — seção "Dois bugs reais..." acima) só existia no **modal de
+detalhe**, nunca na **lista** (`GET /api/azure-inventario/recursos`). Como a coluna "Custo
+acumulado" da tabela principal só mostrava o custo DIRETO (zero pra ~97% dos recursos ativos,
+confirmado de novo com dados reais: 2835 recursos ativos, só 37 com custo direto — o resto
+são VMs/discos/NICs efêmeros de cluster Databricks, mesma causa estrutural já documentada), a
+tela inteira de Recursos parecia "tudo zerado", mesmo o fallback já existindo (só inacessível
+sem clicar em cada linha individualmente pra abrir o modal).
+
+Corrigido levando o MESMO fallback pra lista: `GET /recursos` agora calcula
+`custo_resource_group` por linha, mas **sem** repetir a subquery correlacionada por
+resource_id (custaria até 500 queries, uma por linha da página) — os RGs se repetem muito
+entre recursos do mesmo ambiente (uma dúzia de RGs cobre centenas de VMs efêmeras), então o
+endpoint coleta o conjunto de `(subscription_id, RG)` distintos da página atual, roda UMA
+query agregada (`GROUP BY subscription_id, UPPER(resource_group_name)`) pra todos eles de uma
+vez, e junta o resultado em JS. Tabela mostra `~R$ X,XX` (til indicando aproximação, cor
+laranja, tooltip explicando o motivo) quando o custo direto é zero mas o RG tem custo —
+mesma linguagem visual já usada no modal de detalhe pro mesmo conceito.
+
+**Verificado contra o servidor real** (token JWT forjado, mesmo método de sempre nesta
+sessão): dos primeiros 500 recursos ativos retornados, 5 tinham custo direto, **492 agora
+mostram o custo aproximado do RG** (antes apareciam como R$ 0,00 sem nenhuma pista), e só 3
+realmente não têm custo em lugar nenhum (RG sem nenhuma linha de billing ainda). `node
+--check`, `tsc -b`, suíte completa do frontend (268/268 — 1 teste novo cobrindo o fallback na
+lista), `npm run frontend:build`, `pm2 restart` sem erro/crash-loop.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

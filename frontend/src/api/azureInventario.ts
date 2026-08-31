@@ -45,7 +45,7 @@ export const getAzureRecursosInventario = (filtros?: AzureRecursosFiltros) => {
   const qs = q.toString()
   return apiFetch<{ total: number; recursos: AzureRecursoInventario[] }>('GET', '/azure-inventario/recursos' + (qs ? '?' + qs : '')).then((r) => ({
     ...r,
-    recursos: r.recursos.map((rec) => ({ ...rec, custo_acumulado: Number(rec.custo_acumulado) })),
+    recursos: r.recursos.map((rec) => ({ ...rec, custo_acumulado: Number(rec.custo_acumulado), custo_resource_group: Number(rec.custo_resource_group) })),
   }))
 }
 
