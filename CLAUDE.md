@@ -2982,6 +2982,22 @@ restart** confirmou que o valor NÃO muda de novo (idempotência real, não só 
 end-to-end via `GET /api/azure-inventario/auditoria` (token JWT forjado) — a API já retorna
 o horário corrigido, exatamente como o frontend (`fmtData()`, inalterado) vai renderizar.
 
+**Modal de detalhe do recurso ganhou a Assinatura (2026-08-31, pedido do usuário: "Na tela de
+detalhe do recurso é possível incluir a assinatura")**: `RecursoDetalheModal.tsx` já recebia
+`subscriptionId` como prop (usado só pra montar a query), mas nunca exibia isso — corrigido
+mostrando o nome amigável logo abaixo do resource_id no cabeçalho do modal (mesmo lugar visual
+de Nome/Resource ID), com fallback pro GUID cru quando o nome ainda não está disponível.
+Reaproveita a MESMA `queryKey` (`['calc-subscriptions']`) já usada por `InventarioView.tsx`
+(aba Configuração) — quando o usuário já visitou essa aba na sessão, o React Query serve do
+cache, sem round-trip novo; o componente funciona igual mesmo se aberto sem esse cache aquecido
+(faz sua própria busca). Teste novo em `InventarioView.test.tsx` confirma nome + `(GUID)` juntos
+quando a subscription é conhecida.
+
+**Verificado**: `tsc -b`, 16/16 testes em `InventarioView.test.tsx`, 269/270 na suíte completa
+do frontend (1 falha de timeout em `AcoesView.test.tsx` sob carga do full-run — não reproduz
+isolado, arquivo não tocado nesta mudança, mesmo flaky pré-existente já documentado antes nesta
+sessão), `npm run frontend:build`. Sem mudança em `server.js` — não precisou de `pm2 restart`.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

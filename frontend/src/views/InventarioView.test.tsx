@@ -298,6 +298,39 @@ describe('InventarioView', () => {
     )
   })
 
+  it('modal de detalhe mostra o nome da assinatura (com fallback pro GUID)', async () => {
+    vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([
+      { subscription_id: 'sub-1', subscription_name: 'Development', periodo_inicio: null, periodo_fim: null, moeda: null },
+    ])
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+      }],
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
+      recurso: {
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+      },
+      eventos: [],
+      custo_diario: [],
+      custo_resource_group: 0,
+      resource_group_recursos: 0,
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByText('vm-teste'))
+
+    expect(await screen.findByText('Development')).toBeInTheDocument()
+    expect(screen.getByText('(sub-1)')).toBeInTheDocument()
+  })
+
   it('modal de detalhe mostra o custo do Resource Group quando o custo direto do recurso é zero', async () => {
     vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
       total: 1,

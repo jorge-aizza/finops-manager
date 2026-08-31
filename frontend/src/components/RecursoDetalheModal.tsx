@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { getAzureRecursoDetalhe } from '../api/azureInventario'
+import { listSubscriptions } from '../api/calculadora'
 import type { AzureAuditoriaAcao } from '../types/azureInventario'
 
 // Detalhe de um recurso — timeline completa de eventos (2026-08-30, pedido do usuário:
@@ -30,6 +31,11 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
     queryFn: () => getAzureRecursoDetalhe(resourceId, subscriptionId),
   })
   const data = q.data
+  // Mesma queryKey já usada por InventarioView (aba Configuração) — se o usuário já abriu essa
+  // aba na sessão, isso só lê do cache do React Query, sem round-trip novo. Só o nome amigável
+  // (ex: "Development") depende disso — o GUID cru já vem em `data.recurso.subscription_id`.
+  const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
+  const subscriptionName = subsQuery.data?.find((s) => s.subscription_id === subscriptionId)?.subscription_name
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -47,6 +53,10 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
               <div style={{ marginBottom: 16 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, wordBreak: 'break-all' }}>{data.recurso.nome || data.recurso.resource_id}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all', marginTop: 2 }}>{data.recurso.resource_id}</div>
+                <div style={{ fontSize: 12, marginTop: 6 }}>
+                  Assinatura: <strong style={{ color: 'var(--accent)' }}>{subscriptionName || data.recurso.subscription_id}</strong>
+                  {subscriptionName && <span style={{ color: 'var(--text-muted)' }}> ({data.recurso.subscription_id})</span>}
+                </div>
               </div>
 
               <div className="stats-grid" style={{ marginBottom: 16, gridTemplateColumns: 'repeat(3, 1fr)' }}>
