@@ -2919,6 +2919,27 @@ retornou só eventos desse tipo na lista. `node --check`, `tsc -b`, 15/15 testes
 `InventarioView.test.tsx` (1 novo cobrindo as caixas + o clique que filtra e limpa o filtro),
 `npm run frontend:build`, `pm2 restart` sem erro/crash-loop (↺ estável, sem loop de restart).
 
+**Gráfico "Crescimento de Recursos" removido da UI a pedido do usuário (2026-08-31): "não está
+fazendo sentido nesse momento"** — mesmo padrão já usado antes nesta sessão pra Governança/
+`ReconciliacaoModal.tsx` (remover só a UI, preservar o backend): `GET /api/azure-inventario/
+crescimento` continua existindo e funcionando, só ninguém mais chama. Removidos de
+`InventarioView.tsx`: o componente `GrowthChart` (barras SVG), o card "Crescimento de
+Recursos" (sempre visível no topo, fora das abas) e `crescimentoQuery`/o import de
+`getAzureCrescimento`. **Detalhe que exigiu atenção**: o `useState` `periodo` (datas De/Até)
+que alimentava esse gráfico é o MESMO estado que a aba Auditoria já usava pra filtrar
+`auditoriaQuery` (e agora também `por_tipo`) — não dava pra apagar o seletor de datas junto
+com o card sem quebrar silenciosamente a única forma de trocar o período da Auditoria. Os
+inputs De/Até foram movidos pra dentro da própria aba Auditoria (mesma linha do select de
+Ação e do chip de Tipo), não apagados. `getAzureCrescimento`/`AzureCrescimentoDia`
+(`api/azureInventario.ts`/`types/azureInventario.ts`) não foram tocados — ficam sem nenhum
+chamador no frontend, mais fácil de restaurar (só recolocar o card) se o gráfico voltar a
+fazer sentido depois que a coleta de Inventário acumular mais dias de histórico.
+
+**Verificado**: `tsc -b`, suíte completa do frontend (269/269 — 1 teste ajustado pra não
+depender mais do texto "Crescimento de Recursos"), `npm run frontend:build` (bundle encolheu
+de 322,55 KB pra 320,40 KB, confirmando que o código removido não é mais empacotado). Sem
+mudança em `server.js` — não precisou de `pm2 restart`.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

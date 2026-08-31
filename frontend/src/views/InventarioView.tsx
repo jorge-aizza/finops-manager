@@ -5,7 +5,7 @@ import { listSubscriptions } from '../api/calculadora'
 import {
   getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
-  getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureCrescimento, getAzureInventarioComparativo,
+  getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo } from '../types/azureInventario'
@@ -78,43 +78,6 @@ function resourceTypeLabel(raw: string): string {
   return ultimo.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase())
 }
 
-// Gráfico de crescimento — contagem diária de recursos distintos, mesmo padrão de barras
-// SVG simples já usado em outras telas (sem lib de gráfico nova).
-function GrowthChart({ dias }: { dias: { cost_date: string; recursos: number }[] }) {
-  if (dias.length === 0) return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '0 20px 16px' }}>Sem dados no período.</div>
-  const W = 640, H = 160, PAD_TOP = 24, PAD_BOTTOM = 26, PAD_SIDE = 10
-  const plotH = H - PAD_TOP - PAD_BOTTOM
-  const max = Math.max(1, ...dias.map((d) => d.recursos))
-  const min = Math.min(...dias.map((d) => d.recursos))
-  const slot = (W - PAD_SIDE * 2) / dias.length
-  const barW = Math.max(3, slot * 0.6)
-  const baseY = H - PAD_BOTTOM
-
-  return (
-    <div style={{ padding: '0 20px 16px' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 180 }}>
-        <line x1={PAD_SIDE} y1={baseY} x2={W - PAD_SIDE} y2={baseY} stroke="var(--border)" strokeWidth={1} />
-        {dias.map((d, i) => {
-          const x = PAD_SIDE + i * slot + (slot - barW) / 2
-          const h = ((d.recursos - 0) / max) * plotH
-          const y = baseY - h
-          const cresceu = i > 0 && d.recursos > dias[i - 1].recursos
-          return (
-            <g key={d.cost_date}>
-              <rect x={x} y={y} width={barW} height={Math.max(1, h)} rx={2} fill={cresceu ? 'var(--orange,#ff8c42)' : 'var(--accent)'}>
-                <title>{new Date(d.cost_date).toLocaleDateString('pt-BR')}: {d.recursos} recurso(s){cresceu ? ' (cresceu vs. dia anterior)' : ''}</title>
-              </rect>
-            </g>
-          )
-        })}
-      </svg>
-      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-        Mín: {min} · Máx: {max} recurso(s) no período. <span style={{ color: 'var(--orange,#ff8c42)' }}>Laranja</span> = cresceu em relação ao dia anterior.
-      </div>
-    </div>
-  )
-}
-
 // Uma linha do comparativo (ex: "Recursos ativos", "Custo total") — mostra os dois
 // períodos lado a lado com um delta (▲/▼ colorido) entre eles.
 function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; b: number; formato: 'num' | 'brl' }) {
@@ -159,11 +122,6 @@ export default function InventarioView() {
   // reaproveita nome + ID em vez de exigir que o admin decore/copie GUIDs de subscription.
   const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
   const historicoQuery = useQuery({ queryKey: ['azure-inv-historico'], queryFn: getAzureInventarioColetaHistorico })
-  const crescimentoQuery = useQuery({
-    queryKey: ['azure-inv-crescimento', periodo.inicio, periodo.fim],
-    queryFn: () => getAzureCrescimento(periodo.inicio, periodo.fim),
-    placeholderData: keepPreviousData,
-  })
   const recursosQuery = useQuery({
     queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor],
     queryFn: () => getAzureRecursosInventario({
@@ -265,24 +223,6 @@ export default function InventarioView() {
 
       <AzureInventarioColetaMonitor />
 
-      <div className="card" style={{ margin: '16px 20px 0' }}>
-        <div className="card-header"><span className="card-title">Crescimento de Recursos</span></div>
-        <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-          Contagem diária de recursos distintos com custo — vem direto da Coleta Azure já existente, funciona independente da Auditoria estar configurada.
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', padding: '0 20px 12px', flexWrap: 'wrap' }}>
-          <div className="form-group" style={{ margin: 0 }}>
-            <label>De</label>
-            <input type="date" value={periodo.inicio} onChange={(e) => setPeriodo((p) => ({ ...p, inicio: e.target.value }))} />
-          </div>
-          <div className="form-group" style={{ margin: 0 }}>
-            <label>Até</label>
-            <input type="date" value={periodo.fim} onChange={(e) => setPeriodo((p) => ({ ...p, fim: e.target.value }))} />
-          </div>
-        </div>
-        <GrowthChart dias={crescimentoQuery.data?.dias || []} />
-      </div>
-
       {tab === 'recursos' && (
         <div className="card" style={{ margin: '16px 20px' }}>
           <div className="card-header">
@@ -349,7 +289,15 @@ export default function InventarioView() {
           <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
             Log bruto de toda criação/atualização/exclusão detectada — sujeito ao período de retenção configurado (padrão {configQuery.data?.retencao_dias ?? 180} dias).
           </div>
-          <div style={{ display: 'flex', gap: 8, padding: '0 20px 12px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', padding: '0 20px 12px', flexWrap: 'wrap' }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>De</label>
+              <input type="date" value={periodo.inicio} onChange={(e) => setPeriodo((p) => ({ ...p, inicio: e.target.value }))} />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Até</label>
+              <input type="date" value={periodo.fim} onChange={(e) => setPeriodo((p) => ({ ...p, fim: e.target.value }))} />
+            </div>
             <select value={filtroAcao} onChange={(e) => setFiltroAcao(e.target.value)}>
               <option value="">Todas as ações</option>
               <option value="CRIACAO">Criação</option>

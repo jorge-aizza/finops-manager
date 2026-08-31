@@ -36,7 +36,6 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureInventarioConfig).mockResolvedValue(mockConfig)
   vi.mocked(azureInventarioApi.getAzureInventarioStatus).mockResolvedValue(mockStatus)
   vi.mocked(azureInventarioApi.getAzureInventarioColetaHistorico).mockResolvedValue([])
-  vi.mocked(azureInventarioApi.getAzureCrescimento).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
   vi.mocked(azureInventarioApi.getAzureInventarioComparativo).mockResolvedValue({
@@ -48,13 +47,8 @@ beforeEach(() => {
 })
 
 describe('InventarioView', () => {
-  it('mostra o gráfico de crescimento e a aba Recursos por padrão', async () => {
-    vi.mocked(azureInventarioApi.getAzureCrescimento).mockResolvedValue({
-      periodo: { inicio: '2026-08-01', fim: '2026-08-30' },
-      dias: [{ cost_date: '2026-08-28', recursos: 40 }, { cost_date: '2026-08-29', recursos: 42 }],
-    })
+  it('mostra a aba Recursos por padrão', async () => {
     renderWithClient()
-    expect(await screen.findByText('Crescimento de Recursos')).toBeInTheDocument()
     expect(await screen.findByText('Recursos (Inventário)')).toBeInTheDocument()
   })
 
