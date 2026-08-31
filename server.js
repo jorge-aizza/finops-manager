@@ -7193,7 +7193,7 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
 app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureAzureColetaTable();
-    let { data_inicio, data_fim, resource_id, acao, subscription_id } = req.query;
+    let { data_inicio, data_fim, resource_id, acao, subscription_id, resource_type } = req.query;
     if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
       const fim = new Date();
       const ini = new Date(fim);
@@ -7207,6 +7207,31 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
     if (acao) { params.push(acao); where += ` AND e.acao = $${params.length}`; }
     if (subscription_id) { params.push(subscription_id); where += ` AND e.subscription_id = $${params.length}`; }
 
+    // Caixas por Tipo de Recurso (2026-08-31, pedido do usuário) — agregada sobre TODO o
+    // período/filtros já aplicados (`where`), nunca só os 300 eventos retornados abaixo pro
+    // LIMIT da tabela; funciona como chip-bar (mostra sempre todos os tipos do escopo atual,
+    // independente de `resource_type` estar selecionado ou não — mesmo padrão já usado pela
+    // chip-bar de tipos da Calculadora). Agrupado por UPPER() — confirmado com dados reais que
+    // o Activity Log devolve o MESMO resource_type com casing divergente entre eventos (ex:
+    // "Microsoft.Insights/metricAlerts" vs "microsoft.insights/metricAlerts") — sem isso, o
+    // mesmo tipo apareceria em duas caixas separadas.
+    const rTipo = await pool.query(
+      `SELECT MAX(base) AS tipo, COUNT(*)::int AS total
+       FROM (
+         SELECT COALESCE(NULLIF(TRIM(e.resource_type), ''), '(desconhecido)') AS base
+         FROM azure_recursos_auditoria_eventos e WHERE ${where}
+       ) s
+       GROUP BY UPPER(base) ORDER BY total DESC`,
+      params
+    );
+
+    let whereEventos = where;
+    const paramsEventos = [...params];
+    if (resource_type) {
+      paramsEventos.push(resource_type);
+      whereEventos += ` AND UPPER(COALESCE(NULLIF(TRIM(e.resource_type), ''), '(desconhecido)')) = UPPER($${paramsEventos.length})`;
+    }
+
     // LEFT JOIN pro nome amigável do recurso (`ri.nome` — mesma string que a aba Recursos já
     // mostra) — exact match é seguro aqui (não o mesmo risco de casing do JOIN com azure_costs):
     // as duas tabelas são gravadas na MESMA iteração de _coletarInventarioAzure, a partir da
@@ -7216,10 +7241,15 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
        FROM azure_recursos_auditoria_eventos e
        LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = e.subscription_id AND ri.resource_id = e.resource_id
        LEFT JOIN azure_autores_cache cac ON cac.guid = e.autor
-       WHERE ${where} ORDER BY e.quando DESC LIMIT 300`,
-      params
+       WHERE ${whereEventos} ORDER BY e.quando DESC LIMIT 300`,
+      paramsEventos
     );
-    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, total: r.rows.length, eventos: r.rows });
+    res.json({
+      periodo: { inicio: data_inicio, fim: data_fim },
+      total: r.rows.length,
+      eventos: r.rows,
+      por_tipo: rTipo.rows.map((x) => ({ tipo: x.tipo, total: x.total })),
+    });
   } catch (e) { _dbErr(res, e); }
 });
 

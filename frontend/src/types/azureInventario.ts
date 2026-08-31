@@ -184,6 +184,15 @@ export interface AzureAuditoriaEvento {
   autor_nome: string | null
 }
 
+// Caixas "por Tipo de Recurso" (2026-08-31, pedido do usuário: "Na parte de Auditoria pode
+// incluir caixas por Tipo de Recurso, Ex VM x Disco x etc") — agregação server-side sobre
+// TODO o período/filtros selecionados (não só os 300 eventos retornados pra tabela), serve
+// tanto de resumo visual quanto de chip-bar clicável pra filtrar a tabela abaixo.
+export interface AzureAuditoriaPorTipo {
+  tipo: string
+  total: number
+}
+
 // Crescimento — contagem diária de resource_id distintos, derivada de azure_costs (zero
 // coleta nova) — funciona mesmo sem o Inventário/Auditoria configurado.
 export interface AzureCrescimentoDia {

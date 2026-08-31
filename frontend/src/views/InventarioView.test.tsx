@@ -38,7 +38,7 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureInventarioColetaHistorico).mockResolvedValue([])
   vi.mocked(azureInventarioApi.getAzureCrescimento).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
-  vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [] })
+  vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
   vi.mocked(azureInventarioApi.getAzureInventarioComparativo).mockResolvedValue({
     periodo_a: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
     periodo_b: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
@@ -98,6 +98,7 @@ describe('InventarioView', () => {
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste', acao: 'CRIACAO', autor: 'joao@vivo.com.br',
         quando: '2026-08-20T10:00:00Z', operation_name: 'Microsoft.Compute/virtualMachines/write', correlation_id: null, criado_em: '', autor_nome: null,
       }],
+      por_tipo: [{ tipo: 'Microsoft.Compute/virtualMachines', total: 1 }],
     })
     const user = userEvent.setup()
     renderWithClient()
@@ -106,6 +107,48 @@ describe('InventarioView', () => {
     expect(screen.getByText('joao@vivo.com.br')).toBeInTheDocument()
     expect(screen.getByText('vm-teste')).toBeInTheDocument()
     expect(screen.getByText('Microsoft.Compute/virtualMachines')).toBeInTheDocument()
+  })
+
+  it('aba Auditoria mostra caixas por Tipo de Recurso e filtra a tabela ao clicar', async () => {
+    vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-30' },
+      total: 2,
+      eventos: [
+        {
+          id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+          resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste', acao: 'CRIACAO', autor: 'joao@vivo.com.br',
+          quando: '2026-08-20T10:00:00Z', operation_name: 'Microsoft.Compute/virtualMachines/write', correlation_id: null, criado_em: '', autor_nome: null,
+        },
+        {
+          id: 2, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/disks/disco-x',
+          resource_type: 'Microsoft.Compute/disks', resource_group: 'rg-1', nome: 'disco-x', acao: 'CRIACAO', autor: 'joao@vivo.com.br',
+          quando: '2026-08-20T10:01:00Z', operation_name: 'Microsoft.Compute/disks/write', correlation_id: null, criado_em: '', autor_nome: null,
+        },
+      ],
+      por_tipo: [
+        { tipo: 'Microsoft.Compute/virtualMachines', total: 5 },
+        { tipo: 'Microsoft.Compute/disks', total: 3 },
+      ],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
+
+    expect(await screen.findByText('VM')).toBeInTheDocument()
+    expect(screen.getByText('5')).toBeInTheDocument()
+    expect(screen.getByText('Disco')).toBeInTheDocument()
+    expect(screen.getByText('3')).toBeInTheDocument()
+
+    await user.click(screen.getByText('VM'))
+    await waitFor(() => expect(azureInventarioApi.getAzureAuditoriaEventos).toHaveBeenLastCalledWith(
+      expect.objectContaining({ resource_type: 'Microsoft.Compute/virtualMachines' }),
+    ))
+    expect(await screen.findByText('Tipo: VM ✕')).toBeInTheDocument()
+
+    await user.click(screen.getByText('Tipo: VM ✕'))
+    await waitFor(() => expect(azureInventarioApi.getAzureAuditoriaEventos).toHaveBeenLastCalledWith(
+      expect.objectContaining({ resource_type: undefined }),
+    ))
   })
 
   it('aba Configuração pré-preenche o formulário e permite salvar', async () => {

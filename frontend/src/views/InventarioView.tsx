@@ -39,6 +39,45 @@ const ACAO_BADGE: Record<AzureAuditoriaAcao, { color: string; bg: string; label:
   EXCLUSAO: { color: 'var(--red,#ff4d6a)', bg: 'rgba(255,77,106,.10)', label: '✕ Exclusão' },
 }
 
+// Caixas "por Tipo de Recurso" na aba Auditoria (2026-08-31, pedido do usuário) — `resource_type`
+// vem cru do Activity Log no formato ARM (`Microsoft.Compute/virtualMachines`); rótulos comuns
+// traduzidos pra Português, qualquer outro cai num fallback que separa o último segmento
+// (`virtualMachines` → `Virtual Machines`) em vez de mostrar a string ARM inteira.
+const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  'microsoft.compute/virtualmachines': 'VM',
+  'microsoft.compute/virtualmachinescalesets': 'VM Scale Set',
+  'microsoft.compute/disks': 'Disco',
+  'microsoft.compute/snapshots': 'Snapshot',
+  'microsoft.compute/availabilitysets': 'Availability Set',
+  'microsoft.network/networkinterfaces': 'Interface de Rede (NIC)',
+  'microsoft.network/publicipaddresses': 'IP Público',
+  'microsoft.network/virtualnetworks': 'Rede Virtual (VNet)',
+  'microsoft.network/networksecuritygroups': 'Grupo de Segurança (NSG)',
+  'microsoft.network/loadbalancers': 'Load Balancer',
+  'microsoft.network/privateendpoints': 'Private Endpoint',
+  'microsoft.network/bastionhosts': 'Bastion',
+  'microsoft.storage/storageaccounts': 'Storage Account',
+  'microsoft.databricks/workspaces': 'Databricks Workspace',
+  'microsoft.sql/servers': 'SQL Server',
+  'microsoft.sql/servers/databases': 'SQL Database',
+  'microsoft.containerservice/managedclusters': 'AKS',
+  'microsoft.web/sites': 'App Service',
+  'microsoft.web/serverfarms': 'App Service Plan',
+  'microsoft.keyvault/vaults': 'Key Vault',
+  'microsoft.resources/deployments': 'Deployment (ARM)',
+  'microsoft.insights/components': 'Application Insights',
+  'microsoft.insights/actiongroups': 'Action Group',
+  'microsoft.operationalinsights/workspaces': 'Log Analytics',
+  'microsoft.operationsmanagement/solutions': 'Solução de Monitoramento',
+  '(desconhecido)': 'Desconhecido',
+}
+function resourceTypeLabel(raw: string): string {
+  const conhecido = RESOURCE_TYPE_LABELS[raw.toLowerCase()]
+  if (conhecido) return conhecido
+  const ultimo = raw.split('/').pop() || raw
+  return ultimo.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase())
+}
+
 // Gráfico de crescimento — contagem diária de recursos distintos, mesmo padrão de barras
 // SVG simples já usado em outras telas (sem lib de gráfico nova).
 function GrowthChart({ dias }: { dias: { cost_date: string; recursos: number }[] }) {
@@ -104,6 +143,7 @@ export default function InventarioView() {
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
   const [filtroAcao, setFiltroAcao] = useState('')
+  const [filtroTipo, setFiltroTipo] = useState('')
   const [periodoA, setPeriodoA] = useState(defaultPeriodo(60))
   const [periodoB, setPeriodoB] = useState(defaultPeriodo(30))
   const [recursoDetalhe, setRecursoDetalhe] = useState<{ resourceId: string; subscriptionId: string } | null>(null)
@@ -134,8 +174,8 @@ export default function InventarioView() {
     enabled: tab === 'recursos',
   })
   const auditoriaQuery = useQuery({
-    queryKey: ['azure-inv-auditoria', periodo.inicio, periodo.fim, filtroAcao],
-    queryFn: () => getAzureAuditoriaEventos({ data_inicio: periodo.inicio, data_fim: periodo.fim, acao: filtroAcao || undefined }),
+    queryKey: ['azure-inv-auditoria', periodo.inicio, periodo.fim, filtroAcao, filtroTipo],
+    queryFn: () => getAzureAuditoriaEventos({ data_inicio: periodo.inicio, data_fim: periodo.fim, acao: filtroAcao || undefined, resource_type: filtroTipo || undefined }),
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
   })
@@ -316,7 +356,39 @@ export default function InventarioView() {
               <option value="ATUALIZACAO">Atualização</option>
               <option value="EXCLUSAO">Exclusão</option>
             </select>
+            {filtroTipo && (
+              <span
+                onClick={() => setFiltroTipo('')}
+                title="Limpar filtro de tipo"
+                style={{ cursor: 'pointer', alignSelf: 'center', fontSize: 12, color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 20, padding: '4px 10px' }}
+              >
+                Tipo: {resourceTypeLabel(filtroTipo)} ✕
+              </span>
+            )}
           </div>
+          {auditoriaQuery.data && auditoriaQuery.data.por_tipo.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, padding: '0 20px 16px', flexWrap: 'wrap' }}>
+              {auditoriaQuery.data.por_tipo.map((t) => {
+                const ativo = filtroTipo === t.tipo
+                return (
+                  <button
+                    key={t.tipo}
+                    onClick={() => setFiltroTipo(ativo ? '' : t.tipo)}
+                    title={t.tipo}
+                    style={{
+                      display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, minWidth: 88,
+                      padding: '8px 14px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
+                      border: `1px solid ${ativo ? 'var(--accent)' : 'var(--border)'}`,
+                      background: ativo ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'transparent',
+                    }}
+                  >
+                    <span style={{ fontSize: 18, fontWeight: 700, color: ativo ? 'var(--accent)' : 'var(--text)' }}>{t.total}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{resourceTypeLabel(t.tipo)}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
           {auditoriaQuery.data && auditoriaQuery.data.total === 0 && (
             <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum evento no período selecionado.</div>
           )}

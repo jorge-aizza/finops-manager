@@ -2885,6 +2885,40 @@ realmente não têm custo em lugar nenhum (RG sem nenhuma linha de billing ainda
 --check`, `tsc -b`, suíte completa do frontend (268/268 — 1 teste novo cobrindo o fallback na
 lista), `npm run frontend:build`, `pm2 restart` sem erro/crash-loop.
 
+**Aba Auditoria ganhou caixas por Tipo de Recurso (2026-08-31, pedido do usuário: "Na parte de
+Auditoria pode incluir caixas por Tipo de Recurso, Ex VM x Disco x etc")**: `GET
+/api/azure-inventario/auditoria` ganhou `por_tipo` na resposta — agregação server-side sobre
+TODO o período/filtros aplicados (`where` compartilhado com a query de eventos), nunca só os
+300 eventos retornados pro `LIMIT` da tabela (senão o número nas caixas ficaria truncado em
+períodos com muito volume). Novo parâmetro `resource_type` — clicar numa caixa filtra a tabela
+de eventos abaixo (toggle: clicar de nova remove o filtro), mesmo padrão de drill-down já usado
+no dashboard Databricks; um chip "Tipo: X ✕" acima da tabela confirma o filtro ativo.
+
+**Bug real encontrado e corrigido testando contra dados reais, antes de reportar pronto**: o
+Activity Log devolve o MESMO `resource_type` com casing divergente entre eventos diferentes
+(confirmado com o banco real: `Microsoft.Insights/metricAlerts` com 17 eventos e
+`microsoft.insights/metricAlerts` com 2, `MICROSOFT.APIMANAGEMENT/service` também em caixa
+alta total) — um `GROUP BY resource_type` ingênuo (comparação case-sensitive do Postgres)
+criava duas caixas pro mesmo tipo em vez de uma. Corrigido agrupando por `UPPER(...)` (com
+`MAX(base)` escolhendo uma grafia representativa pra exibir/usar como valor do filtro) e
+comparando o filtro de `resource_type` também via `UPPER(...) = UPPER($N)` — sem isso, filtrar
+por uma caixa deixaria de fora os eventos gravados com a OUTRA grafia do mesmo tipo. Mesma
+classe de problema já documentada em outros lugares deste arquivo pra `resource_id` (Azure
+retorna o mesmo identificador com casing diferente entre serviços).
+
+Rótulos amigáveis em `RESOURCE_TYPE_LABELS` (`InventarioView.tsx`) traduzem os tipos ARM mais
+comuns pro Português (`Microsoft.Compute/virtualMachines` → "VM", `.../disks` → "Disco",
+etc.); qualquer tipo fora do mapa cai num fallback que separa o último segmento do path ARM
+(`virtualMachines` → "Virtual Machines") em vez de mostrar a string crua inteira.
+
+**Verificado contra o servidor real** (token JWT forjado, mesmo método de sempre nesta sessão):
+`por_tipo` retornou os tipos reais do ambiente (NIC 3749, Disco 3525, VM 1357, entre outros —
+confirma que "VM x Disco x etc" já aparece de cara); após o fix de casing, `Microsoft.Insights/
+metricAlerts` unificou pra uma linha só com total 19 (17+2); filtrar por `resource_type=Microsoft.Compute/virtualMachines`
+retornou só eventos desse tipo na lista. `node --check`, `tsc -b`, 15/15 testes em
+`InventarioView.test.tsx` (1 novo cobrindo as caixas + o clique que filtra e limpa o filtro),
+`npm run frontend:build`, `pm2 restart` sem erro/crash-loop (↺ estável, sem loop de restart).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

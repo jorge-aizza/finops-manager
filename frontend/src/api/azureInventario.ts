@@ -5,7 +5,7 @@ import type {
   AzureInventarioColetaHistoricoItem, AzureRecursoInventario, AzureAuditoriaEvento,
   AzureCrescimentoDia, AzureComparativoResposta, AzureRecursoDetalheResposta,
   AzureAnomaliaCrescimento, AzureOrcamentoInventario, AzureOrcamentoInventarioInput,
-  AzureOrcamentoAlerta, AzureTagsFaltantesResposta,
+  AzureOrcamentoAlerta, AzureTagsFaltantesResposta, AzureAuditoriaPorTipo,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -55,6 +55,7 @@ export interface AzureAuditoriaFiltros {
   resource_id?: string
   acao?: string
   subscription_id?: string
+  resource_type?: string
 }
 export const getAzureAuditoriaEventos = (filtros?: AzureAuditoriaFiltros) => {
   const q = new URLSearchParams()
@@ -63,10 +64,11 @@ export const getAzureAuditoriaEventos = (filtros?: AzureAuditoriaFiltros) => {
   if (filtros?.resource_id) q.set('resource_id', filtros.resource_id)
   if (filtros?.acao) q.set('acao', filtros.acao)
   if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
+  if (filtros?.resource_type) q.set('resource_type', filtros.resource_type)
   const qs = q.toString()
-  return apiFetch<{ periodo: { inicio: string; fim: string }; total: number; eventos: AzureAuditoriaEvento[] }>(
+  return apiFetch<{ periodo: { inicio: string; fim: string }; total: number; eventos: AzureAuditoriaEvento[]; por_tipo: AzureAuditoriaPorTipo[] }>(
     'GET', '/azure-inventario/auditoria' + (qs ? '?' + qs : '')
-  )
+  ).then((r) => ({ ...r, por_tipo: r.por_tipo.map((t) => ({ ...t, total: Number(t.total) })) }))
 }
 
 export const getAzureCrescimento = (data_inicio?: string, data_fim?: string, subscription_id?: string) => {
