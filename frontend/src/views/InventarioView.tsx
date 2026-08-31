@@ -5,11 +5,12 @@ import { listSubscriptions } from '../api/calculadora'
 import {
   getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
-  getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureCrescimento,
+  getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureCrescimento, getAzureInventarioComparativo,
 } from '../api/azureInventario'
-import type { AzureAuditoriaAcao } from '../types/azureInventario'
+import type { AzureAuditoriaAcao, AzureComparativoPeriodo } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
 import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMonitor'
+import RecursoDetalheModal from '../components/RecursoDetalheModal'
 
 // Inventário + Auditoria de Recursos Azure (2026-08-30, pedido do usuário: "ontem tinha X
 // recursos, hoje tenho X+1 — quem criou, quando, quanto custa"). Fonte: Azure Activity Log
@@ -74,13 +75,37 @@ function GrowthChart({ dias }: { dias: { cost_date: string; recursos: number }[]
   )
 }
 
+// Uma linha do comparativo (ex: "Recursos ativos", "Custo total") — mostra os dois
+// períodos lado a lado com um delta (▲/▼ colorido) entre eles.
+function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; b: number; formato: 'num' | 'brl' }) {
+  const fmt = (v: number) => (formato === 'brl' ? fmtBRL(v) : v.toLocaleString('pt-BR'))
+  const delta = b - a
+  const deltaPct = a !== 0 ? (delta / a) * 100 : (b !== 0 ? 100 : 0)
+  const cor = delta > 0 ? 'var(--green,#22c55e)' : delta < 0 ? 'var(--red,#ff4d6a)' : 'var(--text-muted)'
+  const seta = delta > 0 ? '▲' : delta < 0 ? '▼' : '—'
+  return (
+    <tr>
+      <td>{label}</td>
+      <td style={{ textAlign: 'right' }}>{fmt(a)}</td>
+      <td style={{ textAlign: 'right' }}>{fmt(b)}</td>
+      <td style={{ textAlign: 'right', color: cor, fontWeight: 700 }}>
+        {seta} {formato === 'brl' ? fmtBRL(Math.abs(delta)) : Math.abs(delta).toLocaleString('pt-BR')}
+        {a !== 0 && <span style={{ fontWeight: 400, fontSize: 11 }}> ({deltaPct > 0 ? '+' : ''}{deltaPct.toFixed(1)}%)</span>}
+      </td>
+    </tr>
+  )
+}
+
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<'recursos' | 'auditoria' | 'config'>('recursos')
+  const [tab, setTab] = useState<'recursos' | 'auditoria' | 'comparativo' | 'config'>('recursos')
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
   const [filtroAcao, setFiltroAcao] = useState('')
+  const [periodoA, setPeriodoA] = useState(defaultPeriodo(60))
+  const [periodoB, setPeriodoB] = useState(defaultPeriodo(30))
+  const [recursoDetalhe, setRecursoDetalhe] = useState<{ resourceId: string; subscriptionId: string } | null>(null)
 
   const configQuery = useQuery({ queryKey: ['azure-inv-config'], queryFn: getAzureInventarioConfig })
   const statusQuery = useQuery({
@@ -112,6 +137,12 @@ export default function InventarioView() {
     queryFn: () => getAzureAuditoriaEventos({ data_inicio: periodo.inicio, data_fim: periodo.fim, acao: filtroAcao || undefined }),
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
+  })
+  const comparativoQuery = useQuery({
+    queryKey: ['azure-inv-comparativo', periodoA.inicio, periodoA.fim, periodoB.inicio, periodoB.fim],
+    queryFn: () => getAzureInventarioComparativo({ a_inicio: periodoA.inicio, a_fim: periodoA.fim, b_inicio: periodoB.inicio, b_fim: periodoB.fim }),
+    placeholderData: keepPreviousData,
+    enabled: tab === 'comparativo',
   })
 
   const [ativo, setAtivo] = useState(false)
@@ -177,6 +208,7 @@ export default function InventarioView() {
       <div style={{ display: 'flex', gap: 8, margin: '16px 20px 0' }}>
         <button className={tab === 'recursos' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('recursos')}>Recursos</button>
         <button className={tab === 'auditoria' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('auditoria')}>Auditoria</button>
+        <button className={tab === 'comparativo' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('comparativo')}>Comparativo</button>
         <button className={tab === 'config' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('config')}>Configuração</button>
       </div>
 
@@ -228,8 +260,8 @@ export default function InventarioView() {
                 <thead><tr><th>Recurso</th><th>Tipo</th><th>RG</th><th>Criado por</th><th>Criado em</th><th>Status</th><th style={{ textAlign: 'right' }}>Custo acumulado</th></tr></thead>
                 <tbody>
                   {recursosQuery.data.recursos.map((r) => (
-                    <tr key={r.id}>
-                      <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.resource_id}>{r.nome || r.resource_id}</td>
+                    <tr key={r.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: r.resource_id, subscriptionId: r.subscription_id })}>
+                      <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--accent)' }} title={r.resource_id}>{r.nome || r.resource_id}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.resource_type || '—'}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.resource_group || '—'}</td>
                       <td style={{ fontSize: 12 }} title={r.criado_por || ''}>{r.criado_por || 'desconhecido'}</td>
@@ -277,15 +309,70 @@ export default function InventarioView() {
                   {auditoriaQuery.data.eventos.map((ev) => {
                     const b = ACAO_BADGE[ev.acao]
                     return (
-                      <tr key={ev.id}>
+                      <tr key={ev.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: ev.resource_id, subscriptionId: ev.subscription_id })}>
                         <td style={{ fontSize: 12 }}>{fmtData(ev.quando)}</td>
                         <td><span style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 600 }}>{b.label}</span></td>
-                        <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }} title={ev.resource_id}>{ev.resource_id.split('/').pop()}</td>
+                        <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--accent)' }} title={ev.resource_id}>{ev.resource_id.split('/').pop()}</td>
                         <td style={{ fontSize: 12 }} title={ev.autor || ''}>{ev.autor || 'desconhecido'}</td>
                         <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{ev.operation_name || '—'}</td>
                       </tr>
                     )
                   })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'comparativo' && (
+        <div className="card" style={{ margin: '16px 20px' }}>
+          <div className="card-header"><span className="card-title">Comparativo entre Períodos</span></div>
+          <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+            "Recursos ativos" é uma fotografia de quantos recursos existiam no FIM de cada período (não uma soma) — os demais números são eventos que aconteceram DENTRO de cada período.
+          </div>
+          <div style={{ display: 'flex', gap: 24, padding: '0 20px 16px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Período A — de</label>
+                <input type="date" value={periodoA.inicio} onChange={(e) => setPeriodoA((p) => ({ ...p, inicio: e.target.value }))} />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>até</label>
+                <input type="date" value={periodoA.fim} onChange={(e) => setPeriodoA((p) => ({ ...p, fim: e.target.value }))} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Período B — de</label>
+                <input type="date" value={periodoB.inicio} onChange={(e) => setPeriodoB((p) => ({ ...p, inicio: e.target.value }))} />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>até</label>
+                <input type="date" value={periodoB.fim} onChange={(e) => setPeriodoB((p) => ({ ...p, fim: e.target.value }))} />
+              </div>
+            </div>
+          </div>
+
+          {comparativoQuery.isLoading && <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+
+          {comparativoQuery.data && (
+            <div className="table-wrapper">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th style={{ textAlign: 'right' }}>Período A ({periodoA.inicio} → {periodoA.fim})</th>
+                    <th style={{ textAlign: 'right' }}>Período B ({periodoB.inicio} → {periodoB.fim})</th>
+                    <th style={{ textAlign: 'right' }}>Diferença</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <LinhaComparativo label="Recursos ativos (no fim do período)" a={(comparativoQuery.data.periodo_a as AzureComparativoPeriodo).total_recursos} b={(comparativoQuery.data.periodo_b as AzureComparativoPeriodo).total_recursos} formato="num" />
+                  <LinhaComparativo label="Custo total" a={comparativoQuery.data.periodo_a.custo_total} b={comparativoQuery.data.periodo_b.custo_total} formato="brl" />
+                  <LinhaComparativo label="Recursos criados" a={comparativoQuery.data.periodo_a.criados} b={comparativoQuery.data.periodo_b.criados} formato="num" />
+                  <LinhaComparativo label="Recursos atualizados" a={comparativoQuery.data.periodo_a.atualizados} b={comparativoQuery.data.periodo_b.atualizados} formato="num" />
+                  <LinhaComparativo label="Recursos excluídos" a={comparativoQuery.data.periodo_a.excluidos} b={comparativoQuery.data.periodo_b.excluidos} formato="num" />
                 </tbody>
               </table>
             </div>
@@ -370,6 +457,14 @@ export default function InventarioView() {
             </div>
           </div>
         </>
+      )}
+
+      {recursoDetalhe && (
+        <RecursoDetalheModal
+          resourceId={recursoDetalhe.resourceId}
+          subscriptionId={recursoDetalhe.subscriptionId}
+          onClose={() => setRecursoDetalhe(null)}
+        />
       )}
     </div>
   )

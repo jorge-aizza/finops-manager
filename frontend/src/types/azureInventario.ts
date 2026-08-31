@@ -94,3 +94,29 @@ export interface AzureCrescimentoDia {
   cost_date: string
   recursos: number
 }
+
+// Comparativo entre dois períodos — total_recursos é um SNAPSHOT (quantos recursos
+// estavam ativos no FIM daquele período), não uma soma. criados/atualizados/excluidos são
+// contagens de eventos DENTRO do período (ver GET /comparativo, server.js).
+export interface AzureComparativoPeriodo {
+  inicio: string
+  fim: string
+  total_recursos: number
+  custo_total: number
+  criados: number
+  atualizados: number
+  excluidos: number
+}
+export interface AzureComparativoResposta {
+  periodo_a: AzureComparativoPeriodo
+  periodo_b: AzureComparativoPeriodo
+}
+
+// Detalhe de um recurso — timeline completa de eventos + tendência de custo (últimos 90
+// dias). Aberto ao clicar num recurso na aba Recursos (ou num item de um período no
+// Comparativo).
+export interface AzureRecursoDetalheResposta {
+  recurso: AzureRecursoInventario
+  eventos: AzureAuditoriaEvento[]
+  custo_diario: { cost_date: string; custo: number }[]
+}

@@ -3,7 +3,7 @@ import { numFields } from './normalize'
 import type {
   AzureInventarioConfig, AzureInventarioConfigInput, AzureInventarioStatus,
   AzureInventarioColetaHistoricoItem, AzureRecursoInventario, AzureAuditoriaEvento,
-  AzureCrescimentoDia,
+  AzureCrescimentoDia, AzureComparativoResposta, AzureRecursoDetalheResposta,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -76,4 +76,38 @@ export const getAzureCrescimento = (data_inicio?: string, data_fim?: string, sub
   return apiFetch<{ periodo: { inicio: string; fim: string }; dias: AzureCrescimentoDia[] }>(
     'GET', '/azure-inventario/crescimento' + (qs ? '?' + qs : '')
   ).then((r) => ({ ...r, dias: r.dias.map((d) => ({ ...d, recursos: Number(d.recursos) })) }))
+}
+
+const normalizeComparativoPeriodo = (p: AzureComparativoResposta['periodo_a']) => ({
+  ...p,
+  total_recursos: Number(p.total_recursos),
+  custo_total: Number(p.custo_total),
+  criados: Number(p.criados),
+  atualizados: Number(p.atualizados),
+  excluidos: Number(p.excluidos),
+})
+
+export interface AzureComparativoParams {
+  a_inicio: string
+  a_fim: string
+  b_inicio: string
+  b_fim: string
+  subscription_id?: string
+}
+export const getAzureInventarioComparativo = (params: AzureComparativoParams) => {
+  const q = new URLSearchParams({ a_inicio: params.a_inicio, a_fim: params.a_fim, b_inicio: params.b_inicio, b_fim: params.b_fim })
+  if (params.subscription_id) q.set('subscription_id', params.subscription_id)
+  return apiFetch<AzureComparativoResposta>('GET', '/azure-inventario/comparativo?' + q.toString()).then((r) => ({
+    periodo_a: normalizeComparativoPeriodo(r.periodo_a),
+    periodo_b: normalizeComparativoPeriodo(r.periodo_b),
+  }))
+}
+
+export const getAzureRecursoDetalhe = (resourceId: string, subscriptionId: string) => {
+  const q = new URLSearchParams({ resource_id: resourceId, subscription_id: subscriptionId })
+  return apiFetch<AzureRecursoDetalheResposta>('GET', '/azure-inventario/recurso-detalhe?' + q.toString()).then((r) => ({
+    recurso: { ...r.recurso, custo_acumulado: Number(r.recurso.custo_acumulado) },
+    eventos: r.eventos,
+    custo_diario: r.custo_diario.map((d) => ({ ...d, custo: Number(d.custo) })),
+  }))
 }

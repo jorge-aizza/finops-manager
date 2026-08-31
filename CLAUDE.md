@@ -2478,6 +2478,51 @@ guardam o próprio histórico de execuções. Testes novos em `InventarioView.te
 (monitor mostra fase/contadores/log durante execução e some o botão "Fechar" enquanto
 `em_execucao=true`; histórico mostra origem/status/mensagem de uma execução concluída).
 
+**Comparativo entre períodos + detalhe de recurso — pedido do usuário ("um comparativo de
+um período pra outro" + "abrir detalhes do recurso que sofreu alteração")**: duas
+features novas, cada uma resolvendo uma lacuna diferente do que já existia (o gráfico de
+Crescimento já mostrava a tendência dia a dia, mas não dava pra comparar dois intervalos
+específicos lado a lado; a lista de Recursos/Auditoria já mostrava o estado/eventos mas
+não a história completa de UM recurso específico).
+
+**`GET /api/azure-inventario/comparativo`** — recebe dois períodos (A e B) e calcula, pra
+cada um: `total_recursos` como um **SNAPSHOT** (quantos recursos estavam ativos no FIM
+daquele período — `WHERE (criado_em IS NULL OR criado_em <= fim) AND (excluido_em IS NULL
+OR excluido_em > fim)`, nunca uma soma de eventos), mais `criados`/`atualizados`/
+`excluidos` (contagem de eventos de `azure_recursos_auditoria_eventos` DENTRO do período)
+e `custo_total` (soma de `azure_costs` no período). `criado_em IS NULL` (recurso
+detectado por um evento de atualização/exclusão antes de qualquer criação conhecida —
+comum pra recursos que já existiam antes da primeira coleta) é tratado como "sempre
+existiu" no snapshot, nunca excluído por falta de data de criação conhecida — sem isso,
+recursos legados (a maioria numa primeira ativação da feature) desapareceriam
+incorretamente do snapshot. Frontend: nova aba "Comparativo" em `InventarioView.tsx`, dois
+seletores de período (A e B) + uma tabela com `LinhaComparativo` (componente pequeno,
+local ao arquivo) mostrando os dois valores lado a lado e um delta colorido (▲ verde/▼
+vermelho) com percentual.
+
+**`GET /api/azure-inventario/recurso-detalhe`** — `resource_id` vem por QUERY PARAM, não
+path param (um resource ID completo do ARM contém `/`, quebraria o roteamento do Express
+como segmento de path). Retorna o recurso (do inventário permanente, com custo acumulado),
+a timeline COMPLETA de eventos de auditoria pra aquele `resource_id` (até 200, ordenados
+por `quando ASC` — do mais antigo pro mais recente, pra ler como uma história), e o custo
+diário dos últimos 90 dias (`azure_costs`, direto por `resource_id`). Frontend:
+`RecursoDetalheModal.tsx` (novo componente), aberto ao clicar em qualquer linha das abas
+Recursos ou Auditoria (`cursor:pointer` + `title` explicando a ação nas linhas da tabela,
+mesmo padrão de affordance já usado noutras tabelas clicáveis do app) — mesmo modal
+reaproveitado dos dois pontos de entrada, sem duplicar UI. Segue o padrão de modal já
+estabelecido (`.modal-overlay open` + checagem `e.target === e.currentTarget` pra fechar
+só ao clicar no backdrop, mesmo idioma de `DatabricksBudgetModal.tsx`) — sem portal
+(`InventarioView.tsx` não tem `overflow:hidden` no container raiz, diferente do caso já
+documentado em `CalculadoraView.tsx`).
+
+**Verificado**: `node --check`, `tsc -b`, `pm2 restart` sem erro/crash-loop contra o
+ambiente real, as 2 rotas novas respondendo 401 sem token, build do frontend limpo, 10
+testes em `InventarioView.test.tsx` passando (2 novos: comparativo mostra os dois períodos
+com delta calculado corretamente — testado com um caso real de crescimento tanto em
+recursos quanto em custo —, e clicar num recurso abre o modal com a linha do tempo e
+confirma que `getAzureRecursoDetalhe` é chamado com `resource_id`+`subscription_id`
+corretos).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

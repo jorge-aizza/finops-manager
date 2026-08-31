@@ -39,6 +39,10 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureCrescimento).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [] })
+  vi.mocked(azureInventarioApi.getAzureInventarioComparativo).mockResolvedValue({
+    periodo_a: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
+    periodo_b: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
+  })
   vi.mocked(coletaApi.listSPs).mockResolvedValue([])
   vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([])
 })
@@ -161,5 +165,55 @@ describe('InventarioView', () => {
     expect(await screen.findByText('⏰ Agendada')).toBeInTheDocument()
     expect(screen.getByText('concluido')).toBeInTheDocument()
     expect(screen.getByText('8 evento(s) | 3 novo(s), 4 atualizado(s), 1 excluído(s)')).toBeInTheDocument()
+  })
+
+  it('aba Comparativo mostra os dois períodos lado a lado com a diferença', async () => {
+    vi.mocked(azureInventarioApi.getAzureInventarioComparativo).mockResolvedValue({
+      periodo_a: { inicio: '2026-07-01', fim: '2026-07-30', total_recursos: 40, custo_total: 1000, criados: 5, atualizados: 10, excluidos: 1 },
+      periodo_b: { inicio: '2026-08-01', fim: '2026-08-30', total_recursos: 45, custo_total: 1200, criados: 8, atualizados: 12, excluidos: 3 },
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Comparativo' }))
+
+    expect(await screen.findByText('Recursos ativos (no fim do período)')).toBeInTheDocument()
+    // delta de recursos ativos: 45 - 40 = 5, crescimento (verde/▲)
+    expect(screen.getByText(/▲ 5/)).toBeInTheDocument()
+    // delta de custo: 1200 - 1000 = 200
+    expect(screen.getByText(/▲ R\$ 200,00/)).toBeInTheDocument()
+  })
+
+  it('clicar num recurso abre o modal de detalhe com a linha do tempo', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+      }],
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
+      recurso: {
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+      },
+      eventos: [
+        { id: 1, subscription_id: 'sub-1', resource_id: 'r1', resource_type: null, resource_group: null, acao: 'CRIACAO', autor: 'joao@vivo.com.br', quando: '2026-08-20T10:00:00Z', operation_name: null, correlation_id: null, criado_em: '' },
+      ],
+      custo_diario: [{ cost_date: '2026-08-20', custo: 5.5 }],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByText('vm-teste'))
+
+    expect(await screen.findByText('Detalhe do Recurso')).toBeInTheDocument()
+    expect(screen.getByText('Linha do tempo (1 evento)')).toBeInTheDocument()
+    expect(screen.getAllByText('✚ Criação').length).toBeGreaterThan(0)
+    expect(azureInventarioApi.getAzureRecursoDetalhe).toHaveBeenCalledWith(
+      '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste', 'sub-1',
+    )
   })
 })

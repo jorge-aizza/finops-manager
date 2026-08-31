@@ -7012,6 +7012,95 @@ app.get('/api/azure-inventario/crescimento', authMiddleware, dbMiddleware, async
   } catch (e) { _dbErr(res, e); }
 });
 
+// Comparativo entre dois períodos (2026-08-30, pedido do usuário) — pra cada período,
+// calcula um SNAPSHOT de quantos recursos estavam ativos no FIM daquele período (não uma
+// soma de eventos), mais quantos eventos de cada tipo aconteceram DENTRO do período e o
+// custo total. `criado_em IS NULL` (recurso detectado por um evento de atualização/exclusão
+// antes de qualquer criação conhecida — comum pra recursos que já existiam antes da
+// primeira coleta) é tratado como "sempre existiu" pro snapshot, nunca excluído por falta
+// de data de criação conhecida.
+app.get('/api/azure-inventario/comparativo', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { a_inicio, a_fim, b_inicio, b_fim, subscription_id } = req.query;
+    if (![a_inicio, a_fim, b_inicio, b_fim].every((d) => _DATE_RE.test(d || ''))) {
+      return res.status(400).json({ error: 'a_inicio, a_fim, b_inicio e b_fim são obrigatórios (formato YYYY-MM-DD)' });
+    }
+
+    async function _snapshotPeriodo(inicio, fim) {
+      const subCond = subscription_id ? ` AND subscription_id = $3` : '';
+      const paramsSnap = subscription_id ? [fim, fim, subscription_id] : [fim, fim];
+      const snap = await pool.query(
+        `SELECT COUNT(*) AS total FROM azure_recursos_inventario
+         WHERE (criado_em IS NULL OR criado_em <= $1) AND (excluido_em IS NULL OR excluido_em > $2)${subCond}`,
+        paramsSnap
+      );
+      const evCond = subscription_id ? ` AND subscription_id = $3` : '';
+      const evParams = subscription_id ? [inicio, fim, subscription_id] : [inicio, fim];
+      const ev = await pool.query(
+        `SELECT acao, COUNT(*) AS total FROM azure_recursos_auditoria_eventos
+         WHERE quando >= $1 AND quando < $2::date + INTERVAL '1 day'${evCond}
+         GROUP BY acao`,
+        evParams
+      );
+      const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
+      for (const row of ev.rows) eventos[row.acao] = parseInt(row.total, 10);
+
+      const custoCond = subscription_id ? ` AND subscription_id = $3` : '';
+      const custoParams = subscription_id ? [inicio, fim, subscription_id] : [inicio, fim];
+      const custo = await pool.query(
+        `SELECT COALESCE(SUM(cost_in_billing_currency),0) AS total FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2${custoCond}`,
+        custoParams
+      );
+
+      return {
+        inicio, fim,
+        total_recursos: parseInt(snap.rows[0].total, 10),
+        custo_total: custo.rows[0].total,
+        criados: eventos.CRIACAO, atualizados: eventos.ATUALIZACAO, excluidos: eventos.EXCLUSAO,
+      };
+    }
+
+    const [periodoA, periodoB] = await Promise.all([
+      _snapshotPeriodo(a_inicio, a_fim),
+      _snapshotPeriodo(b_inicio, b_fim),
+    ]);
+    res.json({ periodo_a: periodoA, periodo_b: periodoB });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Detalhe de um recurso — timeline completa de eventos (2026-08-30, pedido do usuário:
+// "abrir detalhes do recurso que sofreu alteração"). resource_id vem por query param (não
+// path param) porque um resource ID completo do ARM contém `/`, o que quebraria o
+// roteamento do Express se fosse um segmento de path.
+app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { resource_id, subscription_id } = req.query;
+    if (!resource_id || !subscription_id) return res.status(400).json({ error: 'resource_id e subscription_id são obrigatórios' });
+
+    const [recursoR, eventosR, custoR] = await Promise.all([
+      pool.query(
+        `SELECT ri.*,
+           COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE ac.resource_id = ri.resource_id), 0) AS custo_acumulado
+         FROM azure_recursos_inventario ri WHERE ri.subscription_id=$1 AND ri.resource_id=$2`,
+        [subscription_id, resource_id]
+      ),
+      pool.query(
+        `SELECT * FROM azure_recursos_auditoria_eventos WHERE subscription_id=$1 AND resource_id=$2 ORDER BY quando ASC LIMIT 200`,
+        [subscription_id, resource_id]
+      ),
+      pool.query(
+        `SELECT cost_date, SUM(cost_in_billing_currency) AS custo FROM azure_costs
+         WHERE resource_id=$1 AND cost_date >= CURRENT_DATE - INTERVAL '90 days'
+         GROUP BY cost_date ORDER BY cost_date`,
+        [resource_id]
+      ),
+    ]);
+    if (!recursoR.rows.length) return res.status(404).json({ error: 'Recurso não encontrado no inventário' });
+
+    res.json({ recurso: recursoR.rows[0], eventos: eventosR.rows, custo_diario: custoR.rows });
+  } catch (e) { _dbErr(res, e); }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 // SERVICE PRINCIPALS — CRUD (credenciais de autenticação para Storage)
 // ══════════════════════════════════════════════════════════════════════════════
