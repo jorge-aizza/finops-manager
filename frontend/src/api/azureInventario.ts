@@ -4,6 +4,8 @@ import type {
   AzureInventarioConfig, AzureInventarioConfigInput, AzureInventarioStatus,
   AzureInventarioColetaHistoricoItem, AzureRecursoInventario, AzureAuditoriaEvento,
   AzureCrescimentoDia, AzureComparativoResposta, AzureRecursoDetalheResposta,
+  AzureAnomaliaCrescimento, AzureOrcamentoInventario, AzureOrcamentoInventarioInput,
+  AzureOrcamentoAlerta, AzureTagsFaltantesResposta,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -112,4 +114,40 @@ export const getAzureRecursoDetalhe = (resourceId: string, subscriptionId: strin
     custo_resource_group: Number(r.custo_resource_group),
     resource_group_recursos: Number(r.resource_group_recursos),
   }))
+}
+
+// Governança de crescimento — anomalias (Z-score), orçamentos/teto por escopo, tags obrigatórias.
+
+export const getAzureAnomaliasCrescimento = () =>
+  apiFetch<AzureAnomaliaCrescimento[]>('GET', '/azure-inventario/anomalias').then((rows) =>
+    rows.map((r) => numFields(r, ['criacoes', 'media', 'desvio', 'zscore']))
+  )
+
+export const getAzureOrcamentosInventario = () =>
+  apiFetch<AzureOrcamentoInventario[]>('GET', '/azure-inventario/orcamentos').then((rows) =>
+    rows.map((r) => numFields(r, ['limite_valor', 'threshold_atencao', 'threshold_critico']))
+  )
+
+export const criarAzureOrcamentoInventario = (input: AzureOrcamentoInventarioInput) =>
+  apiFetch<AzureOrcamentoInventario>('POST', '/azure-inventario/orcamentos', input)
+
+export const atualizarAzureOrcamentoInventario = (id: number, input: AzureOrcamentoInventarioInput) =>
+  apiFetch<AzureOrcamentoInventario>('PUT', `/azure-inventario/orcamentos/${id}`, input)
+
+export const excluirAzureOrcamentoInventario = (id: number) =>
+  apiFetch<{ ok: boolean }>('DELETE', `/azure-inventario/orcamentos/${id}`)
+
+export const getAzureOrcamentosInventarioAlertas = () =>
+  apiFetch<AzureOrcamentoAlerta[]>('GET', '/azure-inventario/orcamentos/alertas').then((rows) =>
+    rows.map((r) => ({
+      ...r,
+      orcamento: numFields(r.orcamento, ['limite_valor', 'threshold_atencao', 'threshold_critico']),
+      valor_atual: Number(r.valor_atual),
+      pct: Number(r.pct),
+    }))
+  )
+
+export const getAzureTagsFaltantes = (subscriptionId?: string) => {
+  const q = subscriptionId ? '?subscription_id=' + encodeURIComponent(subscriptionId) : ''
+  return apiFetch<AzureTagsFaltantesResposta>('GET', '/azure-inventario/tags-faltantes' + q)
 }

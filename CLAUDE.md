@@ -2655,6 +2655,74 @@ teste novo cobrindo a nota de custo do RG quando o direto é zero), `npm run fro
 sem erro/crash-loop contra o ambiente real, rota respondendo 401 sem token, dois ticks hourly consecutivos
 da coleta de Inventário completando com sucesso pela primeira vez desde a ativação da feature.
 
+### Inventário — Governança de crescimento (2026-08-31, pedido do usuário: "quais melhorias vc me
+sugere para poder ter o controle de crescimento de recursos na cloud")
+
+Pergunta exploratória respondida com 5 sugestões priorizadas; usuário selecionou 4 via
+`AskUserQuestion` (multiSelect) — todas implementadas nesta rodada, cada uma reaproveitando
+infraestrutura já existente no app em vez de inventar mecanismo novo:
+
+1. **Alerta de crescimento anômalo** — mesma técnica de Z-score já validada pro custo diário
+   Databricks (`_computeAnomaliasDatabricks`), aplicada à CONTAGEM de criações por dia (não
+   custo), lida de `azure_recursos_auditoria_eventos` (já coletado pelo Inventário — zero
+   coleta nova). `_computeAnomaliasCrescimento()` roda em dois níveis — subscription inteira
+   E por Resource Group (um RG pequeno "some" dentro da média da subscription, mesmo
+   raciocínio já usado pro global/workspace do Databricks) — janela de 35 dias, in-sample,
+   threshold `|z| ≥ 2,5`, com um piso de `_ANOM_CRESCIMENTO_MIN_CRIACOES = 3` criações no dia
+   (evita ruído de RG que foi de 0→1 recurso/dia virando um z-score gigante por acaso) e
+   `HAVING COUNT(*) >= 5` dias de histórico na base de stats (amostra mínima confiável).
+2. **Orçamento/teto por subscription ou Resource Group** — nova tabela
+   `azure_inventario_orcamentos`, mesmo padrão de `databricks_budgets`
+   (`_validarOrcamentoInventarioInput`/CRUD/`_computeOrcamentosInventarioAlertas` espelham
+   `_validarBudgetInput`/CRUD/`_computeAlertasDatabricks` quase linha a linha), mas com 2
+   tipos de limite em vez de escopo por tag: `tipo_limite='recursos'` (snapshot de
+   `COUNT(*) FROM azure_recursos_inventario WHERE ativo=true` — mesmo conceito de "fotografia
+   atual" já usado no Comparativo, nunca uma soma de eventos) ou `tipo_limite='custo'` (soma
+   de `azure_costs` do mês corrente, idêntico ao Databricks). Threshold de alerta/crítico
+   configurável por orçamento (75%/90% default), não fixo no código.
+3. **Relatório semanal automático por e-mail** — `_checkRelatorioSemanalInventario()`, chave
+   de dedup baseada num "bucket" de 7 dias desde a epoch (`Math.floor(Date.now() / 7dias)`,
+   determinístico, sem precisar de lib de data/semana-ISO nova) — dispara no máximo 1x por
+   semana mesmo com o tick horário de `_iniciarAlertasEmail` rodando o tempo todo. Resume
+   criados/atualizados/excluídos + custo do período + top 5 RGs por criação.
+4. **Checagem de tags obrigatórias** — decisão de design: NÃO usa Activity Log nem chama a
+   ARM API por recurso (custaria uma chamada por recurso, centenas/milhares delas) — reaproveita
+   `azure_costs.tags` (coluna TEXT/JSON já coletada por TODA importação/coleta Azure desde
+   sempre, zero coleta nova — confirmada via `GET /api/azure-costs/diag`, que já expõe
+   `com_tags`/`amostra_tag`). `GET /api/azure-inventario/tags-faltantes` pega a linha de
+   billing MAIS RECENTE por resource_id (`ORDER BY cost_date DESC LIMIT 1` correlacionado)
+   dos recursos ativos do inventário, faz `JSON.parse` em JS (não `::jsonb` em SQL — um CAST
+   que falha aborta a query inteira; exports malformados de CSV são um risco real, try/catch
+   por linha é mais seguro) contra as chaves configuradas em
+   `azure_inventario_config.tags_obrigatorias` (novo campo, texto livre separado por
+   vírgula). Recursos sem NENHUMA linha em `azure_costs` (o caso comum documentado acima —
+   "custo direto zerado" pra VMs/discos efêmeros de Databricks) entram como **"não
+   verificável"**, nunca como não-conforme — não dá pra afirmar que faltam tags num recurso
+   que o billing nunca capturou.
+
+**Frontend**: nova aba "Governança" em `InventarioView.tsx` (5ª aba, entre Comparativo e
+Configuração) com 3 cards — Orçamentos (tabela + CRUD via `InventarioOrcamentoModal.tsx`,
+banner de alertas ativos no topo usando `color-mix()` pro fundo/borda por severidade, mesmo
+padrão já corrigido antes nesta sessão pro popup de alerta Databricks — nunca sufixo de alfa
+hex colado num token `var()`), Anomalias de Crescimento (tabela read-only), Tags Faltantes
+(tabela read-only + contagem de não-verificáveis). Campo `tags_obrigatorias` (texto livre,
+separado por vírgula) adicionado à aba Configuração já existente.
+`InventarioOrcamentoModal.tsx` reaproveita `listResourceGroups` (já usado pela Calculadora)
+como `<datalist>` pro campo Resource Group quando uma subscription é selecionada — evita
+digitação livre propensa a erro, mesmo raciocínio já usado pro dropdown de tag do orçamento
+Databricks.
+
+**Verificado**: `node --check`, `tsc -b`, suíte completa do frontend (266/266, incluindo 1
+teste novo cobrindo as 3 seções da aba Governança), `npm run frontend:build`, `pm2 restart`
+sem erro/crash-loop contra o ambiente real (migração da tabela nova + `ALTER COLUMN
+tags_obrigatorias` aplicadas sem exceção — confirmado pelo boot completar e pela coleta de
+Inventário já em andamento continuar funcionando no mesmo restart), as 4 rotas novas
+respondendo 401 sem token. **Não verificado**: recebimento real de e-mail pelos 3 novos
+gatilhos periódicos (mesma limitação já documentada pra todo o restante da seção EMAIL —
+sem SMTP real configurado neste ambiente) nem os cálculos de anomalia/orçamento contra dados
+reais suficientes pra cruzar o threshold de 5 dias de histórico (a coleta de Inventário
+começou em 2026-08-30, ainda não tem 35 dias de janela completa).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

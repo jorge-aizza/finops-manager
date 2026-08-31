@@ -6149,6 +6149,38 @@ async function ensureAzureColetaTable() {
   await run(`UPDATE databricks_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
   await run(`UPDATE azure_inventario_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
 
+  // ── Governança de crescimento (2026-08-31, pedido do usuário) ────────────────────────────
+  // `tags_obrigatorias` — chaves separadas por vírgula (ex: "projeto,centro_custo") checadas
+  // contra `azure_costs.tags` (JSON já coletado por toda a Coleta Azure — zero coleta nova).
+  await run(`ALTER TABLE azure_inventario_config ADD COLUMN IF NOT EXISTS tags_obrigatorias TEXT`);
+
+  // Orçamentos/teto de crescimento — mesmo padrão de `databricks_budgets`, mas escopado por
+  // subscription/Resource Group (não workspace/tag) e com dois tipos de limite: contagem de
+  // recursos ativos, ou custo do mês corrente — cobre tanto "não deixe esse RG passar de N
+  // recursos" quanto "não deixe esse RG passar de R$X/mês".
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_inventario_orcamentos (
+      id                 SERIAL PRIMARY KEY,
+      nome               VARCHAR(200) NOT NULL,
+      escopo_tipo        VARCHAR(20) NOT NULL DEFAULT 'subscription',
+      subscription_id    VARCHAR(200) NOT NULL,
+      resource_group     VARCHAR(300),
+      tipo_limite        VARCHAR(20) NOT NULL DEFAULT 'recursos',
+      limite_valor       NUMERIC(20,2) NOT NULL,
+      threshold_atencao  NUMERIC(5,2) DEFAULT 75,
+      threshold_critico  NUMERIC(5,2) DEFAULT 90,
+      ativo              BOOLEAN DEFAULT true,
+      criado_em          TIMESTAMP DEFAULT NOW(),
+      atualizado_em      TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_inv_orc_ativo ON azure_inventario_orcamentos (ativo)`);
+
+  // Índice composto pra agregação diária de criação por RG (anomalia de crescimento) —
+  // as consultas existentes (`idx_azure_recursos_aud_quando`/`idx_azure_recursos_aud_resource`)
+  // não cobrem GROUP BY subscription_id+resource_group+dia com eficiência.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_aud_sub_rg_quando ON azure_recursos_auditoria_eventos (subscription_id, resource_group, quando)`);
+
   _coletaTableReady = true;
 }
 
@@ -6402,6 +6434,107 @@ async function _checkAcoesVencendo() {
 // no bloco de Storage que pularia qualquer coisa adicionada depois no mesmo tick;
 // alertas por e-mail não têm essa urgência de 5min, então não valia acoplar ali).
 let _alertasEmailTimer = null;
+// Governança de crescimento de Inventário (2026-08-31) — 3 gatilhos periódicos, mesmo
+// padrão de dedup/cooldown de 24h dos demais. `_computeAnomaliasCrescimento`/
+// `_computeOrcamentosInventarioAlertas` são declaradas mais abaixo (junto das rotas
+// GET .../anomalias e .../orcamentos/alertas que também as usam) — hoisting de function
+// declaration já é o padrão deste arquivo (ex: _checkAnomaliasDatabricks chama
+// _computeAnomaliasDatabricks, definida centenas de linhas depois).
+async function _checkAnomaliasCrescimentoInventario() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+  const anomalias = await _computeAnomaliasCrescimento();
+  for (const a of anomalias) {
+    const chave = `crescimento:${a.subscription_id}:${a.resource_group || 'global'}:${a.dia}`;
+    if (!(await _tentarClaimAlerta('anomalia_crescimento_inventario', chave))) continue;
+    const escopoTxt = a.escopo_tipo === 'resource_group' ? `Resource Group ${a.resource_group}` : `subscription ${a.subscription_id}`;
+    await _sendEmail({
+      to: destinatarios,
+      subject: `📈 Crescimento anômalo de recursos — ${escopoTxt}`,
+      html: _emailTemplate('Crescimento anômalo detectado', `
+        <p><strong>${_escHtmlServer(escopoTxt)}</strong> teve <strong>${a.criacoes}</strong> recurso(s) criado(s) em ${new Date(a.dia).toLocaleDateString('pt-BR')} — fora do padrão histórico (Z-score ${a.zscore.toFixed(2)}).</p>
+        <p>Média da janela (35 dias): ${a.media.toFixed(1)} criações/dia (desvio padrão: ${a.desvio.toFixed(1)})</p>`),
+    });
+  }
+}
+
+// Chave inclui o mês pra tipo "custo" (reseta todo mês, mesmo padrão do orçamento
+// Databricks); tipo "recursos" não tem reset mensal natural — cooldown de 24h já cobre
+// "continua estourado → reavisa todo dia enquanto persistir" (mesmo padrão de reserva/
+// ação vencendo).
+async function _checkOrcamentosInventario() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+  const alertas = await _computeOrcamentosInventarioAlertas();
+  const mes = new Date().toISOString().slice(0, 7);
+  for (const a of alertas) {
+    const chave = a.orcamento.tipo_limite === 'custo' ? `orcamento_inv:${a.orcamento.id}:${mes}` : `orcamento_inv:${a.orcamento.id}`;
+    if (!(await _tentarClaimAlerta('orcamento_inventario', chave))) continue;
+    const pctFmt = (a.pct * 100).toFixed(0);
+    const escopoTxt = a.orcamento.resource_group ? `RG ${a.orcamento.resource_group}` : `subscription ${a.orcamento.subscription_id}`;
+    const custoTipo = a.orcamento.tipo_limite === 'custo';
+    const fmtNum = (v) => custoTipo ? `R$ ${parseFloat(v).toFixed(2)}` : `${Math.round(v)} recurso(s)`;
+    await _sendEmail({
+      to: destinatarios,
+      subject: `⚠ Orçamento de Inventário ${a.severidade === 'estourado' ? 'estourado' : 'em alerta'} — ${a.orcamento.nome}`,
+      html: _emailTemplate('Orçamento de crescimento de recursos', `
+        <p><strong>${_escHtmlServer(a.orcamento.nome)}</strong> (${_escHtmlServer(escopoTxt)}) atingiu <strong>${pctFmt}%</strong> do limite${custoTipo ? ' de custo do mês' : ' de recursos ativos'}.</p>
+        <p>Valor atual: ${fmtNum(a.valor_atual)} de ${fmtNum(a.orcamento.limite_valor)}</p>`),
+    });
+  }
+}
+
+// Relatório semanal — chave de dedup baseada num "bucket" de 7 dias desde a epoch (não
+// alinhado a semana-calendário ISO, mas determinístico e simples, sem precisar de lib de
+// data nova) — muda exatamente a cada 7 dias, então dispara no máximo 1x por semana
+// mesmo com o tick horário rodando o tempo todo.
+async function _checkRelatorioSemanalInventario() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+
+  const semanaKey = Math.floor(Date.now() / (7 * 24 * 60 * 60 * 1000));
+  if (!(await _tentarClaimAlerta('relatorio_semanal_inventario', `semana:${semanaKey}`))) return;
+
+  const hoje = new Date();
+  const seteDiasAtras = new Date(hoje); seteDiasAtras.setDate(seteDiasAtras.getDate() - 7);
+  const inicioStr = seteDiasAtras.toISOString().slice(0, 10);
+  const fimStr = hoje.toISOString().slice(0, 10);
+
+  const [eventosR, custoR, topRgR] = await Promise.all([
+    pool.query(`SELECT acao, COUNT(*) AS total FROM azure_recursos_auditoria_eventos WHERE quando >= $1 GROUP BY acao`, [seteDiasAtras.toISOString()]),
+    pool.query(`SELECT COALESCE(SUM(cost_in_billing_currency),0) AS total FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2`, [inicioStr, fimStr]),
+    pool.query(`
+      SELECT resource_group, COUNT(*) AS criacoes FROM azure_recursos_auditoria_eventos
+      WHERE acao='CRIACAO' AND quando >= $1 AND resource_group IS NOT NULL
+      GROUP BY resource_group ORDER BY criacoes DESC LIMIT 5
+    `, [seteDiasAtras.toISOString()]),
+  ]);
+
+  const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
+  for (const row of eventosR.rows) eventos[row.acao] = parseInt(row.total, 10);
+  const custoTotal = parseFloat(custoR.rows[0].total);
+
+  const topRgHtml = topRgR.rows.length
+    ? `<ul style="margin:8px 0;padding-left:20px">${topRgR.rows.map(r => `<li>${_escHtmlServer(r.resource_group)} — ${r.criacoes} recurso(s) criado(s)</li>`).join('')}</ul>`
+    : '<p style="color:#9ca3af">Nenhum recurso criado nesta semana.</p>';
+
+  await _sendEmail({
+    to: destinatarios,
+    subject: `📊 Relatório semanal de Inventário — ${eventos.CRIACAO} criados, ${eventos.EXCLUSAO} excluídos`,
+    html: _emailTemplate('Relatório semanal de crescimento de recursos', `
+      <p><strong>${eventos.CRIACAO}</strong> recurso(s) criado(s), <strong>${eventos.ATUALIZACAO}</strong> atualizado(s), <strong>${eventos.EXCLUSAO}</strong> excluído(s) nos últimos 7 dias.</p>
+      <p>Custo total do período: <strong>R$ ${custoTotal.toFixed(2)}</strong></p>
+      <p style="margin-top:16px;font-weight:700">Resource Groups com mais criações:</p>
+      ${topRgHtml}`),
+  });
+}
+
 function _iniciarAlertasEmail() {
   if (_alertasEmailTimer || !pool) return;
   const tick = async () => {
@@ -6409,6 +6542,9 @@ function _iniciarAlertasEmail() {
     try { await _checkReservasVencendo(); } catch (e) { console.warn('[Email] Checagem de reservas falhou:', e.message); }
     try { await _checkAcoesVencendo(); } catch (e) { console.warn('[Email] Checagem de ações falhou:', e.message); }
     try { await _checkAnomaliasDatabricks(); } catch (e) { console.warn('[Email] Checagem de anomalias Databricks falhou:', e.message); }
+    try { await _checkAnomaliasCrescimentoInventario(); } catch (e) { console.warn('[Email] Checagem de anomalias de crescimento falhou:', e.message); }
+    try { await _checkOrcamentosInventario(); } catch (e) { console.warn('[Email] Checagem de orçamentos de Inventário falhou:', e.message); }
+    try { await _checkRelatorioSemanalInventario(); } catch (e) { console.warn('[Email] Relatório semanal de Inventário falhou:', e.message); }
   };
   setTimeout(tick, 180 * 1000);
   _alertasEmailTimer = setInterval(tick, 60 * 60 * 1000);
@@ -7168,6 +7304,242 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
       custo_resource_group: custoRGR.rows[0].custo,
       resource_group_recursos: parseInt(custoRGR.rows[0].recursos, 10) || 0,
     });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Inventário — Governança de crescimento (2026-08-31, pedido do usuário: "quais
+// melhorias vc me sugere para poder ter o controle de crescimento de recursos") ─────────
+// Três peças, cada uma reaproveitando infraestrutura já existente (dedup de e-mail,
+// motor de Z-score do Databricks como referência, tabela de auditoria já coletada):
+// (1) anomalia de crescimento por RG/subscription, (2) orçamento/teto de recursos ou
+// custo por escopo, (3) checagem de tags obrigatórias via azure_costs.tags (já coletado).
+
+const _ANOM_CRESCIMENTO_ZSCORE = 2.5;       // mesmo threshold já validado pro Databricks
+const _ANOM_CRESCIMENTO_MIN_CRIACOES = 3;   // piso — evita ruído de RG que foi de 0→1 recurso/dia
+
+// Anomalia de crescimento — mesma técnica de Z-score já usada pro custo diário Databricks
+// (_computeAnomaliasDatabricks), aplicada à contagem de CRIAÇÕES por dia (não custo). Global
+// (toda a subscription) e por Resource Group — um RG pequeno "some" dentro da média da
+// subscription inteira, por isso os dois níveis. Janela de 35 dias, in-sample (mesma
+// simplificação já documentada/aceita pro Databricks — um outlier isolado não domina a
+// média o suficiente pra mascarar a si mesmo). `HAVING COUNT(*) >= 5` na base de stats —
+// só considera RG/subscription com pelo menos 5 dias de atividade de criação na janela,
+// senão a média/desvio de uma amostra minúscula não é confiável.
+async function _computeAnomaliasCrescimento() {
+  const hoje = new Date();
+  const fim = hoje.toISOString().slice(0, 10);
+  const inicio = new Date(hoje); inicio.setDate(inicio.getDate() - 34);
+  const inicioStr = inicio.toISOString().slice(0, 10);
+
+  const [rSub, rRg] = await Promise.all([
+    pool.query(`
+      WITH diario AS (
+        SELECT subscription_id, DATE(quando) AS dia, COUNT(*) AS criacoes
+        FROM azure_recursos_auditoria_eventos
+        WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day'
+        GROUP BY 1, 2
+      ), stats AS (
+        SELECT subscription_id, AVG(criacoes) AS media, STDDEV_POP(criacoes) AS desvio, COUNT(*) AS dias
+        FROM diario GROUP BY 1 HAVING COUNT(*) >= 5
+      )
+      SELECT d.subscription_id, to_char(d.dia,'YYYY-MM-DD') AS dia, d.criacoes, s.media, s.desvio,
+        CASE WHEN s.desvio > 0 THEN (d.criacoes - s.media) / s.desvio ELSE 0 END AS zscore
+      FROM diario d JOIN stats s USING (subscription_id)
+      ORDER BY d.subscription_id, d.dia
+    `, [inicioStr, fim]),
+    pool.query(`
+      WITH diario AS (
+        SELECT subscription_id, resource_group, DATE(quando) AS dia, COUNT(*) AS criacoes
+        FROM azure_recursos_auditoria_eventos
+        WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day' AND resource_group IS NOT NULL
+        GROUP BY 1, 2, 3
+      ), stats AS (
+        SELECT subscription_id, resource_group, AVG(criacoes) AS media, STDDEV_POP(criacoes) AS desvio, COUNT(*) AS dias
+        FROM diario GROUP BY 1, 2 HAVING COUNT(*) >= 5
+      )
+      SELECT d.subscription_id, d.resource_group, to_char(d.dia,'YYYY-MM-DD') AS dia, d.criacoes, s.media, s.desvio,
+        CASE WHEN s.desvio > 0 THEN (d.criacoes - s.media) / s.desvio ELSE 0 END AS zscore
+      FROM diario d JOIN stats s USING (subscription_id, resource_group)
+      ORDER BY d.subscription_id, d.resource_group, d.dia
+    `, [inicioStr, fim]),
+  ]);
+
+  const crescimento = [];
+  for (const r of rSub.rows) {
+    if (parseInt(r.criacoes, 10) < _ANOM_CRESCIMENTO_MIN_CRIACOES) continue;
+    if (Math.abs(parseFloat(r.zscore)) >= _ANOM_CRESCIMENTO_ZSCORE) {
+      crescimento.push({ escopo_tipo: 'subscription', subscription_id: r.subscription_id, resource_group: null, dia: r.dia, criacoes: parseInt(r.criacoes, 10), media: parseFloat(r.media), desvio: parseFloat(r.desvio), zscore: parseFloat(r.zscore) });
+    }
+  }
+  for (const r of rRg.rows) {
+    if (parseInt(r.criacoes, 10) < _ANOM_CRESCIMENTO_MIN_CRIACOES) continue;
+    if (Math.abs(parseFloat(r.zscore)) >= _ANOM_CRESCIMENTO_ZSCORE) {
+      crescimento.push({ escopo_tipo: 'resource_group', subscription_id: r.subscription_id, resource_group: r.resource_group, dia: r.dia, criacoes: parseInt(r.criacoes, 10), media: parseFloat(r.media), desvio: parseFloat(r.desvio), zscore: parseFloat(r.zscore) });
+    }
+  }
+  crescimento.sort((a, b) => Math.abs(b.zscore) - Math.abs(a.zscore));
+  return crescimento;
+}
+
+app.get('/api/azure-inventario/anomalias', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    res.json(await _computeAnomaliasCrescimento());
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Orçamentos/teto — mesmo padrão de databricks_budgets (ver _validarBudgetInput ali), mas
+// escopado por subscription/Resource Group (não workspace/tag) e com 2 tipos de limite:
+// contagem de recursos ATIVOS (snapshot atual, não soma de eventos) ou custo do mês
+// corrente — cobre tanto "não deixe esse RG passar de N recursos" quanto "não deixe esse
+// RG passar de R$X/mês", sem duplicar a lógica de threshold configurável já validada lá.
+function _validarOrcamentoInventarioInput(body) {
+  const { nome, subscription_id, limite_valor, ativo } = body;
+  let { escopo_tipo, resource_group, tipo_limite, threshold_atencao, threshold_critico } = body;
+  if (!nome || !subscription_id || limite_valor == null) return { error: 'nome, subscription_id e limite_valor são obrigatórios' };
+  escopo_tipo = escopo_tipo || (resource_group ? 'resource_group' : 'subscription');
+  if (!['subscription', 'resource_group'].includes(escopo_tipo)) return { error: 'escopo_tipo inválido' };
+  if (escopo_tipo === 'resource_group' && !resource_group) return { error: 'resource_group é obrigatório para escopo "resource_group"' };
+  if (escopo_tipo !== 'resource_group') resource_group = null;
+  tipo_limite = tipo_limite || 'recursos';
+  if (!['recursos', 'custo'].includes(tipo_limite)) return { error: 'tipo_limite inválido (use "recursos" ou "custo")' };
+  const limiteNum = parseFloat(limite_valor);
+  if (!(limiteNum > 0)) return { error: 'limite_valor deve ser maior que zero' };
+  threshold_atencao = threshold_atencao != null ? parseFloat(threshold_atencao) : 75;
+  threshold_critico = threshold_critico != null ? parseFloat(threshold_critico) : 90;
+  if (!(threshold_atencao > 0 && threshold_atencao < 100)) return { error: 'threshold_atencao deve estar entre 0 e 100' };
+  if (!(threshold_critico > threshold_atencao && threshold_critico <= 100)) return { error: 'threshold_critico deve ser maior que threshold_atencao e no máximo 100' };
+  return { value: { nome, escopo_tipo, subscription_id, resource_group, tipo_limite, limite_valor: limiteNum, threshold_atencao, threshold_critico, ativo: ativo !== false } };
+}
+
+app.get('/api/azure-inventario/orcamentos', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`SELECT * FROM azure_inventario_orcamentos ORDER BY nome`);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/azure-inventario/orcamentos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const v = _validarOrcamentoInventarioInput(req.body);
+    if (v.error) return res.status(400).json({ error: v.error });
+    const o = v.value;
+    const r = await pool.query(
+      `INSERT INTO azure_inventario_orcamentos (nome, escopo_tipo, subscription_id, resource_group, tipo_limite, limite_valor, threshold_atencao, threshold_critico, ativo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [o.nome, o.escopo_tipo, o.subscription_id, o.resource_group, o.tipo_limite, o.limite_valor, o.threshold_atencao, o.threshold_critico, o.ativo]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.put('/api/azure-inventario/orcamentos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const v = _validarOrcamentoInventarioInput(req.body);
+    if (v.error) return res.status(400).json({ error: v.error });
+    const o = v.value;
+    const r = await pool.query(
+      `UPDATE azure_inventario_orcamentos SET nome=$1, escopo_tipo=$2, subscription_id=$3, resource_group=$4, tipo_limite=$5, limite_valor=$6, threshold_atencao=$7, threshold_critico=$8, ativo=$9, atualizado_em=NOW() WHERE id=$10 RETURNING *`,
+      [o.nome, o.escopo_tipo, o.subscription_id, o.resource_group, o.tipo_limite, o.limite_valor, o.threshold_atencao, o.threshold_critico, o.ativo, req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/azure-inventario/orcamentos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM azure_inventario_orcamentos WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Status de cada orçamento ativo — extraído numa função compartilhada (dashboard sob
+// demanda + _checkOrcamentosInventario periódica pra e-mail), mesmo padrão de
+// _computeAlertasDatabricks. "recursos" é sempre um SNAPSHOT atual (COUNT ativo=true),
+// nunca uma soma de eventos — bate com o mesmo conceito já usado no Comparativo.
+async function _computeOrcamentosInventarioAlertas() {
+  const orcamentos = (await pool.query(`SELECT * FROM azure_inventario_orcamentos WHERE ativo = true`)).rows;
+  if (!orcamentos.length) return [];
+
+  const inicioMes = new Date(); inicioMes.setDate(1);
+  const inicioMesStr = inicioMes.toISOString().slice(0, 10);
+
+  const alertas = [];
+  for (const o of orcamentos) {
+    let atual;
+    if (o.tipo_limite === 'recursos') {
+      const params = [o.subscription_id];
+      let sql = `SELECT COUNT(*) AS total FROM azure_recursos_inventario WHERE ativo=true AND subscription_id=$1`;
+      if (o.resource_group) { params.push(o.resource_group); sql += ` AND UPPER(resource_group)=UPPER($2)`; }
+      const r = await pool.query(sql, params);
+      atual = parseInt(r.rows[0].total, 10);
+    } else {
+      const params = [inicioMesStr, o.subscription_id];
+      let sql = `SELECT COALESCE(SUM(cost_in_billing_currency),0) AS total FROM azure_costs WHERE cost_date >= $1 AND subscription_id=$2`;
+      if (o.resource_group) { params.push(o.resource_group); sql += ` AND UPPER(resource_group_name)=UPPER($3)`; }
+      const r = await pool.query(sql, params);
+      atual = parseFloat(r.rows[0].total);
+    }
+    const limite = parseFloat(o.limite_valor);
+    const pct = limite > 0 ? atual / limite : 0;
+    const thAtencao = parseFloat(o.threshold_atencao) / 100;
+    const thCritico = parseFloat(o.threshold_critico) / 100;
+    if (pct < thAtencao) continue;
+    const severidade = pct >= 1 ? 'estourado' : pct >= thCritico ? 'critico' : 'atencao';
+    alertas.push({ orcamento: o, valor_atual: atual, pct, severidade });
+  }
+  alertas.sort((a, b) => b.pct - a.pct);
+  return alertas;
+}
+
+app.get('/api/azure-inventario/orcamentos/alertas', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    res.json(await _computeOrcamentosInventarioAlertas());
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Tags obrigatórias — checa `azure_costs.tags` (JSON já coletado por toda importação/coleta
+// Azure, zero coleta nova) dos recursos ATIVOS do inventário contra as chaves configuradas em
+// `azure_inventario_config.tags_obrigatorias`. Pega a linha de billing MAIS RECENTE por
+// resource_id (DISTINCT ON) — tags podem mudar ao longo do tempo, a mais recente é a que
+// importa. Parse em JS (não em SQL) — o texto pode não ser JSON válido em casos raros de
+// export malformado (CSV), e um CAST ::jsonb que falha aborta a query inteira; try/catch por
+// linha é mais seguro. Recursos sem NENHUMA linha em azure_costs (comum — ver "custo direto
+// zerado" documentado acima) entram como "não verificável", não como não-conforme — não dá
+// pra afirmar que faltam tags num recurso que nunca vimos no billing.
+app.get('/api/azure-inventario/tags-faltantes', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const cfgRow = await pool.query(`SELECT tags_obrigatorias FROM azure_inventario_config ORDER BY id LIMIT 1`);
+    const chaves = (cfgRow.rows[0]?.tags_obrigatorias || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!chaves.length) return res.json({ chaves: [], nao_conformes: [], nao_verificaveis: 0, total_verificado: 0 });
+
+    const { subscription_id } = req.query;
+    const params = [];
+    let where = 'ri.ativo = true';
+    if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
+
+    const r = await pool.query(`
+      SELECT ri.subscription_id, ri.resource_id, ri.nome, ri.resource_group, ri.resource_type,
+        (SELECT ac.tags FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)
+         ORDER BY ac.cost_date DESC LIMIT 1) AS tags
+      FROM azure_recursos_inventario ri WHERE ${where}
+    `, params);
+
+    let naoVerificaveis = 0;
+    const naoConformes = [];
+    for (const row of r.rows) {
+      if (!row.tags) { naoVerificaveis++; continue; }
+      let tagsObj = null;
+      try { tagsObj = JSON.parse(row.tags); } catch { /* export malformado — trata como sem tags */ }
+      const faltando = chaves.filter(k => !tagsObj || tagsObj[k] == null || tagsObj[k] === '');
+      if (faltando.length) {
+        naoConformes.push({
+          subscription_id: row.subscription_id, resource_id: row.resource_id, nome: row.nome,
+          resource_group: row.resource_group, resource_type: row.resource_type, tags_faltando: faltando,
+        });
+      }
+    }
+    res.json({ chaves, nao_conformes: naoConformes, nao_verificaveis: naoVerificaveis, total_verificado: r.rows.length });
   } catch (e) { _dbErr(res, e); }
 });
 

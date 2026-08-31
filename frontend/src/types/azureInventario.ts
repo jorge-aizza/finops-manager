@@ -10,6 +10,9 @@ export interface AzureInventarioConfig {
   sp_id: number | null
   subscription_ids: string | null
   ultimo_evento_em: string | null
+  // Chaves de tag obrigatórias, separadas por vírgula (ex: "projeto,centro_custo") — checadas
+  // contra azure_costs.tags (ver GET /azure-inventario/tags-faltantes). null/vazio = checagem desativada.
+  tags_obrigatorias: string | null
   criado_em: string
   atualizado_em: string
 }
@@ -19,6 +22,74 @@ export interface AzureInventarioConfigInput {
   retencao_dias: number
   sp_id: number | null
   subscription_ids: string | null
+  tags_obrigatorias: string | null
+}
+
+// Governança de crescimento (2026-08-31, pedido do usuário: "quais melhorias vc me sugere
+// para poder ter o controle de crescimento de recursos na cloud") — ver seção "Inventário —
+// Governança de crescimento" em server.js.
+
+export type AzureAnomaliaCrescimentoEscopo = 'subscription' | 'resource_group'
+export interface AzureAnomaliaCrescimento {
+  escopo_tipo: AzureAnomaliaCrescimentoEscopo
+  subscription_id: string
+  resource_group: string | null
+  dia: string
+  criacoes: number
+  media: number
+  desvio: number
+  zscore: number
+}
+
+export type AzureOrcamentoEscopoTipo = 'subscription' | 'resource_group'
+export type AzureOrcamentoTipoLimite = 'recursos' | 'custo'
+
+export interface AzureOrcamentoInventario {
+  id: number
+  nome: string
+  escopo_tipo: AzureOrcamentoEscopoTipo
+  subscription_id: string
+  resource_group: string | null
+  tipo_limite: AzureOrcamentoTipoLimite
+  limite_valor: number
+  threshold_atencao: number
+  threshold_critico: number
+  ativo: boolean
+  criado_em: string
+  atualizado_em: string
+}
+export interface AzureOrcamentoInventarioInput {
+  nome: string
+  escopo_tipo: AzureOrcamentoEscopoTipo
+  subscription_id: string
+  resource_group: string | null
+  tipo_limite: AzureOrcamentoTipoLimite
+  limite_valor: number
+  threshold_atencao: number
+  threshold_critico: number
+  ativo: boolean
+}
+export type AzureOrcamentoSeveridade = 'atencao' | 'critico' | 'estourado'
+export interface AzureOrcamentoAlerta {
+  orcamento: AzureOrcamentoInventario
+  valor_atual: number
+  pct: number
+  severidade: AzureOrcamentoSeveridade
+}
+
+export interface AzureTagsFaltantesRecurso {
+  subscription_id: string
+  resource_id: string
+  nome: string | null
+  resource_group: string | null
+  resource_type: string | null
+  tags_faltando: string[]
+}
+export interface AzureTagsFaltantesResposta {
+  chaves: string[]
+  nao_conformes: AzureTagsFaltantesRecurso[]
+  nao_verificaveis: number
+  total_verificado: number
 }
 
 export interface AzureInventarioStatus {
