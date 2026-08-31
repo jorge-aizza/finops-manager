@@ -2462,6 +2462,22 @@ lista com nome + busca + "Selecionar Todos"; o formato salvo no backend continua
 checkbox em vez de digitação manual. Teste novo em `InventarioView.test.tsx` (lista por
 nome, seleciona uma assinatura, confirma que o ID certo vai no payload de salvar).
 
+**Monitor ao vivo + histórico — pedido do usuário ("acompanhar como as coletas em real
+time e históricos")**: o card de progresso da coleta em execução era só uma linha de
+texto simples (`🔄 Coletando... {fase}`); trocado por `AzureInventarioColetaMonitor.tsx`,
+porta fiel do mesmo padrão já usado em `ColetaMonitor.tsx`/`DatabricksColetaMonitor.tsx`
+(borda colorida por estado — roxo rodando/verde concluído/vermelho erro, contadores
+grandes de eventos/novos/atualizados/excluídos, log com timestamp rolável, botão "Fechar"
+só depois de concluído). Mesma `queryKey` (`['azure-inv-status']`) já usada pelo botão
+"Coletar Agora" — React Query deduplica a chamada de rede entre o monitor e o resto da
+tela, sem polling duplicado. Renderizado ACIMA das abas (Recursos/Auditoria/Configuração),
+então fica visível não importa em qual aba o usuário estiver — só o histórico
+(`GET /azure-inventario/coleta-historico`, já existia desde a primeira versão da tela)
+continua dentro da aba Configuração, mesmo lugar onde Azure/Databricks Coleta também
+guardam o próprio histórico de execuções. Testes novos em `InventarioView.test.tsx`
+(monitor mostra fase/contadores/log durante execução e some o botão "Fechar" enquanto
+`em_execucao=true`; histórico mostra origem/status/mensagem de uma execução concluída).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

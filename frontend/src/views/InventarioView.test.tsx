@@ -131,4 +131,35 @@ describe('InventarioView', () => {
     await user.click(await screen.findByRole('button', { name: '▶ Coletar Agora' }))
     await waitFor(() => expect(azureInventarioApi.coletarAzureInventario).toHaveBeenCalled())
   })
+
+  it('mostra o monitor ao vivo com fase/contadores/log enquanto a coleta está em execução', async () => {
+    vi.mocked(azureInventarioApi.getAzureInventarioStatus).mockResolvedValue({
+      em_execucao: true, iniciada_em: '2026-08-30T10:00:00Z',
+      progresso: {
+        fase: '[1/2] Consultando Activity Log — sub-1', sub_atual: 'sub-1', sub_idx: 1, sub_total: 2,
+        eventos: 12, novos: 5, atualizados: 6, excluidos: 1,
+        log: [{ ts: '10:00:01', msg: 'Inventário — 2026-08-29T10:00:00Z → 2026-08-30T10:00:00Z | 2 subscription(s)' }],
+      },
+    })
+    renderWithClient()
+    expect(await screen.findByText('⏳ Coleta de Inventário em andamento')).toBeInTheDocument()
+    expect(screen.getByText('[1/2] Consultando Activity Log — sub-1 (1/2)')).toBeInTheDocument()
+    expect(screen.getByText('12')).toBeInTheDocument() // eventos
+    expect(screen.getByText('5')).toBeInTheDocument() // novos
+    expect(screen.getByText(/Inventário — 2026-08-29T10:00:00Z/)).toBeInTheDocument()
+    // enquanto está rodando não existe botão "Fechar" — só aparece após concluir
+    expect(screen.queryByRole('button', { name: 'Fechar' })).not.toBeInTheDocument()
+  })
+
+  it('histórico de execuções aparece na aba Configuração', async () => {
+    vi.mocked(azureInventarioApi.getAzureInventarioColetaHistorico).mockResolvedValue([
+      { id: 1, iniciado_em: '2026-08-30T09:00:00Z', concluido_em: '2026-08-30T09:01:00Z', status: 'concluido', origem: 'agendado', periodo_inicio: null, periodo_fim: null, eventos_processados: 8, recursos_novos: 3, recursos_atualizados: 4, recursos_excluidos: 1, mensagem: '8 evento(s) | 3 novo(s), 4 atualizado(s), 1 excluído(s)' },
+    ])
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    expect(await screen.findByText('⏰ Agendada')).toBeInTheDocument()
+    expect(screen.getByText('concluido')).toBeInTheDocument()
+    expect(screen.getByText('8 evento(s) | 3 novo(s), 4 atualizado(s), 1 excluído(s)')).toBeInTheDocument()
+  })
 })

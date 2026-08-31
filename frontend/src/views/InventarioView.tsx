@@ -9,6 +9,7 @@ import {
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
+import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMonitor'
 
 // Inventário + Auditoria de Recursos Azure (2026-08-30, pedido do usuário: "ontem tinha X
 // recursos, hoje tenho X+1 — quem criou, quando, quanto custa"). Fonte: Azure Activity Log
@@ -166,8 +167,6 @@ export default function InventarioView() {
     },
   })
 
-  const progresso = statusQuery.data?.progresso
-
   return (
     <div className="view active">
       <div className="view-hero">
@@ -181,13 +180,7 @@ export default function InventarioView() {
         <button className={tab === 'config' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('config')}>Configuração</button>
       </div>
 
-      {statusQuery.data?.em_execucao && progresso && (
-        <div className="card" style={{ margin: '16px 20px 0', borderColor: 'var(--accent)' }}>
-          <div style={{ padding: '12px 20px', fontSize: 12, color: 'var(--text-muted)' }}>
-            🔄 Coletando... {progresso.fase} — {progresso.eventos} evento(s) processado(s) ({progresso.novos} novo(s), {progresso.atualizados} atualizado(s), {progresso.excluidos} excluído(s))
-          </div>
-        </div>
-      )}
+      <AzureInventarioColetaMonitor />
 
       <div className="card" style={{ margin: '16px 20px 0' }}>
         <div className="card-header"><span className="card-title">Crescimento de Recursos</span></div>
