@@ -576,6 +576,21 @@ code{font-family:monospace;font-size:8.5pt;background:#f3eeff;color:#6d28d9;padd
 
   <div class="subsec">Ponto de atenção (⚠️) nos rankings</div>
   <p>Quando o motor de detecção de anomalias (Seção 13) encontra um workspace ou usuário fora do padrão, o item correspondente nos rankings <strong>Por Workspace</strong>/<strong>Por Usuário</strong> ganha um ícone ⚠️ ao lado do nome. Clique no ícone para navegar direto para a aba <strong>Orçamentos e Anomalias</strong> e ver o detalhe (Z-score, % de crescimento).</p>
+
+  <div class="subsec">Controle de Custos — Cluster, Query, AI Gateway e Storage</div>
+  <p>Quatro cards adicionais, cada um lendo um schema de System Tables diferente (habilitado à parte por um account admin — veja o card correspondente se ficar sempre vazio):</p>
+  <div class="tbl-wrap">
+    <table class="doc">
+      <thead><tr><th>Card</th><th>O que mostra</th><th>Observação</th></tr></thead>
+      <tbody>
+        <tr><td>Por Model Serving</td><td>Custo por endpoint de modelo hospedado no Databricks</td><td>Sem coleta extra — já vem do billing normal</td></tr>
+        <tr><td>Utilização de Cluster</td><td>CPU/memória média por cluster — ⚠️ marca os com CPU abaixo de 15% (candidatos a redimensionar)</td><td>Só all-purpose/jobs compute — não cobre SQL Warehouse</td></tr>
+        <tr><td>Queries em SQL Warehouse</td><td>Duração, status e usuário por query — custo é uma <strong>estimativa</strong> (rateio pela duração, não um valor de billing exato)</td><td>Texto da query não é mostrado (redigido pelo Databricks)</td></tr>
+        <tr><td>AI Gateway</td><td>Volume de requisições/tokens por modelo externo (OpenAI, Anthropic, etc.)</td><td><strong>Sem custo em R$</strong> — o Databricks não sabe quanto o provedor externo cobra</td></tr>
+        <tr><td>Otimização de Storage</td><td>Operações de Predictive Optimization (compactação, vacuum, etc.) por tabela</td><td>DBUs são uma estimativa</td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 
 <!-- S13 -->

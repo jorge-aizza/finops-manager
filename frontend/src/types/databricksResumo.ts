@@ -31,6 +31,10 @@ export interface DatabricksResumo {
   por_job: { job_id: string; job_name: string | null; custo: number }[]
   por_cluster: { cluster_id: string; custo: number }[]
   por_warehouse: { warehouse_id: string; custo: number }[]
+  // por_model_serving (2026-08-29, auditoria) — zero coleta nova: a documentação oficial
+  // confirma que custo de Model Serving já vem inteiro de system.billing.usage (SKU
+  // *_SERVERLESS_REAL_TIME_INFERENCE_*), já coletado desde a Fase 2.
+  por_model_serving: { endpoint: string; custo: number }[]
 }
 
 // escopo_tipo 'tag' filtra por custom_tags->>tag_key = tag_valor (projeto/time/centro de

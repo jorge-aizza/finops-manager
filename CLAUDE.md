@@ -2188,31 +2188,21 @@ navegador, sem ganho nenhum. `coletarDatabricks` (gatilho de coleta manual) não
 ajuste — a rota já responde imediatamente e roda a coleta em background (`_dbxColetaEmExecucao`),
 sempre foi fire-and-forget do lado do cliente.
 
-**Lacunas identificadas pra "Controle de Custos" — nenhuma implementada ainda, aguardando
-decisão do usuário sobre prioridade** (ver `system.compute`/`system.query`/`system.serving`/
-`system.ai_gateway`, todos confirmados existentes e não usados hoje):
-- **Utilização de cluster / detecção de ociosidade** (`system.compute.node_timeline` —
-  métricas de CPU/memória minuto a minuto pra all-purpose e jobs compute) — hoje o sistema
-  mostra CUSTO por cluster, mas não se aquele cluster está super-dimensionado ou ocioso.
-  Essa é a diferença entre "visibilidade de custo" (o que já temos) e "otimização de custo"
-  (rightsizing) — um dos dois pilares clássicos de FinOps que ainda falta.
-- **Custo/performance por query em SQL Warehouse** (`system.query.history`) — hoje só
-  temos custo agregado por warehouse (`Por Warehouse`); não há visão de qual QUERY ou qual
-  USUÁRIO específico consumiu mais dentro de um warehouse, nem tempo de execução de query
-  (equivalente ao que "Execuções de Job" acabou de trazer pra Jobs, mas pra SQL).
-- **Gasto com Model Serving / AI Gateway** (`system.serving.endpoint_usage`,
-  `system.ai_gateway.external_model_spend` — literalmente "estimated USD spend for requests
-  routed to external models") — Quotas Genie (já implementado) CONTROLA limites de uso do
-  Genie via a Budgets API nativa, mas não existe hoje nenhuma visão de CONSUMO real de
-  Model Serving/AI Gateway pra outros endpoints além do Genie — área de custo crescente em
-  contas Databricks modernas (GenAI).
-- **Otimização de storage** (`system.storage.predictive_optimization_operations_history`)
-  — fora do escopo de custo de compute, mas relevante pra TCO geral de Databricks.
-
-Nenhuma dessas foi implementada nesta rodada — são apresentadas como opções pro usuário
-decidir prioridade, não implementadas preventivamente, dado o tamanho de cada uma
-(rightsizing de cluster e custo-por-query são, cada um, do tamanho da feature de
-"Execuções de Job" que acabou de ser construída).
+**Lacunas identificadas pra "Controle de Custos" nesta auditoria** — apresentadas ao
+usuário como opções (`system.compute`/`system.query`/`system.serving`/`system.ai_gateway`/
+`system.storage`, todas confirmadas existentes e não usadas até este ponto); o usuário
+escolheu implementar as 4 na mesma sessão — ver seção seguinte
+("Controle de Custos — 4 features novas") pros detalhes de cada uma:
+- **Utilização de cluster / detecção de ociosidade** (`system.compute.node_timeline`) —
+  a diferença entre "visibilidade de custo" (já tínhamos) e "otimização de custo"
+  (rightsizing).
+- **Custo/performance por query em SQL Warehouse** (`system.query.history`).
+- **Gasto com Model Serving / AI Gateway** — **corrigido durante a implementação**: a
+  tabela `system.ai_gateway.external_model_spend` citada aqui NÃO EXISTE (nome
+  impreciso de uma pesquisa anterior desta sessão) — a tabela real é
+  `system.ai_gateway.usage`, confirmada oficialmente SEM nenhuma coluna de custo em
+  R$/US$. Ver seção seguinte pro que foi implementado de fato (volume, não gasto).
+- **Otimização de storage** (`system.storage.predictive_optimization_operations_history`).
 
 **Verificado**: `node --check`, `tsc -b`, `pm2 restart` sem erro/crash-loop. As duas
 correções (fórmula de preço, polling) não têm cobertura de teste automatizado possível
@@ -2220,6 +2210,100 @@ neste ambiente (dependem de uma resposta real da Statement Execution API — moc
 comportamento de polling seria testar o mock, não a lógica real) — mesma limitação já
 documentada pra toda a Coleta Databricks; primeira validação de verdade só na primeira
 coleta contra uma conta Databricks real.
+
+### Coleta Databricks — Controle de Custos: 4 features novas (Cluster, Query, AI Gateway, Storage) (2026-08-29)
+
+Usuário pediu explicitamente as 4 lacunas identificadas na auditoria acima. Cada uma lê um
+schema de System Tables SEPARADO de `system.billing` (habilitado à parte por um account
+admin — mesmo padrão de `system.lakeflow` pra Execuções de Job), coletada best-effort
+(`_bestEffortColetaExtra`, extraído nesta rodada pra não repetir o mesmo try/catch+log+
+anotação-de-histórico 5x — Job Runs foi migrado pra usar o mesmo helper) dentro do mesmo
+`_executarColetaDatabricks` — uma falha em qualquer uma só anota "indisponível" na mensagem
+do histórico, nunca derruba a coleta de billing (que já terminou e foi persistida antes).
+Todas as 4 tabelas novas + `system.lakeflow.*` (já existente) entraram em
+`_DBX_OPTIONAL_TABLES`, testadas individualmente por "Testar Conexão" (nenhuma delas
+disponível/indisponível afeta o `ok` principal da rota).
+
+**1. Utilização de Cluster** (`system.compute.node_timeline` + `system.compute.clusters`)
+— a diferença entre "visibilidade de custo" (já tínhamos, por cluster) e "otimização de
+custo" (rightsizing). `node_timeline` é minuto-a-minuto por instância — granular DEMAIS
+pra guardar cru (um cluster de 10 workers por 30 dias = ~432 mil linhas só daquele
+cluster); agregado por `(workspace,cluster,dia)` na própria query Spark SQL antes de
+gravar (`AVG(cpu_user_percent + cpu_system_percent)` — soma exclui `cpu_wait_percent`,
+que é espera de I/O, não trabalho de verdade). `system.compute.clusters` (SCD2) só usado
+pro nome/dono mais recente do cluster. Nova tabela `databricks_cluster_utilizacao`
+(`UNIQUE workspace_id,cluster_id,dia`). `GET /cluster-utilizacao` agrega por cluster no
+período inteiro (`AVG` das médias diárias) e marca `ocioso:true` quando CPU média <
+`_CLUSTER_OCIOSO_CPU_PCT` (15%, constante do servidor — sem dado real disponível nesta
+sessão pra calibrar um threshold "correto" pro ambiente da Vivo). Frontend:
+`DatabricksClusterUtilizacaoCard.tsx`, ordenado do mais ocioso pro menos (⚠️ nos ociosos) —
+a feature existe pra chamar atenção pra rightsizing, não pra listar em ordem alfabética.
+
+**2. Custo/performance por Query em SQL Warehouse** (`system.query.history`) — equivalente
+ao que "Execuções de Job" trouxe pra Jobs, mas pra SQL. `statement_text` NÃO é coletado
+(redigido por padrão pra quem não é admin/`databricks_pii_access` — não vale a pena
+depender disso, e não precisamos do SQL em si, só metadados de performance). **Sem custo
+próprio** (confirmado na documentação oficial — precisa correlacionar com
+`system.billing.usage`); diferente de Job Runs (que correlaciona por `job_run_id` exato),
+aqui o custo é uma **ALOCAÇÃO PROPORCIONAL** calculada em LEITURA (`GET /query-history`):
+custo diário do warehouse (já em `databricks_consumo`) dividido entre as queries daquele
+dia na proporção de `duracao_total_ms` de cada uma — mesmo espírito de rateio já usado em
+RN-DB-001 (cluster Databricks) e no "custo médio pra período" da Calculadora Azure, nunca
+um valor de billing exato por query; a UI (`DatabricksQueryHistoryCard.tsx`) rotula a
+coluna explicitamente "Custo (estimado)" com tooltip explicando o método, pra não passar a
+falsa impressão de precisão de billing real.
+
+**3. AI Gateway — volume de modelos externos** (`system.ai_gateway.usage`) — **correção
+real encontrada durante a própria implementação, não um bug de código**: a auditoria
+anterior (seção acima) tinha registrado a lacuna como `system.ai_gateway.external_model_spend`
+("estimated USD spend for requests routed to external models") — essa tabela **não
+existe**; foi um nome impreciso vindo de uma pesquisa menos rigorosa numa rodada anterior
+desta sessão. Pesquisado de novo com mais cuidado: a tabela real é
+`system.ai_gateway.usage`, e a documentação oficial confirma que ela **não tem nenhuma
+coluna de custo em R$/US$** — a Databricks não sabe quanto o provedor externo (OpenAI,
+Anthropic etc.) cobra por trás do Gateway, só registra volume de tokens/requisições. Por
+isso esta feature mostra só **VOLUME** (requisições, tokens de entrada/saída por destino),
+nunca "gasto estimado" — não existe base pra estimar isso sem uma tabela de preço por
+provedor externo, que não é um system table do Databricks. Complementa (não sobrepõe)
+Quotas Genie (já implementado): Quotas Genie CONTROLA limite via a Budgets API nativa,
+mas não mostrava consumo real de nenhum outro endpoint de AI Gateway além do Genie —
+gap real que este card fecha, só que em volume, não em dinheiro. Agregado por
+`(workspace,destino,dia)` — volume por request individual seria alto demais pra guardar
+cru. Nova tabela `databricks_ai_gateway_usage`. Frontend: `DatabricksAiGatewayCard.tsx`,
+com aviso explícito "Sem custo em R$/US$" no próprio card (não só num tooltip) — a ausência
+de custo é a informação mais importante desse card pra quem espera ver dinheiro.
+
+**4. Otimização de Storage** (`system.storage.predictive_optimization_operations_history`)
+— TCO geral, fora do escopo de custo de compute. `usage_quantity` vem em `ESTIMATED_DBU`
+— a documentação oficial é explícita que é uma estimativa quando operações dividem
+recursos de cluster. Nova tabela `databricks_storage_otimizacao` (1 linha por
+`operation_id`, imutável). Frontend: `DatabricksStorageOtimizacaoCard.tsx`, agrupado por
+tabela+tipo de operação (COMPACTION/VACUUM/ANALYZE/CLUSTERING/etc.) com contagem de
+sucesso/total.
+
+**Model Serving — deliberadamente SEM tabela/coleta nova**: a documentação oficial
+(`docs.databricks.com/aws/en/admin/system-tables/model-serving-cost`) confirma que o custo
+de Model Serving já vem 100% de `system.billing.usage` (SKU
+`*_SERVERLESS_REAL_TIME_INFERENCE_*`, `usage_metadata.endpoint_name`) — dado que
+`databricks_consumo` já coleta desde a Fase 2 (mesmo padrão de "zero coleta nova" já usado
+pra Por Job/Cluster/Warehouse). Só faltava a agregação: `GET /resumo` ganhou
+`por_model_serving` (filtra `sku_name ILIKE '%SERVERLESS_REAL_TIME_INFERENCE%'`, agrupa por
+`usage_metadata->>'endpoint_name'` com fallback pro `sku_name` quando ausente). Renderizado
+como mais um `RankingCard` na mesma fileira de Workspace/SKU/Usuário/Job/Cluster/Warehouse
+— sem `onToggle`/drill-down (endpoint não é uma dimensão de filtro do dashboard ainda,
+adicionar exigiria estender `where`/`whereMes` só pra este card).
+
+**Verificado**: `node --check`, `tsc -b`, `pm2 restart` contra o ambiente real (banco
+`finops_dev`, com coleta Azure ao vivo rodando em paralelo) sem erro/crash-loop (uptime
+estável, contador de restart do PM2 parado), as 4 rotas novas respondendo 401 sem token.
+18 testes em `DatabricksDashboardView.test.tsx` (1 novo, cobrindo os 5 cards/rankings
+novos com dados mockados: cluster ocioso com ⚠️, custo estimado de query, volume de AI
+Gateway sem custo, contagem sucesso/total de storage, ranking de Model Serving). **NÃO
+VALIDADO contra uma conta Databricks real** (mesma ressalva de sempre nesta feature) —
+nenhuma das 4 queries Spark SQL novas foi exercitada contra um workspace de verdade; nomes
+de coluna/sintaxe conforme documentação oficial pesquisada em 2026-08-29, mas a primeira
+coleta real pode expor um ajuste necessário (mesmo padrão de risco já aceito desde a Fase 1
+da Coleta Databricks).
 
 ### Coleta Databricks — dados de teste sintéticos (2026-08-27)
 

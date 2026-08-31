@@ -8,6 +8,10 @@ import type {
 } from '../types/databricksResumo'
 import type { HistoricoItem, PurgeResult } from '../types/coleta'
 import type { DatabricksJobRunsResposta } from '../types/databricksJobRuns'
+import type {
+  DatabricksClusterUtilizacaoResposta, DatabricksQueryHistoryResposta,
+  DatabricksAiGatewayResposta, DatabricksStorageOtimizacaoResposta,
+} from '../types/databricksAudit'
 
 const NUM_FIELDS: (keyof DatabricksConfig)[] = ['granularidade_dias', 'dia_execucao', 'hora_execucao']
 const normalize = (c: DatabricksConfig) => numFields(c, NUM_FIELDS)
@@ -68,6 +72,7 @@ const normalizeResumo = (r: DatabricksResumo): DatabricksResumo => ({
   por_job: (r.por_job || []).map((j) => ({ ...j, custo: Number(j.custo) })),
   por_cluster: (r.por_cluster || []).map((c) => ({ ...c, custo: Number(c.custo) })),
   por_warehouse: (r.por_warehouse || []).map((w) => ({ ...w, custo: Number(w.custo) })),
+  por_model_serving: (r.por_model_serving || []).map((m) => ({ ...m, custo: Number(m.custo) })),
 })
 
 // filtros = drill-down (dashboard): clicar num item de Workspace/SKU/Usuário/Job/Cluster/
@@ -218,5 +223,64 @@ export const getDatabricksJobRuns = (data_inicio?: string, data_fim?: string, fi
       duracao_segundos: run.duracao_segundos == null ? null : Number(run.duracao_segundos),
       custo_estimado: run.custo_estimado == null ? null : Number(run.custo_estimado),
     })),
+  }))
+}
+
+// ── Auditoria 2026-08-29 — 4 endpoints novos, cada um lendo um schema de System Tables
+// separado de system.billing (ver _DBX_OPTIONAL_TABLES/server.js). Todos os números
+// numéricos vêm de colunas NUMERIC/BIGINT do Postgres (voltam como string via `pg`) — mesmo
+// motivo de sempre pra normalizar explicitamente em vez de confiar no tipo declarado.
+
+export const getDatabricksClusterUtilizacao = (data_inicio?: string, data_fim?: string, workspace_id?: string) => {
+  const q = new URLSearchParams()
+  if (data_inicio && data_fim) { q.set('data_inicio', data_inicio); q.set('data_fim', data_fim) }
+  if (workspace_id) q.set('workspace_id', workspace_id)
+  const qs = q.toString()
+  return apiFetch<DatabricksClusterUtilizacaoResposta>('GET', '/databricks-coleta/cluster-utilizacao' + (qs ? '?' + qs : '')).then((r) => ({
+    ...r,
+    clusters: r.clusters.map((c) => ({
+      ...c,
+      avg_cpu_percent: c.avg_cpu_percent == null ? null : Number(c.avg_cpu_percent),
+      avg_mem_percent: c.avg_mem_percent == null ? null : Number(c.avg_mem_percent),
+      dias_observados: Number(c.dias_observados),
+    })),
+  }))
+}
+
+export const getDatabricksQueryHistory = (data_inicio?: string, data_fim?: string, filtros?: { warehouse_id?: string; executed_by?: string }) => {
+  const q = new URLSearchParams()
+  if (data_inicio && data_fim) { q.set('data_inicio', data_inicio); q.set('data_fim', data_fim) }
+  if (filtros?.warehouse_id) q.set('warehouse_id', filtros.warehouse_id)
+  if (filtros?.executed_by) q.set('executed_by', filtros.executed_by)
+  const qs = q.toString()
+  return apiFetch<DatabricksQueryHistoryResposta>('GET', '/databricks-coleta/query-history' + (qs ? '?' + qs : '')).then((r) => ({
+    ...r,
+    queries: r.queries.map((qi) => ({
+      ...qi,
+      duracao_total_ms: qi.duracao_total_ms == null ? null : Number(qi.duracao_total_ms),
+      custo_estimado: qi.custo_estimado == null ? null : Number(qi.custo_estimado),
+    })),
+  }))
+}
+
+export const getDatabricksAiGatewayUsage = (data_inicio?: string, data_fim?: string, workspace_id?: string) => {
+  const q = new URLSearchParams()
+  if (data_inicio && data_fim) { q.set('data_inicio', data_inicio); q.set('data_fim', data_fim) }
+  if (workspace_id) q.set('workspace_id', workspace_id)
+  const qs = q.toString()
+  return apiFetch<DatabricksAiGatewayResposta>('GET', '/databricks-coleta/ai-gateway-usage' + (qs ? '?' + qs : '')).then((r) => ({
+    ...r,
+    destinos: r.destinos.map((d) => ({ ...d, requisicoes: Number(d.requisicoes), input_tokens: Number(d.input_tokens), output_tokens: Number(d.output_tokens) })),
+  }))
+}
+
+export const getDatabricksStorageOtimizacao = (data_inicio?: string, data_fim?: string, workspace_id?: string) => {
+  const q = new URLSearchParams()
+  if (data_inicio && data_fim) { q.set('data_inicio', data_inicio); q.set('data_fim', data_fim) }
+  if (workspace_id) q.set('workspace_id', workspace_id)
+  const qs = q.toString()
+  return apiFetch<DatabricksStorageOtimizacaoResposta>('GET', '/databricks-coleta/storage-otimizacao' + (qs ? '?' + qs : '')).then((r) => ({
+    ...r,
+    operacoes: r.operacoes.map((o) => ({ ...o, operacoes: Number(o.operacoes), dbus: Number(o.dbus), sucesso: Number(o.sucesso) })),
   }))
 }

@@ -21,7 +21,7 @@ function makeResumo(overrides: Partial<DatabricksResumo> = {}): DatabricksResumo
     por_usuario: [{ usuario: 'joao@empresa.com', custo: 6000 }, { usuario: 'Não identificado', custo: 2000 }],
     free_vs_pago: { free: 3000, pago: 12000 },
     dbus_free_vs_pago: { free: 10, pago: 90 },
-    por_job: [], por_cluster: [], por_warehouse: [],
+    por_job: [], por_cluster: [], por_warehouse: [], por_model_serving: [],
     ...overrides,
   }
 }
@@ -42,6 +42,18 @@ beforeEach(() => {
   vi.mocked(databricksColetaApi.getDatabricksAnomalias).mockResolvedValue({ custo_diario: [], usuarios: [] })
   vi.mocked(databricksColetaApi.getDatabricksJobRuns).mockResolvedValue({
     periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: false, total: 0, runs: [],
+  })
+  vi.mocked(databricksColetaApi.getDatabricksClusterUtilizacao).mockResolvedValue({
+    periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: false, total: 0, threshold_ocioso_pct: 15, clusters: [],
+  })
+  vi.mocked(databricksColetaApi.getDatabricksQueryHistory).mockResolvedValue({
+    periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: false, total: 0, queries: [],
+  })
+  vi.mocked(databricksColetaApi.getDatabricksAiGatewayUsage).mockResolvedValue({
+    periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: false, total: 0, destinos: [],
+  })
+  vi.mocked(databricksColetaApi.getDatabricksStorageOtimizacao).mockResolvedValue({
+    periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: false, total: 0, operacoes: [],
   })
   vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([])
   // `bridge.ts` mantém currentDatabricksTab como estado de módulo (singleton) — sem
@@ -262,6 +274,51 @@ describe('DatabricksDashboardView', () => {
     await waitFor(() => expect(databricksColetaApi.getDatabricksJobRuns).toHaveBeenCalledWith(
       expect.any(String), expect.any(String), { job_id: '123' },
     ))
+  })
+
+  it('auditoria 2026-08-29: mostra Por Model Serving, Utilização de Cluster, Queries SQL, AI Gateway e Otimização de Storage', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo({
+      por_model_serving: [{ endpoint: 'meu-endpoint-llm', custo: 320.5 }],
+    }))
+    vi.mocked(databricksColetaApi.getDatabricksClusterUtilizacao).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: true, total: 1, threshold_ocioso_pct: 15,
+      clusters: [{ workspace_id: 'ws-prod', cluster_id: 'cl-1', cluster_name: 'cluster-ocioso', owned_by: 'joao@empresa.com', avg_cpu_percent: 4.2, avg_mem_percent: 30, dias_observados: 10, ocioso: true }],
+    })
+    vi.mocked(databricksColetaApi.getDatabricksQueryHistory).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: true, total: 1,
+      queries: [{ workspace_id: 'ws-prod', statement_id: 'st-1', warehouse_id: 'wh-1', statement_type: 'SELECT', executed_by: 'ana@empresa.com', iniciado_em: '2026-08-24T10:00:00Z', concluido_em: '2026-08-24T10:00:05Z', duracao_total_ms: 5000, execution_status: 'FINISHED', custo_estimado: 1.23 }],
+    })
+    vi.mocked(databricksColetaApi.getDatabricksAiGatewayUsage).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: true, total: 1,
+      destinos: [{ destination_name: 'openai', destination_model: 'gpt-4o', requisicoes: 500, input_tokens: 100000, output_tokens: 20000 }],
+    })
+    vi.mocked(databricksColetaApi.getDatabricksStorageOtimizacao).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: true, total: 1,
+      operacoes: [{ catalog_name: 'main', schema_name: 'vendas', table_name: 'pedidos', operation_type: 'COMPACTION', operacoes: 3, dbus: 1.5, sucesso: 3 }],
+    })
+    renderWithClient()
+    await screen.findByText('Custo Total no Período')
+
+    // Por Model Serving — zero coleta nova, ranking simples
+    expect(await screen.findByText('meu-endpoint-llm')).toBeInTheDocument()
+    expect(screen.getByText('R$ 320,50')).toBeInTheDocument()
+
+    // Utilização de Cluster — ⚠️ no cluster ocioso
+    expect(await screen.findByText('cluster-ocioso')).toBeInTheDocument()
+    expect(screen.getByText('4.2%')).toBeInTheDocument()
+
+    // Queries SQL Warehouse — custo estimado (alocação proporcional)
+    expect(await screen.findByText('Queries em SQL Warehouse')).toBeInTheDocument()
+    expect(screen.getByText('ana@empresa.com')).toBeInTheDocument()
+    expect(screen.getByText('R$ 1,23')).toBeInTheDocument()
+
+    // AI Gateway — volume, sem custo
+    expect(await screen.findByText('openai')).toBeInTheDocument()
+    expect(screen.getByText('500')).toBeInTheDocument()
+
+    // Otimização de Storage
+    expect(await screen.findByText('main.vendas.pedidos')).toBeInTheDocument()
+    expect(screen.getByText('3/3')).toBeInTheDocument()
   })
 
   it('lista orçamentos existentes na tabela (aba Orçamentos e Anomalias)', async () => {

@@ -6,6 +6,10 @@ import type { DatabricksBudget, DatabricksResumoMes } from '../types/databricksR
 import type { GenieBudget } from '../types/genieBudgets'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
 import DatabricksJobRunsCard from '../components/DatabricksJobRunsCard'
+import DatabricksClusterUtilizacaoCard from '../components/DatabricksClusterUtilizacaoCard'
+import DatabricksQueryHistoryCard from '../components/DatabricksQueryHistoryCard'
+import DatabricksAiGatewayCard from '../components/DatabricksAiGatewayCard'
+import DatabricksStorageOtimizacaoCard from '../components/DatabricksStorageOtimizacaoCard'
 import GenieBudgetModal from '../components/GenieBudgetModal'
 import { forecastLinear } from '../lib/forecastLinear'
 import { setDatabricksTabListener } from '../bridge'
@@ -539,7 +543,18 @@ export default function DatabricksDashboardView() {
                   activeValue={filtros.warehouse_id ?? null}
                   onToggle={(v) => toggleFiltro('warehouse_id', v)}
                 />
+                <RankingCard
+                  title="Por Model Serving"
+                  color="var(--orange,#ff8c42)"
+                  items={resumo.por_model_serving.map((m) => ({ custo: m.custo, label: m.endpoint, value: m.endpoint }))}
+                  hint="Custo já vem de system.billing.usage (mesma coleta de sempre) — sem drill-down, endpoint não é um filtro do dashboard ainda"
+                />
               </div>
+
+              <DatabricksClusterUtilizacaoCard periodo={periodo} />
+              <DatabricksQueryHistoryCard periodo={periodo} />
+              <DatabricksAiGatewayCard periodo={periodo} />
+              <DatabricksStorageOtimizacaoCard periodo={periodo} />
 
               <DatabricksJobRunsCard periodo={periodo} jobId={filtros.job_id} />
             </>

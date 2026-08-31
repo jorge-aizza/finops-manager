@@ -5800,6 +5800,108 @@ async function ensureAzureColetaTable() {
     WHERE usage_metadata->>'job_run_id' IS NOT NULL
   `);
 
+  // ── Auditoria 2026-08-29 (pedido do usuário: validar contra a documentação oficial e
+  // cobrir lacunas de "Controle de Custos") — 4 tabelas novas, cada uma um schema de
+  // System Tables SEPARADO de system.billing (precisa ser habilitado à parte por um
+  // account admin — mesmo padrão de system.lakeflow pra Execuções de Job). Todas
+  // best-effort na coleta (não derrubam billing) — ver _coletarUtilizacaoDatabricks/
+  // _coletarQueryHistoryDatabricks/_coletarAiGatewayDatabricks/_coletarStorageOtimizacaoDatabricks.
+  // "Model Serving" NÃO tem tabela própria aqui — a documentação oficial
+  // (docs.databricks.com/aws/en/admin/system-tables/model-serving-cost) confirma que o
+  // custo de Model Serving já vem 100% de system.billing.usage (SKU
+  // *_SERVERLESS_REAL_TIME_INFERENCE_*, usage_metadata.endpoint_name) — dado que
+  // databricks_consumo já coleta desde a Fase 2; só faltava a agregação (ver GET /resumo
+  // → por_model_serving).
+
+  // system.compute.node_timeline (minuto a minuto) é granular DEMAIS pra guardar cru —
+  // agregado por (workspace,cluster,dia) na própria coleta. cpu_percent = soma de
+  // cpu_user_percent+cpu_system_percent (tempo de CPU realmente em uso, exclui wait/idle).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_cluster_utilizacao (
+      id                SERIAL PRIMARY KEY,
+      workspace_id      VARCHAR(200) NOT NULL,
+      cluster_id        VARCHAR(100) NOT NULL,
+      cluster_name      VARCHAR(300),
+      owned_by          VARCHAR(300),
+      dia               DATE NOT NULL,
+      avg_cpu_percent   NUMERIC(6,2),
+      avg_mem_percent   NUMERIC(6,2),
+      amostras          INTEGER DEFAULT 0,
+      config_id         INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
+      criado_em         TIMESTAMP DEFAULT NOW(),
+      atualizado_em     TIMESTAMP DEFAULT NOW(),
+      UNIQUE (workspace_id, cluster_id, dia)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_databricks_cluster_util_dia ON databricks_cluster_utilizacao (dia)`);
+
+  // system.query.history — 1 linha por statement_id (imutável). statement_text não é
+  // coletado (redigido por padrão pra quem não é admin/databricks_pii_access — não vale a
+  // pena depender disso); guardamos só metadados de performance/custo.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_query_history (
+      id                    SERIAL PRIMARY KEY,
+      workspace_id          VARCHAR(200) NOT NULL,
+      statement_id          VARCHAR(100) NOT NULL,
+      warehouse_id          VARCHAR(100),
+      statement_type        VARCHAR(50),
+      executed_by           VARCHAR(300),
+      iniciado_em           TIMESTAMP,
+      concluido_em          TIMESTAMP,
+      duracao_total_ms      BIGINT,
+      execution_status      VARCHAR(20),
+      config_id             INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
+      criado_em             TIMESTAMP DEFAULT NOW(),
+      UNIQUE (workspace_id, statement_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_databricks_query_history_iniciado ON databricks_query_history (iniciado_em)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_databricks_query_history_warehouse ON databricks_query_history (warehouse_id)`);
+
+  // system.ai_gateway.usage — SEM coluna de custo em R$/US$ (confirmado na documentação
+  // oficial: Databricks não sabe quanto o provedor externo cobra) — agregado por
+  // (workspace,destino,dia) só em volume de tokens/requisições, nunca em dinheiro.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_ai_gateway_usage (
+      id                SERIAL PRIMARY KEY,
+      workspace_id      VARCHAR(200) NOT NULL,
+      destination_name  VARCHAR(300) NOT NULL,
+      destination_model VARCHAR(300),
+      dia               DATE NOT NULL,
+      requisicoes       BIGINT DEFAULT 0,
+      input_tokens      BIGINT DEFAULT 0,
+      output_tokens     BIGINT DEFAULT 0,
+      config_id         INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
+      criado_em         TIMESTAMP DEFAULT NOW(),
+      atualizado_em     TIMESTAMP DEFAULT NOW(),
+      UNIQUE (workspace_id, destination_name, destination_model, dia)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_databricks_ai_gateway_dia ON databricks_ai_gateway_usage (dia)`);
+
+  // system.storage.predictive_optimization_operations_history — 1 linha por operation_id
+  // (imutável). usage_quantity vem em ESTIMATED_DBU (a doc é explícita que é uma
+  // estimativa quando operações dividem recursos de cluster).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_storage_otimizacao (
+      id                SERIAL PRIMARY KEY,
+      workspace_id      VARCHAR(200) NOT NULL,
+      operation_id      VARCHAR(100) NOT NULL,
+      catalog_name      VARCHAR(300),
+      schema_name       VARCHAR(300),
+      table_name        VARCHAR(300),
+      operation_type    VARCHAR(50),
+      operation_status  VARCHAR(50),
+      iniciado_em       TIMESTAMP,
+      concluido_em      TIMESTAMP,
+      usage_quantity    NUMERIC(20,6) DEFAULT 0,
+      config_id         INTEGER REFERENCES databricks_coleta_config(id) ON DELETE SET NULL,
+      criado_em         TIMESTAMP DEFAULT NOW(),
+      UNIQUE (workspace_id, operation_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_databricks_storage_otim_iniciado ON databricks_storage_otimizacao (iniciado_em)`);
+
   // ── databricks_budgets — Fase 3: orçamento mensal opcional, global ou por
   // workspace (workspace_id NULL = todos). Base do alerta em GET .../alertas.
   await pool.query(`
@@ -7168,7 +7270,17 @@ const _DBX_REQUIRED_TABLES = ['system.billing.usage', 'system.billing.list_price
 // Tratadas como OPCIONAIS (não derrubam "Conexão OK" se ausentes) — billing/custo por
 // recurso (Fases 1-3, já em produção) não depende delas; só o card de "Execuções de Job"
 // (duração + status) fica vazio sem esse schema habilitado.
-const _DBX_OPTIONAL_TABLES = ['system.lakeflow.job_run_timeline', 'system.lakeflow.jobs'];
+// 2026-08-29: 4 grupos novos, cada um pra uma feature de "Controle de Custos" separada
+// (Utilização de Cluster, Custo por Query, AI Gateway, Otimização de Storage) — todos
+// opcionais pelo mesmo motivo de system.lakeflow (schema próprio, habilitado à parte por
+// um account admin, nunca derruba billing/custo por recurso se ausente).
+const _DBX_OPTIONAL_TABLES = [
+  'system.lakeflow.job_run_timeline', 'system.lakeflow.jobs',
+  'system.compute.node_timeline', 'system.compute.clusters',
+  'system.query.history',
+  'system.ai_gateway.usage',
+  'system.storage.predictive_optimization_operations_history',
+];
 
 // Diagnóstico — a mensagem de erro É o propósito da rota (mesmo padrão de
 // POST /api/azure-coleta/sps/:id/testar), não genericizar com _dbErr aqui.
@@ -7354,6 +7466,194 @@ async function _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configI
   return { total: linhas.length, ins, upd };
 }
 
+// Utilização de Cluster (2026-08-29, auditoria pedida pelo usuário — lacuna de
+// "otimização de custo" identificada: o sistema já mostra CUSTO por cluster (RN-DB-001),
+// mas não se aquele cluster está superdimensionado/ocioso). system.compute.node_timeline
+// é minuto a minuto por instância — granular DEMAIS pra guardar cru (um cluster de 10
+// workers por 30 dias = ~432 mil linhas só pra um cluster); agregado por
+// (workspace,cluster,dia) na própria query Spark SQL antes de gravar. cpu_percent =
+// cpu_user_percent + cpu_system_percent (tempo de CPU realmente em uso — exclui
+// cpu_wait_percent, que é I/O, não trabalho). jobs_latest (SCD2) só pro nome/dono mais
+// recente do cluster, mesmo padrão já usado pra system.lakeflow.jobs.
+async function _coletarUtilizacaoDatabricks(cfg, token, startDate, endDate, configId) {
+  const sql = `
+    WITH util AS (
+      SELECT workspace_id, cluster_id,
+             CAST(start_time AS DATE) AS dia,
+             AVG(cpu_user_percent + cpu_system_percent) AS avg_cpu_percent,
+             AVG(mem_used_percent) AS avg_mem_percent,
+             COUNT(*) AS amostras
+      FROM system.compute.node_timeline
+      WHERE CAST(start_time AS DATE) >= :data_inicio AND CAST(start_time AS DATE) <= :data_fim
+      GROUP BY workspace_id, cluster_id, CAST(start_time AS DATE)
+    ),
+    clusters_latest AS (
+      SELECT cluster_id, cluster_name, owned_by,
+             ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY change_time DESC) AS rn
+      FROM system.compute.clusters
+      WHERE delete_time IS NULL
+    )
+    SELECT u.workspace_id, u.cluster_id, u.dia, u.avg_cpu_percent, u.avg_mem_percent, u.amostras,
+           c.cluster_name, c.owned_by
+    FROM util u
+    LEFT JOIN clusters_latest c ON c.cluster_id = u.cluster_id AND c.rn = 1
+  `;
+  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
+    { name: 'data_inicio', value: startDate, type: 'DATE' },
+    { name: 'data_fim', value: endDate, type: 'DATE' },
+  ]);
+  const linhas = _parseDatabricksResult(raw);
+  let ins = 0, upd = 0;
+  for (const l of linhas) {
+    const r = await pool.query(
+      `INSERT INTO databricks_cluster_utilizacao (workspace_id,cluster_id,cluster_name,owned_by,dia,avg_cpu_percent,avg_mem_percent,amostras,config_id,atualizado_em)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+       ON CONFLICT (workspace_id,cluster_id,dia) DO UPDATE SET
+         cluster_name=EXCLUDED.cluster_name, owned_by=EXCLUDED.owned_by, avg_cpu_percent=EXCLUDED.avg_cpu_percent,
+         avg_mem_percent=EXCLUDED.avg_mem_percent, amostras=EXCLUDED.amostras, config_id=EXCLUDED.config_id, atualizado_em=NOW()
+       RETURNING (xmax = 0) AS inserted`,
+      [l.workspace_id, l.cluster_id, l.cluster_name || null, l.owned_by || null, l.dia,
+       l.avg_cpu_percent || null, l.avg_mem_percent || null, l.amostras || 0, configId]
+    );
+    if (r.rows[0]?.inserted) ins++; else upd++;
+  }
+  return { total: linhas.length, ins, upd };
+}
+
+// Custo/performance por Query em SQL Warehouse (2026-08-29, auditoria pedida pelo
+// usuário — lacuna identificada: "Por Warehouse" já mostra custo agregado, mas não qual
+// QUERY/usuário específico consumiu mais). system.query.history não tem coluna de custo
+// própria (confirmado na documentação oficial — precisa correlacionar com
+// system.billing.usage por warehouse_id+janela de tempo); guardamos só performance aqui,
+// custo é atribuído proporcionalmente em LEITURA (ver GET /query-history). statement_text
+// NÃO é coletado (redigido por padrão pra quem não é admin/databricks_pii_access — não
+// vale a pena depender disso, e não precisamos do SQL em si, só metadados).
+async function _coletarQueryHistoryDatabricks(cfg, token, startDate, endDate, configId) {
+  const sql = `
+    SELECT workspace_id, statement_id, compute.warehouse_id AS warehouse_id, statement_type,
+           executed_by, start_time, end_time, total_duration_ms, execution_status
+    FROM system.query.history
+    WHERE CAST(start_time AS DATE) >= :data_inicio AND CAST(start_time AS DATE) <= :data_fim
+      AND compute.warehouse_id IS NOT NULL
+  `;
+  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
+    { name: 'data_inicio', value: startDate, type: 'DATE' },
+    { name: 'data_fim', value: endDate, type: 'DATE' },
+  ]);
+  const linhas = _parseDatabricksResult(raw);
+  let ins = 0, upd = 0;
+  for (const l of linhas) {
+    const r = await pool.query(
+      `INSERT INTO databricks_query_history (workspace_id,statement_id,warehouse_id,statement_type,executed_by,iniciado_em,concluido_em,duracao_total_ms,execution_status,config_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT (workspace_id,statement_id) DO UPDATE SET
+         warehouse_id=EXCLUDED.warehouse_id, statement_type=EXCLUDED.statement_type, executed_by=EXCLUDED.executed_by,
+         iniciado_em=EXCLUDED.iniciado_em, concluido_em=EXCLUDED.concluido_em, duracao_total_ms=EXCLUDED.duracao_total_ms,
+         execution_status=EXCLUDED.execution_status, config_id=EXCLUDED.config_id
+       RETURNING (xmax = 0) AS inserted`,
+      [l.workspace_id, l.statement_id, l.warehouse_id || null, l.statement_type || null, l.executed_by || null,
+       l.start_time || null, l.end_time || null, l.total_duration_ms || null, l.execution_status || null, configId]
+    );
+    if (r.rows[0]?.inserted) ins++; else upd++;
+  }
+  return { total: linhas.length, ins, upd };
+}
+
+// AI Gateway — volume de uso de modelos externos (2026-08-29, auditoria pedida pelo
+// usuário — lacuna identificada como "gasto com AI Gateway", CORRIGIDA durante a própria
+// pesquisa: `system.ai_gateway.external_model_spend` (nome usado numa rodada anterior
+// desta sessão) NÃO EXISTE — a tabela real é `system.ai_gateway.usage`, confirmada
+// oficialmente SEM nenhuma coluna de custo em R$/US$: a Databricks não sabe quanto o
+// provedor externo (OpenAI, Anthropic etc.) cobra por trás do Gateway, só registra volume
+// de tokens/requisições. Por isso esta feature mostra VOLUME, nunca "gasto estimado" — não
+// existe base pra estimar isso sem uma tabela de preço por provedor externo, que não faz
+// parte de nenhum system table. Agregado por (workspace,destino,dia) — volume de
+// requisições por request individual seria alto demais pra guardar cru.
+async function _coletarAiGatewayDatabricks(cfg, token, startDate, endDate, configId) {
+  const sql = `
+    SELECT workspace_id, destination_name, destination_model,
+           CAST(event_time AS DATE) AS dia,
+           COUNT(*) AS requisicoes,
+           SUM(input_tokens) AS input_tokens,
+           SUM(output_tokens) AS output_tokens
+    FROM system.ai_gateway.usage
+    WHERE CAST(event_time AS DATE) >= :data_inicio AND CAST(event_time AS DATE) <= :data_fim
+    GROUP BY workspace_id, destination_name, destination_model, CAST(event_time AS DATE)
+  `;
+  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
+    { name: 'data_inicio', value: startDate, type: 'DATE' },
+    { name: 'data_fim', value: endDate, type: 'DATE' },
+  ]);
+  const linhas = _parseDatabricksResult(raw);
+  let ins = 0, upd = 0;
+  for (const l of linhas) {
+    const r = await pool.query(
+      `INSERT INTO databricks_ai_gateway_usage (workspace_id,destination_name,destination_model,dia,requisicoes,input_tokens,output_tokens,config_id,atualizado_em)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+       ON CONFLICT (workspace_id,destination_name,destination_model,dia) DO UPDATE SET
+         requisicoes=EXCLUDED.requisicoes, input_tokens=EXCLUDED.input_tokens, output_tokens=EXCLUDED.output_tokens,
+         config_id=EXCLUDED.config_id, atualizado_em=NOW()
+       RETURNING (xmax = 0) AS inserted`,
+      [l.workspace_id, l.destination_name || 'desconhecido', l.destination_model || null, l.dia,
+       l.requisicoes || 0, l.input_tokens || 0, l.output_tokens || 0, configId]
+    );
+    if (r.rows[0]?.inserted) ins++; else upd++;
+  }
+  return { total: linhas.length, ins, upd };
+}
+
+// Otimização de Storage (2026-08-29, auditoria pedida pelo usuário — TCO geral, fora do
+// escopo de compute). usage_quantity vem em ESTIMATED_DBU — a documentação oficial é
+// explícita que é uma estimativa quando operações dividem recursos de cluster.
+async function _coletarStorageOtimizacaoDatabricks(cfg, token, startDate, endDate, configId) {
+  const sql = `
+    SELECT workspace_id, operation_id, catalog_name, schema_name, table_name,
+           operation_type, operation_status, start_time, end_time, usage_quantity
+    FROM system.storage.predictive_optimization_operations_history
+    WHERE CAST(start_time AS DATE) >= :data_inicio AND CAST(start_time AS DATE) <= :data_fim
+  `;
+  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
+    { name: 'data_inicio', value: startDate, type: 'DATE' },
+    { name: 'data_fim', value: endDate, type: 'DATE' },
+  ]);
+  const linhas = _parseDatabricksResult(raw);
+  let ins = 0, upd = 0;
+  for (const l of linhas) {
+    const r = await pool.query(
+      `INSERT INTO databricks_storage_otimizacao (workspace_id,operation_id,catalog_name,schema_name,table_name,operation_type,operation_status,iniciado_em,concluido_em,usage_quantity,config_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (workspace_id,operation_id) DO UPDATE SET
+         operation_status=EXCLUDED.operation_status, concluido_em=EXCLUDED.concluido_em,
+         usage_quantity=EXCLUDED.usage_quantity, config_id=EXCLUDED.config_id
+       RETURNING (xmax = 0) AS inserted`,
+      [l.workspace_id, l.operation_id, l.catalog_name || null, l.schema_name || null, l.table_name || null,
+       l.operation_type || null, l.operation_status || null, l.start_time || null, l.end_time || null,
+       l.usage_quantity || 0, configId]
+    );
+    if (r.rows[0]?.inserted) ins++; else upd++;
+  }
+  return { total: linhas.length, ins, upd };
+}
+
+// Extraído (2026-08-29) pra evitar repetir o mesmo try/catch+log+anotação de histórico 5x
+// (Job Runs, Utilização de Cluster, Query History, AI Gateway, Storage Otimização) — todas
+// coletas best-effort com o mesmo formato de sucesso ({total,ins,upd}) e o mesmo
+// tratamento de falha (anota "indisponível" na mensagem, nunca lança pro chamador).
+async function _bestEffortColetaExtra(histId, label, faseMsg, fn) {
+  try {
+    _dbxColetaProgresso.fase = faseMsg;
+    _logColetaDbx(faseMsg);
+    const info = await fn();
+    _logColetaDbx(`${label}: ${info.total} linha(s) — ${info.ins} novo(s), ${info.upd} atualizado(s)`);
+    await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
+      [` | ${label}: ${info.total} (${info.ins} novo(s))`, histId]).catch(() => {});
+  } catch (e) {
+    _logColetaDbx(`${label}: não coletado — ${e.message}`);
+    await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
+      [` | ${label}: indisponível (${e.message.slice(0, 120)})`, histId]).catch(() => {});
+  }
+}
+
 async function _executarColetaDatabricks(configId, startDate, endDate, origem = 'manual') {
   if (_dbxColetaEmExecucao) throw new Error('Coleta Databricks já em execução');
   if (!pool) throw new Error('Banco não conectado');
@@ -7437,24 +7737,20 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
     const msgFinal = `Databricks — ${linhas.length} linha(s) | ${startDate}→${endDate}`;
     await _processarLinhasDatabricks(histId, configId, origem, startDate, endDate, linhas, msgFinal);
 
-    // Execuções de Job (tempo + status) — pedido do usuário (2026-08-29): "coletar o
-    // tempo que um Job executou e quanto custou". Best-effort — roda DEPOIS da coleta de
-    // billing (que já vale a pena mesmo se isto falhar) e NUNCA derruba a coleta
-    // principal: system.lakeflow é um schema separado de system.billing, habilitado
-    // independentemente por um account admin — uma conta pode ter billing habilitado sem
-    // ter lakeflow, e vice-versa.
-    try {
-      _dbxColetaProgresso.fase = 'Consultando execuções de Job (system.lakeflow)...';
-      _logColetaDbx('Consultando system.lakeflow.job_run_timeline + system.lakeflow.jobs...');
-      const runsInfo = await _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configId);
-      _logColetaDbx(`Execuções de Job: ${runsInfo.total} run(s) — ${runsInfo.ins} novo(s), ${runsInfo.upd} atualizado(s)`);
-      await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
-        [` | Job Runs: ${runsInfo.total} (${runsInfo.ins} novo(s))`, histId]).catch(() => {});
-    } catch (eRuns) {
-      _logColetaDbx(`Job Runs: não coletado — ${eRuns.message}`);
-      await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
-        [` | Job Runs: indisponível (${eRuns.message.slice(0, 120)})`, histId]).catch(() => {});
-    }
+    // Coletas adicionais best-effort (2026-08-29) — cada uma um schema de System Tables
+    // SEPARADO de system.billing, habilitado independentemente por um account admin; uma
+    // falha aqui só anota "indisponível" na mensagem do histórico, nunca derruba a coleta
+    // de billing acima (já concluída e persistida antes deste ponto).
+    await _bestEffortColetaExtra(histId, 'Job Runs', 'Consultando execuções de Job (system.lakeflow)...',
+      () => _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configId));
+    await _bestEffortColetaExtra(histId, 'Utilização de Cluster', 'Consultando utilização de cluster (system.compute)...',
+      () => _coletarUtilizacaoDatabricks(cfg, token, startDate, endDate, configId));
+    await _bestEffortColetaExtra(histId, 'Query History', 'Consultando histórico de queries (system.query)...',
+      () => _coletarQueryHistoryDatabricks(cfg, token, startDate, endDate, configId));
+    await _bestEffortColetaExtra(histId, 'AI Gateway', 'Consultando uso de AI Gateway (system.ai_gateway)...',
+      () => _coletarAiGatewayDatabricks(cfg, token, startDate, endDate, configId));
+    await _bestEffortColetaExtra(histId, 'Storage Otimização', 'Consultando otimização de storage (system.storage)...',
+      () => _coletarStorageOtimizacaoDatabricks(cfg, token, startDate, endDate, configId));
 
   } catch (err) {
     _logColetaDbx(`ERRO: ${err.message}`);
@@ -7809,7 +8105,7 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
     // (usage_metadata não traz cluster_name, só node_type; nome de verdade precisaria de
     // uma coleta nova contra system.compute.clusters, fora de escopo desta rodada) — job
     // usa job_name quando disponível, cluster/warehouse mostram só o id.
-    const [rTotal, rMes, rWs, rSku, rUser, rFree, rJob, rCluster, rWarehouse] = await Promise.all([
+    const [rTotal, rMes, rWs, rSku, rUser, rFree, rJob, rCluster, rWarehouse, rModelServing] = await Promise.all([
       pool.query(`SELECT COALESCE(SUM(custo_estimado),0) AS total, COUNT(*) AS linhas FROM databricks_consumo WHERE ${whereMes}`, paramsMes),
       pool.query(
         `SELECT to_char(usage_date,'YYYY-MM') AS mes, SUM(custo_estimado) AS custo,
@@ -7834,6 +8130,15 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
         FROM databricks_consumo WHERE ${whereMes} AND usage_metadata->>'cluster_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
       pool.query(`SELECT usage_metadata->>'warehouse_id' AS warehouse_id, SUM(custo_estimado) AS custo
         FROM databricks_consumo WHERE ${whereMes} AND usage_metadata->>'warehouse_id' IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
+      // Model Serving — ZERO coleta nova (auditoria 2026-08-29): a documentação oficial
+      // (docs.databricks.com/aws/en/admin/system-tables/model-serving-cost) confirma que o
+      // custo de Model Serving já vem inteiro de system.billing.usage, via o SKU
+      // *_SERVERLESS_REAL_TIME_INFERENCE_* — dado que databricks_consumo já coleta desde a
+      // Fase 2; só faltava esta agregação. usage_metadata->>'endpoint_name' pode não vir
+      // preenchido em toda linha do SKU (nem toda oferta de Model Serving usa esse campo,
+      // conforme a mesma doc) — fallback pro sku_name quando ausente.
+      pool.query(`SELECT COALESCE(usage_metadata->>'endpoint_name', sku_name) AS endpoint, SUM(custo_estimado) AS custo
+        FROM databricks_consumo WHERE ${whereMes} AND sku_name ILIKE '%SERVERLESS_REAL_TIME_INFERENCE%' GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, paramsMes),
     ]);
 
     res.json({
@@ -7849,6 +8154,7 @@ app.get('/api/databricks-coleta/resumo', authMiddleware, dbMiddleware, async (re
       por_job: rJob.rows,
       por_cluster: rCluster.rows,
       por_warehouse: rWarehouse.rows,
+      por_model_serving: rModelServing.rows,
     });
   } catch (e) { _dbErr(res, e); }
 });
@@ -8032,6 +8338,157 @@ app.get('/api/databricks-coleta/job-runs', authMiddleware, dbMiddleware, async (
       total: r.rows.length,
       runs: r.rows,
     });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Utilização de Cluster (2026-08-29, auditoria) — ver _coletarUtilizacaoDatabricks.
+// Ordenado por avg_cpu_percent ASC (clusters mais OCIOSOS primeiro) — a feature existe
+// pra chamar atenção pra rightsizing, não pra listar em ordem alfabética/de custo.
+// `ocioso` (threshold 15% de CPU em uso) é uma constante do servidor, não configurável
+// ainda — nenhum dado real disponível pra calibrar um threshold "correto" pra este
+// ambiente, 15% é um ponto de partida conservador (clusters legitimamente idle costumam
+// ficar bem abaixo disso, não perto do limiar).
+const _CLUSTER_OCIOSO_CPU_PCT = 15;
+app.get('/api/databricks-coleta/cluster-utilizacao', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    let { data_inicio, data_fim, workspace_id } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `dia >= $1 AND dia <= $2`;
+    const params = [data_inicio, data_fim];
+    if (workspace_id) { params.push(workspace_id); where += ` AND workspace_id = $${params.length}`; }
+
+    const r = await pool.query(
+      `SELECT workspace_id, cluster_id, MAX(cluster_name) AS cluster_name, MAX(owned_by) AS owned_by,
+              AVG(avg_cpu_percent) AS avg_cpu_percent, AVG(avg_mem_percent) AS avg_mem_percent,
+              COUNT(*) AS dias_observados
+       FROM databricks_cluster_utilizacao
+       WHERE ${where}
+       GROUP BY workspace_id, cluster_id
+       ORDER BY avg_cpu_percent ASC NULLS LAST
+       LIMIT 100`,
+      params
+    );
+    const clusters = r.rows.map(c => ({ ...c, ocioso: c.avg_cpu_percent != null && Number(c.avg_cpu_percent) < _CLUSTER_OCIOSO_CPU_PCT }));
+    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, tem_dados: clusters.length > 0, total: clusters.length, threshold_ocioso_pct: _CLUSTER_OCIOSO_CPU_PCT, clusters });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Custo por Query em SQL Warehouse (2026-08-29, auditoria) — ver
+// _coletarQueryHistoryDatabricks. `custo_estimado` é uma ALOCAÇÃO PROPORCIONAL (não um
+// valor exato como em Job Runs, que tem job_run_id direto no billing): system.query.history
+// não tem coluna de custo própria (confirmado na documentação oficial), então o custo
+// diário do warehouse (databricks_consumo) é dividido entre as queries daquele dia na
+// proporção da duração de cada uma — mesmo espírito de rateio já usado em RN-DB-001
+// (cluster Databricks) e no cálculo de "custo médio pra período" da Calculadora Azure,
+// nunca um valor de billing exato por query.
+app.get('/api/databricks-coleta/query-history', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    let { data_inicio, data_fim, warehouse_id, executed_by } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 7);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `q.iniciado_em >= $1 AND q.iniciado_em < $2::date + INTERVAL '1 day'`;
+    const params = [data_inicio, data_fim];
+    if (warehouse_id) { params.push(warehouse_id); where += ` AND q.warehouse_id = $${params.length}`; }
+    if (executed_by) { params.push(executed_by); where += ` AND q.executed_by = $${params.length}`; }
+
+    const r = await pool.query(
+      `WITH warehouse_daily_cost AS (
+         SELECT usage_metadata->>'warehouse_id' AS warehouse_id, usage_date, SUM(custo_estimado) AS custo_dia
+         FROM databricks_consumo WHERE usage_metadata->>'warehouse_id' IS NOT NULL GROUP BY 1, 2
+       ),
+       query_daily_duration AS (
+         SELECT warehouse_id, CAST(iniciado_em AS DATE) AS dia, SUM(duracao_total_ms) AS soma_duracao_dia
+         FROM databricks_query_history WHERE warehouse_id IS NOT NULL GROUP BY 1, 2
+       )
+       SELECT q.workspace_id, q.statement_id, q.warehouse_id, q.statement_type, q.executed_by,
+              q.iniciado_em, q.concluido_em, q.duracao_total_ms, q.execution_status,
+              CASE WHEN qd.soma_duracao_dia > 0 AND wc.custo_dia IS NOT NULL
+                   THEN wc.custo_dia * (q.duracao_total_ms::numeric / qd.soma_duracao_dia)
+                   ELSE NULL END AS custo_estimado
+       FROM databricks_query_history q
+       LEFT JOIN query_daily_duration qd ON qd.warehouse_id = q.warehouse_id AND qd.dia = CAST(q.iniciado_em AS DATE)
+       LEFT JOIN warehouse_daily_cost wc ON wc.warehouse_id = q.warehouse_id AND wc.usage_date = CAST(q.iniciado_em AS DATE)
+       WHERE ${where}
+       ORDER BY q.iniciado_em DESC
+       LIMIT 200`,
+      params
+    );
+    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, tem_dados: r.rows.length > 0, total: r.rows.length, queries: r.rows });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── AI Gateway — volume de modelos externos (2026-08-29, auditoria) — ver
+// _coletarAiGatewayDatabricks. SEM campo de custo — a documentação oficial confirma que
+// system.ai_gateway.usage não tem coluna de USD/spend (Databricks não sabe quanto o
+// provedor externo cobra); só volume de tokens/requisições.
+app.get('/api/databricks-coleta/ai-gateway-usage', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    let { data_inicio, data_fim, workspace_id } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `dia >= $1 AND dia <= $2`;
+    const params = [data_inicio, data_fim];
+    if (workspace_id) { params.push(workspace_id); where += ` AND workspace_id = $${params.length}`; }
+
+    const r = await pool.query(
+      `SELECT destination_name, destination_model,
+              SUM(requisicoes) AS requisicoes, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens
+       FROM databricks_ai_gateway_usage
+       WHERE ${where}
+       GROUP BY 1, 2
+       ORDER BY (SUM(input_tokens) + SUM(output_tokens)) DESC
+       LIMIT 20`,
+      params
+    );
+    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, tem_dados: r.rows.length > 0, total: r.rows.length, destinos: r.rows });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Otimização de Storage / Predictive Optimization (2026-08-29, auditoria) — ver
+// _coletarStorageOtimizacaoDatabricks. usage_quantity em ESTIMATED_DBU (documentação
+// oficial confirma que é estimativa quando operações dividem recursos de cluster).
+app.get('/api/databricks-coleta/storage-otimizacao', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    let { data_inicio, data_fim, workspace_id } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `iniciado_em >= $1 AND iniciado_em < $2::date + INTERVAL '1 day'`;
+    const params = [data_inicio, data_fim];
+    if (workspace_id) { params.push(workspace_id); where += ` AND workspace_id = $${params.length}`; }
+
+    const r = await pool.query(
+      `SELECT catalog_name, schema_name, table_name, operation_type,
+              COUNT(*) AS operacoes, COALESCE(SUM(usage_quantity),0) AS dbus,
+              SUM(CASE WHEN operation_status = 'SUCCESSFUL' THEN 1 ELSE 0 END) AS sucesso
+       FROM databricks_storage_otimizacao
+       WHERE ${where}
+       GROUP BY 1, 2, 3, 4
+       ORDER BY dbus DESC
+       LIMIT 50`,
+      params
+    );
+    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, tem_dados: r.rows.length > 0, total: r.rows.length, operacoes: r.rows });
   } catch (e) { _dbErr(res, e); }
 });
 
