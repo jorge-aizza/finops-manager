@@ -482,7 +482,7 @@ export default function InventarioView() {
           <div className="card" style={{ margin: '16px 20px' }}>
             <div className="card-header"><span className="card-title">Anomalias de Crescimento</span></div>
             <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-              Dias em que a criação de recursos (por subscription ou Resource Group) ficou fora do padrão histórico (Z-score ≥ 2,5 sobre janela de 35 dias).
+              Dias em que a subscription/Resource Group ficou fora do padrão histórico em <strong>quantidade de recursos criados</strong> e/ou <strong>custo</strong> (Z-score ≥ 2,5 sobre janela de 35 dias) — um RG pode crescer em volume sem custo relevante, ou o oposto, por isso os dois sinais são checados separadamente.
             </div>
             {anomaliasQuery.data && anomaliasQuery.data.length === 0 && (
               <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma anomalia detectada no período com histórico suficiente.</div>
@@ -490,15 +490,15 @@ export default function InventarioView() {
             {anomaliasQuery.data && anomaliasQuery.data.length > 0 && (
               <div className="table-wrapper">
                 <table className="data-table">
-                  <thead><tr><th>Dia</th><th>Escopo</th><th style={{ textAlign: 'right' }}>Criações</th><th style={{ textAlign: 'right' }}>Média (35d)</th><th style={{ textAlign: 'right' }}>Z-score</th></tr></thead>
+                  <thead><tr><th>Dia</th><th>Escopo</th><th style={{ textAlign: 'right' }}>Criações</th><th style={{ textAlign: 'right' }}>Custo</th><th>Gatilho</th></tr></thead>
                   <tbody>
                     {anomaliasQuery.data.map((a, i) => (
                       <tr key={i}>
                         <td style={{ fontSize: 12 }}>{new Date(a.dia).toLocaleDateString('pt-BR')}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.escopo_tipo === 'resource_group' ? `RG: ${a.resource_group}` : `Subscription: ${a.subscription_id}`}</td>
-                        <td style={{ textAlign: 'right', fontWeight: 700 }}>{a.criacoes}</td>
-                        <td style={{ textAlign: 'right', fontSize: 12, color: 'var(--text-muted)' }}>{a.media.toFixed(1)}</td>
-                        <td style={{ textAlign: 'right', color: 'var(--orange,#ff8c42)', fontWeight: 700 }}>{a.zscore.toFixed(2)}</td>
+                        <td style={{ textAlign: 'right', fontWeight: a.gatilho !== 'custo' ? 700 : 400, color: a.gatilho !== 'custo' ? 'var(--orange,#ff8c42)' : undefined }} title={`Média: ${a.media_criacoes.toFixed(1)}/dia · Z-score: ${a.zscore_criacoes.toFixed(2)}`}>{a.criacoes}</td>
+                        <td style={{ textAlign: 'right', fontWeight: a.gatilho !== 'criacoes' ? 700 : 400, color: a.gatilho !== 'criacoes' ? 'var(--orange,#ff8c42)' : undefined }} title={`Média: ${fmtBRL(a.media_custo)}/dia · Z-score: ${a.zscore_custo.toFixed(2)}`}>{fmtBRL(a.custo)}</td>
+                        <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{a.gatilho === 'ambos' ? '📦 Recursos + 💰 Custo' : a.gatilho === 'criacoes' ? '📦 Recursos' : '💰 Custo'}</td>
                       </tr>
                     ))}
                   </tbody>

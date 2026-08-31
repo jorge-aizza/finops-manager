@@ -120,7 +120,7 @@ export const getAzureRecursoDetalhe = (resourceId: string, subscriptionId: strin
 
 export const getAzureAnomaliasCrescimento = () =>
   apiFetch<AzureAnomaliaCrescimento[]>('GET', '/azure-inventario/anomalias').then((rows) =>
-    rows.map((r) => numFields(r, ['criacoes', 'media', 'desvio', 'zscore']))
+    rows.map((r) => numFields(r, ['criacoes', 'custo', 'media_criacoes', 'desvio_criacoes', 'media_custo', 'desvio_custo', 'zscore_criacoes', 'zscore_custo']))
   )
 
 export const getAzureOrcamentosInventario = () =>

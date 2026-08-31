@@ -6465,12 +6465,15 @@ async function _checkAnomaliasCrescimentoInventario() {
     const chave = `crescimento:${a.subscription_id}:${a.resource_group || 'global'}:${a.dia}`;
     if (!(await _tentarClaimAlerta('anomalia_crescimento_inventario', chave))) continue;
     const escopoTxt = a.escopo_tipo === 'resource_group' ? `Resource Group ${a.resource_group}` : `subscription ${a.subscription_id}`;
+    const partes = [];
+    if (a.gatilho === 'criacoes' || a.gatilho === 'ambos') partes.push(`<strong>${a.criacoes}</strong> recurso(s) criado(s) (média: ${a.media_criacoes.toFixed(1)}/dia, Z-score ${a.zscore_criacoes.toFixed(2)})`);
+    if (a.gatilho === 'custo' || a.gatilho === 'ambos') partes.push(`custo de <strong>R$ ${a.custo.toFixed(2)}</strong> (média: R$ ${a.media_custo.toFixed(2)}/dia, Z-score ${a.zscore_custo.toFixed(2)})`);
     await _sendEmail({
       to: destinatarios,
-      subject: `📈 Crescimento anômalo de recursos — ${escopoTxt}`,
+      subject: `📈 Crescimento anômalo — ${escopoTxt}`,
       html: _emailTemplate('Crescimento anômalo detectado', `
-        <p><strong>${_escHtmlServer(escopoTxt)}</strong> teve <strong>${a.criacoes}</strong> recurso(s) criado(s) em ${new Date(a.dia).toLocaleDateString('pt-BR')} — fora do padrão histórico (Z-score ${a.zscore.toFixed(2)}).</p>
-        <p>Média da janela (35 dias): ${a.media.toFixed(1)} criações/dia (desvio padrão: ${a.desvio.toFixed(1)})</p>`),
+        <p><strong>${_escHtmlServer(escopoTxt)}</strong> ficou fora do padrão histórico em ${new Date(a.dia).toLocaleDateString('pt-BR')}: ${partes.join(' e ')}.</p>
+        <p>Janela de referência: últimos 35 dias.</p>`),
     });
   }
 }
@@ -7343,6 +7346,7 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
 
 const _ANOM_CRESCIMENTO_ZSCORE = 2.5;       // mesmo threshold já validado pro Databricks
 const _ANOM_CRESCIMENTO_MIN_CRIACOES = 3;   // piso — evita ruído de RG que foi de 0→1 recurso/dia
+const _ANOM_CRESCIMENTO_MIN_CUSTO = 50;     // piso em R$ — mesmo raciocínio de _ANOM_USER_MIN_CUSTO (Databricks)
 
 // Anomalia de crescimento — mesma técnica de Z-score já usada pro custo diário Databricks
 // (_computeAnomaliasDatabricks), aplicada à contagem de CRIAÇÕES por dia (não custo). Global
@@ -7352,6 +7356,19 @@ const _ANOM_CRESCIMENTO_MIN_CRIACOES = 3;   // piso — evita ruído de RG que f
 // média o suficiente pra mascarar a si mesmo). `HAVING COUNT(*) >= 5` na base de stats —
 // só considera RG/subscription com pelo menos 5 dias de atividade de criação na janela,
 // senão a média/desvio de uma amostra minúscula não é confiável.
+// Combina DOIS sinais — quantidade de recursos criados E custo (R$) — no mesmo dia/escopo
+// (2026-08-31, pedido do usuário: "anomalias de Crescimento com base a mudança e Dinheiro").
+// Antes só contava CRIACAO por dia; agora cada linha carrega os dois Z-scores (criações e
+// custo), e um dia entra na lista se QUALQUER um dos dois estourar o threshold — um RG pode
+// crescer em volume sem custo relevante (recursos free-tier/pequenos) ou o oposto (poucos
+// recursos novos mas caros), então nenhum dos dois sinais sozinho conta a história inteira.
+// `custo` vem de azure_costs (mesma fonte já usada em todo o resto do Inventário/
+// Comparativo) — como os dois lados (auditoria de eventos e billing) não têm garantia de
+// cobrir exatamente os mesmos dias (billing tem ~2-3 dias de atraso, documentado acima em
+// "Custo direto quase sempre zerado..."), a união das CHAVES (dia+escopo) de ambas as fontes
+// via UNION é o que garante que um dia com só criação (sem billing ainda) ou só custo (sem
+// criação nova, ex: recurso existente cresceu de tamanho) apareça na base, com o lado
+// ausente virando 0 — não NULL, pra não quebrar a média/desvio.
 async function _computeAnomaliasCrescimento() {
   const hoje = new Date();
   const fim = hoje.toISOString().slice(0, 10);
@@ -7360,51 +7377,92 @@ async function _computeAnomaliasCrescimento() {
 
   const [rSub, rRg] = await Promise.all([
     pool.query(`
-      WITH diario AS (
+      WITH criacoes AS (
         SELECT subscription_id, DATE(quando) AS dia, COUNT(*) AS criacoes
         FROM azure_recursos_auditoria_eventos
         WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day'
         GROUP BY 1, 2
+      ), custos AS (
+        SELECT subscription_id, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
+        FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2
+        GROUP BY 1, 2
+      ), chaves AS (
+        SELECT subscription_id, dia FROM criacoes
+        UNION SELECT subscription_id, dia FROM custos
+      ), combinado AS (
+        SELECT k.subscription_id, k.dia, COALESCE(c.criacoes,0) AS criacoes, COALESCE(cu.custo,0) AS custo
+        FROM chaves k
+        LEFT JOIN criacoes c ON c.subscription_id=k.subscription_id AND c.dia=k.dia
+        LEFT JOIN custos cu ON cu.subscription_id=k.subscription_id AND cu.dia=k.dia
       ), stats AS (
-        SELECT subscription_id, AVG(criacoes) AS media, STDDEV_POP(criacoes) AS desvio, COUNT(*) AS dias
-        FROM diario GROUP BY 1 HAVING COUNT(*) >= 5
+        SELECT subscription_id,
+          AVG(criacoes) AS media_criacoes, STDDEV_POP(criacoes) AS desvio_criacoes,
+          AVG(custo) AS media_custo, STDDEV_POP(custo) AS desvio_custo, COUNT(*) AS dias
+        FROM combinado GROUP BY 1 HAVING COUNT(*) >= 5
       )
-      SELECT d.subscription_id, to_char(d.dia,'YYYY-MM-DD') AS dia, d.criacoes, s.media, s.desvio,
-        CASE WHEN s.desvio > 0 THEN (d.criacoes - s.media) / s.desvio ELSE 0 END AS zscore
-      FROM diario d JOIN stats s USING (subscription_id)
-      ORDER BY d.subscription_id, d.dia
+      SELECT co.subscription_id, to_char(co.dia,'YYYY-MM-DD') AS dia, co.criacoes, co.custo,
+        s.media_criacoes, s.desvio_criacoes, s.media_custo, s.desvio_custo,
+        CASE WHEN s.desvio_criacoes > 0 THEN (co.criacoes - s.media_criacoes) / s.desvio_criacoes ELSE 0 END AS zscore_criacoes,
+        CASE WHEN s.desvio_custo > 0 THEN (co.custo - s.media_custo) / s.desvio_custo ELSE 0 END AS zscore_custo
+      FROM combinado co JOIN stats s USING (subscription_id)
+      ORDER BY co.subscription_id, co.dia
     `, [inicioStr, fim]),
     pool.query(`
-      WITH diario AS (
-        SELECT subscription_id, resource_group, DATE(quando) AS dia, COUNT(*) AS criacoes
+      WITH criacoes AS (
+        SELECT subscription_id, UPPER(resource_group) AS resource_group, DATE(quando) AS dia, COUNT(*) AS criacoes
         FROM azure_recursos_auditoria_eventos
         WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day' AND resource_group IS NOT NULL
         GROUP BY 1, 2, 3
+      ), custos AS (
+        SELECT subscription_id, UPPER(resource_group_name) AS resource_group, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
+        FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2 AND resource_group_name IS NOT NULL
+        GROUP BY 1, 2, 3
+      ), chaves AS (
+        SELECT subscription_id, resource_group, dia FROM criacoes
+        UNION SELECT subscription_id, resource_group, dia FROM custos
+      ), combinado AS (
+        SELECT k.subscription_id, k.resource_group, k.dia, COALESCE(c.criacoes,0) AS criacoes, COALESCE(cu.custo,0) AS custo
+        FROM chaves k
+        LEFT JOIN criacoes c ON c.subscription_id=k.subscription_id AND c.resource_group=k.resource_group AND c.dia=k.dia
+        LEFT JOIN custos cu ON cu.subscription_id=k.subscription_id AND cu.resource_group=k.resource_group AND cu.dia=k.dia
       ), stats AS (
-        SELECT subscription_id, resource_group, AVG(criacoes) AS media, STDDEV_POP(criacoes) AS desvio, COUNT(*) AS dias
-        FROM diario GROUP BY 1, 2 HAVING COUNT(*) >= 5
+        SELECT subscription_id, resource_group,
+          AVG(criacoes) AS media_criacoes, STDDEV_POP(criacoes) AS desvio_criacoes,
+          AVG(custo) AS media_custo, STDDEV_POP(custo) AS desvio_custo, COUNT(*) AS dias
+        FROM combinado GROUP BY 1, 2 HAVING COUNT(*) >= 5
       )
-      SELECT d.subscription_id, d.resource_group, to_char(d.dia,'YYYY-MM-DD') AS dia, d.criacoes, s.media, s.desvio,
-        CASE WHEN s.desvio > 0 THEN (d.criacoes - s.media) / s.desvio ELSE 0 END AS zscore
-      FROM diario d JOIN stats s USING (subscription_id, resource_group)
-      ORDER BY d.subscription_id, d.resource_group, d.dia
+      SELECT co.subscription_id, co.resource_group, to_char(co.dia,'YYYY-MM-DD') AS dia, co.criacoes, co.custo,
+        s.media_criacoes, s.desvio_criacoes, s.media_custo, s.desvio_custo,
+        CASE WHEN s.desvio_criacoes > 0 THEN (co.criacoes - s.media_criacoes) / s.desvio_criacoes ELSE 0 END AS zscore_criacoes,
+        CASE WHEN s.desvio_custo > 0 THEN (co.custo - s.media_custo) / s.desvio_custo ELSE 0 END AS zscore_custo
+      FROM combinado co JOIN stats s USING (subscription_id, resource_group)
+      ORDER BY co.subscription_id, co.resource_group, co.dia
     `, [inicioStr, fim]),
   ]);
 
-  const crescimento = [];
-  for (const r of rSub.rows) {
-    if (parseInt(r.criacoes, 10) < _ANOM_CRESCIMENTO_MIN_CRIACOES) continue;
-    if (Math.abs(parseFloat(r.zscore)) >= _ANOM_CRESCIMENTO_ZSCORE) {
-      crescimento.push({ escopo_tipo: 'subscription', subscription_id: r.subscription_id, resource_group: null, dia: r.dia, criacoes: parseInt(r.criacoes, 10), media: parseFloat(r.media), desvio: parseFloat(r.desvio), zscore: parseFloat(r.zscore) });
+  function processar(rows, escopoTipo) {
+    const out = [];
+    for (const r of rows) {
+      const criacoes = parseInt(r.criacoes, 10);
+      const custo = parseFloat(r.custo);
+      const zCriacoes = parseFloat(r.zscore_criacoes);
+      const zCusto = parseFloat(r.zscore_custo);
+      const anomaloCriacoes = criacoes >= _ANOM_CRESCIMENTO_MIN_CRIACOES && Math.abs(zCriacoes) >= _ANOM_CRESCIMENTO_ZSCORE;
+      const anomaloCusto = custo >= _ANOM_CRESCIMENTO_MIN_CUSTO && Math.abs(zCusto) >= _ANOM_CRESCIMENTO_ZSCORE;
+      if (!anomaloCriacoes && !anomaloCusto) continue;
+      out.push({
+        escopo_tipo: escopoTipo, subscription_id: r.subscription_id, resource_group: r.resource_group || null, dia: r.dia,
+        criacoes, custo, media_criacoes: parseFloat(r.media_criacoes), desvio_criacoes: parseFloat(r.desvio_criacoes),
+        media_custo: parseFloat(r.media_custo), desvio_custo: parseFloat(r.desvio_custo),
+        zscore_criacoes: zCriacoes, zscore_custo: zCusto,
+        gatilho: anomaloCriacoes && anomaloCusto ? 'ambos' : anomaloCriacoes ? 'criacoes' : 'custo',
+      });
     }
+    return out;
   }
-  for (const r of rRg.rows) {
-    if (parseInt(r.criacoes, 10) < _ANOM_CRESCIMENTO_MIN_CRIACOES) continue;
-    if (Math.abs(parseFloat(r.zscore)) >= _ANOM_CRESCIMENTO_ZSCORE) {
-      crescimento.push({ escopo_tipo: 'resource_group', subscription_id: r.subscription_id, resource_group: r.resource_group, dia: r.dia, criacoes: parseInt(r.criacoes, 10), media: parseFloat(r.media), desvio: parseFloat(r.desvio), zscore: parseFloat(r.zscore) });
-    }
-  }
-  crescimento.sort((a, b) => Math.abs(b.zscore) - Math.abs(a.zscore));
+
+  const crescimento = [...processar(rSub.rows, 'subscription'), ...processar(rRg.rows, 'resource_group')];
+  crescimento.sort((a, b) => Math.max(Math.abs(b.zscore_criacoes), Math.abs(b.zscore_custo)) - Math.max(Math.abs(a.zscore_criacoes), Math.abs(a.zscore_custo)));
   return crescimento;
 }
 

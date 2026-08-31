@@ -2780,6 +2780,50 @@ genérico) funcionam ponta a ponta; só falta o admin conceder `Directory.Read.A
 registration da Service Principal (Entra ID → App registrations → API permissions →
 Microsoft Graph → Application permissions) pra os nomes começarem a aparecer de verdade.
 
+### Inventário — Anomalias de Crescimento passam a combinar quantidade E custo (2026-08-31,
+pedido do usuário: "anomalias de Crescimento com base a mudança e Dinheiro")
+
+Feedback do usuário sobre a Governança recém-lançada: Orçamento "ainda não faz sentido"
+(perguntado 2x via `AskUserQuestion` pra entender o que exatamente estava errado — usuário
+não respondeu nenhuma das duas vezes; **deixado como está por enquanto**, sem tocar no
+código de Orçamento, até vir um retorno mais específico) — só Anomalias de Crescimento foi
+confirmada pra revisão: hoje só contava CRIACAO por dia (Z-score de quantidade); usuário
+confirmou explicitamente querer quantidade E custo juntos, refletindo o impacto financeiro
+real do crescimento, não só o volume de recursos.
+
+`_computeAnomaliasCrescimento()` reescrita: cada linha (subscription OU Resource Group, por
+dia) agora carrega DOIS Z-scores independentes — `zscore_criacoes` (mesma métrica de antes,
+de `azure_recursos_auditoria_eventos`) e `zscore_custo` (novo, de `azure_costs`, mesma janela
+de 35 dias). Um dia entra na lista se QUALQUER um dos dois sinais cruzar o threshold — `um RG
+pode crescer em volume sem custo relevante (recursos free-tier/pequenos) ou o oposto (poucos
+recursos novos mas caros)`, então nenhum sinal sozinho conta a história inteira. Novo piso
+`_ANOM_CRESCIMENTO_MIN_CUSTO = 50` (R$, mesmo raciocínio de `_ANOM_USER_MIN_CUSTO` já usado
+pro Databricks) evita que um dia sem billing ainda publicado (custo=0, ~2-3 dias de atraso
+documentado acima) apareça com Z-score negativo grande e seja erroneamente sinalizado como
+"anomalia de custo" — confirmado com dado real: o dia de hoje aparecia com `zscore_custo:
+-2.66` (abaixo da média, óbvio — billing de hoje nem chegou) mas o piso corretamente excluiu
+esse caso do gatilho `custo`, só `criacoes` disparou.
+
+**Por que UNION de chaves em vez de um JOIN direto entre as duas fontes**: eventos de
+auditoria (Activity Log, quase em tempo real) e `azure_costs` (billing, ~2-3 dias de atraso)
+não cobrem exatamente os mesmos dias — um dia com criação nova mas sem billing ainda, ou um
+dia com custo mas sem criação nova (recurso existente cresceu de tamanho), são os dois casos
+reais que um JOIN simples perderia. `chaves` é a UNIÃO das combinações (escopo, dia)
+observadas em QUALQUER uma das duas fontes; o lado ausente vira `0` (nunca `NULL`, que
+quebraria a média/desvio) via `COALESCE` nos `LEFT JOIN`s a partir dessa união.
+
+**Frontend**: `AzureAnomaliaCrescimento` ganhou `custo`/`media_custo`/`desvio_custo`/
+`zscore_custo`/`gatilho` (`'criacoes'|'custo'|'ambos'`); a tabela em `InventarioView.tsx`
+troca a coluna "Média (35d)" única por "Criações"/"Custo" lado a lado (`fmtBRL`), destacando
+em laranja qual das duas colunas foi o gatilho real (tooltip com média/Z-score de cada uma) e
+um badge "📦 Recursos"/"💰 Custo"/"📦 Recursos + 💰 Custo" indicando a origem.
+
+**Verificado**: `node --check`, `tsc -b`, 14/14 testes (mock atualizado pro novo shape),
+`npm run frontend:build`, `pm2 restart` sem erro/crash-loop. Testado contra o servidor real
+(token JWT forjado, mesmo método já usado nesta sessão): `GET /anomalias` retornou 185
+anomalias reais, incluindo o caso do piso de custo confirmado acima (dia de hoje, `custo:0`,
+`zscore_custo` negativo, corretamente excluído do gatilho `custo`).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

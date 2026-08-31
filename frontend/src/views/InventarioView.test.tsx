@@ -290,7 +290,11 @@ describe('InventarioView', () => {
       { orcamento: { id: 1, nome: 'Teto Dev', escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-dev', tipo_limite: 'recursos', limite_valor: 100, threshold_atencao: 75, threshold_critico: 90, ativo: true, criado_em: '', atualizado_em: '' }, valor_atual: 95, pct: 0.95, severidade: 'critico' },
     ])
     vi.mocked(azureInventarioApi.getAzureAnomaliasCrescimento).mockResolvedValue([
-      { escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-dev', dia: '2026-08-30', criacoes: 40, media: 3.2, desvio: 1.1, zscore: 3.4 },
+      {
+        escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-dev', dia: '2026-08-30',
+        criacoes: 40, custo: 8500.5, media_criacoes: 3.2, desvio_criacoes: 1.1, media_custo: 500, desvio_custo: 120,
+        zscore_criacoes: 3.4, zscore_custo: 4.1, gatilho: 'ambos',
+      },
     ])
     vi.mocked(azureInventarioApi.getAzureTagsFaltantes).mockResolvedValue({
       chaves: ['projeto'],
@@ -306,7 +310,8 @@ describe('InventarioView', () => {
     expect(screen.getByText(/⚠ Crítico/)).toBeInTheDocument()
     expect(screen.getAllByText(/rg-dev/).length).toBeGreaterThan(0)
     expect(screen.getByText('40')).toBeInTheDocument()
-    expect(screen.getByText('3.40')).toBeInTheDocument()
+    expect(screen.getByText('R$ 8.500,50')).toBeInTheDocument()
+    expect(screen.getByText(/📦 Recursos \+ 💰 Custo/)).toBeInTheDocument()
     expect(screen.getByText('vm-x')).toBeInTheDocument()
   })
 })

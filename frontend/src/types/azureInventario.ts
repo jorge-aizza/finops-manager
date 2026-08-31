@@ -30,15 +30,25 @@ export interface AzureInventarioConfigInput {
 // Governança de crescimento" em server.js.
 
 export type AzureAnomaliaCrescimentoEscopo = 'subscription' | 'resource_group'
+export type AzureAnomaliaCrescimentoGatilho = 'criacoes' | 'custo' | 'ambos'
+// Combina 2 sinais no mesmo dia/escopo (2026-08-31, pedido do usuário: "anomalias de
+// Crescimento com base a mudança e Dinheiro") — quantidade de recursos criados E custo (R$),
+// cada um com seu próprio Z-score sobre a mesma janela de 35 dias. `gatilho` indica qual
+// sinal (ou os dois) cruzou o threshold pra aquela linha aparecer na lista.
 export interface AzureAnomaliaCrescimento {
   escopo_tipo: AzureAnomaliaCrescimentoEscopo
   subscription_id: string
   resource_group: string | null
   dia: string
   criacoes: number
-  media: number
-  desvio: number
-  zscore: number
+  custo: number
+  media_criacoes: number
+  desvio_criacoes: number
+  media_custo: number
+  desvio_custo: number
+  zscore_criacoes: number
+  zscore_custo: number
+  gatilho: AzureAnomaliaCrescimentoGatilho
 }
 
 export type AzureOrcamentoEscopoTipo = 'subscription' | 'resource_group'
