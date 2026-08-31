@@ -6080,11 +6080,11 @@ async function ensureAzureColetaTable() {
       resource_group    VARCHAR(300),
       nome              VARCHAR(500),
       criado_por        VARCHAR(300),
-      criado_em         TIMESTAMP,
+      criado_em         TIMESTAMPTZ,
       atualizado_por    VARCHAR(300),
-      atualizado_em     TIMESTAMP,
+      atualizado_em     TIMESTAMPTZ,
       excluido_por      VARCHAR(300),
-      excluido_em       TIMESTAMP,
+      excluido_em       TIMESTAMPTZ,
       ativo             BOOLEAN DEFAULT true,
       detectado_em      TIMESTAMP DEFAULT NOW()
     )
@@ -6095,6 +6095,30 @@ async function ensureAzureColetaTable() {
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_recursos_inv_uniq ON azure_recursos_inventario (subscription_id, resource_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
+  // Migração pra TIMESTAMPTZ (2026-08-31, reportado pelo usuário como "o horário parece estar
+  // errado") — `criado_em`/`atualizado_em`/`excluido_em` SEMPRE foram gravados a partir de
+  // `ev.eventTimestamp` (string ISO UTC do Activity Log, ex: "...T12:00:00Z"), nunca de um
+  // objeto JS Date. Confirmado com um teste isolado (INSERT + to_char sem reparse do driver)
+  // que uma coluna TIMESTAMP (sem tz) recebendo essa string simplesmente IGNORA o sufixo 'Z' e
+  // grava os dígitos UTC como se fossem horário local — comportamento documentado do Postgres
+  // pro cast texto→timestamp (timezone no input é descartado, não convertido). Resultado: toda
+  // leitura mostrava o horário UTC do evento como se já fosse horário de Brasília —
+  // sistematicamente 3h à FRENTE do horário real. Diferente do bug do `ultimo_evento_em`
+  // (2 camadas — JS Date reinterpretado + migração não-idempotente acumulando deriva a cada
+  // restart), aqui o caminho de escrita sempre foi só string (nunca Date) — os dígitos naive
+  // armazenados SEMPRE equivalem aos dígitos UTC reais, então uma conversão de uma vez só
+  // (`AT TIME ZONE 'UTC'`) corrige 100% do histórico, sem precisar de reset adicional. Guardado
+  // por checagem de tipo (mesmo padrão do `ultimo_evento_em` acima) pra não rodar de novo em
+  // cada restart — `TIMESTAMPTZ AT TIME ZONE 'UTC'` muda de significado numa coluna já convertida.
+  for (const _col of ['criado_em', 'atualizado_em', 'excluido_em']) {
+    const _t = await pool.query(
+      `SELECT data_type FROM information_schema.columns WHERE table_name='azure_recursos_inventario' AND column_name=$1`,
+      [_col]
+    );
+    if (_t.rows[0]?.data_type !== 'timestamp with time zone') {
+      await pool.query(`ALTER TABLE azure_recursos_inventario ALTER COLUMN ${_col} TYPE TIMESTAMPTZ USING ${_col} AT TIME ZONE 'UTC'`).catch(() => {});
+    }
+  }
   // Backfill idempotente (2026-08-31): linhas cuja primeira detecção foi um evento de EXCLUSÃO
   // nunca tiveram `nome` preenchido (bug corrigido no handler de delete abaixo) — recalcula pra
   // quem já ficou NULL antes da correção. split_part com '/' reverso não existe em SQL puro, então
@@ -6110,7 +6134,7 @@ async function ensureAzureColetaTable() {
       resource_group    VARCHAR(300),
       acao              VARCHAR(20) NOT NULL,
       autor             VARCHAR(300),
-      quando             TIMESTAMP NOT NULL,
+      quando             TIMESTAMPTZ NOT NULL,
       operation_name    VARCHAR(300),
       correlation_id    VARCHAR(100),
       criado_em         TIMESTAMP DEFAULT NOW()
@@ -6118,6 +6142,16 @@ async function ensureAzureColetaTable() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_aud_quando ON azure_recursos_auditoria_eventos (quando)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_aud_resource ON azure_recursos_auditoria_eventos (resource_id)`);
+  // Mesmo bug e mesma correção de `criado_em`/`atualizado_em`/`excluido_em` acima — `quando`
+  // também sempre veio de `ev.eventTimestamp` (string ISO UTC), nunca de um objeto JS Date.
+  {
+    const _t = await pool.query(
+      `SELECT data_type FROM information_schema.columns WHERE table_name='azure_recursos_auditoria_eventos' AND column_name='quando'`
+    );
+    if (_t.rows[0]?.data_type !== 'timestamp with time zone') {
+      await pool.query(`ALTER TABLE azure_recursos_auditoria_eventos ALTER COLUMN quando TYPE TIMESTAMPTZ USING quando AT TIME ZONE 'UTC'`).catch(() => {});
+    }
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_inventario_coleta_historico (

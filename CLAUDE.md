@@ -2940,6 +2940,48 @@ depender mais do texto "Crescimento de Recursos"), `npm run frontend:build` (bun
 de 322,55 KB pra 320,40 KB, confirmando que o código removido não é mais empacotado). Sem
 mudança em `server.js` — não precisou de `pm2 restart`.
 
+**Bug real encontrado e corrigido — horários da Auditoria/Recursos apareciam 3h à FRENTE do
+real, reportado pelo usuário como "o horário parece estar errado" (2026-08-31)**: mesma
+classe de bug já documentada e corrigida pro `ultimo_evento_em` (ver seção de coleta
+incremental acima), agora nas colunas `quando` (`azure_recursos_auditoria_eventos`) e
+`criado_em`/`atualizado_em`/`excluido_em` (`azure_recursos_inventario`) — todas nasceram
+`TIMESTAMP` (sem timezone) e sempre foram gravadas a partir de `ev.eventTimestamp` (string
+ISO UTC do Activity Log, ex: `"...T12:00:00Z"`). Confirmado com um teste isolado (INSERT
+seguido de `to_char()` sem reparse do driver) que uma coluna `TIMESTAMP` recebendo essa
+string simplesmente IGNORA o sufixo `Z` — grava os dígitos UTC como se já fossem horário
+local, comportamento documentado do Postgres pro cast texto→timestamp (timezone no input é
+descartado, nunca convertido). Toda leitura reexibia esses dígitos UTC como se fossem
+horário de Brasília — sistematicamente 3h à frente do horário real do evento. Confirmado
+contra dados reais de produção: um evento gravado com dígitos crus `22:07:13` (era hora
+UTC) aparecia como `22:07` na tela, quando o horário real do evento (Brasil) era `19:07`.
+
+Diferente do bug do `ultimo_evento_em` (que tinha 2 camadas — JS Date reinterpretado +
+migração não-idempotente acumulando deriva a cada restart), aqui o caminho de escrita
+SEMPRE foi só string (nunca objeto JS Date) — os dígitos naive armazenados sempre equivalem
+aos dígitos UTC reais pra 100% do histórico, então uma conversão de uma vez só (`ALTER
+COLUMN ... TYPE TIMESTAMPTZ USING col AT TIME ZONE 'UTC'`) corrige tudo sem precisar de
+nenhum reset adicional (diferente do `ultimo_evento_em`, que precisou zerar o watermark
+corrompido pelos restarts repetidos durante o diagnóstico daquele bug). Guardado pela MESMA
+checagem de idempotência (`information_schema.columns`, só converte se a coluna ainda não
+for `timestamp with time zone`) — testado explicitamente reiniciando o servidor duas vezes
+seguidas e confirmando que o horário NÃO deriva de novo no 2º restart (esse foi exatamente
+o Bug #2 do `ultimo_evento_em`, evitado aqui desde o início).
+
+**Efeito colateral positivo, não buscado mas correto**: `DATE(quando)` (usado no bucket
+diário das Anomalias de Crescimento) agora agrupa por dia-calendário de Brasília em vez de
+UTC — um evento entre 21h-23h59 (Brasil) que antes "vazava" pro dia seguinte (por cair
+depois da meia-noite UTC) agora fica no dia correto.
+
+**Verificado contra o servidor real, incluindo o teste de idempotência**: `node --check`,
+capturado o estado ANTES da migração (tipos `timestamp without time zone`, amostra de 3
+eventos reais com dígitos crus `22:07:xx`), `pm2 restart` (sem erro/crash-loop — coleta
+automática rodou no mesmo restart, 89 eventos processados sem erro de escrita nas colunas já
+convertidas), confirmado DEPOIS: os 4 tipos viraram `timestamp with time zone`, os mesmos 3
+eventos agora mostram `19:07` (horário real) via `.toLocaleString('pt-BR')`. **Segundo
+restart** confirmou que o valor NÃO muda de novo (idempotência real, não só teórica). Testado
+end-to-end via `GET /api/azure-inventario/auditoria` (token JWT forjado) — a API já retorna
+o horário corrigido, exatamente como o frontend (`fmtData()`, inalterado) vai renderizar.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
