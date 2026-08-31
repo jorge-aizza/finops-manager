@@ -5,10 +5,12 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import InventarioView from './InventarioView'
 import * as azureInventarioApi from '../api/azureInventario'
 import * as coletaApi from '../api/coleta'
+import * as calculadoraApi from '../api/calculadora'
 import type { AzureInventarioConfig, AzureInventarioStatus } from '../types/azureInventario'
 
 vi.mock('../api/azureInventario')
 vi.mock('../api/coleta')
+vi.mock('../api/calculadora')
 
 function renderWithClient() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -38,6 +40,7 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [] })
   vi.mocked(coletaApi.listSPs).mockResolvedValue([])
+  vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([])
 })
 
 describe('InventarioView', () => {
@@ -97,6 +100,26 @@ describe('InventarioView', () => {
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
     await waitFor(() => expect(azureInventarioApi.salvarAzureInventarioConfig).toHaveBeenCalledWith(
       expect.objectContaining({ ativo: true, retencao_dias: 180, sp_id: 5 }),
+    ))
+  })
+
+  it('lista as assinaturas por nome pra seleção, e inclui a marcada no salvar', async () => {
+    vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([
+      { subscription_id: 'sub-1', subscription_name: 'Development', periodo_inicio: null, periodo_fim: null, moeda: null },
+      { subscription_id: 'sub-2', subscription_name: 'Production', periodo_inicio: null, periodo_fim: null, moeda: null },
+    ])
+    vi.mocked(azureInventarioApi.salvarAzureInventarioConfig).mockResolvedValue({ ok: true })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+
+    expect(await screen.findByText('Development')).toBeInTheDocument()
+    expect(screen.getByText('Production')).toBeInTheDocument()
+
+    await user.click(screen.getByText('Production'))
+    await user.click(screen.getByRole('button', { name: 'Salvar' }))
+    await waitFor(() => expect(azureInventarioApi.salvarAzureInventarioConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ subscription_ids: 'sub-2' }),
     ))
   })
 

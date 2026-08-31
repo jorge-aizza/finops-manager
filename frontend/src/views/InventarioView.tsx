@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { listSPs } from '../api/coleta'
+import { listSubscriptions } from '../api/calculadora'
 import {
   getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureCrescimento,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao } from '../types/azureInventario'
+import CheckboxSearchList from '../components/CheckboxSearchList'
 
 // Inventário + Auditoria de Recursos Azure (2026-08-30, pedido do usuário: "ontem tinha X
 // recursos, hoje tenho X+1 — quem criou, quando, quanto custa"). Fonte: Azure Activity Log
@@ -86,6 +88,9 @@ export default function InventarioView() {
     refetchInterval: (q) => (q.state.data?.em_execucao ? 3000 : 20000),
   })
   const spsQuery = useQuery({ queryKey: ['coleta-sps'], queryFn: listSPs })
+  // Mesma fonte já usada pelo seletor de Assinatura da Calculadora (azure_subs_cache) —
+  // reaproveita nome + ID em vez de exigir que o admin decore/copie GUIDs de subscription.
+  const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
   const historicoQuery = useQuery({ queryKey: ['azure-inv-historico'], queryFn: getAzureInventarioColetaHistorico })
   const crescimentoQuery = useQuery({
     queryKey: ['azure-inv-crescimento', periodo.inicio, periodo.fim],
@@ -111,18 +116,32 @@ export default function InventarioView() {
   const [ativo, setAtivo] = useState(false)
   const [retencaoDias, setRetencaoDias] = useState(180)
   const [spId, setSpId] = useState<number | null>(null)
-  const [subscriptionIds, setSubscriptionIds] = useState('')
+  const [subsSelecionadas, setSubsSelecionadas] = useState<Set<string>>(new Set())
   const [formInicializado, setFormInicializado] = useState(false)
   if (configQuery.data && !formInicializado) {
     setAtivo(configQuery.data.ativo)
     setRetencaoDias(configQuery.data.retencao_dias)
     setSpId(configQuery.data.sp_id)
-    setSubscriptionIds(configQuery.data.subscription_ids || '')
+    setSubsSelecionadas(new Set((configQuery.data.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)))
     setFormInicializado(true)
   }
 
+  function toggleSub(id: string, checked: boolean) {
+    setSubsSelecionadas((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(id); else next.delete(id)
+      return next
+    })
+  }
+  function toggleTodasSubs(checked: boolean) {
+    setSubsSelecionadas(checked ? new Set((subsQuery.data || []).map((s) => s.subscription_id)) : new Set())
+  }
+
   const salvarMutation = useMutation({
-    mutationFn: () => salvarAzureInventarioConfig({ ativo, retencao_dias: retencaoDias, sp_id: spId, subscription_ids: subscriptionIds || null }),
+    mutationFn: () => salvarAzureInventarioConfig({
+      ativo, retencao_dias: retencaoDias, sp_id: spId,
+      subscription_ids: subsSelecionadas.size ? Array.from(subsSelecionadas).join(',') : null,
+    }),
     onSuccess: () => {
       window.showToast?.('Configuração salva.', 'success')
       queryClient.invalidateQueries({ queryKey: ['azure-inv-config'] })
@@ -293,7 +312,7 @@ export default function InventarioView() {
             <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
               Fonte: Azure Activity Log — usa a mesma credencial (Service Principal com role Reader) já configurada em Coleta Azure. Nenhuma permissão nova precisa ser concedida.
             </div>
-            <div style={{ padding: '0 20px 16px', display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 480 }}>
+            <div style={{ padding: '0 20px 16px', display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560 }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <input type="checkbox" checked={ativo} onChange={(e) => setAtivo(e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
                 Ativar coleta automática de Inventário/Auditoria
@@ -307,7 +326,15 @@ export default function InventarioView() {
               </div>
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Subscriptions (vazio = usa as mesmas do Service Principal)</label>
-                <textarea rows={2} value={subscriptionIds} onChange={(e) => setSubscriptionIds(e.target.value)} placeholder="uma por linha ou separadas por vírgula" />
+                <CheckboxSearchList
+                  items={(subsQuery.data || []).map((s) => ({ id: s.subscription_id, label: s.subscription_name || s.subscription_id, sublabel: s.subscription_name ? s.subscription_id : undefined }))}
+                  selected={subsSelecionadas}
+                  onToggle={toggleSub}
+                  onSelectAll={toggleTodasSubs}
+                  loading={subsQuery.isLoading}
+                  emptyText="Nenhuma assinatura encontrada — importe/colete custos Azure primeiro."
+                  searchPlaceholder="Buscar assinatura..."
+                />
               </div>
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Retenção do log de Auditoria (dias)</label>

@@ -2448,6 +2448,20 @@ sessão) — a sintaxe exata do `$filter`/`$select` e os nomes de campo da respo
 (`caller`, `resourceType.value`, etc.) conferem com a documentação oficial pesquisada em
 2026-08-30, mas a primeira coleta real pode expor um ajuste necessário.
 
+**Seletor de Subscriptions — pedido do usuário logo em seguida**: o campo de escopo (aba
+Configuração) nasceu como um `<textarea>` de texto livre (`subscription_ids`, um GUID por
+linha/vírgula) — usuário pediu pra listar as assinaturas de verdade em vez de exigir que o
+admin decore/copie GUIDs. Reaproveitado `GET /api/calculadora/subscriptions` (já existente,
+lê `azure_subs_cache` — mesma fonte do seletor de Assinatura da Calculadora) +
+`CheckboxSearchList.tsx` (mesmo componente já usado pelo wizard de coleta e pelo seletor de
+subscriptions do `SPModal.tsx` — já vem com o fix defensivo de `width:auto` no checkbox pra
+não ser esticado pela regra `.form-group input{width:100%}`, já documentado como bug real
+encontrado antes nesta sessão). Zero endpoint novo — só troca o campo de entrada por uma
+lista com nome + busca + "Selecionar Todos"; o formato salvo no backend continua o mesmo
+(string de IDs separados por vírgula), só que agora montada a partir da seleção via
+checkbox em vez de digitação manual. Teste novo em `InventarioView.test.tsx` (lista por
+nome, seleciona uma assinatura, confirma que o ID certo vai no payload de salvar).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
