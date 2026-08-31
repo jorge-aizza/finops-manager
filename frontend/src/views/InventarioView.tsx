@@ -6,14 +6,12 @@ import {
   getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureCrescimento, getAzureInventarioComparativo,
-  getAzureAnomaliasCrescimento, getAzureOrcamentosInventario, getAzureOrcamentosInventarioAlertas,
-  excluirAzureOrcamentoInventario, getAzureTagsFaltantes, resolverAutoresInventario,
+  resolverAutoresInventario,
 } from '../api/azureInventario'
-import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureOrcamentoInventario, AzureOrcamentoSeveridade } from '../types/azureInventario'
+import type { AzureAuditoriaAcao, AzureComparativoPeriodo } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
 import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMonitor'
 import RecursoDetalheModal from '../components/RecursoDetalheModal'
-import InventarioOrcamentoModal from '../components/InventarioOrcamentoModal'
 
 // Inventário + Auditoria de Recursos Azure (2026-08-30, pedido do usuário: "ontem tinha X
 // recursos, hoje tenho X+1 — quem criou, quando, quanto custa"). Fonte: Azure Activity Log
@@ -39,12 +37,6 @@ const ACAO_BADGE: Record<AzureAuditoriaAcao, { color: string; bg: string; label:
   CRIACAO: { color: 'var(--green,#22c55e)', bg: 'rgba(34,197,94,.10)', label: '✚ Criação' },
   ATUALIZACAO: { color: 'var(--blue,#4da6ff)', bg: 'rgba(77,166,255,.10)', label: '✎ Atualização' },
   EXCLUSAO: { color: 'var(--red,#ff4d6a)', bg: 'rgba(255,77,106,.10)', label: '✕ Exclusão' },
-}
-
-const SEVERIDADE_INFO: Record<AzureOrcamentoSeveridade, { cor: string; label: string }> = {
-  atencao: { cor: '#f5c518', label: '⚠ Atenção' },
-  critico: { cor: 'var(--orange,#ff8c42)', label: '⚠ Crítico' },
-  estourado: { cor: 'var(--red,#ff4d6a)', label: '🔴 Estourado' },
 }
 
 // Gráfico de crescimento — contagem diária de recursos distintos, mesmo padrão de barras
@@ -107,7 +99,7 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
 
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<'recursos' | 'auditoria' | 'comparativo' | 'governanca' | 'config'>('recursos')
+  const [tab, setTab] = useState<'recursos' | 'auditoria' | 'comparativo' | 'config'>('recursos')
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
@@ -153,49 +145,16 @@ export default function InventarioView() {
     placeholderData: keepPreviousData,
     enabled: tab === 'comparativo',
   })
-  const anomaliasQuery = useQuery({
-    queryKey: ['azure-inv-anomalias'],
-    queryFn: getAzureAnomaliasCrescimento,
-    enabled: tab === 'governanca',
-  })
-  const orcamentosQuery = useQuery({
-    queryKey: ['azure-inv-orcamentos'],
-    queryFn: getAzureOrcamentosInventario,
-    enabled: tab === 'governanca',
-  })
-  const orcamentosAlertasQuery = useQuery({
-    queryKey: ['azure-inv-orcamentos-alertas'],
-    queryFn: getAzureOrcamentosInventarioAlertas,
-    enabled: tab === 'governanca',
-  })
-  const tagsFaltantesQuery = useQuery({
-    queryKey: ['azure-inv-tags-faltantes'],
-    queryFn: () => getAzureTagsFaltantes(),
-    enabled: tab === 'governanca',
-  })
-  const [orcamentoModal, setOrcamentoModal] = useState<{ orcamento: AzureOrcamentoInventario | null } | null>(null)
-  const excluirOrcamentoMutation = useMutation({
-    mutationFn: excluirAzureOrcamentoInventario,
-    onSuccess: () => {
-      window.showToast?.('Orçamento excluído.', 'success')
-      queryClient.invalidateQueries({ queryKey: ['azure-inv-orcamentos'] })
-      queryClient.invalidateQueries({ queryKey: ['azure-inv-orcamentos-alertas'] })
-    },
-    onError: (e: Error) => window.showToast?.('Erro ao excluir: ' + e.message, 'error'),
-  })
-
   const [ativo, setAtivo] = useState(false)
   const [retencaoDias, setRetencaoDias] = useState(180)
   const [spId, setSpId] = useState<number | null>(null)
   const [subsSelecionadas, setSubsSelecionadas] = useState<Set<string>>(new Set())
-  const [tagsObrigatorias, setTagsObrigatorias] = useState('')
   const [formInicializado, setFormInicializado] = useState(false)
   if (configQuery.data && !formInicializado) {
     setAtivo(configQuery.data.ativo)
     setRetencaoDias(configQuery.data.retencao_dias)
     setSpId(configQuery.data.sp_id)
     setSubsSelecionadas(new Set((configQuery.data.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)))
-    setTagsObrigatorias(configQuery.data.tags_obrigatorias || '')
     setFormInicializado(true)
   }
 
@@ -214,7 +173,7 @@ export default function InventarioView() {
     mutationFn: () => salvarAzureInventarioConfig({
       ativo, retencao_dias: retencaoDias, sp_id: spId,
       subscription_ids: subsSelecionadas.size ? Array.from(subsSelecionadas).join(',') : null,
-      tags_obrigatorias: tagsObrigatorias.trim() || null,
+      tags_obrigatorias: configQuery.data?.tags_obrigatorias ?? null,
     }),
     onSuccess: () => {
       window.showToast?.('Configuração salva.', 'success')
@@ -261,7 +220,6 @@ export default function InventarioView() {
         <button className={tab === 'recursos' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('recursos')}>Recursos</button>
         <button className={tab === 'auditoria' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('auditoria')}>Auditoria</button>
         <button className={tab === 'comparativo' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('comparativo')}>Comparativo</button>
-        <button className={tab === 'governanca' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('governanca')}>Governança</button>
         <button className={tab === 'config' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('config')}>Configuração</button>
       </div>
 
@@ -434,119 +392,6 @@ export default function InventarioView() {
         </div>
       )}
 
-      {tab === 'governanca' && (
-        <>
-          <div className="card" style={{ margin: '16px 20px' }}>
-            <div className="card-header">
-              <span className="card-title">Orçamentos e Teto de Crescimento</span>
-              <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => setOrcamentoModal({ orcamento: null })}>+ Novo Orçamento</button>
-            </div>
-            <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-              Define um teto de recursos ativos ou custo mensal por subscription/Resource Group — alerta quando estourar (e-mail, se SMTP configurado em Integrações).
-            </div>
-            {orcamentosAlertasQuery.data && orcamentosAlertasQuery.data.length > 0 && (
-              <div style={{ padding: '0 20px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {orcamentosAlertasQuery.data.map((a) => {
-                  const info = SEVERIDADE_INFO[a.severidade]
-                  return (
-                    <div key={a.orcamento.id} style={{ fontSize: 12, padding: '8px 12px', borderRadius: 8, background: `color-mix(in srgb, ${info.cor} 14%, transparent)`, border: `1px solid color-mix(in srgb, ${info.cor} 55%, transparent)` }}>
-                      <strong style={{ color: info.cor }}>{info.label}</strong> — <strong>{a.orcamento.nome}</strong>: {a.orcamento.tipo_limite === 'custo' ? fmtBRL(a.valor_atual) : Math.round(a.valor_atual) + ' recurso(s)'} de {a.orcamento.tipo_limite === 'custo' ? fmtBRL(a.orcamento.limite_valor) : Math.round(a.orcamento.limite_valor) + ' recurso(s)'} ({(a.pct * 100).toFixed(0)}%)
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-            <div className="table-wrapper">
-              <table className="data-table">
-                <thead><tr><th>Nome</th><th>Escopo</th><th>Tipo</th><th style={{ textAlign: 'right' }}>Limite</th><th>Status</th><th></th></tr></thead>
-                <tbody>
-                  {(orcamentosQuery.data || []).length === 0 && <tr><td colSpan={6} className="empty-state">Nenhum orçamento configurado</td></tr>}
-                  {(orcamentosQuery.data || []).map((o) => (
-                    <tr key={o.id}>
-                      <td>{o.nome}</td>
-                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{o.resource_group ? `RG: ${o.resource_group}` : o.subscription_id}</td>
-                      <td style={{ fontSize: 12 }}>{o.tipo_limite === 'custo' ? 'Custo/mês' : 'Recursos ativos'}</td>
-                      <td style={{ textAlign: 'right' }}>{o.tipo_limite === 'custo' ? fmtBRL(o.limite_valor) : Math.round(o.limite_valor)}</td>
-                      <td>{o.ativo ? <span style={{ color: 'var(--green,#22c55e)', fontSize: 11 }}>● Ativo</span> : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>○ Inativo</span>}</td>
-                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                        <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 8px' }} onClick={() => setOrcamentoModal({ orcamento: o })}>Editar</button>
-                        <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 8px', color: 'var(--red,#ff4d6a)' }} onClick={() => { if (confirm(`Excluir orçamento "${o.nome}"?`)) excluirOrcamentoMutation.mutate(o.id) }}>Excluir</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="card" style={{ margin: '16px 20px' }}>
-            <div className="card-header"><span className="card-title">Anomalias de Crescimento</span></div>
-            <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-              Dias em que a subscription/Resource Group ficou fora do padrão histórico em <strong>quantidade de recursos criados</strong> e/ou <strong>custo</strong> (Z-score ≥ 2,5 sobre janela de 35 dias) — um RG pode crescer em volume sem custo relevante, ou o oposto, por isso os dois sinais são checados separadamente.
-            </div>
-            {anomaliasQuery.data && anomaliasQuery.data.length === 0 && (
-              <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma anomalia detectada no período com histórico suficiente.</div>
-            )}
-            {anomaliasQuery.data && anomaliasQuery.data.length > 0 && (
-              <div className="table-wrapper">
-                <table className="data-table">
-                  <thead><tr><th>Dia</th><th>Escopo</th><th style={{ textAlign: 'right' }}>Criações</th><th style={{ textAlign: 'right' }}>Custo</th><th>Gatilho</th></tr></thead>
-                  <tbody>
-                    {anomaliasQuery.data.map((a, i) => (
-                      <tr key={i}>
-                        <td style={{ fontSize: 12 }}>{new Date(a.dia).toLocaleDateString('pt-BR')}</td>
-                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.escopo_tipo === 'resource_group' ? `RG: ${a.resource_group}` : `Subscription: ${a.subscription_id}`}</td>
-                        <td style={{ textAlign: 'right', fontWeight: a.gatilho !== 'custo' ? 700 : 400, color: a.gatilho !== 'custo' ? 'var(--orange,#ff8c42)' : undefined }} title={`Média: ${a.media_criacoes.toFixed(1)}/dia · Z-score: ${a.zscore_criacoes.toFixed(2)}`}>{a.criacoes}</td>
-                        <td style={{ textAlign: 'right', fontWeight: a.gatilho !== 'criacoes' ? 700 : 400, color: a.gatilho !== 'criacoes' ? 'var(--orange,#ff8c42)' : undefined }} title={`Média: ${fmtBRL(a.media_custo)}/dia · Z-score: ${a.zscore_custo.toFixed(2)}`}>{fmtBRL(a.custo)}</td>
-                        <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{a.gatilho === 'ambos' ? '📦 Recursos + 💰 Custo' : a.gatilho === 'criacoes' ? '📦 Recursos' : '💰 Custo'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-
-          <div className="card" style={{ margin: '16px 20px' }}>
-            <div className="card-header">
-              <span className="card-title">Tags Obrigatórias</span>
-              {tagsFaltantesQuery.data && <span className="badge">{tagsFaltantesQuery.data.nao_conformes.length}</span>}
-            </div>
-            {!tagsFaltantesQuery.data?.chaves.length && (
-              <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>
-                Nenhuma tag obrigatória configurada — defina na aba <strong>Configuração</strong>.
-              </div>
-            )}
-            {!!tagsFaltantesQuery.data?.chaves.length && (
-              <>
-                <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  Chaves checadas: <strong>{tagsFaltantesQuery.data.chaves.join(', ')}</strong> · {tagsFaltantesQuery.data.total_verificado} recurso(s) verificado(s) · {tagsFaltantesQuery.data.nao_verificaveis} sem billing ainda (não verificável)
-                </div>
-                {tagsFaltantesQuery.data.nao_conformes.length === 0 && (
-                  <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--green,#22c55e)' }}>✓ Todos os recursos verificáveis estão em conformidade.</div>
-                )}
-                {tagsFaltantesQuery.data.nao_conformes.length > 0 && (
-                  <div className="table-wrapper">
-                    <table className="data-table">
-                      <thead><tr><th>Recurso</th><th>Resource Group</th><th>Tags faltando</th></tr></thead>
-                      <tbody>
-                        {tagsFaltantesQuery.data.nao_conformes.map((r) => (
-                          <tr key={r.resource_id}>
-                            <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.resource_id}>{r.nome || r.resource_id}</td>
-                            <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.resource_group || '—'}</td>
-                            <td style={{ fontSize: 12, color: 'var(--red,#ff4d6a)' }}>{r.tags_faltando.join(', ')}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </>
-      )}
-
       {tab === 'config' && (
         <>
           <div className="card" style={{ margin: '16px 20px' }}>
@@ -590,13 +435,6 @@ export default function InventarioView() {
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Retenção do log de Auditoria (dias)</label>
                 <input type="number" min={1} value={retencaoDias} onChange={(e) => setRetencaoDias(Number(e.target.value) || 180)} style={{ maxWidth: 120 }} />
-              </div>
-              <div className="form-group" style={{ margin: 0 }}>
-                <label>Tags obrigatórias (opcional — separadas por vírgula)</label>
-                <input value={tagsObrigatorias} onChange={(e) => setTagsObrigatorias(e.target.value)} placeholder="Ex: projeto,centro_custo,ambiente" />
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                  Checado contra as tags do billing (aba Governança) — recurso sem alguma dessas chaves aparece como não conforme.
-                </div>
               </div>
               <button className="btn-primary" style={{ alignSelf: 'flex-start' }} disabled={salvarMutation.isPending} onClick={() => salvarMutation.mutate()}>
                 {salvarMutation.isPending ? 'Salvando...' : 'Salvar'}
@@ -645,13 +483,6 @@ export default function InventarioView() {
         />
       )}
 
-      {orcamentoModal && (
-        <InventarioOrcamentoModal
-          orcamento={orcamentoModal.orcamento}
-          subscriptions={(subsQuery.data || []).map((s) => ({ subscription_id: s.subscription_id, subscription_name: s.subscription_name }))}
-          onClose={() => setOrcamentoModal(null)}
-        />
-      )}
     </div>
   )
 }

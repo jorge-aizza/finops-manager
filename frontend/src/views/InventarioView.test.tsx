@@ -43,10 +43,6 @@ beforeEach(() => {
     periodo_a: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
     periodo_b: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
   })
-  vi.mocked(azureInventarioApi.getAzureAnomaliasCrescimento).mockResolvedValue([])
-  vi.mocked(azureInventarioApi.getAzureOrcamentosInventario).mockResolvedValue([])
-  vi.mocked(azureInventarioApi.getAzureOrcamentosInventarioAlertas).mockResolvedValue([])
-  vi.mocked(azureInventarioApi.getAzureTagsFaltantes).mockResolvedValue({ chaves: [], nao_conformes: [], nao_verificaveis: 0, total_verificado: 0 })
   vi.mocked(coletaApi.listSPs).mockResolvedValue([])
   vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([])
 })
@@ -280,38 +276,5 @@ describe('InventarioView', () => {
     expect(screen.getByText(/Custo direto zerado, mas o Resource Group/)).toBeInTheDocument()
     expect(screen.getByText('R$ 2.500,75')).toBeInTheDocument()
     expect(screen.getByText(/34 recursos diferentes/)).toBeInTheDocument()
-  })
-
-  it('aba Governança mostra orçamentos, anomalias de crescimento e tags faltantes', async () => {
-    vi.mocked(azureInventarioApi.getAzureOrcamentosInventario).mockResolvedValue([
-      { id: 1, nome: 'Teto Dev', escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-dev', tipo_limite: 'recursos', limite_valor: 100, threshold_atencao: 75, threshold_critico: 90, ativo: true, criado_em: '', atualizado_em: '' },
-    ])
-    vi.mocked(azureInventarioApi.getAzureOrcamentosInventarioAlertas).mockResolvedValue([
-      { orcamento: { id: 1, nome: 'Teto Dev', escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-dev', tipo_limite: 'recursos', limite_valor: 100, threshold_atencao: 75, threshold_critico: 90, ativo: true, criado_em: '', atualizado_em: '' }, valor_atual: 95, pct: 0.95, severidade: 'critico' },
-    ])
-    vi.mocked(azureInventarioApi.getAzureAnomaliasCrescimento).mockResolvedValue([
-      {
-        escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-dev', dia: '2026-08-30',
-        criacoes: 40, custo: 8500.5, media_criacoes: 3.2, desvio_criacoes: 1.1, media_custo: 500, desvio_custo: 120,
-        zscore_criacoes: 3.4, zscore_custo: 4.1, gatilho: 'ambos',
-      },
-    ])
-    vi.mocked(azureInventarioApi.getAzureTagsFaltantes).mockResolvedValue({
-      chaves: ['projeto'],
-      nao_conformes: [{ subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/rg/vm-x', nome: 'vm-x', resource_group: 'rg-dev', resource_type: 'Microsoft.Compute/virtualMachines', tags_faltando: ['projeto'] }],
-      nao_verificaveis: 2,
-      total_verificado: 5,
-    })
-    const user = userEvent.setup()
-    renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Governança' }))
-
-    expect((await screen.findAllByText('Teto Dev')).length).toBe(2)
-    expect(screen.getByText(/⚠ Crítico/)).toBeInTheDocument()
-    expect(screen.getAllByText(/rg-dev/).length).toBeGreaterThan(0)
-    expect(screen.getByText('40')).toBeInTheDocument()
-    expect(screen.getByText('R$ 8.500,50')).toBeInTheDocument()
-    expect(screen.getByText(/📦 Recursos \+ 💰 Custo/)).toBeInTheDocument()
-    expect(screen.getByText('vm-x')).toBeInTheDocument()
   })
 })

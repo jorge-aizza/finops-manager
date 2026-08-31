@@ -2824,6 +2824,39 @@ um badge "📦 Recursos"/"💰 Custo"/"📦 Recursos + 💰 Custo" indicando a o
 anomalias reais, incluindo o caso do piso de custo confirmado acima (dia de hoje, `custo:0`,
 `zscore_custo` negativo, corretamente excluído do gatilho `custo`).
 
+**Aba Governança removida da UI a pedido do usuário (2026-08-31)**: "Não quero nesse momento
+Orçamento então pode retirar a parte de Governança" — pedido feito logo após a revisão de
+Anomalias de Crescimento acima (a mesma sessão que tinha acabado de melhorar o recurso).
+Perguntado 2x antes disso o que especificamente não fazia sentido no Orçamento, sem resposta
+nas duas vezes (ver seção anterior) — dado o pedido explícito subsequente de remover a aba
+inteira, tratado como decisão tomada: tira TUDO da Governança (Orçamento + Anomalias de
+Crescimento + Tags Faltantes), não só o Orçamento.
+
+**Só a UI foi removida, backend intacto — mesmo padrão já usado antes pra
+`ReconciliacaoModal.tsx`** (Calculadora): as 3 tabelas (`azure_inventario_orcamentos`,
+funções `_computeAnomaliasCrescimento`/`_computeOrcamentosInventarioAlertas`, rotas
+`GET/POST/PUT/DELETE .../orcamentos`, `GET .../anomalias`, `GET .../tags-faltantes`) e os 3
+gatilhos periódicos de e-mail (`_checkAnomaliasCrescimentoInventario`/
+`_checkOrcamentosInventario`/`_checkRelatorioSemanalInventario`, ainda chamados no tick
+horário de `_iniciarAlertasEmail`) **continuam existindo e rodando** — nada foi apagado do
+`server.js`. Só o front-end perdeu o ponto de entrada: removidos de `InventarioView.tsx` a
+aba "Governança" (botão + os 3 cards), o campo "Tags obrigatórias" da aba Configuração (órfão
+sem a aba que mostraria o resultado — o valor já salvo, se algum, continua sendo reenviado
+sem mudança a cada save via `configQuery.data?.tags_obrigatorias`, nunca sobrescrito por uma
+UI que não existe mais), e todas as queries/mutations/imports associados
+(`anomaliasQuery`/`orcamentosQuery`/`orcamentosAlertasQuery`/`tagsFaltantesQuery`/
+`orcamentoModal`/`excluirOrcamentoMutation`/`SEVERIDADE_INFO`). `InventarioOrcamentoModal.tsx`
+(componente) **não foi apagado** — fica sem nenhum jeito de abrir pela UI, mais fácil de
+restaurar (só recolocar a aba) se a feature for pedida de volta. Deliberadamente NÃO tocado:
+o botão **🪪 Resolver Nomes** (resolução de autor via Microsoft Graph) — é uma feature
+separada, não faz parte de "Governança", só compartilhava a aba Configuração fisicamente.
+
+**Verificado**: `tsc -b`, suíte completa do frontend (267/267 — 1 teste removido junto com a
+aba, nenhuma regressão nos 267 restantes), `npm run frontend:build` (bundle encolheu de
+334KB pra 319KB, confirmando que o código removido não é mais empacotado). Sem mudança em
+`server.js` nesta rodada — não precisou de `pm2 restart` (Express serve os arquivos
+estáticos de `frontend/dist` diretamente, sem precisar reiniciar o processo Node).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
