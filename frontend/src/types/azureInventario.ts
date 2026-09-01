@@ -230,4 +230,18 @@ export interface AzureRecursoDetalheResposta {
   // ser publicado, ~2-3 dias depois). O RG agrega todo o ambiente, sempre populado.
   custo_resource_group: number
   resource_group_recursos: number
+  // SKU/tipo (2026-08-31, pedido do usuário: "colar o SKU da Máquina, tipo de Disco e Etc")
+  // — extraído da linha de billing mais recente que casa com este recurso. `origem:'direto'`
+  // = billing do próprio resource_id; `'rg_mesmo_tipo'` = fallback (nenhum billing direto —
+  // comum pra recursos efêmeros de cluster — usa outro recurso do MESMO tipo no MESMO
+  // Resource Group como aproximação). `null` = nenhuma das duas fontes teve dado.
+  billing_detalhe: {
+    meter_category: string | null
+    meter_sub_category: string | null
+    meter_name: string | null
+    product_name: string | null
+    sku: string | null
+    vcpus: number | null
+    origem: 'direto' | 'rg_mesmo_tipo'
+  } | null
 }

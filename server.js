@@ -7423,12 +7423,80 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
         : Promise.resolve({ rows: [{ custo: 0, recursos: 0 }] }),
     ]);
 
+    // SKU/tipo (2026-08-31, pedido do usuário: "é possível colar o SKU da Máquina, tipo de
+    // Disco e Etc") — Azure Cost Management já traz isso por linha de billing, sem precisar
+    // de nenhuma chamada nova à ARM: `meter_sub_category` já dá o tipo (ex: "Premium SSD
+    // Managed Disks" pra disco, "Virtual Machines Ddsv5 Series" pra VM), e `additional_info`
+    // (JSON) traz `ServiceType` — confirmado com dados reais desta sessão que, pra VM, é
+    // exatamente a SKU no formato do Azure (`"Standard_D4ds_v5"`); usado como valor
+    // principal quando presente, com `meter_name` de fallback (parse defensivo — formato de
+    // `additional_info` não é documentado oficialmente, varia por meter).
+    // Mesma limitação estrutural já documentada pro custo: o resource_id exato de VMs/discos
+    // efêmeros de cluster (Databricks/AKS) raramente sobrevive até o billing (~2-3 dias de
+    // atraso) — confirmado testando contra o inventário real: de 40 recursos não-Databricks
+    // amostrados, só 4 tinham QUALQUER linha de billing pelo resource_id exato. Por isso,
+    // sem billing direto, cai num fallback: SKU de outro recurso do MESMO tipo no MESMO
+    // Resource Group (clusters tendem a ter nós homogêneos) — melhor que nada, mas marcado
+    // como `origem:'rg_mesmo_tipo'` pro frontend deixar claro que é uma aproximação.
+    // Bug real de performance encontrado testando contra dados reais desta sessão, corrigido
+    // ANTES de reportar a feature como pronta: a 1ª versão usava `resource_type=$3` no
+    // fallback (filtrando pelo tipo ARM vindo do inventário) + `ORDER BY cost_date DESC` —
+    // travou 2-4 MINUTOS num RG real de 64 mil linhas. Duas causas, as duas corrigidas:
+    // (1) `azure_costs.resource_type` está SEMPRE NULL neste ambiente (a exportação de
+    // billing usada aqui nunca populou essa coluna) — o filtro nunca batia com nada, e o
+    // planner ainda tinha que visitar (e filtrar) todas as ~22 mil linhas do RG pra chegar
+    // nessa conclusão; trocado por `resource_id ILIKE '%/' || tipo || '/%'` — o path do
+    // resource_id SEMPRE carrega o tipo ARM (`/providers/Microsoft.Compute/disks/...`),
+    // então filtra corretamente sem depender de uma coluna que não existe nesta exportação.
+    // (2) `ORDER BY cost_date DESC` força um Sort sobre TODO o conjunto filtrado antes do
+    // `LIMIT 1` poder cortar — sem o ORDER BY, o planner para no primeiro match (confirmado
+    // via EXPLAIN ANALYZE: de ~1s com Bitmap Heap Scan + Sort pra ~0,2ms com Index Scan
+    // parando cedo). "Qualquer" linha recente é suficiente pra esta feature (é uma
+    // aproximação, não uma auditoria de billing exata), então perder a garantia de "a mais
+    // recente" é um trade-off aceitável pela mudança de minutos pra milissegundos.
+    let _bdRow = null, _bdOrigem = null;
+    const _bdDireto = await pool.query(
+      `SELECT meter_category, meter_sub_category, meter_name, product_name, additional_info
+       FROM azure_costs WHERE UPPER(resource_id) = UPPER($1) AND additional_info IS NOT NULL AND additional_info <> ''
+       LIMIT 1`,
+      [resource_id]
+    );
+    if (_bdDireto.rows.length) {
+      _bdRow = _bdDireto.rows[0]; _bdOrigem = 'direto';
+    } else if (recurso.resource_group && recurso.resource_type) {
+      const _bdRg = await pool.query(
+        `SELECT meter_category, meter_sub_category, meter_name, product_name, additional_info
+         FROM azure_costs
+         WHERE subscription_id=$1 AND UPPER(resource_group_name)=UPPER($2)
+           AND resource_id ILIKE '%/' || $3 || '/%'
+           AND additional_info IS NOT NULL AND additional_info <> ''
+         LIMIT 1`,
+        [subscription_id, recurso.resource_group, recurso.resource_type]
+      );
+      if (_bdRg.rows.length) { _bdRow = _bdRg.rows[0]; _bdOrigem = 'rg_mesmo_tipo'; }
+    }
+    let billing_detalhe = null;
+    if (_bdRow) {
+      let sku = null, vcpus = null;
+      try {
+        const info = JSON.parse(_bdRow.additional_info);
+        sku = info.ServiceType || null;
+        vcpus = typeof info.VCPUs === 'number' ? info.VCPUs : null;
+      } catch {}
+      billing_detalhe = {
+        meter_category: _bdRow.meter_category, meter_sub_category: _bdRow.meter_sub_category,
+        meter_name: _bdRow.meter_name, product_name: _bdRow.product_name,
+        sku, vcpus, origem: _bdOrigem,
+      };
+    }
+
     res.json({
       recurso,
       eventos: eventosR.rows,
       custo_diario: custoR.rows,
       custo_resource_group: custoRGR.rows[0].custo,
       resource_group_recursos: parseInt(custoRGR.rows[0].recursos, 10) || 0,
+      billing_detalhe,
     });
   } catch (e) { _dbErr(res, e); }
 });

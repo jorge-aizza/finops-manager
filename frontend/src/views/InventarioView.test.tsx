@@ -285,6 +285,11 @@ describe('InventarioView', () => {
       custo_diario: [{ cost_date: '2026-08-20', custo: 5.5 }],
       custo_resource_group: 123.45,
       resource_group_recursos: 1,
+      billing_detalhe: {
+        meter_category: 'Virtual Machines', meter_sub_category: 'Virtual Machines Ddsv5 Series',
+        meter_name: 'D4ds v5', product_name: 'Virtual Machines Ddsv5 Series - D4ds v5 - BR South',
+        sku: 'Standard_D4ds_v5', vcpus: 4, origem: 'direto',
+      },
     })
     const user = userEvent.setup()
     renderWithClient()
@@ -293,9 +298,46 @@ describe('InventarioView', () => {
     expect(await screen.findByText('Detalhe do Recurso')).toBeInTheDocument()
     expect(screen.getByText('Linha do tempo (1 evento)')).toBeInTheDocument()
     expect(screen.getAllByText('✚ Criação').length).toBeGreaterThan(0)
+    expect(screen.getByText('Standard_D4ds_v5')).toBeInTheDocument()
+    expect(screen.getByText(/4 vCPUs/)).toBeInTheDocument()
     expect(azureInventarioApi.getAzureRecursoDetalhe).toHaveBeenCalledWith(
       '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste', 'sub-1',
     )
+  })
+
+  it('modal de detalhe mostra o SKU típico do RG quando não há billing direto', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-x/providers/Microsoft.Compute/disks/disco-x',
+        resource_type: 'Microsoft.Compute/disks', resource_group: 'databricks-rg-x', nome: 'disco-x',
+        criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 0,
+      }],
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
+      recurso: {
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-x/providers/Microsoft.Compute/disks/disco-x',
+        resource_type: 'Microsoft.Compute/disks', resource_group: 'databricks-rg-x', nome: 'disco-x',
+        criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 0,
+      },
+      eventos: [],
+      custo_diario: [],
+      custo_resource_group: 0,
+      resource_group_recursos: 0,
+      billing_detalhe: {
+        meter_category: 'Storage', meter_sub_category: 'Premium SSD Managed Disks',
+        meter_name: 'P10 LRS Disk', product_name: 'Premium SSD Managed Disks - P10 LRS',
+        sku: null, vcpus: null, origem: 'rg_mesmo_tipo',
+      },
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByText('disco-x'))
+
+    expect(await screen.findByText('P10 LRS Disk')).toBeInTheDocument()
+    expect(screen.getByText(/típico deste Resource Group/)).toBeInTheDocument()
   })
 
   it('modal de detalhe mostra o nome da assinatura (com fallback pro GUID)', async () => {
@@ -322,6 +364,7 @@ describe('InventarioView', () => {
       custo_diario: [],
       custo_resource_group: 0,
       resource_group_recursos: 0,
+      billing_detalhe: null,
     })
     const user = userEvent.setup()
     renderWithClient()
@@ -352,6 +395,7 @@ describe('InventarioView', () => {
       custo_diario: [],
       custo_resource_group: 2500.75,
       resource_group_recursos: 34,
+      billing_detalhe: null,
     })
     const user = userEvent.setup()
     renderWithClient()

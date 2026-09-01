@@ -74,6 +74,36 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                 </div>
               </div>
 
+              {data.billing_detalhe ? (
+                <div style={{ fontSize: 12, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', marginBottom: 16 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                    SKU / Tipo
+                    {data.billing_detalhe.origem === 'rg_mesmo_tipo' && (
+                      <span style={{ fontWeight: 400, color: 'var(--orange,#ff8c42)', marginLeft: 6 }}>
+                        (típico deste Resource Group — este recurso não tem billing próprio)
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <strong style={{ color: 'var(--text)' }}>{data.billing_detalhe.sku || data.billing_detalhe.meter_name || '—'}</strong>
+                    {data.billing_detalhe.vcpus != null && (
+                      <span style={{ color: 'var(--text-muted)' }}> · {data.billing_detalhe.vcpus} vCPU{data.billing_detalhe.vcpus !== 1 ? 's' : ''}</span>
+                    )}
+                  </div>
+                  <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>
+                    {data.billing_detalhe.meter_category}
+                    {data.billing_detalhe.meter_sub_category ? ` › ${data.billing_detalhe.meter_sub_category}` : ''}
+                  </div>
+                  {data.billing_detalhe.product_name && (
+                    <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>{data.billing_detalhe.product_name}</div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+                  SKU/tipo não disponível — sem nenhuma linha de billing pra este recurso, nem pra outro do mesmo tipo neste Resource Group.
+                </div>
+              )}
+
               {data.recurso.custo_acumulado === 0 && data.custo_resource_group > 0 && (
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', marginBottom: 16 }}>
                   💡 Custo direto zerado, mas o Resource Group <strong style={{ color: 'var(--text)' }}>{data.recurso.resource_group}</strong> acumulou{' '}

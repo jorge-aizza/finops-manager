@@ -2998,6 +2998,65 @@ do frontend (1 falha de timeout em `AcoesView.test.tsx` sob carga do full-run �
 isolado, arquivo não tocado nesta mudança, mesmo flaky pré-existente já documentado antes nesta
 sessão), `npm run frontend:build`. Sem mudança em `server.js` — não precisou de `pm2 restart`.
 
+**Modal de detalhe do recurso ganhou SKU/Tipo (2026-08-31, pedido do usuário: "é possível colar
+o SKU da Máquina, tipo de Disco e Etc")**: `GET /api/azure-inventario/recurso-detalhe` ganhou
+`billing_detalhe`, extraído da linha de billing (`azure_costs`) mais relevante pro recurso.
+Confirmado com dados reais desta sessão que `additional_info` (JSON, coluna já coletada por
+toda importação/coleta Azure) traz `ServiceType` — pra VM, é exatamente a SKU no formato do
+Azure (`"Standard_D4ds_v5"`), e `meter_sub_category` já dá o tipo pra outros recursos (ex:
+`"Premium SSD Managed Disks"` pra disco) — nenhuma chamada nova à ARM foi necessária.
+
+**Fallback pelo mesmo motivo estrutural já documentado pro custo**: testado contra o
+inventário real (40 recursos não-Databricks amostrados) que só 4 tinham QUALQUER linha de
+billing pelo resource_id exato — mesma causa (recursos efêmeros de cluster, billing com
+2-3 dias de atraso). Sem billing direto, cai num fallback: SKU de outro recurso do MESMO tipo
+no MESMO Resource Group (`origem:'rg_mesmo_tipo'` na resposta — o frontend mostra um aviso
+"típico deste Resource Group" quando essa é a fonte, nunca finge que é o dado exato).
+
+**Bug real de performance encontrado testando contra dados reais, corrigido ANTES de reportar
+pronto — a 1ª versão do fallback travava 2-4 MINUTOS** num RG real de 64 mil linhas de
+billing. Duas causas, as duas confirmadas via `EXPLAIN ANALYZE` contra o banco real e
+corrigidas: (1) o fallback original filtrava por `resource_type=$3` (o tipo ARM vindo do
+inventário) — mas `azure_costs.resource_type` está **sempre `NULL`** neste ambiente (a
+exportação de billing usada pela Vivo nunca populou essa coluna), então o filtro nunca batia
+com nada, e o planner ainda precisava visitar e filtrar todas as ~22 mil linhas candidatas do
+RG pra chegar nessa conclusão. Corrigido trocando por `resource_id ILIKE '%/' || tipo || '/%'`
+— o path do `resource_id` SEMPRE carrega o tipo ARM (`/providers/Microsoft.Compute/disks/...`),
+então filtra corretamente sem depender de uma coluna que essa exportação nunca preenche — mesma
+classe de "não confiar num campo não confirmado" já documentada várias vezes neste arquivo.
+(2) `ORDER BY cost_date DESC` força um `Sort` sobre TODO o conjunto filtrado antes do `LIMIT 1`
+poder cortar — sem o `ORDER BY`, o planner para no primeiro match. As duas juntas confirmadas
+via `EXPLAIN ANALYZE`: de ~1s com `Bitmap Heap Scan` + `Sort` (varrendo 64 mil linhas, 0
+resultados por causa do bug #1) pra ~0,2ms com `Index Scan` parando no primeiro match real.
+"Qualquer" linha recente é suficiente pra esta feature (uma aproximação, não uma auditoria de
+billing exata) — perder a garantia de "a mais recente" é aceitável pela mudança de minutos pra
+milissegundos. Mesmo tratamento aplicado à query de match direto (removido o `ORDER BY` ali
+também, por consistência/segurança, mesmo não sendo o gargalo confirmado).
+
+**Achado à parte, NÃO corrigido nesta rodada (fora do escopo do que foi pedido)**: mesmo depois
+do fix acima, o endpoint inteiro ainda levou ~8,8s pra esse RG específico — isolado e confirmado
+via `EXPLAIN`/timing direto que o gargalo real é a query PRÉ-EXISTENTE `custoRGR` (o fallback de
+custo do Resource Group, já documentado acima — soma todo o RG quando o custo direto do recurso
+é zero), que precisa somar as 64 mil linhas do RG sem nenhum atalho possível (é um `SUM`/`COUNT
+DISTINCT` de verdade, não um `LIMIT 1` como o SKU) — 8,5s isolada, quase o tempo inteiro do
+endpoint. Esse RG (64 mil linhas) é um outlier real — ~4,4% de toda a tabela `azure_costs`
+(~1,45M linhas) sozinho — a maioria dos RGs deve ser bem menor e não sofrer disso. Não corrigido
+agora porque é uma característica pré-existente de uma feature já em produção (não introduzida
+por esta mudança) e uma correção de verdade (cache, índice novo, ou aceitar uma aproximação)
+é um escopo maior que "adicionar SKU" — documentado aqui como um item pra decidir depois.
+
+**Verificado contra o servidor real, incluindo o caminho de performance**: `node --check`,
+`pm2 restart` sem erro/crash-loop, testado com um SP/VM real do ambiente (token JWT forjado) —
+`billing_detalhe` retornou `sku:"Standard_D4ds_v5"`, `vcpus:4`, `origem:"rg_mesmo_tipo"`
+corretamente, em ~28ms de SQL (contra minutos antes do fix). **Efeito colateral do próprio
+diagnóstico**: os testes de performance repetidos deixaram várias queries antigas penduradas
+no Postgres (`pg_cancel_backend` usado pra limpar, confirmado via `pg_stat_activity` que não
+sobrou nada preso depois). `tsc -b`, 17/17 testes em `InventarioView.test.tsx` (2 novos —
+SKU direto com vCPUs, e o aviso de "típico do RG"), 267/271 na suíte completa (4 falhas de
+timeout sob carga do full-run em arquivos não tocados por esta mudança — `AcoesView`,
+`ColetaView`, `DatabricksConfigModal` — confirmadas como flaky pré-existente, todas passam
+100% quando rodadas isoladas), `npm run frontend:build`.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
