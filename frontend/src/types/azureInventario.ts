@@ -220,6 +220,22 @@ export interface AzureComparativoResposta {
 // Detalhe de um recurso — timeline completa de eventos + tendência de custo (últimos 90
 // dias). Aberto ao clicar num recurso na aba Recursos (ou num item de um período no
 // Comparativo).
+// Hierarquia Assinatura → Resource Group (2026-08-31, pedido do usuário: "algo por
+// Assinatura... vou fazendo drill down dos dados até chegar no recurso"). Sem `nivel`
+// diferenciado por union — `subscription_id`/`resource_group` vêm um ou outro conforme o
+// nível pedido (ver GET /azure-inventario/resumo-por-assinatura). O 3º nível (recursos
+// dentro do RG) reaproveita `AzureRecursoInventario`/`getAzureRecursosInventario` direto.
+export interface AzureResumoPorAssinaturaItem {
+  subscription_id?: string
+  resource_group?: string
+  total: number
+  por_tipo: { tipo: string; total: number }[]
+}
+export interface AzureResumoPorAssinaturaResposta {
+  nivel: 'assinatura' | 'resource_group'
+  itens: AzureResumoPorAssinaturaItem[]
+}
+
 export interface AzureRecursoDetalheResposta {
   recurso: AzureRecursoInventario
   eventos: AzureAuditoriaEvento[]

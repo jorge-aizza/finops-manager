@@ -38,6 +38,7 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureInventarioColetaHistorico).mockResolvedValue([])
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
+  vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockResolvedValue({ nivel: 'assinatura', itens: [] })
   vi.mocked(azureInventarioApi.getAzureInventarioComparativo).mockResolvedValue({
     periodo_a: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
     periodo_b: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
@@ -50,6 +51,88 @@ describe('InventarioView', () => {
   it('mostra a aba Recursos por padrão', async () => {
     renderWithClient()
     expect(await screen.findByText('Recursos (Inventário)')).toBeInTheDocument()
+  })
+
+  it('aba Por Assinatura navega Assinatura → Resource Group → Recurso', async () => {
+    vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([
+      { subscription_id: 'sub-1', subscription_name: 'Development', periodo_inicio: null, periodo_fim: null, moeda: null },
+    ])
+    vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockImplementation((subscriptionId?: string) => {
+      if (!subscriptionId) {
+        return Promise.resolve({
+          nivel: 'assinatura' as const,
+          itens: [{ subscription_id: 'sub-1', total: 3, por_tipo: [
+            { tipo: 'Microsoft.Compute/virtualMachines', total: 2 },
+            { tipo: 'Microsoft.Compute/disks', total: 1 },
+          ] }],
+        })
+      }
+      return Promise.resolve({
+        nivel: 'resource_group' as const,
+        itens: [{ resource_group: 'rg-1', total: 1, por_tipo: [{ tipo: 'Microsoft.Compute/virtualMachines', total: 1 }] }],
+      })
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 50,
+      }],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Por Assinatura' }))
+
+    expect(await screen.findByText('Development')).toBeInTheDocument()
+    expect(screen.getByText('3 recursos ativos')).toBeInTheDocument()
+
+    await user.click(screen.getByText('Development'))
+    expect(await screen.findByText('rg-1')).toBeInTheDocument()
+    expect(azureInventarioApi.getAzureResumoPorAssinatura).toHaveBeenLastCalledWith('sub-1')
+
+    await user.click(screen.getByText('rg-1'))
+    expect(await screen.findByText('vm-teste')).toBeInTheDocument()
+    expect(azureInventarioApi.getAzureRecursosInventario).toHaveBeenLastCalledWith(
+      expect.objectContaining({ subscription_id: 'sub-1', resource_group: 'rg-1', ativo: true }),
+    )
+
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
+      recurso: {
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 50,
+      },
+      eventos: [], custo_diario: [], custo_resource_group: 0, resource_group_recursos: 0, billing_detalhe: null,
+    })
+    await user.click(screen.getByText('vm-teste'))
+    expect(await screen.findByText('Detalhe do Recurso')).toBeInTheDocument()
+  })
+
+  it('aba Por Assinatura separa VM, VM Scale Set e VM de Databricks em badges distintos', async () => {
+    vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([
+      { subscription_id: 'sub-1', subscription_name: 'Development', periodo_inicio: null, periodo_fim: null, moeda: null },
+    ])
+    vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockResolvedValue({
+      nivel: 'assinatura',
+      itens: [{
+        subscription_id: 'sub-1', total: 6, por_tipo: [
+          { tipo: 'Microsoft.Compute/virtualMachines', total: 3 },
+          { tipo: 'Microsoft.Compute/virtualMachines::databricks', total: 2 },
+          { tipo: 'Microsoft.Compute/virtualMachineScaleSets', total: 1 },
+        ],
+      }],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Por Assinatura' }))
+
+    expect(await screen.findByText('Development')).toBeInTheDocument()
+    expect(screen.getByTitle('VM')).toHaveTextContent('🖥️ 3')
+    expect(screen.getByTitle('VM (Databricks)')).toHaveTextContent('🧱 2')
+    expect(screen.getByTitle('VM Scale Set')).toHaveTextContent('🧩 1')
   })
 
   it('lista recursos com custo acumulado, e mostra "desconhecido" quando não há criado_por', async () => {

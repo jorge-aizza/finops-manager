@@ -6,7 +6,7 @@ import {
   getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
-  resolverAutoresInventario,
+  resolverAutoresInventario, getAzureResumoPorAssinatura,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -71,11 +71,51 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   'microsoft.operationsmanagement/solutions': 'Solução de Monitoramento',
   '(desconhecido)': 'Desconhecido',
 }
+// Sufixo `::databricks` (2026-09-01, pedido do usuário: "separar nos Card o que é VM, o que
+// é Scale Set, o que é VM de Databricks") — marca uma VM/VM Scale Set que é nó de cluster
+// Databricks (RG gerenciado, ver `_detectManagedRg` em server.js), nunca aparece num
+// resource_type real do ARM (que só usa `/`). Tratado ANTES do lookup normal — o rótulo/ícone
+// base continua vindo do mesmo mapa, só com o sufixo "(Databricks)"/ícone 🧱 acrescentado.
 function resourceTypeLabel(raw: string): string {
+  if (raw.endsWith('::databricks')) return resourceTypeLabel(raw.slice(0, -'::databricks'.length)) + ' (Databricks)'
   const conhecido = RESOURCE_TYPE_LABELS[raw.toLowerCase()]
   if (conhecido) return conhecido
   const ultimo = raw.split('/').pop() || raw
   return ultimo.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase())
+}
+
+// Ícone por tipo de recurso (2026-08-31, pedido do usuário: "ícones em destaque com o
+// número") — usado nos badges da vista "Por Assinatura". Mesma normalização/fallback de
+// `resourceTypeLabel` (chave em minúsculo); tipos fora do mapa caem no ícone genérico 📦.
+const RESOURCE_TYPE_ICONS: Record<string, string> = {
+  'microsoft.compute/virtualmachines': '🖥️',
+  'microsoft.compute/virtualmachinescalesets': '🧩',
+  'microsoft.compute/disks': '💾',
+  'microsoft.compute/snapshots': '📸',
+  'microsoft.network/networkinterfaces': '🔌',
+  'microsoft.network/publicipaddresses': '🌐',
+  'microsoft.network/virtualnetworks': '🕸️',
+  'microsoft.network/networksecuritygroups': '🛡️',
+  'microsoft.network/loadbalancers': '⚖️',
+  'microsoft.network/privateendpoints': '🔒',
+  'microsoft.network/bastionhosts': '🚪',
+  'microsoft.storage/storageaccounts': '🗄️',
+  'microsoft.databricks/workspaces': '🧱',
+  'microsoft.sql/servers': '🛢️',
+  'microsoft.sql/servers/databases': '🛢️',
+  'microsoft.containerservice/managedclusters': '☸️',
+  'microsoft.web/sites': '🌍',
+  'microsoft.web/serverfarms': '🌍',
+  'microsoft.keyvault/vaults': '🔑',
+  'microsoft.resources/deployments': '📦',
+  'microsoft.insights/components': '📈',
+  'microsoft.insights/actiongroups': '📣',
+  'microsoft.operationalinsights/workspaces': '📊',
+  '(desconhecido)': '❔',
+}
+function resourceTypeIcon(raw: string): string {
+  if (raw.endsWith('::databricks')) return '🧱'
+  return RESOURCE_TYPE_ICONS[raw.toLowerCase()] || '📦'
 }
 
 // Uma linha do comparativo (ex: "Recursos ativos", "Custo total") — mostra os dois
@@ -101,7 +141,7 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
 
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<'recursos' | 'auditoria' | 'comparativo' | 'config'>('recursos')
+  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'config'>('recursos')
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
@@ -110,6 +150,10 @@ export default function InventarioView() {
   const [periodoA, setPeriodoA] = useState(defaultPeriodo(60))
   const [periodoB, setPeriodoB] = useState(defaultPeriodo(30))
   const [recursoDetalhe, setRecursoDetalhe] = useState<{ resourceId: string; subscriptionId: string } | null>(null)
+  // Vista "Por Assinatura" (2026-08-31, pedido do usuário) — drill-down Assinatura → Resource
+  // Group → Recurso. `paSub`/`paRg` null = ainda não desceu naquele nível.
+  const [paSub, setPaSub] = useState<string | null>(null)
+  const [paRg, setPaRg] = useState<string | null>(null)
 
   const configQuery = useQuery({ queryKey: ['azure-inv-config'], queryFn: getAzureInventarioConfig })
   const statusQuery = useQuery({
@@ -136,6 +180,21 @@ export default function InventarioView() {
     queryFn: () => getAzureAuditoriaEventos({ data_inicio: periodo.inicio, data_fim: periodo.fim, acao: filtroAcao || undefined, resource_type: filtroTipo || undefined }),
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
+  })
+  const paNivel1Query = useQuery({
+    queryKey: ['azure-inv-resumo-assinatura'],
+    queryFn: () => getAzureResumoPorAssinatura(),
+    enabled: tab === 'porAssinatura' && !paSub,
+  })
+  const paNivel2Query = useQuery({
+    queryKey: ['azure-inv-resumo-rg', paSub],
+    queryFn: () => getAzureResumoPorAssinatura(paSub || undefined),
+    enabled: tab === 'porAssinatura' && !!paSub && !paRg,
+  })
+  const paRecursosQuery = useQuery({
+    queryKey: ['azure-inv-pa-recursos', paSub, paRg],
+    queryFn: () => getAzureRecursosInventario({ subscription_id: paSub || undefined, resource_group: paRg || undefined, ativo: true }),
+    enabled: tab === 'porAssinatura' && !!paSub && !!paRg,
   })
   const comparativoQuery = useQuery({
     queryKey: ['azure-inv-comparativo', periodoA.inicio, periodoA.fim, periodoB.inicio, periodoB.fim],
@@ -216,6 +275,7 @@ export default function InventarioView() {
 
       <div style={{ display: 'flex', gap: 8, margin: '16px 20px 0' }}>
         <button className={tab === 'recursos' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('recursos')}>Recursos</button>
+        <button className={tab === 'porAssinatura' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('porAssinatura')}>Por Assinatura</button>
         <button className={tab === 'auditoria' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('auditoria')}>Auditoria</button>
         <button className={tab === 'comparativo' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('comparativo')}>Comparativo</button>
         <button className={tab === 'config' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('config')}>Configuração</button>
@@ -276,6 +336,137 @@ export default function InventarioView() {
                 </tbody>
               </table>
             </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'porAssinatura' && (
+        <div className="card" style={{ margin: '16px 20px' }}>
+          <div className="card-header"><span className="card-title">Por Assinatura</span></div>
+          <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+            Navegue de Assinatura → Resource Group → Recurso. Só recursos ativos.
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 20px 14px', fontSize: 12, flexWrap: 'wrap' }}>
+            <span
+              onClick={() => { setPaSub(null); setPaRg(null) }}
+              style={{ cursor: paSub ? 'pointer' : 'default', color: paSub ? 'var(--accent)' : 'var(--text)', fontWeight: paSub ? 400 : 700 }}
+            >
+              📁 Assinaturas
+            </span>
+            {paSub && (
+              <>
+                <span style={{ color: 'var(--text-muted)' }}>›</span>
+                <span
+                  onClick={() => setPaRg(null)}
+                  style={{ cursor: paRg ? 'pointer' : 'default', color: paRg ? 'var(--accent)' : 'var(--text)', fontWeight: paRg ? 400 : 700 }}
+                >
+                  {subsQuery.data?.find((s) => s.subscription_id === paSub)?.subscription_name || paSub}
+                </span>
+              </>
+            )}
+            {paRg && (
+              <>
+                <span style={{ color: 'var(--text-muted)' }}>›</span>
+                <span style={{ fontWeight: 700, wordBreak: 'break-word' }}>{paRg}</span>
+              </>
+            )}
+          </div>
+
+          {!paSub && (
+            <>
+              {paNivel1Query.isLoading && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+              {paNivel1Query.data && paNivel1Query.data.itens.length === 0 && (
+                <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum recurso ativo no inventário ainda.</div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12, padding: '0 20px 20px' }}>
+                {paNivel1Query.data?.itens.map((it) => {
+                  const nome = subsQuery.data?.find((s) => s.subscription_id === it.subscription_id)?.subscription_name || it.subscription_id
+                  return (
+                    <div
+                      key={it.subscription_id}
+                      onClick={() => setPaSub(it.subscription_id || null)}
+                      style={{ cursor: 'pointer', border: '1px solid var(--border)', borderRadius: 10, padding: 14 }}
+                    >
+                      <div style={{ fontWeight: 700, marginBottom: 4, wordBreak: 'break-word' }}>{nome}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>{it.total} recurso{it.total !== 1 ? 's' : ''} ativo{it.total !== 1 ? 's' : ''}</div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {it.por_tipo.slice(0, 4).map((t) => (
+                          <span key={t.tipo} title={resourceTypeLabel(t.tipo)} style={{ fontSize: 11, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 20, padding: '3px 8px' }}>
+                            {resourceTypeIcon(t.tipo)} {t.total}
+                          </span>
+                        ))}
+                        {it.por_tipo.length > 4 && <span style={{ fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center' }}>+{it.por_tipo.length - 4}</span>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
+
+          {paSub && !paRg && (
+            <>
+              {paNivel2Query.isLoading && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+              {paNivel2Query.data && paNivel2Query.data.itens.length === 0 && (
+                <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum recurso ativo nesta assinatura.</div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12, padding: '0 20px 20px' }}>
+                {paNivel2Query.data?.itens.map((it) => (
+                  <div
+                    key={it.resource_group}
+                    onClick={() => setPaRg(it.resource_group || null)}
+                    style={{ cursor: 'pointer', border: '1px solid var(--border)', borderRadius: 10, padding: 14 }}
+                  >
+                    <div style={{ fontWeight: 700, marginBottom: 4, wordBreak: 'break-word' }}>{it.resource_group}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>{it.total} recurso{it.total !== 1 ? 's' : ''}</div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {it.por_tipo.slice(0, 4).map((t) => (
+                        <span key={t.tipo} title={resourceTypeLabel(t.tipo)} style={{ fontSize: 11, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 20, padding: '3px 8px' }}>
+                          {resourceTypeIcon(t.tipo)} {t.total}
+                        </span>
+                      ))}
+                      {it.por_tipo.length > 4 && <span style={{ fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center' }}>+{it.por_tipo.length - 4}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {paSub && paRg && (
+            <>
+              {paRecursosQuery.isLoading && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+              {paRecursosQuery.data && paRecursosQuery.data.total === 0 && (
+                <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum recurso ativo neste Resource Group.</div>
+              )}
+              {paRecursosQuery.data && paRecursosQuery.data.total > 0 && (
+                <div className="table-wrapper">
+                  <table className="data-table">
+                    <thead><tr><th>Recurso</th><th>Tipo</th><th>Criado por</th><th>Criado em</th><th style={{ textAlign: 'right' }}>Custo</th></tr></thead>
+                    <tbody>
+                      {paRecursosQuery.data.recursos.map((r) => {
+                        const usaFallbackRg = r.custo_acumulado === 0 && r.custo_resource_group > 0
+                        return (
+                          <tr key={r.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: r.resource_id, subscriptionId: r.subscription_id })}>
+                            <td style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--accent)' }} title={r.resource_id}>{r.nome || r.resource_id}</td>
+                            <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{resourceTypeIcon(r.resource_type || '(desconhecido)')} {r.resource_type ? resourceTypeLabel(r.resource_type) : '—'}</td>
+                            <td style={{ fontSize: 12 }} title={r.criado_por || ''}>{r.criado_por_nome || r.criado_por || 'desconhecido'}</td>
+                            <td style={{ fontSize: 12 }}>{fmtData(r.criado_em)}</td>
+                            <td
+                              style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--orange,#ff8c42)' : undefined }}
+                              title={usaFallbackRg ? `Custo direto deste recurso é zero — mostrando o custo total do Resource Group no lugar` : ''}
+                            >
+                              {usaFallbackRg ? '~' : ''}{fmtBRL(usaFallbackRg ? r.custo_resource_group : r.custo_acumulado)}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

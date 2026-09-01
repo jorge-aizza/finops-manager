@@ -3057,6 +3057,89 @@ timeout sob carga do full-run em arquivos não tocados por esta mudança — `Ac
 `ColetaView`, `DatabricksConfigModal` — confirmadas como flaky pré-existente, todas passam
 100% quando rodadas isoladas), `npm run frontend:build`.
 
+### Inventário — vista "Por Assinatura" (drill-down Assinatura → Resource Group → Recurso, 2026-08-31/09-01)
+
+Pedido do usuário: "algo por Assinatura, tipo lista as assinaturas e vou fazendo drill down
+dos dados até chegar no recurso... mostra assinaturas e na frente uns ícones em destaque com
+o número". Nova aba "Por Assinatura" em `InventarioView.tsx`, 3 níveis:
+
+- **Nível 1** (cards de Assinatura) — nome amigável (via `listSubscriptions`, mesma fonte já
+  usada na aba Configuração) + total de recursos ativos + até 4 badges de "Tipo de Recurso"
+  (ícone+contagem, mesmo conceito das caixas já usadas na Auditoria) em destaque.
+- **Nível 2** (cards de Resource Group dentro da assinatura selecionada) — mesmo padrão de
+  card, badges por tipo dentro daquele RG.
+- **Nível 3** (tabela de recursos, reaproveita `GET /recursos?subscription_id=&resource_group=`
+  direto — sem rota nova) — clicar num recurso abre o `RecursoDetalheModal` já existente.
+  `resource_group` virou um filtro novo em `GET /api/azure-inventario/recursos` (case-
+  insensitive via `UPPER()`, mesmo padrão já usado pra `resource_id` em outros pontos).
+
+Backend: `GET /api/azure-inventario/resumo-por-assinatura` (sem `subscription_id` → nível 1;
+com → nível 2), baseado só em `azure_recursos_inventario` (permanente, ~16 mil linhas ativas
+no ambiente real — cabe inteiro em memória) — nunca em `azure_costs` (~1,45M linhas), evitando
+de propósito a classe de risco de performance já documentada acima. Agregação em **JS**, não
+SQL `GROUP BY` — mais simples de aplicar a classificação Databricks (função JS, ver abaixo) e
+evita de vez os bugs de casing já encontrados nas primeiras versões desta rota (`MAX()`
+escolhendo grafias diferentes por subgrupo, duplicando o mesmo RG em duas entradas — corrigido
+nesta reescrita).
+
+**VM x VM Scale Set x VM de Databricks separados nos badges (2026-09-01, pedido do usuário:
+"separar nos Card o que é VM, o que é Scale Set, o que é VM de Databricks")** — antes, uma
+VM "normal" e uma VM que é nó de cluster Databricks apareciam somadas no mesmo badge "VM",
+escondendo completamente a distinção (confirmado com dados reais: uma assinatura tinha só 8
+VMs "de verdade" contra 1.679 VMs de cluster Databricks, tudo achatado num único número
+"1.687" antes desta correção). `_paTipoDisplay(resourceType, resourceGroup)` (server.js)
+reaproveita `_detectManagedRg()` — já usado pra badge/agrupamento de RG gerenciado na
+Calculadora (RN-DB-001) — em vez de duplicar a lógica de padrão de nome de RG; quando o tipo é
+VM ou VM Scale Set E o RG é gerenciado por Databricks, marca com sufixo `::databricks` (nunca
+aparece num `resource_type` real do ARM, que só usa `/`). Frontend (`resourceTypeLabel`/
+`resourceTypeIcon`) reconhece o sufixo e mostra "VM (Databricks)" com ícone 🧱 (mesmo ícone já
+usado pro Databricks Workspace) — VM normal fica 🖥️, VM Scale Set ganhou ícone próprio 🧩
+(antes idêntico ao de VM, sem diferenciação visual).
+
+**Bug real de performance encontrado e corrigido ANTES de reportar pronto — abrir um RG grande
+na vista "Por Assinatura" (ou a aba Recursos) travava 17-23 segundos**: o fallback "custo do
+RG inteiro" (já existente desde antes desta feature, usado tanto na lista de Recursos quanto
+no modal de detalhe) rodava `SUM(cost_in_billing_currency) WHERE subscription_id AND
+UPPER(resource_group_name)` **a cada request**, contra `azure_costs` (~1,45M linhas) — pra um
+RG de alta rotatividade (Databricks, dezenas de milhares de linhas de billing), isso precisa
+varrer TODAS as linhas daquele RG toda vez, sem atalho possível (diferente do SKU, que só
+precisa de 1 linha qualquer — `LIMIT 1` já resolvia). Corrigido pré-computando custo+contagem
+de **todos** os RGs de uma vez só (`_getRgStatsCache()`, 1 scan completo de `azure_costs`,
+resultado pequeno — só ~385 RGs no ambiente real) e cacheando em memória — mesmo padrão/TTL
+(5 min) já usado por `_coberturaCache`/`_resumoCache`/`_importsCache`, invalidado nos mesmos
+4 pontos (2 coletas Azure + purge + reset). Depois disso, cada request é um lookup O(1) no
+Map — os dois pontos que antes rodavam a query ao vivo (`GET /recursos`'s `custoPorRg`,
+`GET /recurso-detalhe`'s `custoRGR`) agora só consultam o cache.
+
+**Segundo bug real de concorrência, encontrado testando com múltiplas requests simultâneas**:
+sem proteção, 2-3 requests chegando com o cache vazio/expirado ao mesmo tempo disparavam CADA
+UMA o seu próprio scan completo em paralelo — o build "frio" (que já custava ~20-90s, mesma
+ordem de grandeza de `_refreshAzureCache`) chegou a **209 segundos** com 3 scans concorrentes
+competindo por I/O/buffers, pior que rodar 1 só. Corrigido com `_rgStatsCachePromise` — guarda
+a build EM ANDAMENTO; qualquer chamada concorrente espera essa mesma promise em vez de iniciar
+outro scan. **Achado colateral durante a investigação, não um bug real**: o que parecia
+"múltiplas builds concorrentes" numa checagem posterior era na verdade o próprio Postgres
+paralelizando UMA query só (`backend_type='parallel worker'`, mesmo `leader_pid`) — confirmado
+via `pg_stat_activity` com a coluna `backend_type`/`leader_pid`, não `pg_cancel_backend`ado por
+engano. Cache também **pré-aquecido no boot** (`setTimeout` 120s, 30s depois do
+`_refreshAzureCache` já existente — escalonado pra não somar dois scans pesados no mesmo
+instante do startup) — sem isso, o primeiro usuário a abrir Recursos/Por Assinatura/detalhe
+depois de um restart pagaria o custo do scan completo.
+
+**Verificado contra o servidor real, incluindo os dois bugs de performance/concorrência**:
+`node --check`, `pm2 restart` sem erro/crash-loop, nível 1/2/3 testados end-to-end (token JWT
+forjado) — nível 1 e 2 respondem em <1s (baseados só em `azure_recursos_inventario`); nível 3
+(lista de recursos de um RG grande) caiu de 17-23s por request pra ~500ms quando o cache já
+está quente; testado disparando requests concorrentes de propósito e confirmado via
+`pg_stat_activity` (`backend_type`/`leader_pid`) que só 1 build real acontece por vez. Dados
+reais confirmam a distinção VM/Databricks funcionando: uma assinatura com 8 VMs normais e
+1.679 VMs de cluster Databricks, antes uma única badge "VM: 1.687". `tsc -b`, 19/19 testes em
+`InventarioView.test.tsx` (2 novos — navegação completa dos 3 níveis, e os 3 badges VM/VM
+Scale Set/VM Databricks separados), 273/273 na suíte completa do frontend (rodada limpa, sem
+processos `vitest` órfãos concorrendo por CPU — as falhas de uma rodada anterior, num universo
+mais amplo de arquivos não tocados nesta sessão, foram rastreadas até 2 processos `vitest`
+antigos ainda rodando em paralelo, não regressão de código), `npm run frontend:build`.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

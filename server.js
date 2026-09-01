@@ -1995,6 +1995,49 @@ let _resumoCacheTs = 0;
 let _importsCache = null;
 let _importsCacheTs = 0;
 const _RESUMO_TTL = 5 * 60 * 1000;
+
+// Custo + contagem de recursos por Resource Group (2026-08-31) — usado pelo fallback "custo
+// do RG inteiro" do Inventário (lista de Recursos, modal de detalhe, e a vista "Por
+// Assinatura"). Bug real de performance encontrado testando contra dados reais: `SUM(...)
+// WHERE subscription_id AND UPPER(resource_group_name)` pra UM RG grande (Databricks, alta
+// rotatividade) levou 17-23s — um `SUM`/`COUNT(DISTINCT)` precisa varrer TODAS as linhas
+// daquele RG, sem atalho possível (diferente do SKU, que só precisa de 1 linha qualquer).
+// Corrigido pré-computando custo+contagem de TODOS os RGs de uma vez (1 scan completo de
+// `azure_costs`, resultado pequeno — só ~385 RGs no ambiente real) e cacheando em memória,
+// mesmo padrão/TTL já usado por `_coberturaCache`/`_resumoCache`/`_importsCache` — depois
+// disso, cada request é um lookup O(1) no Map, sem tocar o Postgres.
+let _rgStatsCache = null; // Map<'subscription_id::RG_UPPER', { custo:number, recursos:number }>
+let _rgStatsCacheTs = 0;
+// Bug real de concorrência encontrado testando contra dados reais: sem dedup, 2-3 requests
+// chegando com o cache vazio/expirado ao mesmo tempo disparavam cada uma o SEU PRÓPRIO scan
+// completo de `azure_costs` (1,45M linhas) em paralelo — o build "frio" que já era caro
+// (~20-90s, comparável a `_refreshAzureCache`) ficou 209s com 3 scans competindo por
+// I/O/buffers ao mesmo tempo, muito pior que rodar 1 só. `_rgStatsCachePromise` guarda o
+// build EM ANDAMENTO — qualquer chamada concorrente espera essa mesma promise em vez de
+// iniciar outro scan.
+let _rgStatsCachePromise = null;
+async function _getRgStatsCache() {
+  if (_rgStatsCache && (Date.now() - _rgStatsCacheTs) < _RESUMO_TTL) return _rgStatsCache;
+  if (_rgStatsCachePromise) return _rgStatsCachePromise;
+  _rgStatsCachePromise = (async () => {
+    try {
+      const r = await pool.query(`
+        SELECT subscription_id, UPPER(resource_group_name) AS rg,
+               SUM(cost_in_billing_currency) AS custo, COUNT(DISTINCT resource_id) AS recursos
+        FROM azure_costs WHERE resource_group_name IS NOT NULL
+        GROUP BY 1, 2
+      `);
+      const map = new Map();
+      for (const row of r.rows) map.set(row.subscription_id + '::' + row.rg, { custo: parseFloat(row.custo), recursos: parseInt(row.recursos, 10) });
+      _rgStatsCache = map;
+      _rgStatsCacheTs = Date.now();
+      return map;
+    } finally {
+      _rgStatsCachePromise = null;
+    }
+  })();
+  return _rgStatsCachePromise;
+}
 async function _refreshAzureCache() {
   if (!pool || _cacheRefreshing) return;
   _cacheRefreshing = true;
@@ -5305,6 +5348,7 @@ app.delete('/api/azure-costs/purge', authMiddleware, dbMiddleware, async (req, r
         msg = `Todos os ${removidos} registros foram removidos.`;
       }
       _coberturaCache = null;
+      _rgStatsCache = null;
       _resumoCache = null;
       _importsCache = null;
       console.log(`[Azure Purge] ${msg}`);
@@ -7164,10 +7208,11 @@ app.delete('/api/azure-inventario/coleta-historico', authMiddleware, dbMiddlewar
 app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureAzureColetaTable();
-    const { subscription_id, ativo, criado_por, data_inicio, data_fim } = req.query;
+    const { subscription_id, resource_group, ativo, criado_por, data_inicio, data_fim } = req.query;
     let where = '1=1';
     const params = [];
     if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
+    if (resource_group) { params.push(resource_group); where += ` AND UPPER(ri.resource_group) = UPPER($${params.length})`; }
     if (ativo === 'true') where += ` AND ri.ativo = true`;
     else if (ativo === 'false') where += ` AND ri.ativo = false`;
     if (criado_por) { params.push('%' + criado_por + '%'); where += ` AND ri.criado_por ILIKE $${params.length}`; }
@@ -7195,31 +7240,87 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
     // atraso pra ser publicado — o resource_id exato quase nunca sobrevive até aparecer no
     // billing. Sem esse fallback TAMBÉM na LISTA (não só no modal de detalhe), a tabela
     // inteira de Recursos parecia "toda zerada", mesmo a maioria dos RGs tendo custo real.
-    // 1 query agregada pelos RGs distintos da PÁGINA atual (não 1 subquery correlacionada
-    // por linha, que seria até 500 queries) — muito mais barato, RGs se repetem bastante
-    // entre recursos do mesmo ambiente.
-    const rgKeys = new Set();
-    for (const row of r.rows) {
-      if (row.resource_group) rgKeys.add(row.subscription_id + '::' + row.resource_group.toUpperCase());
-    }
-    const custoPorRg = new Map();
-    if (rgKeys.size) {
-      const rgRows = await pool.query(
-        `SELECT subscription_id, UPPER(resource_group_name) AS rg, SUM(cost_in_billing_currency) AS custo
-         FROM azure_costs
-         WHERE resource_group_name IS NOT NULL
-           AND (subscription_id || '::' || UPPER(resource_group_name)) = ANY($1::text[])
-         GROUP BY 1, 2`,
-        [[...rgKeys]]
-      );
-      for (const row of rgRows.rows) custoPorRg.set(row.subscription_id + '::' + row.rg, parseFloat(row.custo));
-    }
+    // Lookup no cache pré-computado (`_getRgStatsCache`) em vez de agregar `azure_costs` a
+    // cada request — um RG grande sozinho já levava 17-23s pra somar (ver comentário na
+    // declaração do cache), inaceitável mesmo batendo só 1 query por página.
+    const rgStats = await _getRgStatsCache();
     const recursos = r.rows.map(row => ({
       ...row,
-      custo_resource_group: row.resource_group ? (custoPorRg.get(row.subscription_id + '::' + row.resource_group.toUpperCase()) || 0) : 0,
+      custo_resource_group: row.resource_group ? (rgStats.get(row.subscription_id + '::' + row.resource_group.toUpperCase())?.custo || 0) : 0,
     }));
 
     res.json({ total: recursos.length, recursos });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Distingue VM/VM Scale Set "normal" de VM/VMSS que é nó de cluster Databricks (2026-09-01,
+// pedido do usuário: "separar nos Card o que é VM, o que é Scale Set, o que é VM de
+// Databricks") — reaproveita `_detectManagedRg` (já usado pra badge/agrupamento de RG
+// gerenciado na Calculadora, ver seção RN-DB-001) em vez de duplicar a lógica de padrão de
+// nome de RG. Sufixo `::databricks` (nunca aparece num resource_type real do ARM, que só usa
+// `/`) marca a variante — o frontend (`resourceTypeLabel`/`resourceTypeIcon`) reconhece esse
+// sufixo e rotula/ícone diferente, sem mexer no `resource_type` original armazenado.
+const _PA_VM_TYPES = new Set(['MICROSOFT.COMPUTE/VIRTUALMACHINES', 'MICROSOFT.COMPUTE/VIRTUALMACHINESCALESETS']);
+function _paTipoDisplay(resourceType, resourceGroup) {
+  const base = (resourceType && resourceType.trim()) || '(desconhecido)';
+  if (_PA_VM_TYPES.has(base.toUpperCase()) && _detectManagedRg(resourceGroup).managed_type === 'databricks') {
+    return base + '::databricks';
+  }
+  return base;
+}
+
+// Hierarquia Assinatura → Resource Group (2026-08-31, pedido do usuário: "algo por
+// Assinatura, tipo lista as assinaturas e vou fazendo drill down dos dados até chegar no
+// recurso... mostra assinaturas e na frente uns ícones em destaque com o número") — vista
+// alternativa à lista plana da aba Recursos. Sem `subscription_id` → nível 1 (uma linha por
+// assinatura); com `subscription_id` → nível 2 (uma linha por Resource Group dentro dela).
+// Cada nível vem com `por_tipo` (mesmas caixas por Tipo de Recurso já usadas na Auditoria)
+// pros badges/ícones em destaque. Baseado só em `azure_recursos_inventario` (permanente —
+// ~16 mil linhas ativas no ambiente real, cabe inteiro em memória sem problema) — NUNCA em
+// `azure_costs` (~1,45M linhas) — evita de propósito o mesmo risco de performance já
+// encontrado/corrigido antes nesta sessão pra tabelas grandes. Agregação em JS (não SQL
+// GROUP BY) — mais simples de aplicar `_paTipoDisplay` (função JS) e evita de vez os bugs de
+// casing já encontrados nas versões anteriores desta rota (MAX() escolhendo grafias
+// diferentes por subgrupo). O 3º nível (recursos dentro do RG) reaproveita
+// `GET /recursos?subscription_id=&resource_group=` direto — não precisa de rota nova.
+app.get('/api/azure-inventario/resumo-por-assinatura', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const { subscription_id } = req.query;
+
+    if (!subscription_id) {
+      const r = await pool.query(`SELECT subscription_id, resource_group, resource_type FROM azure_recursos_inventario WHERE ativo = true`);
+      const bySub = new Map();
+      for (const row of r.rows) {
+        if (!bySub.has(row.subscription_id)) bySub.set(row.subscription_id, { subscription_id: row.subscription_id, total: 0, tipos: new Map() });
+        const e = bySub.get(row.subscription_id);
+        e.total += 1;
+        const tipo = _paTipoDisplay(row.resource_type, row.resource_group);
+        const tKey = tipo.toUpperCase();
+        e.tipos.set(tKey, { tipo, total: (e.tipos.get(tKey)?.total || 0) + 1 });
+      }
+      const itens = [...bySub.values()]
+        .map((a) => ({ subscription_id: a.subscription_id, total: a.total, por_tipo: [...a.tipos.values()].sort((x, y) => y.total - x.total) }))
+        .sort((a, b) => b.total - a.total);
+      return res.json({ nivel: 'assinatura', itens });
+    }
+
+    const r = await pool.query(`SELECT resource_group, resource_type FROM azure_recursos_inventario WHERE ativo = true AND subscription_id = $1`, [subscription_id]);
+    const byRg = new Map();
+    for (const row of r.rows) {
+      const rg = (row.resource_group && row.resource_group.trim()) || '(sem Resource Group)';
+      const rgKey = rg.toUpperCase();
+      if (!byRg.has(rgKey)) byRg.set(rgKey, { resource_group: rg, total: 0, tipos: new Map() });
+      const e = byRg.get(rgKey);
+      e.total += 1;
+      const tipo = _paTipoDisplay(row.resource_type, row.resource_group);
+      const tKey = tipo.toUpperCase();
+      e.tipos.set(tKey, { tipo, total: (e.tipos.get(tKey)?.total || 0) + 1 });
+    }
+    const itens = [...byRg.values()]
+      .map((g) => ({ resource_group: g.resource_group, total: g.total, por_tipo: [...g.tipos.values()].sort((x, y) => y.total - x.total) }))
+      .sort((a, b) => b.total - a.total);
+    res.json({ nivel: 'resource_group', itens });
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -7414,12 +7515,13 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
          GROUP BY cost_date ORDER BY cost_date`,
         [resource_id]
       ),
+      // Lookup no cache pré-computado (`_getRgStatsCache`, ver declaração acima) em vez de
+      // agregar `azure_costs` a cada request — a query direta (`SUM`+`COUNT(DISTINCT)` pra
+      // UM RG) já chegou a levar 17-23s pra RGs grandes de alta rotatividade (Databricks).
       recurso.resource_group
-        ? pool.query(
-            `SELECT COALESCE(SUM(cost_in_billing_currency),0) AS custo, COUNT(DISTINCT resource_id) AS recursos
-             FROM azure_costs WHERE subscription_id=$1 AND UPPER(resource_group_name) = UPPER($2)`,
-            [subscription_id, recurso.resource_group]
-          )
+        ? _getRgStatsCache().then((map) => ({
+            rows: [map.get(subscription_id + '::' + recurso.resource_group.toUpperCase()) || { custo: 0, recursos: 0 }],
+          }))
         : Promise.resolve({ rows: [{ custo: 0, recursos: 0 }] }),
     ]);
 
@@ -10703,7 +10805,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     // Marca registros desta coleta como fonte='api' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='api' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
-    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null;
+    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null; _rgStatsCache = null;
     _refreshAzureCache().catch(() => {});
     const msgFinal = modo === 'subscription'
       ? `API Subscription — ${subCount} sub(s) | ${startDate}→${endDate}`
@@ -10916,7 +11018,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     // Marca registros desta coleta como fonte='storage' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='storage' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
-    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null;
+    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null; _rgStatsCache = null;
     _refreshAzureCache().catch(() => {});
 
     // ── Price List via Storage (opcional) ──────────────────────────────────────
@@ -11424,6 +11526,14 @@ app.get('/health', (_req, res) => {
       setTimeout(() => {
         _refreshAzureCache().catch(e => console.warn('[Azure] Cache de dropdowns não pôde ser construído:', e.message));
       }, 90 * 1000);
+      // Pré-aquece o cache de custo por Resource Group (usado pelo Inventário — lista de
+      // Recursos, modal de detalhe, vista "Por Assinatura") — sem isso, o PRIMEIRO usuário a
+      // abrir qualquer uma dessas telas depois do boot paga o custo do scan completo
+      // (~20-90s). Delay maior que o de `_refreshAzureCache` (mais 30s depois) pra não somar
+      // dois scans pesados de `azure_costs` no mesmo instante do startup.
+      setTimeout(() => {
+        _getRgStatsCache().catch(e => console.warn('[Inventario] Cache de custo por RG não pôde ser pré-aquecido:', e.message));
+      }, 120 * 1000);
       // Índice pesado criado em background (3 min de delay) — evita saturar o pool no startup
       setTimeout(() => {
         if (!pool) return;

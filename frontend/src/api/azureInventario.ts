@@ -6,6 +6,7 @@ import type {
   AzureCrescimentoDia, AzureComparativoResposta, AzureRecursoDetalheResposta,
   AzureAnomaliaCrescimento, AzureOrcamentoInventario, AzureOrcamentoInventarioInput,
   AzureOrcamentoAlerta, AzureTagsFaltantesResposta, AzureAuditoriaPorTipo,
+  AzureResumoPorAssinaturaResposta,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -30,6 +31,7 @@ export const limparAzureInventarioColetaHistorico = () =>
 
 export interface AzureRecursosFiltros {
   subscription_id?: string
+  resource_group?: string
   ativo?: boolean
   criado_por?: string
   data_inicio?: string
@@ -38,6 +40,7 @@ export interface AzureRecursosFiltros {
 export const getAzureRecursosInventario = (filtros?: AzureRecursosFiltros) => {
   const q = new URLSearchParams()
   if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
+  if (filtros?.resource_group) q.set('resource_group', filtros.resource_group)
   if (filtros?.ativo != null) q.set('ativo', String(filtros.ativo))
   if (filtros?.criado_por) q.set('criado_por', filtros.criado_por)
   if (filtros?.data_inicio) q.set('data_inicio', filtros.data_inicio)
@@ -116,6 +119,17 @@ export const getAzureRecursoDetalhe = (resourceId: string, subscriptionId: strin
     custo_resource_group: Number(r.custo_resource_group),
     resource_group_recursos: Number(r.resource_group_recursos),
     billing_detalhe: r.billing_detalhe,
+  }))
+}
+
+// Hierarquia Assinatura → Resource Group (ver AzureResumoPorAssinaturaResposta) — sem
+// subscriptionId, nível 1 (por assinatura); com subscriptionId, nível 2 (por Resource Group
+// dentro dela). O 3º nível (recursos) reaproveita getAzureRecursosInventario direto.
+export const getAzureResumoPorAssinatura = (subscriptionId?: string) => {
+  const q = subscriptionId ? '?subscription_id=' + encodeURIComponent(subscriptionId) : ''
+  return apiFetch<AzureResumoPorAssinaturaResposta>('GET', '/azure-inventario/resumo-por-assinatura' + q).then((r) => ({
+    ...r,
+    itens: r.itens.map((it) => ({ ...it, total: Number(it.total), por_tipo: it.por_tipo.map((t) => ({ ...t, total: Number(t.total) })) })),
   }))
 }
 
