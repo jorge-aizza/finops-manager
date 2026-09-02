@@ -273,6 +273,15 @@ describe('InventarioView', () => {
     await waitFor(() => expect(azureInventarioApi.coletarAzureInventario).toHaveBeenCalled())
   })
 
+  it('botão "Reconciliar (Resource Graph)" dispara a reconciliação', async () => {
+    vi.mocked(azureInventarioApi.reconciliarAzureInventario).mockResolvedValue({ ok: true, message: 'Reconciliação via Resource Graph iniciada' })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    await user.click(await screen.findByRole('button', { name: '🔎 Reconciliar (Resource Graph)' }))
+    await waitFor(() => expect(azureInventarioApi.reconciliarAzureInventario).toHaveBeenCalled())
+  })
+
   it('mostra o nome resolvido (Microsoft Graph) em vez do GUID quando disponível', async () => {
     vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
       total: 1,

@@ -18,6 +18,12 @@ export const salvarAzureInventarioConfig = (input: AzureInventarioConfigInput) =
 export const coletarAzureInventario = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-inventario/coletar')
 
+// Reconciliação via Resource Graph (2026-09-02) — backfill de recursos que existem mas nunca
+// geraram evento no Activity Log desde a ativação do Inventário (ver server.js,
+// _reconciliarInventarioResourceGraph). Mesma flag/monitor de progresso da coleta normal.
+export const reconciliarAzureInventario = () =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-inventario/reconciliar')
+
 export const getAzureInventarioStatus = () =>
   apiFetch<AzureInventarioStatus>('GET', '/azure-inventario/status')
 

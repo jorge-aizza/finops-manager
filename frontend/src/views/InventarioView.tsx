@@ -6,7 +6,7 @@ import {
   getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
-  resolverAutoresInventario, getAzureResumoPorAssinatura,
+  resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -264,6 +264,15 @@ export default function InventarioView() {
       queryClient.invalidateQueries({ queryKey: ['azure-inv-auditoria'] })
     },
     onError: (e: Error) => window.showToast?.('Erro ao resolver nomes: ' + e.message, 'error'),
+  })
+
+  const reconciliarMutation = useMutation({
+    mutationFn: reconciliarAzureInventario,
+    onSuccess: (r) => {
+      window.showToast?.(r.message, 'success')
+      queryClient.invalidateQueries({ queryKey: ['azure-inv-status'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro: ' + e.message, 'error'),
   })
 
   return (
@@ -619,6 +628,9 @@ export default function InventarioView() {
               <button className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 11 }} disabled={resolverAutoresMutation.isPending} onClick={() => resolverAutoresMutation.mutate()} title="Resolve GUID de Criado por/Autor pro nome real via Microsoft Graph — exige Directory.Read.All concedida no Entra ID">
                 {resolverAutoresMutation.isPending ? 'Resolvendo...' : '🪪 Resolver Nomes'}
               </button>
+              <button className="btn-ghost" style={{ fontSize: 11 }} disabled={reconciliarMutation.isPending || statusQuery.data?.em_execucao} onClick={() => reconciliarMutation.mutate()} title="Lista TODOS os recursos que existem agora via Azure Resource Graph e completa o Inventário com os que o Activity Log nunca capturou (recursos antigos, criados antes da ativação do Inventário, que nunca mais foram tocados)">
+                {reconciliarMutation.isPending ? 'Reconciliando...' : '🔎 Reconciliar (Resource Graph)'}
+              </button>
               <button className="btn-primary" disabled={coletarMutation.isPending || statusQuery.data?.em_execucao} onClick={() => coletarMutation.mutate()}>
                 {statusQuery.data?.em_execucao ? 'Coletando...' : '▶ Coletar Agora'}
               </button>
@@ -626,6 +638,7 @@ export default function InventarioView() {
             <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
               Fonte: Azure Activity Log — usa a mesma credencial (Service Principal com role Reader) já configurada em Coleta Azure. Nenhuma permissão nova precisa ser concedida.
               "Criado por"/"Autor" traz um ID (GUID) do Activity Log — pra resolver pro nome real, clique em <strong>🪪 Resolver Nomes</strong> (roda automaticamente após cada coleta também), o que exige a permissão de aplicativo <strong>Directory.Read.All</strong> concedida a esta Service Principal no Entra ID (App registration → API permissions → Microsoft Graph).
+              O Activity Log só aprende sobre um recurso quando há um evento depois da ativação do Inventário — recursos antigos nunca tocados desde então ficam de fora, mesmo ativos. Clique em <strong>🔎 Reconciliar</strong> pra completar com tudo que existe agora (sem "criado por/em", já que o Resource Graph não tem esse histórico).
             </div>
             <div style={{ padding: '0 20px 16px', display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560 }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -674,7 +687,9 @@ export default function InventarioView() {
                   {(historicoQuery.data || []).map((h) => (
                     <tr key={h.id}>
                       <td style={{ fontSize: 12 }}>{fmtData(h.iniciado_em)}</td>
-                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{h.origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'}</td>
+                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                        {h.origem?.startsWith('reconciliacao') ? '🔎 Reconciliação' : h.origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'}
+                      </td>
                       <td>
                         <span style={{ color: h.status === 'concluido' ? 'var(--green,#22c55e)' : h.status === 'erro' ? 'var(--red,#ff4d6a)' : 'var(--orange,#ff8c42)', fontSize: 11, fontWeight: 600 }}>
                           {h.status}

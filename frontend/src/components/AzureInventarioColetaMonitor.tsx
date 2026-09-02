@@ -42,12 +42,16 @@ export default function AzureInventarioColetaMonitor() {
 
   const houveErro = !emExecucao && progresso.log?.some((l) => l.msg.startsWith('ERRO'))
   const corBorda = emExecucao ? 'var(--accent)' : (houveErro ? 'var(--danger)' : 'var(--green,#22c55e)')
+  // Mesmo estado/monitor da coleta normal (Activity Log) e da reconciliação (Resource Graph,
+  // ver server.js `_reconciliarInventarioResourceGraph`) — só o rótulo muda conforme `tipo`.
+  const isReconciliacao = progresso.tipo === 'reconciliacao'
+  const titulo = isReconciliacao ? 'Reconciliação (Resource Graph)' : 'Coleta de Inventário'
 
   return (
     <div className="stat-card" style={{ margin: '16px 20px 0', padding: '16px 20px', borderColor: corBorda, borderWidth: 2 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <span style={{ fontSize: 14, fontWeight: 700 }}>
-          {emExecucao ? '⏳ Coleta de Inventário em andamento' : (houveErro ? '❌ Coleta de Inventário com erro' : '✅ Coleta de Inventário concluída')}
+          {emExecucao ? `⏳ ${titulo} em andamento` : (houveErro ? `❌ ${titulo} com erro` : `✅ ${titulo} concluída`)}
         </span>
         {!emExecucao && (
           <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDismissed(true)}>Fechar</button>
@@ -60,10 +64,14 @@ export default function AzureInventarioColetaMonitor() {
       </div>
 
       <div style={{ display: 'flex', gap: 18, fontSize: 12, marginBottom: 10, flexWrap: 'wrap' }}>
-        <span>Eventos: <strong>{progresso.eventos.toLocaleString('pt-BR')}</strong></span>
+        <span>{isReconciliacao ? 'Recursos encontrados' : 'Eventos'}: <strong>{progresso.eventos.toLocaleString('pt-BR')}</strong></span>
         <span>Novos: <strong style={{ color: 'var(--green,#22c55e)' }}>{progresso.novos.toLocaleString('pt-BR')}</strong></span>
-        <span>Atualizados: <strong style={{ color: 'var(--accent)' }}>{progresso.atualizados.toLocaleString('pt-BR')}</strong></span>
-        <span>Excluídos: <strong style={{ color: 'var(--red,#ff4d6a)' }}>{progresso.excluidos.toLocaleString('pt-BR')}</strong></span>
+        {!isReconciliacao && (
+          <>
+            <span>Atualizados: <strong style={{ color: 'var(--accent)' }}>{progresso.atualizados.toLocaleString('pt-BR')}</strong></span>
+            <span>Excluídos: <strong style={{ color: 'var(--red,#ff4d6a)' }}>{progresso.excluidos.toLocaleString('pt-BR')}</strong></span>
+          </>
+        )}
       </div>
 
       {progresso.log?.length > 0 && (

@@ -114,6 +114,11 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                 </div>
               )}
 
+              {data.recurso.origem_deteccao === 'resource_graph' && (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
+                  🔎 Este recurso foi adicionado por reconciliação (Resource Graph) — existia antes da ativação do Inventário e nunca gerou um evento de criação/atualização, por isso não há "criado por/em" disponível.
+                </div>
+              )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, marginBottom: 16 }}>
                 <div>Criado por <strong>{data.recurso.criado_por_nome || data.recurso.criado_por || 'desconhecido'}</strong> em {fmtData(data.recurso.criado_em)}</div>
                 {data.recurso.atualizado_em && (

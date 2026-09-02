@@ -3140,6 +3140,74 @@ processos `vitest` órfãos concorrendo por CPU — as falhas de uma rodada ante
 mais amplo de arquivos não tocados nesta sessão, foram rastreadas até 2 processos `vitest`
 antigos ainda rodando em paralelo, não regressão de código), `npm run frontend:build`.
 
+### Inventário — Reconciliação via Azure Resource Graph (2026-09-02)
+
+Pedido do usuário: "valida se no inventário por assinatura está aparecendo todos os
+Recursos pois está diferente do Billing". Investigado com dados reais: comparando os
+`resource_id` cobrados NUM ÚNICO DIA (billing) contra o que existia no Inventário, só
+**11 de 3.000 (0,37%)** tinham qualquer registro lá — gap real, não diferença esperada
+entre fontes. Exemplos ausentes eram reveladores: discos de restore point de backup,
+`AzureBackupRG_BrazilSouth`, extension topics — recursos criados há muito tempo e nunca
+mais tocados.
+
+**Causa raiz**: o Inventário (Activity Log) é um rastreador INCREMENTAL desde a ativação
+da feature (2026-08-30), não um catálogo completo — só aprende sobre um recurso quando há
+um evento de criação/atualização/exclusão DEPOIS de ativado. Um recurso criado meses antes
+e nunca mais modificado segue cobrando todo dia sem nunca ter gerado um evento — invisível
+pro Inventário, mesmo 100% ativo. Confirmado que não é bug de execução — a coleta roda com
+sucesso nas 3 assinaturas, milhares de eventos por execução — é uma limitação estrutural
+do desenho original (aceita conscientemente na ocasião, pela vantagem de "quem criou" que
+só o Activity Log dá).
+
+**Solução, aprovada pelo usuário após validação: reconciliação via Azure Resource Graph**
+— lista TUDO que existe AGORA, independente de histórico. `_reconciliarInventarioResourceGraph()`
+(server.js) reaproveita a MESMA Service Principal já configurada pro Inventário — Resource
+Graph só exige a role Reader, já concedida, **zero permissão nova** (diferente do
+Microsoft Graph pra nomes de autor, que precisou de `Directory.Read.All`). Query
+`Resources | project id, name, type, resourceGroup` via `POST .../providers/Microsoft.ResourceGraph/resources`,
+paginada por `$skipToken` (até 1000 recursos/página).
+
+**Só ADICIONA recursos ausentes — nunca desativa um recurso que o Resource Graph não
+retornou**: decisão deliberada. "Não apareceu no Resource Graph" pode significar "foi
+excluído de verdade" OU "erro de paginação/transiente" — só um evento de delete real do
+Activity Log (com autor e timestamp) tem confiança suficiente pra marcar `ativo=false`.
+Reconciliação e coleta normal são mutuamente exclusivas (mesma flag `_invColetaEmExecucao`)
+— as duas escrevem na mesma tabela, evita condição de corrida.
+
+**Nova coluna `origem_deteccao`** (`'activity_log'` padrão | `'resource_graph'`) —
+`ON CONFLICT DO UPDATE` do UPSERT de reconciliação nunca a toca (só é setada no INSERT),
+então um recurso que JÁ existia via Activity Log nunca perde essa marcação, mesmo
+confirmado de novo por uma reconciliação seguinte. Resource Graph não tem "criado por/em"
+(só Activity Log tem esse histórico) — `RecursoDetalheModal.tsx` mostra uma nota explicando
+o motivo quando `origem_deteccao='resource_graph'`, em vez de deixar "desconhecido" sem
+contexto.
+
+**UI reaproveita a MESMA infraestrutura de progresso/monitor da coleta normal** (`_invColetaProgresso`
+ganhou um campo `tipo: 'coleta'|'reconciliacao'`) — evita duplicar componente/estado pra o
+que é conceitualmente "mais um tipo de execução"; `AzureInventarioColetaMonitor.tsx` só
+ajusta título e rótulos ("Recursos encontrados" em vez de "Eventos", esconde Atualizados/
+Excluídos — conceitos que não existem em reconciliação) conforme `tipo`. Botão "🔎
+Reconciliar (Resource Graph)" novo na aba Configuração, ao lado de "Coletar Agora". Coluna
+Origem do Histórico de Execuções ganhou um 3º rótulo ("🔎 Reconciliação") pro prefixo
+`reconciliacao_manual`/`reconciliacao_agendado` do campo `origem`.
+
+**Deliberadamente SEM agendamento automático nesta v1** — só trigger manual. Depois do
+primeiro backfill completo, a maioria dos recursos já existirá no Inventário; novos gaps
+(recursos criados fora da janela de Activity Log observada, ex: se a coleta ficar
+desativada por um tempo) são bem mais raros que o gap inicial — reavaliar se vale
+automatizar depois de observar a frequência real de uso.
+
+**Verificado end-to-end contra o ambiente real, incluindo a chamada de verdade à API do
+Resource Graph** (nunca testada antes nesta sessão): reconciliação rodou nas 3 assinaturas
+em ~18 segundos, encontrou 12.450 recursos reais, dos quais **12.424 (99,8%) estavam
+ausentes do Inventário** — confirmação direta e definitiva do gap. Contagem "ativos" por
+assinatura antes/depois: Production 9.178→13.704 (+4.526), Development 5.634→9.971
+(+4.337), Test 1.771→5.332 (+3.561) — soma das 3 diferenças (12.424) bate exatamente com
+o "novos" reportado pela reconciliação, confirmando consistência ponta a ponta. `node
+--check`, `tsc -b`, migração (`origem_deteccao`) aplicada sem erro, `pm2 restart` sem
+crash-loop, 20/20 testes em `InventarioView.test.tsx` (1 novo — botão de reconciliação),
+274/274 na suíte completa do frontend, `npm run frontend:build`.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

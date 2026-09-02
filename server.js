@@ -5481,7 +5481,10 @@ function _logColetaDbx(msg) {
 // já que isso também é Azure Management API) próprios.
 let _invColetaEmExecucao = false;
 let _invColetaIniciadaEm = null;
-let _invColetaProgresso  = { fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
+// `tipo` distingue coleta normal (Activity Log) de reconciliação (Resource Graph) — mesmo
+// estado/rota/monitor reaproveitados pras duas (mutuamente exclusivas, escrevem na mesma
+// tabela) — só o frontend ajusta rótulos conforme `tipo` (ver AzureInventarioColetaMonitor.tsx).
+let _invColetaProgresso  = { tipo: 'coleta', fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
 function _logColetaInv(msg) {
   _invColetaProgresso.log.push({ ts: new Date().toISOString().slice(11, 19), msg });
   if (_invColetaProgresso.log.length > 200) _invColetaProgresso.log.shift();
@@ -6130,9 +6133,16 @@ async function ensureAzureColetaTable() {
       excluido_por      VARCHAR(300),
       excluido_em       TIMESTAMPTZ,
       ativo             BOOLEAN DEFAULT true,
-      detectado_em      TIMESTAMP DEFAULT NOW()
+      detectado_em      TIMESTAMP DEFAULT NOW(),
+      origem_deteccao   VARCHAR(20) DEFAULT 'activity_log'
     )
   `);
+  // Migração idempotente (2026-09-02) — coluna nova pra distinguir recursos aprendidos via
+  // Activity Log (fluxo normal, tem criado_por/criado_em) de recursos adicionados pela
+  // reconciliação via Resource Graph (ver `_reconciliarInventarioResourceGraph` — backfill
+  // de recursos que existem mas nunca geraram evento desde a ativação do Inventário, sem
+  // "criado por/em" porque o Resource Graph não tem esse histórico).
+  await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS origem_deteccao VARCHAR(20) DEFAULT 'activity_log'`);
   // UNIQUE via índice (não constraint inline) — resource_id é TEXT sem limite, e um índice
   // btree comum já é suficiente pra UPSERT (ON CONFLICT precisa de um índice único, não
   // necessariamente uma constraint declarada no CREATE TABLE).
@@ -7184,6 +7194,16 @@ app.post('/api/azure-inventario/coletar', authMiddleware, dbMiddleware, async (_
 
 app.get('/api/azure-inventario/status', authMiddleware, dbMiddleware, async (_req, res) => {
   res.json({ em_execucao: _invColetaEmExecucao, iniciada_em: _invColetaIniciadaEm, progresso: _invColetaProgresso });
+});
+
+// Reconciliação via Resource Graph (2026-09-02) — ver _reconciliarInventarioResourceGraph
+// pro porquê: o Inventário via Activity Log só aprende sobre um recurso quando há um evento
+// depois da ativação da feature, deixando de fora recursos antigos nunca mais tocados (mas
+// ainda cobrando). Mesma flag/monitor de progresso da coleta normal (mutuamente exclusivas).
+app.post('/api/azure-inventario/reconciliar', authMiddleware, dbMiddleware, async (_req, res) => {
+  if (_invColetaEmExecucao) return res.status(409).json({ error: 'Já existe uma coleta ou reconciliação de Inventário em execução' });
+  res.json({ ok: true, message: 'Reconciliação via Resource Graph iniciada' });
+  _reconciliarInventarioResourceGraph('manual').catch(e => console.error('[Inventario] Erro na reconciliação:', e.message));
 });
 
 app.get('/api/azure-inventario/coleta-historico', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -10209,7 +10229,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
   if (!pool) throw new Error('Banco não conectado');
   _invColetaEmExecucao = true;
   _invColetaIniciadaEm = new Date();
-  _invColetaProgresso = { fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
+  _invColetaProgresso = { tipo: 'coleta', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
   let histId;
   try {
     await ensureAzureColetaTable();
@@ -10332,6 +10352,131 @@ async function _coletarInventarioAzure(origem = 'manual') {
     } catch (eGraph) { _logColetaInv(`Resolução de nomes (Graph) indisponível: ${eGraph.message}`); }
   } catch (err) {
     _logColetaInv(`ERRO: ${err.message}`);
+    if (histId) await pool.query(
+      `UPDATE azure_inventario_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1 WHERE id=$2`,
+      [err.message, histId]
+    ).catch(() => {});
+  } finally {
+    _invColetaEmExecucao = false;
+    _invColetaIniciadaEm = null;
+  }
+}
+
+// Reconciliação via Azure Resource Graph (2026-09-02, pedido do usuário: validou que "Por
+// Assinatura" mostrava só uma fração dos recursos reais — confirmado com dados reais que só
+// 0,37% dos resource_ids cobrados num único dia tinham QUALQUER registro no Inventário).
+// Causa raiz: o Inventário (Activity Log) é um rastreador INCREMENTAL, não um catálogo — só
+// aprende sobre um recurso quando há um evento de criação/atualização/exclusão DEPOIS da
+// ativação da feature (2026-08-30). Um recurso criado meses antes e nunca mais tocado (ex:
+// um disco de restore point de backup) segue cobrando todo dia sem nunca ter gerado um
+// evento — invisível pro Inventário, mesmo 100% ativo. Resource Graph resolve isso porque
+// lista TUDO que existe AGORA, independente de histórico — mesma permissão Reader já
+// concedida à Service Principal (Resource Graph não exige nenhum grant adicional).
+//
+// Só ADICIONA recursos ausentes — nunca desativa um recurso que o Resource Graph não
+// retornou. Deliberado: "não apareceu no Resource Graph" pode significar "foi excluído" OU
+// "erro de paginação/transiente" — só o Activity Log (evento de delete real, com autor e
+// timestamp) tem confiança suficiente pra marcar `ativo=false`. Reconciliação e coleta
+// normal são mutuamente exclusivas (mesma flag `_invColetaEmExecucao`) — as duas escrevem
+// na mesma tabela, evita condição de corrida.
+async function _resourceGraphFetchRecursos(token, subscriptionId) {
+  const recursos = [];
+  let skipToken = null;
+  let paginas = 0;
+  do {
+    const body = {
+      subscriptions: [subscriptionId],
+      query: 'Resources | project id, name, type, resourceGroup',
+      options: { $top: 1000, ...(skipToken ? { $skipToken: skipToken } : {}) },
+    };
+    const resp = await _cbFetch(
+      'https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01',
+      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      { timeoutMs: 30_000 }
+    );
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+    for (const item of (data.data || [])) recursos.push(item);
+    skipToken = data.$skipToken || null;
+    paginas++;
+  } while (skipToken && paginas < 1000); // guarda-corpo generoso (até 1M recursos por subscription)
+  return recursos;
+}
+
+async function _reconciliarInventarioResourceGraph(origem = 'manual') {
+  if (_invColetaEmExecucao) throw new Error('Já existe uma coleta ou reconciliação de Inventário em execução');
+  if (!pool) throw new Error('Banco não conectado');
+  _invColetaEmExecucao = true;
+  _invColetaIniciadaEm = new Date();
+  _invColetaProgresso = { tipo: 'reconciliacao', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
+  let histId;
+  try {
+    await ensureAzureColetaTable();
+    const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
+    if (!cfgRow.rows.length) throw new Error('Inventário não configurado');
+    const cfg = cfgRow.rows[0];
+    if (!cfg.sp_id) throw new Error('Nenhum Service Principal configurado para o Inventário');
+    const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
+    if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
+    const spCfg = spRow.rows[0];
+    const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
+    const token = await getToken();
+
+    const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    if (!subs.length) throw new Error('Nenhuma subscription configurada (nem no Inventário, nem no Service Principal escolhido)');
+
+    const hist = await pool.query(
+      `INSERT INTO azure_inventario_coleta_historico (status,origem) VALUES ('executando',$1) RETURNING id`,
+      ['reconciliacao_' + origem]
+    );
+    histId = hist.rows[0].id;
+    _logColetaInv(`Reconciliação (Resource Graph) — ${subs.length} subscription(s)`);
+    _invColetaProgresso.sub_total = subs.length;
+
+    let totalEncontrados = 0, totalNovos = 0;
+    for (let i = 0; i < subs.length; i++) {
+      const subId = subs[i];
+      _invColetaProgresso.sub_idx = i + 1;
+      _invColetaProgresso.sub_atual = subId;
+      _invColetaProgresso.fase = `[${i + 1}/${subs.length}] Consultando Resource Graph — ${subId}`;
+      let recursos;
+      try {
+        recursos = await _resourceGraphFetchRecursos(token, subId);
+      } catch (eSub) {
+        _logColetaInv(`  ✗ ${subId}: ${eSub.message}`);
+        continue;
+      }
+      _logColetaInv(`  ${subId}: ${recursos.length} recurso(s) encontrado(s)`);
+      totalEncontrados += recursos.length;
+
+      for (const item of recursos) {
+        if (!item.id) continue;
+        const nome = item.name || String(item.id).split('/').pop();
+        const r = await pool.query(
+          `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,ativo,origem_deteccao)
+           VALUES ($1,$2,$3,$4,$5,true,'resource_graph')
+           ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
+             ativo=true,
+             resource_type=COALESCE(azure_recursos_inventario.resource_type, EXCLUDED.resource_type),
+             resource_group=COALESCE(azure_recursos_inventario.resource_group, EXCLUDED.resource_group),
+             nome=COALESCE(azure_recursos_inventario.nome, EXCLUDED.nome)
+           RETURNING (xmax = 0) AS inserted`,
+          [subId, item.id, item.type || null, item.resourceGroup || null, nome]
+        );
+        if (r.rows[0]?.inserted) totalNovos++;
+        _invColetaProgresso.eventos = totalEncontrados;
+        _invColetaProgresso.novos = totalNovos;
+      }
+    }
+
+    const msg = `${totalEncontrados} recurso(s) encontrados no Resource Graph | ${totalNovos} novo(s) adicionado(s) ao Inventário`;
+    _logColetaInv(`Reconciliação concluída: ${msg}`);
+    await pool.query(
+      `UPDATE azure_inventario_coleta_historico SET status='concluido',concluido_em=NOW(),eventos_processados=$1,recursos_novos=$2,mensagem=$3 WHERE id=$4`,
+      [totalEncontrados, totalNovos, msg, histId]
+    );
+  } catch (err) {
+    _logColetaInv(`ERRO (reconciliação): ${err.message}`);
     if (histId) await pool.query(
       `UPDATE azure_inventario_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1 WHERE id=$2`,
       [err.message, histId]

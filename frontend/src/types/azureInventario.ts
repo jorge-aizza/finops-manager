@@ -106,6 +106,9 @@ export interface AzureInventarioStatus {
   em_execucao: boolean
   iniciada_em: string | null
   progresso: {
+    // 'coleta' (Activity Log, padrão) | 'reconciliacao' (Resource Graph, ver
+    // POST /azure-inventario/reconciliar) — mesmo estado/monitor pras duas, só o rótulo muda.
+    tipo?: 'coleta' | 'reconciliacao'
     fase: string
     sub_atual: string
     sub_idx: number
@@ -160,6 +163,10 @@ export interface AzureRecursoInventario {
   criado_por_nome: string | null
   atualizado_por_nome: string | null
   excluido_por_nome: string | null
+  // 'activity_log' (padrão, tem criado_por/criado_em) | 'resource_graph' (backfill de
+  // reconciliação — recurso existe mas nunca gerou evento desde a ativação do Inventário,
+  // por isso sem histórico de criação). Ver server.js, _reconciliarInventarioResourceGraph.
+  origem_deteccao?: 'activity_log' | 'resource_graph'
 }
 
 export type AzureAuditoriaAcao = 'CRIACAO' | 'ATUALIZACAO' | 'EXCLUSAO'
