@@ -39,6 +39,7 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
   vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockResolvedValue({ nivel: 'assinatura', itens: [] })
+  vi.mocked(azureInventarioApi.getAzureCrescimentoLiquido).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
   vi.mocked(azureInventarioApi.getAzureInventarioComparativo).mockResolvedValue({
     periodo_a: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
     periodo_b: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
@@ -51,6 +52,22 @@ describe('InventarioView', () => {
   it('mostra a aba Recursos por padrão', async () => {
     renderWithClient()
     expect(await screen.findByText('Recursos (Inventário)')).toBeInTheDocument()
+  })
+
+  it('mostra o gráfico de Crescimento Líquido com o delta do período', async () => {
+    vi.mocked(azureInventarioApi.getAzureCrescimentoLiquido).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-30' },
+      dias: [
+        { dia: '2026-08-01', ativos: 100 },
+        { dia: '2026-08-15', ativos: 108 },
+        { dia: '2026-08-30', ativos: 112 },
+      ],
+    })
+    renderWithClient()
+    expect(await screen.findByText('Crescimento Líquido de Recursos')).toBeInTheDocument()
+    expect(await screen.findByText(/100 → 112 recursos no período/)).toBeInTheDocument()
+    expect(screen.getByText('+12')).toBeInTheDocument()
+    expect(screen.getByText(/Exclui recursos de cluster efêmero/)).toBeInTheDocument()
   })
 
   it('aba Por Assinatura navega Assinatura → Resource Group → Recurso', async () => {

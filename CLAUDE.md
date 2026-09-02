@@ -3208,6 +3208,38 @@ o "novos" reportado pela reconciliação, confirmando consistência ponta a pont
 crash-loop, 20/20 testes em `InventarioView.test.tsx` (1 novo — botão de reconciliação),
 274/274 na suíte completa do frontend, `npm run frontend:build`.
 
+**Gráfico "Crescimento Líquido de Recursos" reintroduzido, agora filtrado (2026-09-02,
+pedido do usuário: "a ideia é ver crescimento de recurso novos, que cresça e não morra")** —
+o gráfico antigo "Crescimento de Recursos" (removido em 2026-08-31 por "não fazer sentido
+nesse momento") era baseado em `azure_costs` (contava QUALQUER `resource_id` cobrado no dia,
+dominado pelo churn de VMs/discos/NICs efêmeros de cluster — confirmado nesta sessão: uma
+assinatura com 1.679 VMs de cluster Databricks contra só 8 VMs "de verdade"). Reintroduzido
+com fonte e lógica diferentes: `GET /api/azure-inventario/crescimento-liquido` conta, dia a
+dia, quantos recursos de `azure_recursos_inventario` (permanente) estavam ativos NAQUELE
+dia — `(criado_em IS NULL OR criado_em::date <= dia) AND (excluido_em IS NULL OR
+excluido_em::date > dia)`, mesma convenção do Comparativo pra `criado_em IS NULL` ("sempre
+existiu") — **excluindo Resource Groups gerenciados por Databricks/AKS** (`_detectManagedRg`,
+mesma detecção já usada nos badges "VM (Databricks)" de "Por Assinatura"). Classificação de
+RG gerenciado é feita em JS (lista de RGs distintos, pequena) e passada pro SQL como filtro —
+evita duplicar a lógica de padrão de nome em SQL. `CROSS JOIN` dias × recursos é barato aqui
+porque `azure_recursos_inventario` é a tabela pequena/permanente do Inventário (não
+`azure_costs`, ~1,45M linhas) — mesmo cuidado de escala já aplicado em outras partes desta
+sessão.
+
+**Gráfico virou linha, não mais barras** — diferente do antigo (barras, laranja = cresceu
+vs. dia anterior), este é um NÍVEL ao longo do tempo (quantos recursos ativos), não
+magnitudes independentes por dia; linha com área preenchida, eixo Y não começa em zero de
+propósito (o objetivo é mostrar a forma da tendência, não comparar magnitude absoluta —
+barras exigiriam começar em zero pra não distorcer, linha não). Card mostra o delta do
+período (ex: "13.206 → 12.134 recursos (−1.072)") com cor verde/vermelha.
+
+**Verificado contra o servidor real**: endpoint responde em ~330ms (31 dias, ~29 mil
+recursos na tabela). Dado real do ambiente mostrou uma QUEDA líquida no período
+(13.206→12.134, excluindo efêmero) — sinal real que ficava invisível atrás do vaivém de
+cluster antes desta correção. `node --check`, `tsc -b`, 21/21 testes em
+`InventarioView.test.tsx` (1 novo — delta do gráfico), 275/275 na suíte completa do
+frontend, `npm run frontend:build`, `pm2 restart` sem erro/crash-loop.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

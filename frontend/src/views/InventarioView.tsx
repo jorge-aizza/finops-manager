@@ -7,6 +7,7 @@ import {
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
+  getAzureCrescimentoLiquido,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -118,6 +119,56 @@ function resourceTypeIcon(raw: string): string {
   return RESOURCE_TYPE_ICONS[raw.toLowerCase()] || '📦'
 }
 
+// Gráfico de crescimento LÍQUIDO (2026-09-02, pedido do usuário: "a ideia é ver crescimento
+// de recurso novos, que cresça e não morra") — linha (não barras) porque é um NÍVEL ao longo
+// do tempo (quantos recursos ativos naquele dia), não magnitudes independentes por dia; eixo
+// Y não começa em zero de propósito — o objetivo é mostrar a FORMA da tendência (sobe/desce/
+// estável), não comparar magnitude absoluta. Dado já vem filtrado pelo backend (exclui
+// Resource Groups gerenciados por Databricks/AKS — ver GET /crescimento-liquido).
+function GrowthChart({ dias }: { dias: { dia: string; ativos: number }[] }) {
+  if (dias.length === 0) return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '0 20px 16px' }}>Sem dados no período.</div>
+  const W = 640, H = 160, PAD_TOP = 16, PAD_BOTTOM = 26, PAD_SIDE = 10
+  const plotH = H - PAD_TOP - PAD_BOTTOM
+  const valores = dias.map((d) => d.ativos)
+  const max = Math.max(...valores)
+  const min = Math.min(...valores)
+  const folga = Math.max(1, Math.round((max - min) * 0.15))
+  const yMax = max + folga
+  const yMin = Math.max(0, min - folga)
+  const yRange = Math.max(1, yMax - yMin)
+  const slot = dias.length > 1 ? (W - PAD_SIDE * 2) / (dias.length - 1) : 0
+  const baseY = H - PAD_BOTTOM
+  const px = (i: number) => PAD_SIDE + i * slot
+  const py = (v: number) => PAD_TOP + (1 - (v - yMin) / yRange) * plotH
+
+  const pontos = dias.map((d, i) => `${px(i)},${py(d.ativos)}`).join(' ')
+  const areaPontos = `${px(0)},${baseY} ${pontos} ${px(dias.length - 1)},${baseY}`
+  const primeiro = dias[0].ativos
+  const ultimo = dias[dias.length - 1].ativos
+  const delta = ultimo - primeiro
+  const corDelta = delta > 0 ? 'var(--green,#22c55e)' : delta < 0 ? 'var(--red,#ff4d6a)' : 'var(--text-muted)'
+
+  return (
+    <div style={{ padding: '0 20px 16px' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 180 }}>
+        <line x1={PAD_SIDE} y1={baseY} x2={W - PAD_SIDE} y2={baseY} stroke="var(--border)" strokeWidth={1} />
+        <polygon points={areaPontos} fill="var(--accent)" opacity={0.12} />
+        <polyline points={pontos} fill="none" stroke="var(--accent)" strokeWidth={2} />
+        {dias.map((d, i) => (
+          <circle key={d.dia} cx={px(i)} cy={py(d.ativos)} r={2.5} fill="var(--accent)">
+            <title>{new Date(d.dia + 'T00:00:00').toLocaleDateString('pt-BR')}: {d.ativos.toLocaleString('pt-BR')} recurso(s) ativo(s)</title>
+          </circle>
+        ))}
+      </svg>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        {primeiro.toLocaleString('pt-BR')} → {ultimo.toLocaleString('pt-BR')} recursos no período (
+        <strong style={{ color: corDelta }}>{delta > 0 ? '+' : ''}{delta.toLocaleString('pt-BR')}</strong>
+        ). Exclui recursos de cluster efêmero (Databricks/AKS) — só o que nasce e permanece.
+      </div>
+    </div>
+  )
+}
+
 // Uma linha do comparativo (ex: "Recursos ativos", "Custo total") — mostra os dois
 // períodos lado a lado com um delta (▲/▼ colorido) entre eles.
 function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; b: number; formato: 'num' | 'brl' }) {
@@ -154,8 +205,16 @@ export default function InventarioView() {
   // Group → Recurso. `paSub`/`paRg` null = ainda não desceu naquele nível.
   const [paSub, setPaSub] = useState<string | null>(null)
   const [paRg, setPaRg] = useState<string | null>(null)
+  // Gráfico de Crescimento Líquido (2026-09-02) — período próprio, independente do usado
+  // pela aba Auditoria (`periodo`).
+  const [periodoCrescimento, setPeriodoCrescimento] = useState(defaultPeriodo(30))
 
   const configQuery = useQuery({ queryKey: ['azure-inv-config'], queryFn: getAzureInventarioConfig })
+  const crescimentoQuery = useQuery({
+    queryKey: ['azure-inv-crescimento-liquido', periodoCrescimento.inicio, periodoCrescimento.fim],
+    queryFn: () => getAzureCrescimentoLiquido(periodoCrescimento.inicio, periodoCrescimento.fim),
+    placeholderData: keepPreviousData,
+  })
   const statusQuery = useQuery({
     queryKey: ['azure-inv-status'],
     queryFn: getAzureInventarioStatus,
@@ -291,6 +350,24 @@ export default function InventarioView() {
       </div>
 
       <AzureInventarioColetaMonitor />
+
+      <div className="card" style={{ margin: '16px 20px 0' }}>
+        <div className="card-header"><span className="card-title">Crescimento Líquido de Recursos</span></div>
+        <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+          Quantos recursos estavam ativos em cada dia — exclui recursos de cluster efêmero (Databricks/AKS), que nascem e morrem em horas e escondem o crescimento real.
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', padding: '0 20px 12px', flexWrap: 'wrap' }}>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label>De</label>
+            <input type="date" value={periodoCrescimento.inicio} onChange={(e) => setPeriodoCrescimento((p) => ({ ...p, inicio: e.target.value }))} />
+          </div>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label>Até</label>
+            <input type="date" value={periodoCrescimento.fim} onChange={(e) => setPeriodoCrescimento((p) => ({ ...p, fim: e.target.value }))} />
+          </div>
+        </div>
+        <GrowthChart dias={crescimentoQuery.data?.dias || []} />
+      </div>
 
       {tab === 'recursos' && (
         <div className="card" style={{ margin: '16px 20px' }}>

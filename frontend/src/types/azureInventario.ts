@@ -202,9 +202,22 @@ export interface AzureAuditoriaPorTipo {
 
 // Crescimento — contagem diária de resource_id distintos, derivada de azure_costs (zero
 // coleta nova) — funciona mesmo sem o Inventário/Auditoria configurado.
+// Removido da UI (2026-08-31, "não está fazendo sentido") — sem nenhum chamador hoje, ver
+// AzureCrescimentoLiquidoDia abaixo pro gráfico que voltou a fazer sentido (2026-09-02).
 export interface AzureCrescimentoDia {
   cost_date: string
   recursos: number
+}
+
+// Crescimento LÍQUIDO (2026-09-02, pedido do usuário: "a ideia é ver crescimento de recurso
+// novos, que cresça e não morra") — diferente do AzureCrescimentoDia acima (billing, conta
+// QUALQUER resource_id cobrado no dia, dominado por churn de cluster): baseado em
+// `azure_recursos_inventario` (permanente), conta quantos recursos estavam ativos NAQUELE
+// dia, EXCLUINDO Resource Groups gerenciados por Databricks/AKS. Ver GET
+// /azure-inventario/crescimento-liquido.
+export interface AzureCrescimentoLiquidoDia {
+  dia: string
+  ativos: number
 }
 
 // Comparativo entre dois períodos — total_recursos é um SNAPSHOT (quantos recursos

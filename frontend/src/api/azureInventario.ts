@@ -3,7 +3,7 @@ import { numFields } from './normalize'
 import type {
   AzureInventarioConfig, AzureInventarioConfigInput, AzureInventarioStatus,
   AzureInventarioColetaHistoricoItem, AzureRecursoInventario, AzureAuditoriaEvento,
-  AzureCrescimentoDia, AzureComparativoResposta, AzureRecursoDetalheResposta,
+  AzureCrescimentoDia, AzureCrescimentoLiquidoDia, AzureComparativoResposta, AzureRecursoDetalheResposta,
   AzureAnomaliaCrescimento, AzureOrcamentoInventario, AzureOrcamentoInventarioInput,
   AzureOrcamentoAlerta, AzureTagsFaltantesResposta, AzureAuditoriaPorTipo,
   AzureResumoPorAssinaturaResposta,
@@ -89,6 +89,17 @@ export const getAzureCrescimento = (data_inicio?: string, data_fim?: string, sub
   return apiFetch<{ periodo: { inicio: string; fim: string }; dias: AzureCrescimentoDia[] }>(
     'GET', '/azure-inventario/crescimento' + (qs ? '?' + qs : '')
   ).then((r) => ({ ...r, dias: r.dias.map((d) => ({ ...d, recursos: Number(d.recursos) })) }))
+}
+
+// Crescimento líquido (2026-09-02) — ver AzureCrescimentoLiquidoDia.
+export const getAzureCrescimentoLiquido = (data_inicio?: string, data_fim?: string) => {
+  const q = new URLSearchParams()
+  if (data_inicio) q.set('data_inicio', data_inicio)
+  if (data_fim) q.set('data_fim', data_fim)
+  const qs = q.toString()
+  return apiFetch<{ periodo: { inicio: string; fim: string }; dias: AzureCrescimentoLiquidoDia[] }>(
+    'GET', '/azure-inventario/crescimento-liquido' + (qs ? '?' + qs : '')
+  ).then((r) => ({ ...r, dias: r.dias.map((d) => ({ ...d, ativos: Number(d.ativos) })) }))
 }
 
 const normalizeComparativoPeriodo = (p: AzureComparativoResposta['periodo_a']) => ({

@@ -7344,6 +7344,61 @@ app.get('/api/azure-inventario/resumo-por-assinatura', authMiddleware, dbMiddlew
   } catch (e) { _dbErr(res, e); }
 });
 
+// Crescimento líquido (2026-09-02, pedido do usuário: "a ideia é ver crescimento de recurso
+// novos, que cresça e não morra") — diferente do gráfico "Crescimento de Recursos" removido
+// antes nesta sessão (baseado em `azure_costs`, contava QUALQUER resource_id cobrado no dia,
+// dominado pelo churn de VMs/discos/NICs efêmeros de cluster), este conta, dia a dia, quantos
+// recursos de `azure_recursos_inventario` estavam ativos NAQUELE dia — EXCLUINDO Resource
+// Groups gerenciados por Databricks/AKS (mesma detecção `_detectManagedRg` já usada pra
+// separar VM de "VM (Databricks)" nos badges de "Por Assinatura"). Sem esse filtro, o
+// crescimento de recursos "de verdade" (que nascem e permanecem) fica invisível atrás do
+// vaivém de nós de cluster que vivem só algumas horas.
+app.get('/api/azure-inventario/crescimento-liquido', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    let { data_inicio, data_fim } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+
+    // Classificação de RG gerenciado é JS (_detectManagedRg), não dá pra fazer em SQL sem
+    // duplicar a lógica de padrão de nome — mas a tabela é pequena (só RGs distintos, algumas
+    // centenas), então classificar em JS e passar a lista pro SQL como filtro é barato.
+    const rgRows = await pool.query(`SELECT DISTINCT resource_group FROM azure_recursos_inventario WHERE resource_group IS NOT NULL`);
+    const rgsGerenciados = rgRows.rows
+      .map((r) => r.resource_group)
+      .filter((rg) => _detectManagedRg(rg).managed_type)
+      .map((rg) => rg.toUpperCase());
+
+    // CROSS JOIN dias × recursos é barato aqui — azure_recursos_inventario é a tabela
+    // PERMANENTE do Inventário (só alguns milhares de linhas), nunca a azure_costs (~1,45M).
+    // "Ativo no dia D" = criado até D (ou criado_em desconhecido — recurso que já existia
+    // antes da 1ª coleta, mesma convenção já usada no Comparativo) E ainda não excluído (ou
+    // excluído depois de D).
+    const r = await pool.query(
+      `WITH dias AS (SELECT generate_series($1::date, $2::date, '1 day')::date AS dia)
+       SELECT d.dia,
+         COUNT(*) FILTER (
+           WHERE (ri.criado_em IS NULL OR ri.criado_em::date <= d.dia)
+             AND (ri.excluido_em IS NULL OR ri.excluido_em::date > d.dia)
+         ) AS ativos
+       FROM dias d
+       CROSS JOIN azure_recursos_inventario ri
+       WHERE NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($3::text[]))
+       GROUP BY d.dia ORDER BY d.dia`,
+      [data_inicio, data_fim, rgsGerenciados]
+    );
+    res.json({
+      periodo: { inicio: data_inicio, fim: data_fim },
+      dias: r.rows.map((row) => ({ dia: row.dia.toISOString().slice(0, 10), ativos: parseInt(row.ativos, 10) })),
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
 // Auditoria — log bruto de eventos (sujeito à retenção configurável).
 app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (req, res) => {
   try {
