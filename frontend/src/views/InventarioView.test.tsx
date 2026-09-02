@@ -40,6 +40,9 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
   vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockResolvedValue({ nivel: 'assinatura', itens: [] })
   vi.mocked(azureInventarioApi.getAzureCrescimentoLiquido).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
+  vi.mocked(azureInventarioApi.getAzureAdvisor).mockResolvedValue({ total: 0, itens: [], por_categoria: {}, erros: [] })
+  vi.mocked(azureInventarioApi.getAzureRedeTopologia).mockResolvedValue({ vnets: [] })
+  vi.mocked(azureInventarioApi.baixarAzureInventarioExcel).mockResolvedValue(undefined)
   vi.mocked(azureInventarioApi.getAzureInventarioComparativo).mockResolvedValue({
     periodo_a: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
     periodo_b: { inicio: '', fim: '', total_recursos: 0, custo_total: 0, criados: 0, atualizados: 0, excluidos: 0 },
@@ -299,6 +302,59 @@ describe('InventarioView', () => {
     await waitFor(() => expect(azureInventarioApi.reconciliarAzureInventario).toHaveBeenCalled())
   })
 
+  it('botão "Exportar Excel" dispara o download com o filtro de ativo atual', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: '📊 Exportar Excel' }))
+    await waitFor(() => expect(azureInventarioApi.baixarAzureInventarioExcel).toHaveBeenCalledWith({ ativo: true }))
+    expect(window.showToast).toHaveBeenCalledWith('Inventário exportado.', 'success')
+  })
+
+  it('aba Advisor mostra badges por categoria e filtra a tabela ao clicar', async () => {
+    vi.mocked(azureInventarioApi.getAzureAdvisor).mockResolvedValue({
+      total: 2,
+      itens: [
+        { id: 'r1', subscription_id: 'sub-1', categoria: 'Cost', impacto: 'High', tipo_recurso: 'Microsoft.Compute/virtualMachines', recurso: 'vm-teste', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste', problema: 'VM subutilizada', solucao: 'Redimensionar', beneficio_potencial: 'Economize R$ 100/mês' },
+        { id: 'r2', subscription_id: 'sub-1', categoria: 'Security', impacto: 'Medium', tipo_recurso: 'Microsoft.Storage/storageAccounts', recurso: 'storageteste', resource_id: null, problema: 'Habilitar criptografia', solucao: 'Habilitar', beneficio_potencial: null },
+      ],
+      por_categoria: { Cost: 1, Security: 1 },
+      erros: [],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Advisor' }))
+
+    expect(await screen.findByText('VM subutilizada')).toBeInTheDocument()
+    expect(screen.getByText('Habilitar criptografia')).toBeInTheDocument()
+    const botaoCategoria = screen.getByRole('button', { name: /💰 Custo/ })
+    expect(botaoCategoria).toBeInTheDocument()
+
+    await user.click(botaoCategoria)
+    expect(screen.getByText('VM subutilizada')).toBeInTheDocument()
+    expect(screen.queryByText('Habilitar criptografia')).not.toBeInTheDocument()
+  })
+
+  it('aba Rede mostra as VNets da assinatura selecionada com address space e subnets', async () => {
+    vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([
+      { subscription_id: 'sub-1', subscription_name: 'Development', periodo_inicio: null, periodo_fim: null, moeda: null },
+    ])
+    vi.mocked(azureInventarioApi.getAzureRedeTopologia).mockResolvedValue({
+      vnets: [{
+        id: '/subscriptions/sub-1/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-teste',
+        nome: 'vnet-teste', resource_group: 'rg-net', address_space: ['10.0.0.0/16'],
+        subnets: [{ nome: 'subnet-app', prefixo: '10.0.1.0/24' }], peerings: [],
+      }],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Rede' }))
+    await user.selectOptions(await screen.findByRole('combobox'), 'sub-1')
+
+    expect(await screen.findByText(/vnet-teste/)).toBeInTheDocument()
+    expect(screen.getByText('10.0.0.0/16')).toBeInTheDocument()
+    expect(screen.getByText('subnet-app')).toBeInTheDocument()
+  })
+
   it('mostra o nome resolvido (Microsoft Graph) em vez do GUID quando disponível', async () => {
     vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
       total: 1,
@@ -410,6 +466,45 @@ describe('InventarioView', () => {
     expect(screen.getByText('Standard_D4ds_v5')).toBeInTheDocument()
     expect(screen.getByText(/4 vCPUs/)).toBeInTheDocument()
     expect(azureInventarioApi.getAzureRecursoDetalhe).toHaveBeenCalledWith(
+      '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste', 'sub-1',
+    )
+  })
+
+  it('modal de detalhe busca propriedades reais da Azure sob demanda (Resource Graph)', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+      }],
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
+      recurso: {
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+      },
+      eventos: [], custo_diario: [], custo_resource_group: 0, resource_group_recursos: 0, billing_detalhe: null,
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursoArmDetalhe).mockResolvedValue({
+      id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+      name: 'vm-teste', type: 'microsoft.compute/virtualmachines', resourceGroup: 'rg-1', location: 'brazilsouth',
+      sku: null, properties: { hardwareProfile: { vmSize: 'Standard_D4ds_v5' } }, tags: null,
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByText('vm-teste'))
+    expect(await screen.findByText('Detalhe do Recurso')).toBeInTheDocument()
+
+    expect(azureInventarioApi.getAzureRecursoArmDetalhe).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: '🔎 Ver propriedades completas (Azure)' }))
+
+    expect(await screen.findByText('microsoft.compute/virtualmachines')).toBeInTheDocument()
+    expect(screen.getByText(/vmSize/)).toBeInTheDocument()
+    expect(azureInventarioApi.getAzureRecursoArmDetalhe).toHaveBeenCalledWith(
       '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste', 'sub-1',
     )
   })

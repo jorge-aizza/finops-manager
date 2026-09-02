@@ -7206,6 +7206,98 @@ app.post('/api/azure-inventario/reconciliar', authMiddleware, dbMiddleware, asyn
   _reconciliarInventarioResourceGraph('manual').catch(e => console.error('[Inventario] Erro na reconciliação:', e.message));
 });
 
+// Recomendações do Azure Advisor (2026-09-02, inspirado no ARI) — sem `subscription_id`,
+// agrega TODAS as subscriptions configuradas pro Inventário; erro numa subscription não
+// derruba as outras (`erros` na resposta lista qual falhou e por quê, mesmo padrão de
+// resiliência já usado na coleta/reconciliação). `category` opcional filtra client-side
+// (Cost/Security/HighAvailability/Performance/OperationalExcellence).
+app.get('/api/azure-inventario/advisor', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_id, category } = req.query;
+    const { getToken, subs } = await _getInventarioSpConfig();
+    const token = await getToken();
+    const alvo = subscription_id ? [subscription_id] : subs;
+    if (!alvo.length) return res.status(400).json({ error: 'Nenhuma subscription configurada' });
+
+    const porSub = await Promise.all(alvo.map(async (sub) => {
+      try {
+        return { subscription_id: sub, recomendacoes: await _getAdvisorCached(token, sub), erro: null };
+      } catch (e) {
+        return { subscription_id: sub, recomendacoes: [], erro: e.message };
+      }
+    }));
+
+    let itens = [];
+    for (const p of porSub) {
+      for (const r of p.recomendacoes) {
+        itens.push({
+          id: r.id,
+          subscription_id: p.subscription_id,
+          categoria: r.properties?.category || null,
+          impacto: r.properties?.impact || null,
+          tipo_recurso: r.properties?.impactedField || null,
+          recurso: r.properties?.impactedValue || null,
+          resource_id: r.properties?.resourceMetadata?.resourceId || null,
+          problema: r.properties?.shortDescription?.problem || null,
+          solucao: r.properties?.shortDescription?.solution || null,
+          beneficio_potencial: r.properties?.potentialBenefits || null,
+        });
+      }
+    }
+    if (category) itens = itens.filter((i) => i.categoria === category);
+
+    const porCategoria = {};
+    for (const i of itens) porCategoria[i.categoria || 'Outro'] = (porCategoria[i.categoria || 'Outro'] || 0) + 1;
+
+    res.json({
+      total: itens.length,
+      itens,
+      por_categoria: porCategoria,
+      erros: porSub.filter((p) => p.erro).map((p) => ({ subscription_id: p.subscription_id, erro: p.erro })),
+    });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Topologia de rede (2026-09-02, inspirado no ARI — que gera diagrama draw.io de VNets/
+// peerings). Campos confirmados na documentação oficial da REST API de Virtual Network
+// (learn.microsoft.com/rest/api/virtualnetwork/virtual-networks/get):
+// `properties.addressSpace.addressPrefixes[]`, `properties.subnets[].{name,properties.addressPrefix}`,
+// `properties.virtualNetworkPeerings[].properties.{remoteVirtualNetwork.id,peeringState}`.
+// Resource Graph devolve o mesmo bag `properties` cru do ARM (é o índice dele), então esses
+// caminhos valem igual via Resource Graph. Renderizado como SVG simples no frontend — sem
+// lib de diagrama nova, mesmo padrão já usado pros outros gráficos desta sessão.
+app.get('/api/azure-inventario/rede-topologia', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { subscription_id } = req.query;
+    if (!subscription_id) return res.status(400).json({ error: 'subscription_id é obrigatório' });
+    const { getToken } = await _getInventarioSpConfig();
+    const token = await getToken();
+    const body = {
+      subscriptions: [subscription_id],
+      query: `Resources | where type =~ 'microsoft.network/virtualnetworks' | project id, name, resourceGroup, properties | limit 1000`,
+    };
+    const resp = await _cbFetch(
+      'https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01',
+      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      { timeoutMs: 30_000 }
+    );
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+
+    const vnets = (data.data || []).map((v) => ({
+      id: v.id,
+      nome: v.name,
+      resource_group: v.resourceGroup,
+      address_space: v.properties?.addressSpace?.addressPrefixes || [],
+      subnets: (v.properties?.subnets || []).map((s) => ({ nome: s.name, prefixo: s.properties?.addressPrefix || null })),
+      peerings: (v.properties?.virtualNetworkPeerings || [])
+        .map((p) => ({ vnet_remoto_id: p.properties?.remoteVirtualNetwork?.id || null, estado: p.properties?.peeringState || null }))
+        .filter((p) => p.vnet_remoto_id),
+    }));
+    res.json({ vnets });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/azure-inventario/coleta-historico', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
@@ -7270,6 +7362,96 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
     }));
 
     res.json({ total: recursos.length, recursos });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Exportar Inventário pra Excel (2026-09-02, inspirado no Azure Resource Inventory —
+// github.com/microsoft/ARI, que gera relatório .xlsx completo) — reaproveita ExcelJS e a
+// paleta roxa Vivo já usadas em GET /api/export/excel (Ações), mas com estilo local a esta
+// rota (não um refactor do export existente). Sem LIMIT — dump completo (a tabela é pequena,
+// ~29 mil linhas no ambiente real, ExcelJS escreve isso em segundos).
+app.get('/api/azure-inventario/export/excel', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const ExcelJS = require('exceljs');
+    await ensureAzureColetaTable();
+    const { subscription_id, ativo } = req.query;
+    let where = '1=1';
+    const params = [];
+    if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
+    if (ativo === 'true') where += ` AND ri.ativo = true`;
+    else if (ativo === 'false') where += ` AND ri.ativo = false`;
+
+    const [r, subsRow, rgStats] = await Promise.all([
+      pool.query(
+        `SELECT ri.*, cac1.nome AS criado_por_nome
+         FROM azure_recursos_inventario ri
+         LEFT JOIN azure_autores_cache cac1 ON cac1.guid = ri.criado_por
+         WHERE ${where}
+         ORDER BY ri.subscription_id, ri.resource_group, ri.nome`,
+        params
+      ),
+      pool.query(`SELECT subscription_id, subscription_name FROM azure_subs_cache`),
+      _getRgStatsCache(),
+    ]);
+    const subsMap = new Map(subsRow.rows.map((s) => [s.subscription_id, s.subscription_name]));
+
+    const PURPLE_MAIN = '7B2FBE', PURPLE_LIGHT = 'F3E8FF', NAVY = 'FF1B2A4A', GRAY_BDR = 'FFE0D4F5';
+    const BRL_FMT = '"R$ "#,##0.00';
+    const hFill = (hex) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + hex } });
+    const hFont = (bold, color, size) => ({ bold: !!bold, color: { argb: color || NAVY }, size: size || 9, name: 'Arial' });
+    const hBorder = () => { const s = { style: 'thin', color: { argb: GRAY_BDR } }; return { left: s, right: s, top: s, bottom: s }; };
+    const styleCell = (cell, { fill, font, alignment, border, numFmt } = {}) => {
+      if (fill) cell.fill = fill;
+      if (font) cell.font = font;
+      if (alignment) cell.alignment = alignment;
+      if (border) cell.border = border;
+      if (numFmt) cell.numFmt = numFmt;
+    };
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'FinOps Manager';
+    wb.created = new Date();
+
+    const ws = wb.addWorksheet('Recursos');
+    ws.views = [{ showGridLines: false, state: 'frozen', ySplit: 1 }];
+    ws.columns = [{ width: 26 }, { width: 38 }, { width: 42 }, { width: 30 }, { width: 8 }, { width: 26 }, { width: 16 }, { width: 16 }, { width: 20 }];
+    const headers = ['Assinatura', 'Resource Group', 'Nome', 'Tipo', 'Ativo', 'Criado por', 'Criado em', 'Custo Direto (R$)', 'Custo do RG (~aprox., R$)'];
+    const headerRow = ws.getRow(1);
+    headers.forEach((h, i) => {
+      styleCell(headerRow.getCell(i + 1), {
+        fill: hFill(PURPLE_MAIN), font: hFont(true, 'FFFFFFFF', 10),
+        alignment: { horizontal: 'center', vertical: 'middle' }, border: hBorder(),
+      });
+      headerRow.getCell(i + 1).value = h;
+    });
+    headerRow.height = 20;
+
+    let rowIdx = 2;
+    for (const row of r.rows) {
+      const rgKey = row.resource_group ? row.subscription_id + '::' + row.resource_group.toUpperCase() : null;
+      const custoRg = rgKey ? (rgStats.get(rgKey)?.custo || 0) : 0;
+      const excelRow = ws.getRow(rowIdx);
+      excelRow.getCell(1).value = subsMap.get(row.subscription_id) || row.subscription_id;
+      excelRow.getCell(2).value = row.resource_group || '';
+      excelRow.getCell(3).value = row.nome || row.resource_id;
+      excelRow.getCell(4).value = row.resource_type || '';
+      excelRow.getCell(5).value = row.ativo ? 'Sim' : 'Não';
+      excelRow.getCell(6).value = row.criado_por_nome || row.criado_por || 'desconhecido';
+      excelRow.getCell(7).value = row.criado_em ? new Date(row.criado_em) : null;
+      excelRow.getCell(7).numFmt = 'dd/mm/yyyy hh:mm';
+      excelRow.getCell(8).value = parseFloat(row.custo_acumulado) || 0;
+      excelRow.getCell(8).numFmt = BRL_FMT;
+      excelRow.getCell(9).value = custoRg;
+      excelRow.getCell(9).numFmt = BRL_FMT;
+      const fundo = rowIdx % 2 === 0 ? PURPLE_LIGHT : 'FFFFFF';
+      for (let c = 1; c <= 9; c++) styleCell(excelRow.getCell(c), { border: hBorder(), font: hFont(false, NAVY, 9), fill: hFill(fundo) });
+      rowIdx++;
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="inventario-azure-${new Date().toISOString().slice(0, 10)}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -7549,6 +7731,27 @@ app.get('/api/azure-inventario/comparativo', authMiddleware, dbMiddleware, async
 // "abrir detalhes do recurso que sofreu alteração"). resource_id vem por query param (não
 // path param) porque um resource ID completo do ARM contém `/`, o que quebraria o
 // roteamento do Express se fosse um segmento de path.
+// Propriedades REAIS do recurso via Resource Graph (2026-09-02, inspirado no ARI) — chamada
+// AO VIVO na Azure (não armazenado, sempre a versão mais recente), diferente do
+// `billing_detalhe` do endpoint abaixo (que aproxima SKU/tipo a partir do billing quando não
+// há dado melhor). Aqui, quando o recurso ainda existe na Azure, vem o SKU exato e o bag
+// `properties` completo (varia por tipo — VM traz vmSize/osProfile, disco traz diskSizeGB,
+// etc.) — mostrado como JSON formatado no frontend por causa dessa variedade, sem tentar
+// mapear campo por campo pra cada um dos milhares de tipos de recurso possíveis no Azure.
+// 404 é o caso normal pra recursos efêmeros já excluídos (a maioria, ver "custo direto
+// zerado" documentado acima) — não é erro, o frontend trata como "não disponível".
+app.get('/api/azure-inventario/recurso-arm-detalhe', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { resource_id, subscription_id } = req.query;
+    if (!resource_id || !subscription_id) return res.status(400).json({ error: 'resource_id e subscription_id são obrigatórios' });
+    const { getToken } = await _getInventarioSpConfig();
+    const token = await getToken();
+    const recurso = await _resourceGraphFetchRecursoPorId(token, subscription_id, resource_id);
+    if (!recurso) return res.status(404).json({ error: 'Recurso não encontrado no Resource Graph (pode ter sido excluído)' });
+    res.json(recurso);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { resource_id, subscription_id } = req.query;
@@ -10434,6 +10637,23 @@ async function _coletarInventarioAzure(origem = 'manual') {
 // timestamp) tem confiança suficiente pra marcar `ativo=false`. Reconciliação e coleta
 // normal são mutuamente exclusivas (mesma flag `_invColetaEmExecucao`) — as duas escrevem
 // na mesma tabela, evita condição de corrida.
+// Lookup compartilhado (2026-09-02) da credencial/subscriptions configuradas pro Inventário
+// — usado pelas rotas novas de Detalhe ARM e Advisor. Não usado por `_coletarInventarioAzure`/
+// `_reconciliarInventarioResourceGraph` de propósito — são funções já testadas/em produção,
+// evita risco de regressão só pra eliminar uma pequena duplicação.
+async function _getInventarioSpConfig() {
+  const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
+  if (!cfgRow.rows.length) throw new Error('Inventário não configurado');
+  const cfg = cfgRow.rows[0];
+  if (!cfg.sp_id) throw new Error('Nenhum Service Principal configurado para o Inventário');
+  const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
+  if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
+  const spCfg = spRow.rows[0];
+  const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
+  const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  return { cfg, spCfg, getToken, subs };
+}
+
 async function _resourceGraphFetchRecursos(token, subscriptionId) {
   const recursos = [];
   let skipToken = null;
@@ -10456,6 +10676,78 @@ async function _resourceGraphFetchRecursos(token, subscriptionId) {
     paginas++;
   } while (skipToken && paginas < 1000); // guarda-corpo generoso (até 1M recursos por subscription)
   return recursos;
+}
+
+// Detalhe completo de UM recurso via Resource Graph (2026-09-02, inspirado no ARI — que lê
+// propriedades reais de cada recurso pro relatório Excel). Diferente de uma chamada ARM
+// direta (`GET /{resourceId}?api-version=...`), que exigiria saber o api-version certo pra
+// CADA provider/tipo (não existe um valor universal) — Resource Graph mantém seu próprio
+// índice de propriedades por recurso, então UMA query serve pra qualquer tipo. `=~` é
+// comparação case-insensitive em KQL (resource_id pode divergir em casing entre fontes, já
+// documentado várias vezes neste arquivo). Aspas simples escapadas (dobradas) — resource_id
+// nunca deveria conter aspas, mas o valor vem de query string, defensivo por padrão.
+async function _resourceGraphFetchRecursoPorId(token, subscriptionId, resourceId) {
+  const idEscapado = String(resourceId).replace(/'/g, "''");
+  const body = {
+    subscriptions: [subscriptionId],
+    query: `Resources | where id =~ '${idEscapado}' | project id, name, type, resourceGroup, location, sku, properties, tags | limit 1`,
+  };
+  const resp = await _cbFetch(
+    'https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01',
+    { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    { timeoutMs: 30_000 }
+  );
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
+  const data = await _safeRespJson(resp);
+  return (data.data && data.data[0]) || null;
+}
+
+// Recomendações do Azure Advisor (2026-09-02, inspirado no ARI, que integra com Advisor/
+// Security Center) — Custo/Segurança/Confiabilidade/Performance/Excelência Operacional.
+// Confirmado na documentação oficial (learn.microsoft.com/rest/api/advisor/recommendations/list):
+// exige só a role Reader (já concedida), formato de resposta `{ value: [{ id, properties:
+// { category, impact, impactedField, impactedValue, label, shortDescription:{problem,
+// solution}, potentialBenefits, resourceMetadata:{resourceId} } }] }`. Não existe um campo
+// numérico de "economia estimada" na API base — `potentialBenefits` é texto livre, mostrado
+// como está, sem inventar um valor em R$ que a API não fornece.
+async function _advisorFetchRecomendacoes(token, subscriptionId) {
+  const recs = [];
+  let url = `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Advisor/recommendations?api-version=2023-01-01&$top=200`;
+  let paginas = 0;
+  while (url && paginas < 100) {
+    const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Azure Advisor falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+    for (const item of (data.value || [])) recs.push(item);
+    url = data.nextLink || null;
+    paginas++;
+  }
+  return recs;
+}
+
+// Cache em memória (2026-09-02) — a chamada ao vivo levou ~46s pra 3 subscriptions reais
+// (13 mil recomendações, dezenas de páginas) — inaceitável pra uma aba interativa. TTL de
+// 20 min (recomendações do Advisor não mudam minuto a minuto) + dedup por promise em
+// andamento (mesmo padrão já usado em `_getRgStatsCache`, evita 2 requests concorrentes
+// disparando 2 fetches completos da mesma subscription).
+const _ADVISOR_TTL = 20 * 60 * 1000;
+const _advisorCache = new Map(); // subscription_id -> { recs, ts }
+const _advisorCachePromises = new Map(); // subscription_id -> Promise em andamento
+async function _getAdvisorCached(token, subscriptionId) {
+  const cached = _advisorCache.get(subscriptionId);
+  if (cached && (Date.now() - cached.ts) < _ADVISOR_TTL) return cached.recs;
+  if (_advisorCachePromises.has(subscriptionId)) return _advisorCachePromises.get(subscriptionId);
+  const p = (async () => {
+    try {
+      const recs = await _advisorFetchRecomendacoes(token, subscriptionId);
+      _advisorCache.set(subscriptionId, { recs, ts: Date.now() });
+      return recs;
+    } finally {
+      _advisorCachePromises.delete(subscriptionId);
+    }
+  })();
+  _advisorCachePromises.set(subscriptionId, p);
+  return p;
 }
 
 async function _reconciliarInventarioResourceGraph(origem = 'manual') {

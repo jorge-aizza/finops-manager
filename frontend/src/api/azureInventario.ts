@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { apiFetch, API_BASE, getToken } from './client'
 import { numFields } from './normalize'
 import type {
   AzureInventarioConfig, AzureInventarioConfigInput, AzureInventarioStatus,
@@ -6,7 +6,8 @@ import type {
   AzureCrescimentoDia, AzureCrescimentoLiquidoDia, AzureComparativoResposta, AzureRecursoDetalheResposta,
   AzureAnomaliaCrescimento, AzureOrcamentoInventario, AzureOrcamentoInventarioInput,
   AzureOrcamentoAlerta, AzureTagsFaltantesResposta, AzureAuditoriaPorTipo,
-  AzureResumoPorAssinaturaResposta,
+  AzureResumoPorAssinaturaResposta, AzureRecursoArmDetalhe, AzureAdvisorResposta,
+  AzureRedeTopologiaResposta,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -191,3 +192,52 @@ export const getAzureTagsFaltantes = (subscriptionId?: string) => {
 // permissão Directory.Read.All ainda não foi concedida à Service Principal no Entra ID.
 export const resolverAutoresInventario = () =>
   apiFetch<{ resolvidos: number; pendentes: number }>('POST', '/azure-inventario/resolver-autores')
+
+// ── Melhorias inspiradas no ARI (github.com/microsoft/ARI), 2026-09-02 ──────────────────
+
+// Propriedades reais do recurso via Resource Graph — chamada ao vivo na Azure. 404 é normal
+// pra recursos já excluídos (a maioria, ver comentário em server.js) — não tratado como erro
+// fatal aqui, o componente decide o que mostrar.
+export const getAzureRecursoArmDetalhe = (resourceId: string, subscriptionId: string) => {
+  const q = new URLSearchParams({ resource_id: resourceId, subscription_id: subscriptionId })
+  return apiFetch<AzureRecursoArmDetalhe>('GET', '/azure-inventario/recurso-arm-detalhe?' + q.toString())
+}
+
+// Recomendações do Azure Advisor — sem parâmetros, agrega todas as subscriptions
+// configuradas pro Inventário. `category` filtra server-side.
+export const getAzureAdvisor = (subscriptionId?: string, category?: string) => {
+  const q = new URLSearchParams()
+  if (subscriptionId) q.set('subscription_id', subscriptionId)
+  if (category) q.set('category', category)
+  const qs = q.toString()
+  return apiFetch<AzureAdvisorResposta>('GET', '/azure-inventario/advisor' + (qs ? '?' + qs : ''))
+}
+
+// Topologia de rede (VNets/subnets/peerings) de uma assinatura.
+export const getAzureRedeTopologia = (subscriptionId: string) =>
+  apiFetch<AzureRedeTopologiaResposta>('GET', '/azure-inventario/rede-topologia?subscription_id=' + encodeURIComponent(subscriptionId))
+
+// Exportar Inventário pra Excel — download direto (não é JSON), mesmo padrão já usado pelo
+// export de Ações legado (app.js `exportarExcel()`): fetch com Bearer token (apiFetch não
+// serve aqui, ele sempre espera JSON) → blob → link temporário → clique → revoke.
+export async function baixarAzureInventarioExcel(filtros?: { subscription_id?: string; ativo?: boolean }) {
+  const q = new URLSearchParams()
+  if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
+  if (filtros?.ativo != null) q.set('ativo', String(filtros.ativo))
+  const qs = q.toString()
+  const token = getToken()
+  const resp = await fetch(API_BASE + '/azure-inventario/export/excel' + (qs ? '?' + qs : ''), {
+    headers: token ? { Authorization: 'Bearer ' + token } : {},
+  })
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: 'Erro desconhecido' }))
+    throw new Error(err.error || 'Erro ao exportar')
+  }
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'inventario-azure-' + new Date().toISOString().slice(0, 10) + '.xlsx'
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
+}

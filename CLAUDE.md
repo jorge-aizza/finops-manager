@@ -3240,6 +3240,83 @@ cluster antes desta correção. `node --check`, `tsc -b`, 21/21 testes em
 `InventarioView.test.tsx` (1 novo — delta do gráfico), 275/275 na suíte completa do
 frontend, `npm run frontend:build`, `pm2 restart` sem erro/crash-loop.
 
+### Inventário — 4 features inspiradas no Azure Resource Inventory (ARI) (2026-09-02)
+
+Pedido do usuário: "Consulte a Documentação https://github.com/microsoft/ARI ajuste o nosso inventario
+para algo desse Nível do Git" — o ARI é uma ferramenta open-source da Microsoft que gera um relatório
+Excel completo de um tenant Azure (recursos, Advisor, diagramas de rede). Pesquisada a documentação do
+projeto e apresentadas 4 features equivalentes ao usuário via `AskUserQuestion` (multiSelect) —
+**todas as 4 foram aprovadas**: Azure Advisor, exportação Excel, detalhe completo via ARM, e diagrama
+de topologia de rede.
+
+**Todas as 4 reaproveitam a MESMA Service Principal já configurada no Inventário** (`_getInventarioSpConfig()`,
+novo helper compartilhado — lê `azure_inventario_config`, resolve o SP via `azure_coleta_config`, monta o
+`getToken`) — zero credencial nova. **Deliberadamente NÃO retrofitado** em `_coletarInventarioAzure`/
+`_reconciliarInventarioResourceGraph` (que já tinham sua própria resolução de SP inline) — risco de
+regressão numa feature já em produção maior que o ganho de eliminar a pequena duplicação.
+
+**1. Azure Advisor** — `GET /api/azure-inventario/advisor?subscription_id=&category=`. Recomendações de
+custo/segurança/HA/performance/excelência operacional direto da API do Advisor
+(`providers/Microsoft.Advisor/recommendations`), paginada via `nextLink`. Sem `subscription_id` agrega
+TODAS as subscriptions configuradas, com isolamento de erro por sub (uma sub sem permissão não derruba as
+outras, aparece em `erros[]`). **Cache com dedup de promise em andamento** (`_advisorCache`/
+`_advisorCachePromises`, TTL 20min — mesmo padrão já usado por `_getRgStatsCache`) — sem isso, a 1ª
+chamada real levou **46 segundos** (a API do Advisor é lenta pra tenants grandes); com cache quente, é
+instantâneo. Advisor não tem campo estruturado de economia em R$ (só texto livre `potentialBenefits`) —
+não inventado um valor numérico que a API não fornece. Frontend: nova aba "Advisor" em `InventarioView.tsx`,
+badges de categoria clicáveis (toggle, `color-mix()` no ativo — mesmo padrão de bug de alfa-hex já evitado
+em outros lugares desta sessão), tabela capada a 300 linhas visíveis client-side (nota "mostrando as
+primeiras 300 de X" quando trunca), linha clicável abre `RecursoDetalheModal` quando há `resource_id`.
+
+**2. Exportar Excel** — `GET /api/azure-inventario/export/excel?subscription_id=&ativo=`, ExcelJS, aba
+única "Recursos", estilos locais (não compartilhados com o Excel export de Ações/Reservas — paleta Vivo
+replicada localmente), sem `LIMIT` de linhas (diferente da tabela da UI, capada em 500). Join com
+`azure_autores_cache` (nomes de autor) e `_getRgStatsCache()` (fallback de custo por RG — mesmo cache já
+usado pela lista de Recursos). `Content-Disposition: attachment`. Frontend:
+`baixarAzureInventarioExcel()` (`api/azureInventario.ts`) — mesmo padrão fetch→blob→`<a download>` já
+usado em `app.js`'s `exportarExcel()` (browsers não permitem header `Authorization` em `<a href>` puro).
+Botão "📊 Exportar Excel" no header do card Recursos.
+
+**3. Detalhe completo via ARM** — `GET /api/azure-inventario/recurso-arm-detalhe?resource_id=&subscription_id=`,
+via Resource Graph (`Resources | where id =~ '{id}' | project id,name,type,resourceGroup,location,sku,
+properties,tags | limit 1`) — não a ARM API direta, que exige saber o `api-version` correto por tipo de
+recurso (centenas de tipos diferentes); Resource Graph indexa `properties` de forma agnóstica ao tipo,
+resolvendo o mesmo problema que o ARI documenta ter enfrentado. 404 com mensagem amigável quando o recurso
+já não existe mais na Azure (**esperado e comum** — a maioria dos recursos do Inventário são
+VMs/discos/NICs efêmeros de cluster Databricks, recriados em horas — ver "custo direto zerado" documentado
+acima). Frontend: `RecursoDetalheModal.tsx` ganhou uma seção nova, sob demanda (`enabled: armAberto`, só
+busca ao clicar) — botão "🔎 Ver propriedades completas (Azure)" → "🔄 Atualizar" após a 1ª busca, JSON
+formatado num `<pre>`.
+
+**4. Diagrama de topologia de rede** — `GET /api/azure-inventario/rede-topologia?subscription_id=`, Resource
+Graph (`Resources | where type =~ 'microsoft.network/virtualnetworks' | project id,name,resourceGroup,
+properties | limit 1000`), mapeado pra `{nome, address_space, subnets[], peerings[]}`. **Sem lib de
+diagramação nova** (mesma filosofia "zero lib" já aplicada a todo gráfico desta sessão) —
+`RedeTopologiaDiagrama` (`InventarioView.tsx`) é um híbrido cards HTML (posição em grid fixo, matemática por
+índice, sem refs de DOM) + overlay SVG transparente absolutamente posicionado só pras linhas de conexão dos
+peerings (tracejada+vermelha quando `peeringState !== 'Connected'`, sólida roxa quando conectado; dedup via
+par de índices ordenado num `Set`). Peerings que apontam pra fora da assinatura selecionada (sem o VNet
+remoto na mesma resposta) não são desenhados — contados e mostrados como nota ("N peering(s) pra fora desta
+assinatura, não desenhado"), nunca uma linha pra lugar nenhum.
+
+**Verificado contra o servidor real, incluindo as chamadas de verdade às 3 APIs Azure novas (Advisor,
+Resource Graph por-recurso, Resource Graph de VNets — nenhuma delas exercitada antes nesta sessão)**: via
+JWT forjado (`fetch` direto) — Advisor retornou **13.064 recomendações reais** nas 3 subscriptions; Rede
+retornou **6 VNets reais com 5 peerings**; ARM detalhe retornou propriedades reais de uma VNet (incl.
+peerings); Excel gerou um `.xlsx` válido de 1,38 MB. Depois, via Playwright contra o app renderizado de
+verdade (login com sessão injetada, navegação via `window.showView('inventario')` — a sidebar carrega
+colapsada/só-ícone no viewport de teste, então a navegação por clique em texto não funciona; usado o bridge
+global direto): botão "Exportar Excel" presente; aba Advisor renderiza com badges de categoria reais; aba
+Rede mostra 6 cards de VNet reais (`vnet-production-brsouth` com 21 subnets, `vnet-prod-brsouth-01` com 204
+subnets, etc.) com endereçamento IP real e nota de peerings externos; clicar numa linha da tabela Recursos
+abre `RecursoDetalheModal`, e o botão "Ver propriedades completas" corretamente mostra "Não encontrado no
+Azure agora — provavelmente já foi excluído" pro recurso testado (uma VM efêmera de cluster Databricks —
+confirma o caminho 404 funcionando ponta a ponta, o cenário mais comum na prática). Zero erro de console
+JS em toda a navegação (só o 404 esperado da própria chamada ARM, registrado como network error, não erro
+de JS). `node --check`, `tsc -b`, suíte completa do frontend 279/279 (4 testes novos em
+`InventarioView.test.tsx`: exportação Excel, badge/filtro do Advisor, diagrama de Rede, busca sob demanda
+do detalhe ARM), `npm run frontend:build`.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

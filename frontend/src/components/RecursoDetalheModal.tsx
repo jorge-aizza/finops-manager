@@ -1,5 +1,6 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getAzureRecursoDetalhe } from '../api/azureInventario'
+import { getAzureRecursoDetalhe, getAzureRecursoArmDetalhe } from '../api/azureInventario'
 import { listSubscriptions } from '../api/calculadora'
 import type { AzureAuditoriaAcao } from '../types/azureInventario'
 
@@ -36,6 +37,19 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
   // (ex: "Development") depende disso — o GUID cru já vem em `data.recurso.subscription_id`.
   const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
   const subscriptionName = subsQuery.data?.find((s) => s.subscription_id === subscriptionId)?.subscription_name
+
+  // Propriedades reais via Resource Graph (2026-09-02, inspirado no ARI) — sob demanda, não
+  // auto-fetch: é uma chamada AO VIVO na Azure, e este modal abre com frequência ao navegar
+  // "Por Assinatura" — disparar em toda abertura seria carga desnecessária na maioria das
+  // vezes (usuário só quer ver custo/linha do tempo). `retry:false` porque 404 (recurso já
+  // excluído) é o caso normal, não uma falha transitória.
+  const [armAberto, setArmAberto] = useState(false)
+  const armQuery = useQuery({
+    queryKey: ['azure-inv-recurso-arm-detalhe', subscriptionId, resourceId],
+    queryFn: () => getAzureRecursoArmDetalhe(resourceId, subscriptionId),
+    enabled: armAberto,
+    retry: false,
+  })
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -156,6 +170,42 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                   </div>
                 </>
               )}
+
+              <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                <button
+                  className="btn-ghost" style={{ fontSize: 11 }}
+                  disabled={armQuery.isFetching}
+                  onClick={() => (armAberto ? armQuery.refetch() : setArmAberto(true))}
+                  title="Busca as propriedades reais do recurso direto na Azure (Resource Graph) — SKU exato, configuração, etc."
+                >
+                  {armQuery.isFetching ? 'Buscando na Azure...' : armAberto ? '🔄 Atualizar propriedades (Azure)' : '🔎 Ver propriedades completas (Azure)'}
+                </button>
+                {armAberto && armQuery.isError && (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+                    Não encontrado no Azure agora — provavelmente já foi excluído (comum pra recursos efêmeros de cluster).
+                  </div>
+                )}
+                {armAberto && armQuery.data && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 12, marginBottom: 6 }}>
+                      <strong>{armQuery.data.type}</strong> · {armQuery.data.location || '—'}
+                      {!!armQuery.data.sku && (
+                        <span style={{ color: 'var(--text-muted)' }}> · SKU: {JSON.stringify(armQuery.data.sku)}</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>
+                      Propriedades completas (JSON — varia por tipo de recurso)
+                    </div>
+                    <pre style={{
+                      maxHeight: 260, overflow: 'auto', background: 'var(--bg)', border: '1px solid var(--border)',
+                      borderRadius: 8, padding: '10px 12px', fontSize: 11, fontFamily: "'IBM Plex Mono',monospace",
+                      whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-muted)', margin: 0,
+                    }}>
+                      {JSON.stringify(armQuery.data.properties, null, 2) || '—'}
+                    </pre>
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>

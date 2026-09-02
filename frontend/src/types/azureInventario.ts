@@ -281,3 +281,68 @@ export interface AzureRecursoDetalheResposta {
     origem: 'direto' | 'rg_mesmo_tipo'
   } | null
 }
+
+// ── Melhorias inspiradas no Azure Resource Inventory (ARI — github.com/microsoft/ARI),
+// 2026-09-02, pedido do usuário: "ajuste o nosso inventario para algo desse Nivel do Git" ──
+
+// Detalhe completo de UM recurso via Resource Graph (propriedades reais da Azure, ao vivo —
+// não armazenado). `properties`/`sku`/`tags` variam MUITO por tipo de recurso (VM traz
+// vmSize/osProfile, disco traz diskSizeGB, VNet traz addressSpace/subnets...) — por isso
+// tipados como `unknown`, mostrados como JSON formatado no frontend em vez de tentar mapear
+// campo por campo pra cada um dos milhares de tipos de recurso possíveis no Azure.
+export interface AzureRecursoArmDetalhe {
+  id: string
+  name: string
+  type: string
+  resourceGroup: string
+  location: string | null
+  sku: unknown
+  properties: unknown
+  tags: unknown
+}
+
+// Recomendações do Azure Advisor — ver GET /azure-inventario/advisor. Sem campo de
+// "economia estimada": a API base do Advisor não retorna um valor numérico de savings,
+// só o texto livre `beneficio_potencial`.
+export type AzureAdvisorCategoria = 'Cost' | 'Security' | 'HighAvailability' | 'Performance' | 'OperationalExcellence'
+export type AzureAdvisorImpacto = 'High' | 'Medium' | 'Low'
+export interface AzureAdvisorItem {
+  id: string
+  subscription_id: string
+  categoria: AzureAdvisorCategoria | null
+  impacto: AzureAdvisorImpacto | null
+  tipo_recurso: string | null
+  recurso: string | null
+  resource_id: string | null
+  problema: string | null
+  solucao: string | null
+  beneficio_potencial: string | null
+}
+export interface AzureAdvisorResposta {
+  total: number
+  itens: AzureAdvisorItem[]
+  por_categoria: Record<string, number>
+  erros: { subscription_id: string; erro: string }[]
+}
+
+// Topologia de rede — VNets, subnets e peerings de uma assinatura (ver GET
+// /azure-inventario/rede-topologia). Renderizado como diagrama SVG simples, sem lib nova.
+export interface AzureRedeSubnet {
+  nome: string
+  prefixo: string | null
+}
+export interface AzureRedePeering {
+  vnet_remoto_id: string
+  estado: string | null
+}
+export interface AzureRedeVNet {
+  id: string
+  nome: string
+  resource_group: string
+  address_space: string[]
+  subnets: AzureRedeSubnet[]
+  peerings: AzureRedePeering[]
+}
+export interface AzureRedeTopologiaResposta {
+  vnets: AzureRedeVNet[]
+}
