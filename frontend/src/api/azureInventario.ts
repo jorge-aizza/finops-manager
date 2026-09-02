@@ -7,7 +7,7 @@ import type {
   AzureAnomaliaCrescimento, AzureOrcamentoInventario, AzureOrcamentoInventarioInput,
   AzureOrcamentoAlerta, AzureTagsFaltantesResposta, AzureAuditoriaPorTipo,
   AzureResumoPorAssinaturaResposta, AzureRecursoArmDetalhe, AzureAdvisorResposta,
-  AzureRedeTopologiaResposta,
+  AzureRedeTopologiaResposta, AzureSkuMudanca,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -79,6 +79,24 @@ export const getAzureAuditoriaEventos = (filtros?: AzureAuditoriaFiltros) => {
   return apiFetch<{ periodo: { inicio: string; fim: string }; total: number; eventos: AzureAuditoriaEvento[]; por_tipo: AzureAuditoriaPorTipo[] }>(
     'GET', '/azure-inventario/auditoria' + (qs ? '?' + qs : '')
   ).then((r) => ({ ...r, por_tipo: r.por_tipo.map((t) => ({ ...t, total: Number(t.total) })) }))
+}
+
+export interface AzureSkuHistoricoFiltros {
+  data_inicio?: string
+  data_fim?: string
+  resource_id?: string
+  subscription_id?: string
+}
+export const getAzureSkuHistorico = (filtros?: AzureSkuHistoricoFiltros) => {
+  const q = new URLSearchParams()
+  if (filtros?.data_inicio) q.set('data_inicio', filtros.data_inicio)
+  if (filtros?.data_fim) q.set('data_fim', filtros.data_fim)
+  if (filtros?.resource_id) q.set('resource_id', filtros.resource_id)
+  if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
+  const qs = q.toString()
+  return apiFetch<{ periodo: { inicio: string; fim: string }; total: number; mudancas: AzureSkuMudanca[] }>(
+    'GET', '/azure-inventario/sku-historico' + (qs ? '?' + qs : '')
+  )
 }
 
 export const getAzureCrescimento = (data_inicio?: string, data_fim?: string, subscription_id?: string) => {

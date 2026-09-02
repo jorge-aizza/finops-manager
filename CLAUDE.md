@@ -3317,6 +3317,74 @@ de JS). `node --check`, `tsc -b`, suíte completa do frontend 279/279 (4 testes 
 `InventarioView.test.tsx`: exportação Excel, badge/filtro do Advisor, diagrama de Rede, busca sob demanda
 do detalhe ARM), `npm run frontend:build`.
 
+### Inventário — Mudança de SKU de VM (2026-09-02)
+
+Pedido do usuário depois das 4 features ARI: "a ideia é ver o crescimento de Infra... a VM tinha um SKU e
+mudou pra outro, qual o antigo e qual o novo". Diferente de tudo que o Inventário já tinha — Activity Log
+(fonte de toda a Auditoria) **não carrega valores de propriedade**, só o fato de que um `/write` aconteceu
+num `resourceId`; não dá pra saber O QUE mudou (tag? disco anexado? SKU?) só pelo evento. Confirmado que
+nem ARI (a inspiração da rodada anterior) faz isso — é um relatório de ponto único no tempo, não um
+rastreador de mudança de atributo.
+
+**Abordagem: ler o valor atual via Resource Graph e comparar contra a última leitura conhecida** — só
+assim dá pra saber "antes X, agora Y". `azure_recursos_inventario` ganhou `sku_atual` (última leitura);
+nova tabela `azure_recursos_sku_historico` (append-only, 1 linha por mudança real detectada) guarda
+`sku_anterior`/`sku_novo`/`detectado_em`/autor do evento que disparou a checagem.
+
+**Só VMs nesta v1** (`Microsoft.Compute/virtualMachines`, propriedade `properties.hardwareProfile.vmSize`)
+— outros tipos não têm um conceito único de "SKU" que bata com o pedido específico do usuário ("tamanho da
+máquina"); generalizar exigiria mapear a propriedade certa por tipo (discos usam `sku.name`, storage
+accounts idem), escopo maior que o pedido.
+
+**Excluindo RGs gerenciados por Databricks/AKS** (`_detectManagedRg`, mesma detecção já usada no
+Crescimento Líquido e nos badges "VM (Databricks)") — confirmado com dados reais desta sessão que VMs
+nesses RGs são recriadas em HORAS; "SKU mudou" ali seria ruído de recriação (VM nova, resource_id
+diferente na prática — nem bateria o `sku_atual` do resource_id antigo), não um resize real. Verificado
+numa coleta real: de ~300 eventos de ATUALIZACAO de VM numa janela, só 1 RG (`PCCAgentlessScanResourceGroup`)
+não era gerenciado — os outros 13 eram todos `databricks-rg-*`/`managed-rg-adbx-*`/`managed-rg-dbw-*`,
+corretamente excluídos.
+
+**Detecção batched, não uma chamada por VM** — `_detectarMudancasSku(token, subId, candidatos)` recebe um
+`Map` (resource_id → {autor, quando}, acumulado durante o loop de eventos de uma subscription) e faz UMA
+query Resource Graph por chunk de 1000 ids (`Resources | where id in (...) | project id, resourceGroup,
+vmSize=tostring(properties.hardwareProfile.vmSize)`), chamada UMA vez ao final do processamento de cada
+subscription — essencial num tick com muitas VMs atualizadas (nem toda ATUALIZACAO troca o SKU, mas não dá
+pra saber sem olhar; uma chamada por evento explodiria o volume de chamadas à API).
+
+**Primeira observação de uma VM só semeia a base, nunca gera uma linha de histórico** — `sku_atual` começa
+`NULL` pra todo recurso já existente (rodou uma migração idempotente só de `ADD COLUMN`, sem backfill via
+Resource Graph — o backfill aconteceria organicamente na próxima vez que cada VM tiver um evento de
+ATUALIZACAO real). Sem isso, a primeira coleta depois de ativar a feature logaria uma "mudança" falsa pra
+toda VM só por não ter um "antes" conhecido. Confirmado numa coleta real completa (5.605 eventos, 2.513
+atualizações) que zero mudanças falsas foram logadas.
+
+**Best-effort, mesmo padrão da resolução de autor via Graph** — roda dentro de um try/catch por
+subscription, nunca derruba a coleta principal (já persistida antes dessa checagem rodar); falha só vira
+uma linha no log (`✗ {sub}: checagem de SKU falhou — {motivo}`), não um status de erro no histórico da
+coleta.
+
+**Endpoint**: `GET /api/azure-inventario/sku-historico?data_inicio=&data_fim=&resource_id=&subscription_id=`
+— mesmo padrão `periodo`/300 linhas já usado por `/auditoria`. **Frontend**: novo card "Mudanças de SKU de
+VM" na aba Auditoria (mesmo período De/Até da tabela de eventos acima), linha clicável abre
+`RecursoDetalheModal`; o próprio modal ganhou uma seção "Histórico de SKU" (só renderizada quando
+`resource_type` é VM), com range de busca bem mais largo (`2015-01-01` → hoje) que os 30 dias padrão da
+aba, pra cobrir a vida inteira do recurso, não só o que está sendo olhado na tabela.
+
+**Verificado contra o servidor real, incluindo uma coleta completa ao vivo**: `node --check`, `tsc -b`,
+280/280 testes do frontend (2 novos: card de mudanças de SKU + navegação pro detalhe, cobrindo o path
+completo de UI), `npm run frontend:build`, `pm2 restart` sem erro/crash-loop, migração (`sku_atual` +
+tabela `azure_recursos_sku_historico`) aplicada sem exceção. Disparada uma coleta manual completa (5.605
+eventos processados, 3 subscriptions) — confirmado nos logs que `_detectarMudancasSku` rodou sem erro
+contra a API real do Resource Graph (nenhuma linha "checagem de SKU falhou"), incluindo pelo menos 1
+candidato real fora de RG gerenciado (`PCCAgentlessScanResourceGroup`); `GET /sku-historico` respondeu
+corretamente com `total:0` (esperado — primeira execução da feature, só semeia `sku_atual`, sem "antes"
+conhecido pra comparar). **Não validado**: o caminho de DETECÇÃO de uma mudança real (precisa de duas
+observações da MESMA VM com SKUs diferentes — não há como forçar um resize real neste ambiente sob
+demanda); a lógica de comparação é a mesma já usada/testada em outros pontos deste arquivo (ex:
+`_detectarMudancasSku`'s update de `sku_atual` segue o mesmo padrão de UPSERT condicional já validado em
+`_coletarInventarioAzure`), e a query Resource Graph em si (sintaxe/campo `vmSize`) foi confirmada válida
+pela ausência de erro na chamada real acima.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

@@ -191,6 +191,26 @@ export interface AzureAuditoriaEvento {
   autor_nome: string | null
 }
 
+// Mudança de SKU de VM (2026-09-02, pedido do usuário: "a VM tinha um SKU e mudou pra outro,
+// qual o antigo e qual o novo") — gravado por `_detectarMudancasSku` (server.js) quando o
+// tamanho lido via Resource Graph diverge do último valor conhecido. Só VMs nesta v1
+// (`Microsoft.Compute/virtualMachines`), excluindo RGs gerenciados por Databricks/AKS (VMs
+// efêmeras de cluster — "SKU mudou" ali é ruído de recriação, não um resize real).
+export interface AzureSkuMudanca {
+  id: number
+  subscription_id: string
+  resource_id: string
+  resource_type: string | null
+  resource_group: string | null
+  sku_anterior: string | null
+  sku_novo: string | null
+  detectado_em: string
+  evento_autor: string | null
+  evento_quando: string | null
+  nome: string | null
+  evento_autor_nome: string | null
+}
+
 // Caixas "por Tipo de Recurso" (2026-08-31, pedido do usuário: "Na parte de Auditoria pode
 // incluir caixas por Tipo de Recurso, Ex VM x Disco x etc") — agregação server-side sobre
 // TODO o período/filtros selecionados (não só os 300 eventos retornados pra tabela), serve

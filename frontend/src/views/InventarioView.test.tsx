@@ -38,6 +38,7 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureInventarioColetaHistorico).mockResolvedValue([])
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
+  vi.mocked(azureInventarioApi.getAzureSkuHistorico).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, mudancas: [] })
   vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockResolvedValue({ nivel: 'assinatura', itens: [] })
   vi.mocked(azureInventarioApi.getAzureCrescimentoLiquido).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
   vi.mocked(azureInventarioApi.getAzureAdvisor).mockResolvedValue({ total: 0, itens: [], por_categoria: {}, erros: [] })
@@ -246,6 +247,42 @@ describe('InventarioView', () => {
     await waitFor(() => expect(azureInventarioApi.getAzureAuditoriaEventos).toHaveBeenLastCalledWith(
       expect.objectContaining({ resource_type: undefined }),
     ))
+  })
+
+  it('aba Auditoria mostra o histórico de mudanças de SKU de VM e abre o detalhe ao clicar', async () => {
+    vi.mocked(azureInventarioApi.getAzureSkuHistorico).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-08-30' },
+      total: 1,
+      mudancas: [{
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', sku_anterior: 'Standard_E4s_v3', sku_novo: 'Standard_E8s_v3',
+        detectado_em: '2026-08-20T10:00:00Z', evento_autor: 'joao@vivo.com.br', evento_quando: '2026-08-20T09:58:00Z',
+        nome: 'vm-teste', evento_autor_nome: null,
+      }],
+    })
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
+      recurso: {
+        id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
+        criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 50,
+      },
+      eventos: [], custo_diario: [], custo_resource_group: 0, resource_group_recursos: 0, billing_detalhe: null,
+    } as never)
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
+
+    expect(await screen.findByText('Mudanças de SKU de VM')).toBeInTheDocument()
+    expect(screen.getByText('Standard_E4s_v3')).toBeInTheDocument()
+    expect(screen.getByText('Standard_E8s_v3')).toBeInTheDocument()
+    expect(screen.getByText('joao@vivo.com.br')).toBeInTheDocument()
+
+    await user.click(screen.getByText('Standard_E4s_v3'))
+    expect(await screen.findByText('Detalhe do Recurso')).toBeInTheDocument()
+    expect(azureInventarioApi.getAzureRecursoDetalhe).toHaveBeenCalledWith(
+      '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste', 'sub-1',
+    )
   })
 
   it('aba Configuração pré-preenche o formulário e permite salvar', async () => {

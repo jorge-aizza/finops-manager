@@ -6179,6 +6179,34 @@ async function ensureAzureColetaTable() {
   // usa regexp pra pegar o último segmento do resource_id (mesma lógica de resourceId.split('/').pop()).
   await pool.query(`UPDATE azure_recursos_inventario SET nome = regexp_replace(resource_id, '^.*/', '') WHERE nome IS NULL`);
 
+  // Rastreamento de mudança de SKU (2026-09-02, pedido do usuário: "a VM tinha um SKU e mudou
+  // pra outro, qual o antigo e qual o novo") — Activity Log não carrega o valor de propriedades
+  // (não dá pra saber QUAL atributo mudou nem seus valores só pelo evento). `sku_atual` guarda a
+  // última leitura conhecida (via Resource Graph, batched — ver `_detectarMudancasSku`); quando
+  // o valor lido diverge do já conhecido, grava uma linha aqui (histórico append-only, nunca
+  // sobrescrito) e atualiza `sku_atual`. Só VMs nesta v1 (`Microsoft.Compute/virtualMachines`,
+  // propriedade `hardwareProfile.vmSize`) — outros tipos de recurso não têm um conceito único de
+  // "SKU" (discos usam `sku.name`, storage accounts idem, mas o significado prático — "trocar o
+  // tamanho/tipo da máquina" — é o pedido específico do usuário; generalizar exigiria mapear a
+  // propriedade certa por tipo, escopo maior que o pedido).
+  await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS sku_atual VARCHAR(200)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_recursos_sku_historico (
+      id                SERIAL PRIMARY KEY,
+      subscription_id   VARCHAR(200) NOT NULL,
+      resource_id       TEXT NOT NULL,
+      resource_type     VARCHAR(300),
+      resource_group    VARCHAR(300),
+      sku_anterior      VARCHAR(200),
+      sku_novo          VARCHAR(200),
+      detectado_em      TIMESTAMPTZ DEFAULT NOW(),
+      evento_autor      VARCHAR(300),
+      evento_quando     TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_sku_hist_resource ON azure_recursos_sku_historico (subscription_id, resource_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_sku_hist_detectado ON azure_recursos_sku_historico (detectado_em)`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_recursos_auditoria_eventos (
       id                SERIAL PRIMARY KEY,
@@ -7642,6 +7670,37 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
       eventos: r.rows,
       por_tipo: rTipo.rows.map((x) => ({ tipo: x.tipo, total: x.total })),
     });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Mudanças de SKU de VM (2026-09-02) — histórico gravado por `_detectarMudancasSku` durante a
+// coleta. `resource_id` opcional filtra pra um recurso específico (usado por
+// `RecursoDetalheModal.tsx`); sem ele, lista tudo no período (mesmo padrão `periodo`/300 linhas
+// já usado por `/auditoria`).
+app.get('/api/azure-inventario/sku-historico', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    let { data_inicio, data_fim, resource_id, subscription_id } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    let where = `h.detectado_em >= $1 AND h.detectado_em < $2::date + INTERVAL '1 day'`;
+    const params = [data_inicio, data_fim];
+    if (resource_id) { params.push(resource_id); where += ` AND h.resource_id = $${params.length}`; }
+    if (subscription_id) { params.push(subscription_id); where += ` AND h.subscription_id = $${params.length}`; }
+    const r = await pool.query(
+      `SELECT h.*, ri.nome, cac.nome AS evento_autor_nome
+       FROM azure_recursos_sku_historico h
+       LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = h.subscription_id AND ri.resource_id = h.resource_id
+       LEFT JOIN azure_autores_cache cac ON cac.guid = h.evento_autor
+       WHERE ${where} ORDER BY h.detectado_em DESC LIMIT 300`,
+      params
+    );
+    res.json({ periodo: { inicio: data_inicio, fim: data_fim }, total: r.rows.length, mudancas: r.rows });
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -10520,7 +10579,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
     histId = hist.rows[0].id;
     _logColetaInv(`Inventário — ${desdeISO} → ${ateISO} | ${subs.length} subscription(s)`);
 
-    let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0;
+    let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0, totalMudancasSku = 0;
     _invColetaProgresso.sub_total = subs.length;
 
     for (let i = 0; i < subs.length; i++) {
@@ -10537,6 +10596,11 @@ async function _coletarInventarioAzure(origem = 'manual') {
       }
       _logColetaInv(`  ${subId}: ${eventos.length} evento(s) retornado(s)`);
 
+      // Candidatos a checagem de SKU (só VMs, excluindo RGs gerenciados por Databricks/AKS —
+      // ver `_detectarMudancasSku`) — acumulado durante o loop de eventos, checado em lote UMA
+      // vez ao final desta subscription (não uma chamada por evento).
+      const candidatosSku = new Map();
+
       for (const ev of eventos) {
         if ((ev.status?.value || '') !== 'Succeeded') continue;
         const acaoBruta = _classificarEventoAtividade(ev.operationName?.value);
@@ -10550,6 +10614,11 @@ async function _coletarInventarioAzure(origem = 'manual') {
         const resourceGroup = ev.resourceGroupName || null;
         const opName = ev.operationName?.value || null;
         totalEventos++;
+
+        if (acaoBruta === 'write' && (resourceType || '').toUpperCase() === 'MICROSOFT.COMPUTE/VIRTUALMACHINES'
+            && !_detectManagedRg(resourceGroup || '').managed_type) {
+          candidatosSku.set(resourceId, { autor, quando });
+        }
 
         if (acaoBruta === 'delete') {
           const nomeDel = resourceId.split('/').pop();
@@ -10591,10 +10660,19 @@ async function _coletarInventarioAzure(origem = 'manual') {
         _invColetaProgresso.atualizados = totalAtualizados;
         _invColetaProgresso.excluidos = totalExcluidos;
       }
+
+      // Best-effort — mesmo espírito da resolução de autor via Graph ao final da coleta: nunca
+      // derruba a coleta principal (já persistida acima), só loga se falhar.
+      if (candidatosSku.size > 0) {
+        try {
+          const n = await _detectarMudancasSku(token, subId, candidatosSku);
+          if (n > 0) { totalMudancasSku += n; _logColetaInv(`  ${subId}: ${n} mudança(s) de SKU de VM detectada(s)`); }
+        } catch (eSku) { _logColetaInv(`  ✗ ${subId}: checagem de SKU falhou — ${eSku.message}`); }
+      }
     }
 
     await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em=$1, atualizado_em=NOW() WHERE id=$2`, [ateISO, cfg.id]);
-    const msg = `${totalEventos} evento(s) | ${totalNovos} novo(s), ${totalAtualizados} atualizado(s), ${totalExcluidos} excluído(s)`;
+    const msg = `${totalEventos} evento(s) | ${totalNovos} novo(s), ${totalAtualizados} atualizado(s), ${totalExcluidos} excluído(s)${totalMudancasSku > 0 ? ` | ${totalMudancasSku} mudança(s) de SKU de VM` : ''}`;
     _logColetaInv(`Concluído: ${msg}`);
     await pool.query(
       `UPDATE azure_inventario_coleta_historico SET status='concluido',concluido_em=NOW(),eventos_processados=$1,recursos_novos=$2,recursos_atualizados=$3,recursos_excluidos=$4,mensagem=$5 WHERE id=$6`,
@@ -10700,6 +10778,66 @@ async function _resourceGraphFetchRecursoPorId(token, subscriptionId, resourceId
   if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
   const data = await _safeRespJson(resp);
   return (data.data && data.data[0]) || null;
+}
+
+// Detecta mudança de SKU/tamanho de VM (2026-09-02, pedido do usuário: "a VM tinha um SKU e
+// mudou pra outro, qual o antigo e qual o novo") — Activity Log não carrega valores de
+// propriedade, só o fato de que um `/write` aconteceu; pra saber O QUE mudou é preciso ler o
+// estado atual do recurso via Resource Graph e comparar contra a última leitura conhecida
+// (`azure_recursos_inventario.sku_atual`). `candidatos` é um Map resource_id → {autor, quando}
+// (do evento que disparou a checagem) já filtrado pelo chamador — só VMs, excluindo RGs
+// gerenciados por Databricks/AKS (recriados em horas, "SKU mudou" ali é ruído, não sinal —
+// mesmo raciocínio já usado no Crescimento Líquido). UMA query batched por chunk de 1000 ids
+// (limite do Resource Graph) em vez de uma chamada por VM — essencial num tick com muitas VMs
+// atualizadas (tags, discos, extensões — nem toda ATUALIZACAO troca o SKU, mas não dá pra saber
+// sem olhar). Primeira observação de uma VM (`sku_atual` ainda NULL) só semeia a base — não gera
+// linha de histórico, já que não existe um "antes" real conhecido por nós.
+async function _detectarMudancasSku(token, subId, candidatos) {
+  const ids = [...candidatos.keys()];
+  if (!ids.length) return 0;
+  let mudancas = 0;
+  for (let i = 0; i < ids.length; i += 1000) {
+    const chunk = ids.slice(i, i + 1000);
+    const idsKql = chunk.map((id) => `'${id.replace(/'/g, "''")}'`).join(',');
+    const body = {
+      subscriptions: [subId],
+      query: `Resources | where id in (${idsKql}) | project id, resourceGroup, vmSize=tostring(properties.hardwareProfile.vmSize)`,
+    };
+    const resp = await _cbFetch(
+      'https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01',
+      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      { timeoutMs: 30_000 }
+    );
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+    const linhas = (data.data || []).filter((r) => r.vmSize);
+    if (!linhas.length) continue;
+
+    const rAtual = await pool.query(
+      `SELECT resource_id, sku_atual, resource_type FROM azure_recursos_inventario WHERE subscription_id=$1 AND resource_id = ANY($2)`,
+      [subId, linhas.map((l) => l.id)]
+    );
+    const atuaisPorId = new Map(rAtual.rows.map((r) => [r.resource_id, r]));
+
+    for (const l of linhas) {
+      const conhecido = atuaisPorId.get(l.id);
+      const skuNovo = l.vmSize;
+      const skuAnterior = conhecido?.sku_atual || null;
+      if (skuAnterior && skuAnterior !== skuNovo) {
+        const ev = candidatos.get(l.id) || {};
+        await pool.query(
+          `INSERT INTO azure_recursos_sku_historico (subscription_id,resource_id,resource_type,resource_group,sku_anterior,sku_novo,evento_autor,evento_quando)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [subId, l.id, conhecido?.resource_type || 'Microsoft.Compute/virtualMachines', l.resourceGroup || null, skuAnterior, skuNovo, ev.autor || null, ev.quando || null]
+        );
+        mudancas++;
+      }
+      if (skuAnterior !== skuNovo) {
+        await pool.query(`UPDATE azure_recursos_inventario SET sku_atual=$1 WHERE subscription_id=$2 AND resource_id=$3`, [skuNovo, subId, l.id]);
+      }
+    }
+  }
+  return mudancas;
 }
 
 // Recomendações do Azure Advisor (2026-09-02, inspirado no ARI, que integra com Advisor/
