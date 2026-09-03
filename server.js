@@ -6871,6 +6871,28 @@ async function _alertarColetaComErro(titulo, mensagem) {
   await _sendEmail({ to: destinatarios, subject: `❌ ${titulo}`, html: _emailTemplate(titulo, `<p>${_escHtmlServer(mensagem)}</p>`) });
 }
 
+// Alteração de propriedade "de infra" (2026-09-03, pedido do usuário — 1 das 4 melhorias
+// sugeridas após expandir o rastreio de propriedades) — evento, sem dedup (cada linha em
+// `azure_recursos_mudancas_propriedade` só é inserida uma vez). Deliberadamente só propriedades
+// de infra (SKU de VM, disco, storage, IP) — NUNCA tags: uma re-tag em massa por automação
+// dispararia dezenas de e-mails de uma vez, mesmo raciocínio já usado pra excluir e-mail de
+// "coleta com sucesso" ("viraria spam sem valor"). Chamado pelo próprio `_coletarInventarioAzure`
+// logo após o INSERT bem-sucedido — nunca lança pro chamador (mesma garantia de `_sendEmail`).
+async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, quando) {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+  await _sendEmail({
+    to: destinatarios,
+    subject: `🔧 ${p.propriedade_label} mudou — ${nomeRecurso}`,
+    html: _emailTemplate('Alteração de propriedade detectada', `
+      <p><strong>${_escHtmlServer(nomeRecurso)}</strong> (${_escHtmlServer(resourceGroup || '—')})</p>
+      <p>${_escHtmlServer(p.propriedade_label)}: <strong style="color:#dc2626">${_escHtmlServer(p.valor_anterior)}</strong> → <strong style="color:#16a34a">${_escHtmlServer(p.valor_novo)}</strong></p>
+      <p style="margin-top:12px;font-size:12px;color:#6b7280">Detectado por ${_escHtmlServer(autor || 'desconhecido')} em ${quando ? new Date(quando).toLocaleString('pt-BR') : '—'}. Veja o histórico completo em Inventário → Auditoria.</p>`),
+  });
+}
+
 // Estimativa aprovada/reprovada — evento (PUT /api/estimativas/:id/status), sem
 // dedup (dispara 1x por troca real de status). `responsavel` é texto livre —
 // mesma tentativa de casar com usuarios.nome usada em _checkAcoesVencendo.
@@ -10707,7 +10729,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
   if (!pool) throw new Error('Banco não conectado');
   _invColetaEmExecucao = true;
   _invColetaIniciadaEm = new Date();
-  _invColetaProgresso = { tipo: 'coleta', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, log: [] };
+  _invColetaProgresso = { tipo: 'coleta', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, eventos: 0, novos: 0, atualizados: 0, excluidos: 0, descartadas: 0, log: [] };
   let histId;
   try {
     await ensureAzureColetaTable();
@@ -10749,7 +10771,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
     histId = hist.rows[0].id;
     _logColetaInv(`Inventário — ${desdeISO} → ${ateISO} | ${subs.length} subscription(s)`);
 
-    let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0, totalMudancasProp = 0;
+    let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0, totalMudancasProp = 0, totalDescartadas = 0;
     _invColetaProgresso.sub_total = subs.length;
 
     for (let i = 0; i < subs.length; i++) {
@@ -10824,6 +10846,12 @@ async function _coletarInventarioAzure(origem = 'manual') {
           // mudança real, vale igualmente pra tag/disco/tier quanto pra SKU de VM.
           if (acao === 'ATUALIZACAO' && !_detectManagedRg(resourceGroup || '').managed_type) {
             const propriedades = _extrairMudancasRastreadas(resourceType, ch.changes);
+            // Contador de descarte (2026-09-03, item 4 das melhorias sugeridas) — quantas
+            // propriedades vieram no bag da Change Analysis mas NÃO bateram na allowlist
+            // curada (ruído tipo `provisioningState`/`instanceView`). Só conta eventos já
+            // dentro do escopo não-gerenciado (mesmo `if` acima) — não é sobre TODO evento,
+            // é sobre "quanto sinal perdemos dentro do que já íamos processar mesmo".
+            totalDescartadas += Object.keys(ch.changes || {}).length - propriedades.length;
             for (const p of propriedades) {
               if (!p.valor_anterior || !p.valor_novo || p.valor_anterior === p.valor_novo) continue;
               await pool.query(
@@ -10833,6 +10861,13 @@ async function _coletarInventarioAzure(origem = 'manual') {
               );
               totalMudancasProp++;
               mudancasPropSub++;
+              // Alerta por e-mail (2026-09-03, item 1) — só propriedades de infra, nunca tags
+              // (ver `_alertarMudancaPropriedade`). Best-effort, nunca derruba a coleta.
+              if (!p.propriedade.startsWith('tag:')) {
+                _alertarMudancaPropriedade(nome, resourceGroup, p, autor, quando).catch((eMail) => {
+                  _logColetaInv(`  ✗ ${subId}: alerta por e-mail falhou — ${eMail.message}`);
+                });
+              }
             }
           }
         }
@@ -10840,12 +10875,13 @@ async function _coletarInventarioAzure(origem = 'manual') {
         _invColetaProgresso.novos = totalNovos;
         _invColetaProgresso.atualizados = totalAtualizados;
         _invColetaProgresso.excluidos = totalExcluidos;
+        _invColetaProgresso.descartadas = totalDescartadas;
       }
       if (mudancasPropSub > 0) _logColetaInv(`  ${subId}: ${mudancasPropSub} alteração(ões) de propriedade detectada(s)`);
     }
 
     await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em=$1, atualizado_em=NOW() WHERE id=$2`, [ateISO, cfg.id]);
-    const msg = `${totalEventos} evento(s) | ${totalNovos} novo(s), ${totalAtualizados} atualizado(s), ${totalExcluidos} excluído(s)${totalMudancasProp > 0 ? ` | ${totalMudancasProp} alteração(ões) de propriedade` : ''}`;
+    const msg = `${totalEventos} evento(s) | ${totalNovos} novo(s), ${totalAtualizados} atualizado(s), ${totalExcluidos} excluído(s)${totalMudancasProp > 0 ? ` | ${totalMudancasProp} alteração(ões) de propriedade` : ''}${totalDescartadas > 0 ? ` | ${totalDescartadas} propriedade(s) descartada(s) (ruído)` : ''}`;
     _logColetaInv(`Concluído: ${msg}`);
     await pool.query(
       `UPDATE azure_inventario_coleta_historico SET status='concluido',concluido_em=NOW(),eventos_processados=$1,recursos_novos=$2,recursos_atualizados=$3,recursos_excluidos=$4,mensagem=$5 WHERE id=$6`,
@@ -10993,9 +11029,9 @@ async function _resourceGraphFetchChanges(token, subscriptionId, desdeISO, ateIS
 // significa coisas diferentes em disco vs. storage account. Função pura (sem I/O) — recebe o
 // bag `changes` já desserializado (objeto JS) e o `resourceType` do evento, devolve um array de
 // `{propriedade, propriedade_label, valor_anterior, valor_novo}` só com o que bateu na allowlist.
-// Fora do escopo (documentado, não implementado): IP privado / NIC — `properties.ipConfigurations`
-// é um array aninhado, e a Change Analysis diffa por path de propriedade escalar — mudanças
-// dentro de um elemento de array não produzem um diff previsível no mesmo formato.
+// IP privado de NIC (`ip_privado_nic`, abaixo) é ESPECULATIVO — nunca confirmado contra uma
+// mudança real, ver comentário no próprio caso.
+const _IP_PRIVADO_NIC_RE = /^properties\.ipConfigurations\[\d+\]\.properties\.privateIPAddress$/;
 function _extrairMudancasRastreadas(resourceType, changes) {
   if (!changes || typeof changes !== 'object') return [];
   const tipo = (resourceType || '').toUpperCase();
@@ -11029,6 +11065,16 @@ function _extrairMudancasRastreadas(resourceType, changes) {
       achados.push({ propriedade: 'storage_access_tier', propriedade_label: 'Tier de acesso (Storage)', valor_anterior: anterior, valor_novo: novo });
     } else if (chave === 'properties.ipAddress' && tipo === 'MICROSOFT.NETWORK/PUBLICIPADDRESSES') {
       achados.push({ propriedade: 'ip_publico', propriedade_label: 'Endereço IP público', valor_anterior: anterior, valor_novo: novo });
+    } else if (_IP_PRIVADO_NIC_RE.test(chave) && tipo === 'MICROSOFT.NETWORK/NETWORKINTERFACES') {
+      // ESPECULATIVO (2026-09-03) — nunca confirmado contra uma mudança real de IP privado (30
+      // atualizações de NIC observadas em 24h de dados reais, nenhuma mexendo em
+      // `ipConfigurations`). Adicionado por analogia: a mesma investigação confirmou que a
+      // Change Analysis diffa arrays com índice explícito no path (visto em
+      // `properties.routes[N].xxx` de route tables) — a premissa antiga de "arrays não diffam
+      // limpo" era errada. Path completo confere com o schema ARM de NIC
+      // (`properties.ipConfigurations[N].properties.privateIPAddress`), mas só fica confirmado
+      // de verdade quando uma linha real aparecer em produção.
+      achados.push({ propriedade: 'ip_privado_nic', propriedade_label: 'IP privado (NIC)', valor_anterior: anterior, valor_novo: novo });
     }
   }
   return achados;

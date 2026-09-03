@@ -106,8 +106,9 @@ export interface AzureInventarioStatus {
   em_execucao: boolean
   iniciada_em: string | null
   progresso: {
-    // 'coleta' (Activity Log, padrão) | 'reconciliacao' (Resource Graph, ver
-    // POST /azure-inventario/reconciliar) — mesmo estado/monitor pras duas, só o rótulo muda.
+    // 'coleta' (Azure Resource Graph Change Analysis, padrão — ver "Inventário 2.0") |
+    // 'reconciliacao' (Resource Graph, ver POST /azure-inventario/reconciliar) — mesmo
+    // estado/monitor pras duas, só o rótulo muda.
     tipo?: 'coleta' | 'reconciliacao'
     fase: string
     sub_atual: string
@@ -117,6 +118,10 @@ export interface AzureInventarioStatus {
     novos: number
     atualizados: number
     excluidos: number
+    // Quantas propriedades vieram no bag da Change Analysis mas não bateram na allowlist
+    // curada (ruído tipo provisioningState/instanceView) — só existe pro tipo 'coleta',
+    // undefined em 'reconciliacao' (que não processa mudança de propriedade nenhuma).
+    descartadas?: number
     log: { ts: string; msg: string }[]
   }
 }

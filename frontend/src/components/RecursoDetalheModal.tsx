@@ -22,6 +22,28 @@ const ACAO_BADGE: Record<AzureAuditoriaAcao, { color: string; bg: string; label:
   EXCLUSAO: { color: 'var(--red,#ff4d6a)', bg: 'rgba(255,77,106,.10)', label: '✕ Exclusão' },
 }
 
+// Impacto de custo (2026-09-03, "mostrar o impacto de custo estimado") — decisão de design: NÃO
+// usar preço de tabela (a Price List não guarda `armSkuName`, só um nome "bonito" da Retail
+// Prices API — mapear "Standard_D2s_v3" pra um meter de forma confiável exigiria coluna nova +
+// ressincronizar tudo, risco desproporcional ao pedido). Em vez disso, custo REAL de billing
+// (`custo_diario`, já buscado pelo card "Custo — últimos 90 dias" logo abaixo, zero rota nova)
+// — média diária nos 7 dias antes vs. 7 dias depois de `detectado_em`. Só propriedades
+// diretamente ligadas a custo (SKU/tamanho de VM ou disco, tier de storage) — nunca tag/IP, que
+// não têm relação de custo direta.
+export const PROPRIEDADES_COM_IMPACTO_CUSTO = new Set(['sku_vm', 'disco_sku', 'disco_tier', 'disco_tamanho_gb', 'storage_sku', 'storage_access_tier'])
+export interface ImpactoCusto { antes: number | null; depois: number | null }
+export function calcularImpactoCusto(custoDiario: { cost_date: string; custo: number }[], detectadoEm: string): ImpactoCusto {
+  const JANELA_MS = 7 * 24 * 60 * 60 * 1000
+  const MIN_DIAS = 2 // billing tem 2-3 dias de atraso — menos que isso não é confiável
+  const dataMudanca = new Date(detectadoEm).getTime()
+  const antes = custoDiario.filter((d) => { const t = new Date(d.cost_date).getTime(); return t >= dataMudanca - JANELA_MS && t < dataMudanca })
+  const depois = custoDiario.filter((d) => { const t = new Date(d.cost_date).getTime(); return t >= dataMudanca && t < dataMudanca + JANELA_MS })
+  return {
+    antes: antes.length >= MIN_DIAS ? antes.reduce((s, d) => s + d.custo, 0) / antes.length : null,
+    depois: depois.length >= MIN_DIAS ? depois.reduce((s, d) => s + d.custo, 0) / depois.length : null,
+  }
+}
+
 export default function RecursoDetalheModal({ resourceId, subscriptionId, onClose }: {
   resourceId: string
   subscriptionId: string
@@ -179,18 +201,38 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                   <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
                     Histórico de Alterações ({propHistQuery.data.total} {propHistQuery.data.total === 1 ? 'alteração' : 'alterações'})
                   </div>
-                  <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
-                    {propHistQuery.data.mudancas.map((m) => (
-                      <div key={m.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, flexWrap: 'wrap' }}>
-                        <span style={{ color: 'var(--text-muted)', fontWeight: 600, minWidth: 140 }}>{m.propriedade_label}</span>
-                        <span style={{ color: 'var(--red,#ff4d6a)' }}>{m.valor_anterior || '—'}</span>
-                        <span style={{ color: 'var(--text-muted)' }}>→</span>
-                        <span style={{ color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.valor_novo || '—'}</span>
-                        <span style={{ flex: 1 }} />
-                        <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={m.evento_autor || ''}>{m.evento_autor_nome || m.evento_autor || 'desconhecido'}</span>
-                        <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{fmtData(m.detectado_em)}</span>
-                      </div>
-                    ))}
+                  <div style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
+                    {propHistQuery.data.mudancas.map((m) => {
+                      const impacto = PROPRIEDADES_COM_IMPACTO_CUSTO.has(m.propriedade) && data.custo_diario.length > 0
+                        ? calcularImpactoCusto(data.custo_diario, m.detectado_em)
+                        : null
+                      return (
+                        <div key={m.id} style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 600, minWidth: 140 }}>{m.propriedade_label}</span>
+                            <span style={{ color: 'var(--red,#ff4d6a)' }}>{m.valor_anterior || '—'}</span>
+                            <span style={{ color: 'var(--text-muted)' }}>→</span>
+                            <span style={{ color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.valor_novo || '—'}</span>
+                            <span style={{ flex: 1 }} />
+                            <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={m.evento_autor || ''}>{m.evento_autor_nome || m.evento_autor || 'desconhecido'}</span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{fmtData(m.detectado_em)}</span>
+                          </div>
+                          {impacto && (impacto.antes != null || impacto.depois != null) ? (
+                            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
+                              💰 Impacto de custo (média/dia, billing real):{' '}
+                              {impacto.antes != null ? fmtBRL(impacto.antes) : '—'} → {impacto.depois != null ? fmtBRL(impacto.depois) : '—'}
+                              {impacto.antes != null && impacto.depois != null && (
+                                <span style={{ color: impacto.depois > impacto.antes ? 'var(--orange,#ff8c42)' : 'var(--green,#22c55e)', fontWeight: 600 }}>
+                                  {' '}({impacto.depois > impacto.antes ? '▲' : '▼'} {fmtBRL(Math.abs(impacto.depois - impacto.antes))}/dia)
+                                </span>
+                              )}
+                            </div>
+                          ) : PROPRIEDADES_COM_IMPACTO_CUSTO.has(m.propriedade) ? (
+                            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-dim)' }}>💰 Impacto de custo ainda não disponível (billing tem 2-3 dias de atraso).</div>
+                          ) : null}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}

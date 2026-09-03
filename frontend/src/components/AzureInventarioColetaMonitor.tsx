@@ -70,6 +70,11 @@ export default function AzureInventarioColetaMonitor() {
           <>
             <span>Atualizados: <strong style={{ color: 'var(--accent)' }}>{progresso.atualizados.toLocaleString('pt-BR')}</strong></span>
             <span>Excluídos: <strong style={{ color: 'var(--red,#ff4d6a)' }}>{progresso.excluidos.toLocaleString('pt-BR')}</strong></span>
+            {!!progresso.descartadas && (
+              <span title="Propriedades vistas na Change Analysis que não bateram na allowlist curada (ruído)">
+                Descartadas: <strong style={{ color: 'var(--text-muted)' }}>{progresso.descartadas.toLocaleString('pt-BR')}</strong>
+              </span>
+            )}
           </>
         )}
       </div>

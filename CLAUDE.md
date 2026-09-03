@@ -3595,6 +3595,65 @@ observada (41 discos/26 VMs num universo de ~6 mil atualizações em 2h, quase t
 de ruído ou pelo filtro de RG gerenciado); mecânica de extração confirmada correta via inspeção direta dos
 dados brutos da API, então a detecção deve funcionar assim que uma mudança real qualificada acontecer.
 
+### Inventário — 4 melhorias: alerta por e-mail, impacto de custo, IP privado de NIC, contador de descarte (2026-09-03)
+
+Usuário perguntou "quais as próximas sugestões de melhorias" logo após expandir o rastreio de propriedades
+— apresentadas 4 opções, pediu pra seguir em sequência. Investigação feita antes de desenhar (mesma
+disciplina de "verificar contra dado real antes de implementar" do resto da sessão) mudou o design de duas
+delas.
+
+**1. Alerta por e-mail em mudança de propriedade "de infra"** — nova `_alertarMudancaPropriedade` (server.js,
+ao lado de `_alertarColetaComErro`, mesmo padrão exato: `_getSmtpConfig` → `_parseDestinatarios` →
+`_sendEmail`, sem dedup — evento, dispara 1x por linha real inserida). Chamada de dentro do loop de
+`_coletarInventarioAzure`, logo após o INSERT em `azure_recursos_mudancas_propriedade`, só quando
+`!p.propriedade.startsWith('tag:')` — **tags são deliberadamente excluídas** do alerta (uma re-tag em
+massa por automação dispararia dezenas de e-mails de uma vez; mesmo raciocínio já usado pra excluir e-mail
+de "coleta com sucesso" — "viraria spam sem valor"). Best-effort (`.catch()` só loga, nunca derruba a
+coleta).
+
+**2. Impacto de custo — design revisado ao investigar o schema real**: o plano original cogitava preço de
+tabela (Price List) pra estimar "quanto custa antes vs. depois" de um resize. Investigação encontrou que
+`azure_price_list` **não tem** um campo `arm_sku_name` — só `sku_name` (nome "bonito" da Retail Prices
+API, ex: "D2s v3", formato diferente do ARM "Standard_D2s_v3") — e `_syncPriceList` nunca leu/guardou
+`armSkuName` da API real. Mapear "SKU antigo → preço" de forma confiável exigiria coluna nova +
+ressincronizar toda a Price List — risco/esforço desproporcional. **Redesenhado pra usar custo REAL de
+billing** em vez de preço teórico: `calcularImpactoCusto()` (nova, `RecursoDetalheModal.tsx`, função pura
+exportada e testada isoladamente — `RecursoDetalheModal.test.tsx`, 4 casos) calcula a média diária de
+`data.custo_diario` (já buscado pro card "Custo — últimos 90 dias", **zero rota nova**) nos 7 dias antes vs.
+7 dias depois de `detectado_em`, só pra propriedades cost-relevantes (`sku_vm`/`disco_sku`/`disco_tier`/
+`disco_tamanho_gb`/`storage_sku`/`storage_access_tier` — nunca `ip_publico`/tags). Exige pelo menos 2 dias
+de dado de cada lado (billing tem 2-3 dias de atraso documentado) — mostra "impacto ainda não disponível"
+quando não dá pra calcular, nunca um número inventado.
+
+**3. IP privado de NIC — premissa antiga corrigida com dado real**: a v1 do rastreio de propriedades
+descartou isso deliberadamente ("arrays não diffam limpo"). Testado ao vivo contra a API real pra validar:
+30 atualizações de NIC em 24h, nenhuma mexendo em `ipConfigurations` — não achei um exemplo confirmado do
+path exato. MAS a mesma investigação (rodada anterior, pra `disco_tier`) já tinha confirmado que a Change
+Analysis diffa arrays com índice explícito (`properties.routes[10].properties.addressPrefix`, visto em
+route tables reais) — a premissa "arrays não diffam limpo" estava **errada**. Implementado por analogia
+(`properties.ipConfigurations[N].properties.privateIPAddress`, regex `_IP_PRIVADO_NIC_RE`), marcado como
+**especulativo** no código até uma mudança real de IP privado confirmar o path.
+
+**4. Contador de propriedades descartadas** — `Object.keys(ch.changes||{}).length - propriedades.length`
+somado a cada evento dentro do escopo não-gerenciado (mesmo `if` que já guarda o bloco de extração) — só
+mede "quanto ruído tinha dentro do que já íamos processar mesmo", não todo evento do sistema. Exposto em
+`_invColetaProgresso.descartadas` (monitor ao vivo, `AzureInventarioColetaMonitor.tsx`, só aparece quando
+`>0`) e na mensagem final da coleta (`| N propriedade(s) descartada(s) (ruído)`). Sem coluna nova no
+histórico persistido — vive só no progresso ao vivo + na mensagem de texto já gravada, suficiente pro
+propósito (calibrar a allowlist observando a proporção ao longo do tempo).
+
+**Verificado contra o servidor real com múltiplas coletas ao vivo**: `node --check`, `tsc -b`, suíte
+completa do frontend 285/285 (4 testes novos pra `calcularImpactoCusto`), `npm run frontend:build`,
+`pm2 restart` sem crash-loop. Uma coleta real processou 8.391 eventos e reportou **275 propriedades
+descartadas (ruído)** — número plausível dado que a maioria do tráfego real já é ruído (confirmado em
+investigações anteriores desta sessão). Playwright confirmou o monitor renderizando sem erro de console.
+**Não validado**: entrega real de e-mail (SMTP não configurado neste ambiente, mesma limitação de sempre);
+detecção real de IP privado de NIC (nenhuma mudança desse tipo aconteceu ainda nas janelas coletadas); e o
+card de impacto de custo com dado real (nenhuma propriedade cost-relevante mudou fora de RG gerenciado nas
+coletas rodadas até agora) — a lógica de cada um foi verificada onde dava (queries reais, testes
+unitários), mas o caminho positivo completo (usuário vendo o número de verdade na tela) ainda depende de
+uma mudança real acontecer.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
