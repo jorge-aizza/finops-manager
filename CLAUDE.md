@@ -4032,6 +4032,56 @@ não só que o código não quebra. **Não verificado**: entrega de e-mail de po
 (nenhum SMTP real disponível neste ambiente) — quando o usuário configurar um servidor de verdade, "Testar
 Conexão" é o primeiro passo pra confirmar que funciona.
 
+**Timeouts explícitos + Log persistente na UI (2026-09-02, pedido do usuário: "estou tentando configurar o
+e-mail mas não está indo")** — usuário já tinha um servidor SMTP real salvo (`mail.antoniolucca.com.br:465`,
+hospedagem cPanel) e "Testar Conexão" não estava funcionando. Bug real encontrado e corrigido ANTES de
+reportar: nem `_sendEmail` nem `POST /integrations/smtp/testar` passavam `connectionTimeout`/
+`greetingTimeout`/`socketTimeout` pro `nodemailer.createTransport()` — o default do nodemailer é **2
+minutos** por fase, enquanto `api()` (app.js) aborta a requisição em **30s**. Contra um host que não recusa
+ativamente a conexão mas também não responde rápido (comum em firewall que descarta pacote em vez de
+rejeitar), o CLIENTE abortava primeiro — o usuário via só "Servidor não respondeu em 30s" (erro genérico do
+`fetch`/`AbortController`), nunca a causa real (host errado, porta bloqueada, TLS, credencial). Corrigido
+com `connectionTimeout:10_000, greetingTimeout:10_000, socketTimeout:10_000` nos dois pontos (`_sendEmail`
+e a rota de teste) — falha rápido o bastante pra devolver o erro real do nodemailer antes de qualquer
+timeout do lado do cliente; `testarConexao('smtp')` (app.js) também subiu de 30s (default de `api()`) pra
+45s, margem confortável acima da soma das 3 fases de 10s.
+
+**Diagnóstico real feito nesta sessão, direto contra o host salvo do usuário** (fora do código, só pra
+confirmar a causa raiz antes de reportar): `net.connect()` bruto pra `mail.antoniolucca.com.br:465` conectou
+em 127ms (rede/firewall OK); com a senha real do formulário só chegando cifrada até o servidor e nunca
+sendo testável por mim, testado `POST /integrations/smtp/testar` com o host/porta/usuário reais do usuário e
+uma senha propositalmente errada — retornou `"Invalid login: 535 Incorrect authentication data"`, um erro
+de autenticação SMTP real vindo do servidor de e-mail, provando que TCP+TLS+protocolo SMTP funcionam
+ponta a ponta pra esse host através do MESMO caminho de código do app. Ou seja: a infraestrutura de rede/
+TLS não é o problema pra este usuário especificamente — o mais provável é senha incorreta ou o provedor
+exigindo uma senha de aplicativo (comum em hospedagem com 2FA/autenticação moderna). Sem o fix, esse mesmo
+teste correria risco de nunca chegar a essa resposta real dentro dos 30s do cliente, dependendo da
+latência do host.
+
+**Novo ring buffer em memória** (`_emailLog`, até 50 entradas, sem tabela nova — é diagnóstico operacional,
+não dado de negócio, perder o histórico num restart é aceitável) — `_logEmailAttempt()` chamado tanto por
+`_sendEmail` (envios reais: alertas periódicos, coleta com erro, etc.) quanto por `POST
+/integrations/smtp/testar` (teste manual) — um só lugar pra ver os dois tipos de tentativa em ordem
+cronológica, já que "Testar Conexão" funcionar não garante que os envios reais (que usam a config SALVA,
+possivelmente diferente da testada no momento) também funcionem. Nova rota `GET
+/integrations/smtp/log` (`adminMiddleware`) expõe o buffer.
+
+**Frontend**: novo box "Log — últimos testes e envios" dentro do card E-mail (SMTP) em `index.html`
+(`#smtp-log`), populado por `carregarSmtpLog()` (app.js) — chamado ao abrir Configurações
+(`openSettingsModal`), depois de cada "Testar Conexão", e via botão "↻" manual. Cada linha mostra
+ícone ✅/❌, tipo (Teste/Envio), horário, destinatário(s) e o erro completo (não truncado, `word-break`)
+quando falhou — substitui depender só do toast (que desaparece em poucos segundos e trunca mensagens
+longas de erro SMTP).
+
+**Verificado contra o servidor real, incluindo o bug do timeout de propósito**: `node --check` nos dois
+arquivos, `pm2 restart` sem erro/crash-loop. Testado com um IP não-roteável (`10.255.255.1:587`) — antes
+do fix isso demoraria até 2min (nodemailer) mas seria abortado pelo cliente em 30s mostrando erro genérico;
+depois do fix, `POST /integrations/smtp/testar` respondeu em **10.222s** com o erro real do nodemailer
+(`"Connection timeout"`), confirmando a correção na prática, não só na teoria. Ring buffer confirmado via
+`GET /integrations/smtp/log` (entrada gravada corretamente). Via Playwright: card SMTP mostra os campos já
+salvos do usuário (confirma que a configuração É real, não um ambiente vazio), o botão "↻" e o box de Log
+renderizam corretamente com a entrada de teste real (`❌ Teste · Connection timeout`), zero erro de console.
+
 ### Excel export
 `GET /api/export/excel` — ExcelJS, 3-sheet `.xlsx`:
 1. **Sumário Executivo** — status + cloud breakdown

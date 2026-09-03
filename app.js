@@ -1934,6 +1934,7 @@ async function openSettingsModal() {
       }
     });
   } catch {}
+  carregarSmtpLog();
 }
 
 function switchSettingsTab(tab) {
@@ -3091,6 +3092,36 @@ async function salvarIntegracao(tipo) {
   catch(e) { showToast('Erro: '+e.message,'error'); }
 }
 
+// Log de tentativas de e-mail (2026-09-02, pedido do usuário: "inclua Log nas configurações de
+// integrações, estou tentando configurar o e-mail mas não está indo") — lê o ring buffer do
+// servidor (`GET /integrations/smtp/log`, ver server.js `_logEmailAttempt`), populado tanto
+// pelo botão "Testar Conexão" quanto pelos envios reais (alertas periódicos, coleta com erro
+// etc.) — um só lugar pra ver os dois em ordem cronológica, já que "Testar Conexão" funcionar
+// não garante que os envios reais (que usam a config SALVA) também funcionem.
+async function carregarSmtpLog() {
+  const el = document.getElementById('smtp-log');
+  if (!el) return;
+  try {
+    const log = await api('GET', '/integrations/smtp/log');
+    if (!log || !log.length) { el.innerHTML = '<div style="padding:10px 12px;color:var(--text-muted)">Nenhuma tentativa registrada ainda.</div>'; return; }
+    el.innerHTML = log.map(l => {
+      const hora = new Date(l.ts).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+      const tipoLabel = l.tipo === 'teste' ? 'Teste' : 'Envio';
+      const cor = l.ok ? 'var(--green,#22c55e)' : 'var(--red,#ff4d6a)';
+      const icone = l.ok ? '✅' : '❌';
+      return `<div style="padding:8px 12px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span>${icone}</span>
+          <strong style="color:${cor}">${tipoLabel}</strong>
+          <span style="color:var(--text-muted)">${hora}</span>
+          <span style="color:var(--text-muted)">→ ${escHtml(l.destinatarios || '—')}</span>
+        </div>
+        ${l.erro ? `<div style="color:var(--red,#ff4d6a);margin-top:4px;word-break:break-word">${escHtml(l.erro)}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (e) { el.innerHTML = '<div style="padding:10px 12px;color:var(--red,#ff4d6a)">Erro ao carregar log: '+escHtml(e.message)+'</div>'; }
+}
+
 async function testarConexao(type) {
   if (type==='ad') {
     const server=document.getElementById('ad-server').value, basedn=document.getElementById('ad-basedn').value;
@@ -3106,8 +3137,15 @@ async function testarConexao(type) {
     const remetente_nome=document.getElementById('smtp-remetente-nome').value, remetente_email=document.getElementById('smtp-remetente-email').value;
     if (!host||!usuario||!senha||!remetente_email) { showToast('Preencha host, usuário, senha e e-mail do remetente para testar','error'); return; }
     showToast('Enviando e-mail de teste...','success');
-    try { const r=await api('POST','/integrations/smtp/testar',{host,port,secure,usuario,senha,remetente_nome,remetente_email}); showToast(r.message||'E-mail de teste enviado!','success'); }
+    // Timeout de 45s aqui (não os 30s padrão de api()) — o servidor agora falha rápido de
+    // propósito (10s por fase do SMTP: conexão/greeting/socket, ver server.js), mas precisa de
+    // folga suficiente pra essas fases somadas + latência de rede não bater no abort do
+    // cliente ANTES da resposta real chegar — senão a gente voltaria a mostrar "não respondeu"
+    // em vez do erro de verdade (mesmo motivo do timeout de 3min já usado pro teste de conexão
+    // Databricks, só que aqui o servidor está limitado a bem menos que isso).
+    try { const r=await api('POST','/integrations/smtp/testar',{host,port,secure,usuario,senha,remetente_nome,remetente_email},45000); showToast(r.message||'E-mail de teste enviado!','success'); }
     catch(e) { showToast('Falha: '+e.message,'error'); }
+    finally { carregarSmtpLog(); }
   } else {
     showToast('Para testar Entra ID, configure e use o botão na tela de login','success');
   }

@@ -868,15 +868,23 @@ app.post('/api/integrations/:tipo', authMiddleware, adminMiddleware, async (req,
 
 // Testa credenciais SMTP ainda não salvas (mesmo padrão de POST /api/azure-coleta/sps/:id/testar
 // — o erro cru É o propósito da rota) — envia um e-mail de teste pro próprio remetente.
+// Timeouts explícitos de 10s por fase (2026-09-02) — mesmo motivo de `_sendEmail`: sem isso, um
+// host inalcançável/bloqueado por firewall demora até 2min (default do nodemailer) pra falhar,
+// e o frontend já aborta em 30s (`api()`, app.js) — o cliente via só "não respondeu", nunca o
+// erro real (ECONNREFUSED/ETIMEDOUT/EAUTH). Também loga a tentativa no mesmo ring buffer que
+// `_sendEmail` usa — `GET /integrations/smtp/log` mostra teste e envio real juntos.
 app.post('/api/integrations/smtp/testar', authMiddleware, adminMiddleware, async (req, res) => {
+  const { host, port, secure, usuario, senha, remetente_email, remetente_nome } = req.body;
   try {
-    const { host, port, secure, usuario, senha, remetente_email, remetente_nome } = req.body;
     if (!host || !usuario || !senha || !remetente_email) {
       return res.status(400).json({ error: 'Preencha host, usuário, senha e e-mail do remetente antes de testar.' });
     }
     const transporter = nodemailer.createTransport({
       host, port: parseInt(port, 10) || 587, secure: !!secure,
       auth: { user: usuario, pass: senha },
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 10_000,
     });
     await transporter.sendMail({
       from: `"${remetente_nome || 'FinOps Manager'}" <${remetente_email}>`,
@@ -884,10 +892,19 @@ app.post('/api/integrations/smtp/testar', authMiddleware, adminMiddleware, async
       subject: '✅ Teste de conexão SMTP — FinOps Manager',
       html: _emailTemplate('Teste de conexão', '<p>Se você está lendo isso, a configuração de SMTP está funcionando corretamente.</p>'),
     });
+    _logEmailAttempt({ tipo: 'teste', destinatarios: remetente_email, assunto: 'Teste de conexão SMTP', ok: true });
     res.json({ ok: true, message: `E-mail de teste enviado para ${remetente_email}.` });
   } catch (e) {
+    _logEmailAttempt({ tipo: 'teste', destinatarios: remetente_email, assunto: 'Teste de conexão SMTP', ok: false, erro: e.message });
     res.status(400).json({ error: e.message });
   }
+});
+
+// Log das últimas tentativas de e-mail (teste manual + envios reais) — ring buffer em memória,
+// ver `_logEmailAttempt` acima. Serve a UI de Integrações (card SMTP) pra diagnosticar sem
+// precisar de acesso a `pm2 logs`.
+app.get('/api/integrations/smtp/log', authMiddleware, adminMiddleware, async (_req, res) => {
+  res.json(_emailLog);
 });
 
 // ─── DB CONNECTIONS ──────────────────────────────────────────────────────────
@@ -6378,19 +6395,53 @@ async function _getSmtpConfig() {
   } catch (_) { return null; }
 }
 
+// Log de tentativas de e-mail (2026-09-02, pedido do usuário: "inclua Log nas configurações de
+// integrações, estou tentando configurar o e-mail mas não está indo") — ring buffer em memória
+// (sem tabela nova — é um diagnóstico operacional, não um dado de negócio; se o servidor
+// reiniciar, perde o histórico, mas isso é aceitável pro propósito de "o que aconteceu nos
+// últimos envios/testes"). Alimentado tanto por `_sendEmail` (envios reais — alertas
+// periódicos, coleta com erro, etc.) quanto por `POST /integrations/smtp/testar` (teste manual
+// com credenciais ainda não salvas) — um só lugar pra ver os dois tipos de tentativa em ordem
+// cronológica, já que "Testar Conexão" funcionar não garante que os envios reais (que usam a
+// config SALVA, possivelmente diferente da testada) também funcionem.
+const _EMAIL_LOG_MAX = 50;
+let _emailLog = [];
+function _logEmailAttempt({ tipo, destinatarios, assunto, ok, erro }) {
+  _emailLog.unshift({
+    ts: new Date().toISOString(),
+    tipo, // 'teste' | 'envio'
+    destinatarios: Array.isArray(destinatarios) ? destinatarios.join(', ') : (destinatarios || null),
+    assunto: assunto || null,
+    ok: !!ok,
+    erro: erro || null,
+  });
+  if (_emailLog.length > _EMAIL_LOG_MAX) _emailLog.length = _EMAIL_LOG_MAX;
+}
+
 // Nunca lança pro chamador — falha de e-mail não pode quebrar uma coleta, uma
 // troca de status de estimativa, nem nenhum outro fluxo real do sistema.
 async function _sendEmail({ to, subject, html }) {
+  const destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
   try {
     const cfg = await _getSmtpConfig();
     if (!cfg) return;
-    const destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
     if (!destinatarios.length) return;
+    // Timeouts explícitos (2026-09-02) — sem isso, nodemailer usa o default de 2 MINUTOS pra
+    // connectionTimeout/socketTimeout; o frontend aborta a chamada de "Testar Conexão" em 30s
+    // (ver `api()` em app.js), então um SMTP lento/bloqueado por firewall (comum — silenciosamente
+    // descarta pacotes em vez de recusar a conexão) fazia o CLIENTE abortar primeiro, mostrando
+    // "Servidor não respondeu em 30s" — mascarando completamente a causa real (host errado,
+    // porta bloqueada, credencial errada). 10s por fase é generoso pra uma conexão real e curto
+    // o bastante pra devolver o erro de verdade do nodemailer (ECONNREFUSED/ETIMEDOUT/EAUTH)
+    // antes de qualquer timeout do lado do cliente.
     const transporter = nodemailer.createTransport({
       host: cfg.host,
       port: parseInt(cfg.port, 10) || 587,
       secure: !!cfg.secure,
       auth: { user: cfg.usuario, pass: cfg.senha },
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 10_000,
     });
     await transporter.sendMail({
       from: `"${cfg.remetente_nome || 'FinOps Manager'}" <${cfg.remetente_email || cfg.usuario}>`,
@@ -6398,8 +6449,10 @@ async function _sendEmail({ to, subject, html }) {
       subject,
       html,
     });
+    _logEmailAttempt({ tipo: 'envio', destinatarios, assunto: subject, ok: true });
   } catch (e) {
     console.warn('[Email] Falha ao enviar:', e.message);
+    _logEmailAttempt({ tipo: 'envio', destinatarios, assunto: subject, ok: false, erro: e.message });
   }
 }
 
