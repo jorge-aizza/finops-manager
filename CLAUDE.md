@@ -3454,6 +3454,99 @@ via Playwright, card renderiza corretamente na aba Auditoria com esses valores r
 sob carga do full-run, não reproduz isolado — mesmo flaky pré-existente já documentado várias vezes nesta
 sessão, não regressão), `npm run frontend:build`, `pm2 restart` sem erro/crash-loop.
 
+### Inventário 2.0 — troca Activity Log por Azure Resource Graph Change Analysis (2026-09-03)
+
+Pedido do usuário: "Vamos Recriar o Inventario... consulte documentação e Boas práticas de mercado de
+como Acompanhar Recursos e seu crescimento". Pesquisado contra documentação oficial da Microsoft (Cloud
+Adoption Framework, Azure Resource Graph Change Analysis), AWS (Config, como benchmark cross-cloud) e
+FinOps Foundation — apresentado como proposta num artifact (`Inventário 2.0`) antes de qualquer código,
+com diagnóstico dos problemas reais já vividos nesta sessão com o desenho baseado em Activity Log (gap de
+99,8% que exigiu reconciliação via Resource Graph; diff manual de SKU só pra VM; autor via Microsoft Graph
+bloqueado por permissão; dois bugs de fuso horário). Usuário aprovou e decidiu, via `AskUserQuestion`: (1)
+zerar os dados já coletados e recomeçar limpo; (2) começar enxuto (paridade com o que já existia, sem
+expandir o escopo de propriedades rastreadas). Implementado via `EnterPlanMode`/`ExitPlanMode` dado o
+escopo (reescreve a ingestão principal) e a natureza destrutiva (zera tabelas de produção).
+
+**A peça central — Azure Resource Graph Change Analysis (tabela `resourcechanges`)**: mesmo endpoint
+(`Microsoft.ResourceGraph/resources`), mesma api-version, mesma permissão Reader já usados em todo o
+resto do módulo (Advisor, Rede, ARM detalhe, Reconciliação) — zero credencial nova. Diferente do Activity
+Log (só registrava QUE um `/write` aconteceu), Change Analysis grava nativamente o antes/depois de
+qualquer propriedade que mudou no mesmo evento, e `changeType` (`Create`/`Update`/`Delete`) já diferencia
+criação de atualização — não precisa mais do truque `RETURNING (xmax=0)` no upsert. Gratuito, sem
+precisar habilitar nada (confirmado na documentação oficial: "no extra cost", "onboarding-free").
+Retenção nativa de só 14 dias (contra 90 do Activity Log) — janela de coleta ajustada de 89 pra **13
+dias** de lookback máximo.
+
+**`_resourceGraphFetchChanges(token, subscriptionId, desdeISO, ateISO)`** (nova, ao lado de
+`_resourceGraphFetchRecursos`) — mesmo padrão de paginação via `$skipToken`. KQL extrai
+`vmSizeChange = properties.changes["properties.hardwareProfile.vmSize"]` direto na query — quando
+presente, o antes/depois já vem pronto no mesmo evento, **sem round-trip extra** ao Resource Graph pra
+comparar contra uma última leitura conhecida (era exatamente isso que `_detectarMudancasSku`, agora
+removida por completo, fazia manualmente desde 2026-09-02).
+
+**`_coletarInventarioAzure` reescrita, mas com a MESMA assinatura/contrato externo** — `_invColetaProgresso`,
+`azure_inventario_coleta_historico`, o watermark em `azure_inventario_config.ultimo_evento_em`,
+`_purgarAuditoriaInventario`/`_graphResolveAutores` ao final, tudo idêntico. Só o miolo do loop muda: troca
+`_activityLogFetchEventos`+`_classificarEventoAtividade` (ambas removidas, dead code) por
+`_resourceGraphFetchChanges`; `ate` da janela agora é `agora − 5 minutos` (não `agora` puro) — a
+documentação oficial diz que uma mudança pode levar até 5min pra ser indexada na Change Analysis; sem essa
+margem, uma mudança bem recente cairia fora da janela atual E fora da próxima (watermark já teria avançado
+pra depois dela), perdida pra sempre — ajuste novo, não existia no código do Activity Log. SKU de VM
+gravado direto em `azure_recursos_sku_historico` a partir de `ch.vmSizeChange.previousValue`/`.newValue`
+(mesma exclusão de RGs gerenciados por Databricks/AKS via `_detectManagedRg` de sempre).
+
+**Migração de dados — TRUNCATE + DROP COLUMN, não DROP TABLE**: dado o pedido explícito de zerar,
+`ensureAzureColetaTable()` ganhou uma migração one-time guardada pela existência da coluna `sku_atual`
+(só existia no schema antigo — nunca mais roda depois que ela for removida, mesmo padrão de idempotência
+já usado pelas migrações de TIMESTAMPTZ neste arquivo):
+```js
+const _temSkuAtual = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_name='azure_recursos_inventario' AND column_name='sku_atual'`);
+if (_temSkuAtual.rows.length) {
+  await pool.query(`TRUNCATE TABLE azure_recursos_sku_historico, azure_recursos_auditoria_eventos, azure_recursos_inventario`);
+  await pool.query(`ALTER TABLE azure_recursos_inventario DROP COLUMN sku_atual`);
+  await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em = NULL`);
+}
+```
+Deliberadamente TRUNCATE (não DROP TABLE) — todas as rotas de leitura continuam batendo com o mesmo
+schema (só `sku_atual`, coluna write-only nunca lida por rota nenhuma, sai), então reescrever os `CREATE
+TABLE IF NOT EXISTS` seria risco sem benefício.
+
+**O que NÃO mudou (confirmado por leitura direta do código antes de implementar, listado na proposta)**:
+`_reconciliarInventarioResourceGraph` (lê a tabela `resources`, não `resourcechanges` — resolve um
+problema diferente, backfill de recursos que existiam antes da ativação); `_iniciarInventarioAgendador`
+(continua horário); `_graphResolveAutores` (mesma lógica — só resolve valores em formato GUID, agora
+resolve menos coisa já que `changedBy` vem como e-mail com mais frequência); todas as rotas de leitura
+(`/recursos`, `/auditoria`, `/comparativo`, `/resumo-por-assinatura`, `/sku-historico`,
+`/relatorio-diario`, `/export/excel`, `/recurso-detalhe`, `/advisor`, `/rede-topologia`, `/anomalias`,
+`/orcamentos*`, `/tags-faltantes`) e todos os componentes React — mesma forma de tabela, zero mudança de
+código. Só 2 blocos de texto explicativo pro admin (aba Configuração do Inventário, e um comentário em
+`RecursoDetalheModal.tsx`) foram atualizados pra não continuarem dizendo "Activity Log".
+
+**Verificado contra o servidor real, incluindo uma coleta completa ao vivo com a fonte nova** — a
+verificação mais extensa desta sessão pra uma única mudança: `node --check`, `tsc -b`, suíte completa do
+frontend 281/281 (zero teste quebrado — o teste que mocka a string de progresso "Consultando Activity
+Log" continuou passando porque só verifica que o componente renderiza o texto vindo do backend
+verbatim, não que o backend produza aquele texto específico), `npm run frontend:build`, `pm2 restart`
+sem erro/crash-loop. Migração confirmada via query direta ao Postgres: coluna `sku_atual` removida, as 3
+tabelas com `COUNT(*) = 0`, watermark `NULL`. Disparada uma coleta manual completa contra as 3
+subscriptions reais — **primeira vez que a query KQL contra `resourcechanges` foi exercitada contra uma
+conta Azure de verdade** — completou em ~7 minutos processando **155.734 eventos** (47.914 novos, 70.752
+atualizados, 37.068 excluídos), zero erro/paginação quebrada, incluindo uma subscription só com 104.441
+mudanças (exigiu dezenas de páginas de `$skipToken`, confirmando que a paginação funciona em escala real).
+Volume bem maior que o do Activity Log pro mesmo tipo de janela (documentado em sessões anteriores como
+~5-9 mil eventos/dia) — esperado, já que Change Analysis captura granularidade de propriedade, não só de
+operação. `GET /auditoria` confirmado com classificação por tipo real (`microsoft.compute/disks`:63313,
+`microsoft.network/networkinterfaces`:48152, `microsoft.compute/virtualmachines`:34962, etc.) e `GET
+/recursos` retornando inventário real (500+). `GET /sku-historico` retornou `total:0` — esperado (nenhum
+resize de VM real aconteceu na janela), mesmo tipo de resultado "correto mas vazio" já confirmado quando a
+feature original foi lançada. **Não validado**: o caminho de DETECÇÃO de uma mudança de SKU real (precisa
+de um resize de verdade acontecer — não há como forçar isso neste ambiente sob demanda), e a alegação da
+documentação oficial de que `changedBy` "vem como e-mail na maioria dos casos" não se confirmou nos dados
+reais desta conta especificamente (amostra de 300 eventos recentes: 0 com formato de e-mail, só GUIDs de
+Service Principal e `"System"`) — plausível porque este ambiente é dominado por automação (Databricks/AKS/
+Coleta Azure), não por mudanças feitas por humanos no portal; o texto da UI já reflete essa possibilidade
+("já vem como e-mail na maioria dos casos; quando vem como ID — comum pra Service Principals").
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

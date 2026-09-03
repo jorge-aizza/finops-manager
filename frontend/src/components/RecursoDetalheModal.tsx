@@ -53,7 +53,8 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
 
   // Histórico de SKU (2026-09-02, pedido do usuário: "a VM tinha um SKU e mudou pra outro,
   // qual o antigo e qual o novo") — só faz sentido pra VMs (única classe rastreada nesta v1,
-  // ver _detectarMudancasSku em server.js); range bem largo (não os 30 dias padrão da aba
+  // gravado direto durante a coleta a partir do antes/depois que a Azure Resource Graph Change
+  // Analysis já entrega, ver server.js); range bem largo (não os 30 dias padrão da aba
   // Auditoria) pra cobrir toda a vida do recurso, não só o que está sendo olhado no momento.
   const ehVm = (data?.recurso.resource_type || '').toUpperCase() === 'MICROSOFT.COMPUTE/VIRTUALMACHINES'
   const skuHistQuery = useQuery({

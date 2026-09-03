@@ -6196,17 +6196,22 @@ async function ensureAzureColetaTable() {
   // usa regexp pra pegar o último segmento do resource_id (mesma lógica de resourceId.split('/').pop()).
   await pool.query(`UPDATE azure_recursos_inventario SET nome = regexp_replace(resource_id, '^.*/', '') WHERE nome IS NULL`);
 
-  // Rastreamento de mudança de SKU (2026-09-02, pedido do usuário: "a VM tinha um SKU e mudou
-  // pra outro, qual o antigo e qual o novo") — Activity Log não carrega o valor de propriedades
-  // (não dá pra saber QUAL atributo mudou nem seus valores só pelo evento). `sku_atual` guarda a
-  // última leitura conhecida (via Resource Graph, batched — ver `_detectarMudancasSku`); quando
-  // o valor lido diverge do já conhecido, grava uma linha aqui (histórico append-only, nunca
-  // sobrescrito) e atualiza `sku_atual`. Só VMs nesta v1 (`Microsoft.Compute/virtualMachines`,
-  // propriedade `hardwareProfile.vmSize`) — outros tipos de recurso não têm um conceito único de
-  // "SKU" (discos usam `sku.name`, storage accounts idem, mas o significado prático — "trocar o
-  // tamanho/tipo da máquina" — é o pedido específico do usuário; generalizar exigiria mapear a
-  // propriedade certa por tipo, escopo maior que o pedido).
-  await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS sku_atual VARCHAR(200)`);
+  // Inventário 2.0 (2026-09-03) — troca a fonte de eventos de Activity Log pra Azure Resource
+  // Graph Change Analysis (tabela `resourcechanges`, ver `_resourceGraphFetchChanges` e
+  // `_coletarInventarioAzure`) — pesquisa contra documentação oficial encontrou que ela grava o
+  // antes/depois de QUALQUER propriedade nativamente, então o diff manual de SKU de VM
+  // (`_detectarMudancasSku`, que lia o valor atual via Resource Graph e comparava contra a
+  // última leitura conhecida em `sku_atual`) deixa de ser necessário — o mesmo dado já vem
+  // pronto no próprio evento de mudança. Pedido explícito do usuário: zerar o histórico já
+  // coletado (eventos, SKU, autores resolvidos) e recomeçar limpo com a nova fonte, em vez de
+  // tentar migrar dado antigo pro formato novo. Guardado pela existência da coluna `sku_atual`
+  // (só existia no schema antigo) — roda uma vez só, nunca de novo depois que ela for removida.
+  const _temSkuAtual = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_name='azure_recursos_inventario' AND column_name='sku_atual'`);
+  if (_temSkuAtual.rows.length) {
+    await pool.query(`TRUNCATE TABLE azure_recursos_sku_historico, azure_recursos_auditoria_eventos, azure_recursos_inventario`);
+    await pool.query(`ALTER TABLE azure_recursos_inventario DROP COLUMN sku_atual`);
+    await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em = NULL`);
+  }
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_recursos_sku_historico (
       id                SERIAL PRIMARY KEY,
@@ -7835,8 +7840,9 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
   } catch (e) { _dbErr(res, e); }
 });
 
-// Mudanças de SKU de VM (2026-09-02) — histórico gravado por `_detectarMudancasSku` durante a
-// coleta. `resource_id` opcional filtra pra um recurso específico (usado por
+// Mudanças de SKU de VM (2026-09-02, atualizado 2026-09-03 — Inventário 2.0) — histórico
+// gravado direto por `_coletarInventarioAzure` a partir do antes/depois que a Change Analysis já
+// entrega no próprio evento. `resource_id` opcional filtra pra um recurso específico (usado por
 // `RecursoDetalheModal.tsx`); sem ele, lista tudo no período (mesmo padrão `periodo`/300 linhas
 // já usado por `/auditoria`).
 app.get('/api/azure-inventario/sku-historico', authMiddleware, dbMiddleware, async (req, res) => {
@@ -10597,48 +10603,21 @@ async function _safeRespJson(resp) {
 // ══════════════════════════════════════════════════════════════════════════════
 // INVENTÁRIO + AUDITORIA DE RECURSOS AZURE (2026-08-30, pedido do usuário)
 // ══════════════════════════════════════════════════════════════════════════════
-// "Ontem tinha X recursos, hoje tenho X+1 — quem criou, quando, quanto custa." Fonte:
-// Azure Activity Log (Microsoft.Insights/eventtypes/management) — mesma credencial ARM
-// (Service Principal com role Reader) já usada pra Cost Management; `Reader` já cobre
-// `Microsoft.Insights/eventtypes/*`, nenhuma role nova precisa ser concedida.
+// "Ontem tinha X recursos, hoje tenho X+1 — quem criou, quando, quanto custa." Fonte
+// (2026-09-03, "Inventário 2.0" — ver `_resourceGraphFetchChanges`): Azure Resource Graph
+// Change Analysis, mesma credencial ARM (Service Principal com role Reader) já usada pra
+// Cost Management/Resource Graph — nenhuma role nova precisa ser concedida. Substitui o
+// Activity Log original: além de criação/atualização/exclusão, Change Analysis grava
+// nativamente o antes/depois de propriedade (usado aqui pra SKU de VM, sem round-trip
+// extra), e "quem mudou" já vem como e-mail na maioria dos casos.
 //
-// $filter da API é MUITO restrito (confirmado na documentação oficial,
-// learn.microsoft.com/rest/api/monitor/activity-logs/list) — só aceita
-// `eventTimestamp ge/le` + no máximo UMA condição extra (resourceGroupName eq,
-// resourceUri eq, resourceProvider eq ou correlationId eq). Não dá pra filtrar por
-// `status`/`operationName` no servidor — filtragem por essas duas é sempre client-side,
-// depois de buscar TODOS os eventos do intervalo.
-//
-// Retenção nativa da API é 90 dias — por isso a janela de coleta nunca busca mais que 89
-// dias pra trás (margem de segurança de 1 dia), e por isso um recurso criado antes da
-// primeira coleta deste sistema nunca vai ter `criado_por` conhecido (dado que não existe
-// mais na fonte).
-function _classificarEventoAtividade(operationName) {
-  const op = (operationName || '').toLowerCase();
-  if (op.endsWith('/delete')) return 'delete';
-  if (op.endsWith('/write')) return 'write'; // criação OU atualização — decidido por UPSERT (xmax) no chamador, não dá pra saber pelo nome da operação sozinho
-  return null; // ignora ações que não são escrita/exclusão (ex: /read, /action)
-}
-
-// Busca paginada (segue `nextLink`) — NÃO VALIDADO contra uma assinatura Azure real (mesma
-// ressalva de toda integração nova nesta sessão) — sintaxe conforme documentação oficial
-// pesquisada em 2026-08-30. `$select` reduz o payload só aos campos que usamos.
-async function _activityLogFetchEventos(token, subscriptionId, desdeISO, ateISO) {
-  const filtro = `eventTimestamp ge '${desdeISO}' and eventTimestamp le '${ateISO}'`;
-  const select = 'eventName,operationName,status,eventTimestamp,resourceId,resourceGroupName,resourceType,caller,correlationId';
-  let url = `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01&$filter=${encodeURIComponent(filtro)}&$select=${encodeURIComponent(select)}`;
-  const eventos = [];
-  let paginas = 0;
-  while (url && paginas < 50) { // guarda-corpo contra paginação anômala/infinita
-    const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
-    if (!resp.ok) { const e = await resp.text(); throw new Error(`Activity Log falhou (${resp.status}): ${e}`); }
-    const data = await _safeRespJson(resp);
-    for (const ev of (data.value || [])) eventos.push(ev);
-    url = data.nextLink || null;
-    paginas++;
-  }
-  return eventos;
-}
+// Retenção nativa da Change Analysis é 14 dias — por isso a janela de coleta nunca busca
+// mais que 13 dias pra trás (margem de segurança de 1 dia), e por isso um recurso criado
+// antes da primeira coleta deste sistema nunca vai ter `criado_por` conhecido (dado que não
+// existe mais na fonte). A Reconciliação via Resource Graph (`_reconciliarInventarioResourceGraph`,
+// mais abaixo) continua sendo o único jeito de descobrir recursos que já existiam antes da
+// ativação do Inventário — Change Analysis também é um stream daqui pra frente, não um
+// catálogo do passado.
 
 // Remove eventos de auditoria mais antigos que a retenção configurada — NUNCA toca em
 // azure_recursos_inventario (permanente por design, ver comentário na criação da tabela em
@@ -10738,12 +10717,21 @@ async function _coletarInventarioAzure(origem = 'manual') {
     const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
     if (!subs.length) throw new Error('Nenhuma subscription configurada (nem no Inventário, nem no Service Principal escolhido)');
 
+    // Retenção nativa da Change Analysis é 14 dias (vs. 90 do Activity Log antigo) — janela
+    // nunca busca mais que 13 dias pra trás (margem de segurança de 1 dia). `ate` fica 5min no
+    // passado (não `agora` puro): a documentação oficial diz que uma mudança pode levar até 5min
+    // pra ser indexada — sem essa margem, uma mudança bem recente poderia cair fora da janela
+    // atual E fora da próxima (o watermark já teria avançado pra depois dela), perdida pra
+    // sempre. Não existia no código do Activity Log (lá o comentário já mencionava "alguns
+    // minutos de atraso" mas nunca tinha sido tratado com uma margem explícita).
     const agora = new Date();
-    const MAX_JANELA_MS = 89 * 24 * 60 * 60 * 1000;
-    let desde = cfg.ultimo_evento_em ? new Date(cfg.ultimo_evento_em) : new Date(agora.getTime() - 24 * 60 * 60 * 1000);
-    if (agora.getTime() - desde.getTime() > MAX_JANELA_MS) desde = new Date(agora.getTime() - MAX_JANELA_MS);
+    const MAX_JANELA_MS = 13 * 24 * 60 * 60 * 1000;
+    const PROPAGACAO_MS = 5 * 60 * 1000;
+    const ate = new Date(agora.getTime() - PROPAGACAO_MS);
+    let desde = cfg.ultimo_evento_em ? new Date(cfg.ultimo_evento_em) : new Date(ate.getTime() - 24 * 60 * 60 * 1000);
+    if (ate.getTime() - desde.getTime() > MAX_JANELA_MS) desde = new Date(ate.getTime() - MAX_JANELA_MS);
     const desdeISO = desde.toISOString();
-    const ateISO = agora.toISOString();
+    const ateISO = ate.toISOString();
 
     const hist = await pool.query(
       `INSERT INTO azure_inventario_coleta_historico (status,origem,periodo_inicio,periodo_fim) VALUES ('executando',$1,$2,$3) RETURNING id`,
@@ -10759,41 +10747,28 @@ async function _coletarInventarioAzure(origem = 'manual') {
       const subId = subs[i];
       _invColetaProgresso.sub_idx = i + 1;
       _invColetaProgresso.sub_atual = subId;
-      _invColetaProgresso.fase = `[${i + 1}/${subs.length}] Consultando Activity Log — ${subId}`;
-      let eventos;
+      _invColetaProgresso.fase = `[${i + 1}/${subs.length}] Consultando Change Analysis — ${subId}`;
+      let mudancas;
       try {
-        eventos = await _activityLogFetchEventos(token, subId, desdeISO, ateISO);
+        mudancas = await _resourceGraphFetchChanges(token, subId, desdeISO, ateISO);
       } catch (eSub) {
         _logColetaInv(`  ✗ ${subId}: ${eSub.message}`);
         continue;
       }
-      _logColetaInv(`  ${subId}: ${eventos.length} evento(s) retornado(s)`);
+      _logColetaInv(`  ${subId}: ${mudancas.length} mudança(s) retornada(s)`);
+      let mudancasSkuSub = 0;
 
-      // Candidatos a checagem de SKU (só VMs, excluindo RGs gerenciados por Databricks/AKS —
-      // ver `_detectarMudancasSku`) — acumulado durante o loop de eventos, checado em lote UMA
-      // vez ao final desta subscription (não uma chamada por evento).
-      const candidatosSku = new Map();
+      for (const ch of mudancas) {
+        const resourceId = ch.targetResourceId;
+        if (!resourceId || !ch.changeType) continue;
 
-      for (const ev of eventos) {
-        if ((ev.status?.value || '') !== 'Succeeded') continue;
-        const acaoBruta = _classificarEventoAtividade(ev.operationName?.value);
-        if (!acaoBruta) continue;
-        const resourceId = ev.resourceId;
-        if (!resourceId) continue;
-
-        const autor = ev.caller || null;
-        const quando = ev.eventTimestamp || null;
-        const resourceType = ev.resourceType?.value || null;
-        const resourceGroup = ev.resourceGroupName || null;
-        const opName = ev.operationName?.value || null;
+        const autor = ch.changedBy || null;
+        const quando = ch.changeTime || null;
+        const resourceType = ch.targetResourceType || null;
+        const resourceGroup = ch.resourceGroup || null;
         totalEventos++;
 
-        if (acaoBruta === 'write' && (resourceType || '').toUpperCase() === 'MICROSOFT.COMPUTE/VIRTUALMACHINES'
-            && !_detectManagedRg(resourceGroup || '').managed_type) {
-          candidatosSku.set(resourceId, { autor, quando });
-        }
-
-        if (acaoBruta === 'delete') {
+        if (ch.changeType === 'Delete') {
           const nomeDel = resourceId.split('/').pop();
           await pool.query(
             `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,excluido_por,excluido_em,ativo)
@@ -10806,42 +10781,58 @@ async function _coletarInventarioAzure(origem = 'manual') {
           totalExcluidos++;
           await pool.query(
             `INSERT INTO azure_recursos_auditoria_eventos (subscription_id,resource_id,resource_type,resource_group,acao,autor,quando,operation_name,correlation_id)
-             VALUES ($1,$2,$3,$4,'EXCLUSAO',$5,$6,$7,$8)`,
-            [subId, resourceId, resourceType, resourceGroup, autor, quando, opName, ev.correlationId || null]
+             VALUES ($1,$2,$3,$4,'EXCLUSAO',$5,$6,'Delete',$7)`,
+            [subId, resourceId, resourceType, resourceGroup, autor, quando, ch.correlationId || null]
           );
         } else {
           const nome = resourceId.split('/').pop();
-          const r = await pool.query(
+          await pool.query(
             `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,criado_por,criado_em,atualizado_por,atualizado_em,ativo)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,true)
              ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
                atualizado_por=EXCLUDED.atualizado_por, atualizado_em=EXCLUDED.atualizado_em,
-               resource_type=EXCLUDED.resource_type, resource_group=EXCLUDED.resource_group, ativo=true
-             RETURNING (xmax = 0) AS inserted`,
+               resource_type=EXCLUDED.resource_type, resource_group=EXCLUDED.resource_group, ativo=true`,
             [subId, resourceId, resourceType, resourceGroup, nome, autor, quando]
           );
-          const acao = r.rows[0]?.inserted ? 'CRIACAO' : 'ATUALIZACAO';
+          // `changeType` já diferencia Create de Update nativamente — não precisa mais do
+          // truque `RETURNING (xmax=0)` que o Activity Log exigia (lá o mesmo evento `/write`
+          // servia pros dois casos, sem como saber qual sem olhar o estado anterior da linha).
+          const acao = ch.changeType === 'Create' ? 'CRIACAO' : 'ATUALIZACAO';
           if (acao === 'CRIACAO') totalNovos++; else totalAtualizados++;
           await pool.query(
             `INSERT INTO azure_recursos_auditoria_eventos (subscription_id,resource_id,resource_type,resource_group,acao,autor,quando,operation_name,correlation_id)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-            [subId, resourceId, resourceType, resourceGroup, acao, autor, quando, opName, ev.correlationId || null]
+            [subId, resourceId, resourceType, resourceGroup, acao, autor, quando, ch.changeType, ch.correlationId || null]
           );
+
+          // SKU de VM (paridade com o Inventário antigo) — o valor antes/depois já vem NO
+          // MESMO evento (Change Analysis), sem precisar de uma segunda chamada ao Resource
+          // Graph pra comparar contra uma última leitura conhecida (como o detector manual
+          // antigo, `_detectarMudancasSku`, fazia). Mesma exclusão de RGs gerenciados por
+          // Databricks/AKS de sempre — lá a VM é recriada em horas, "SKU mudou" seria ruído de
+          // recriação, não um resize real.
+          if (acao === 'ATUALIZACAO' && ch.vmSizeChange
+              && (resourceType || '').toUpperCase() === 'MICROSOFT.COMPUTE/VIRTUALMACHINES'
+              && !_detectManagedRg(resourceGroup || '').managed_type) {
+            const anterior = ch.vmSizeChange.previousValue;
+            const novo = ch.vmSizeChange.newValue;
+            if (anterior && novo && anterior !== novo) {
+              await pool.query(
+                `INSERT INTO azure_recursos_sku_historico (subscription_id,resource_id,resource_type,resource_group,sku_anterior,sku_novo,evento_autor,evento_quando)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+                [subId, resourceId, resourceType, resourceGroup, anterior, novo, autor, quando]
+              );
+              totalMudancasSku++;
+              mudancasSkuSub++;
+            }
+          }
         }
         _invColetaProgresso.eventos = totalEventos;
         _invColetaProgresso.novos = totalNovos;
         _invColetaProgresso.atualizados = totalAtualizados;
         _invColetaProgresso.excluidos = totalExcluidos;
       }
-
-      // Best-effort — mesmo espírito da resolução de autor via Graph ao final da coleta: nunca
-      // derruba a coleta principal (já persistida acima), só loga se falhar.
-      if (candidatosSku.size > 0) {
-        try {
-          const n = await _detectarMudancasSku(token, subId, candidatosSku);
-          if (n > 0) { totalMudancasSku += n; _logColetaInv(`  ${subId}: ${n} mudança(s) de SKU de VM detectada(s)`); }
-        } catch (eSku) { _logColetaInv(`  ✗ ${subId}: checagem de SKU falhou — ${eSku.message}`); }
-      }
+      if (mudancasSkuSub > 0) _logColetaInv(`  ${subId}: ${mudancasSkuSub} mudança(s) de SKU de VM detectada(s)`);
     }
 
     await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em=$1, atualizado_em=NOW() WHERE id=$2`, [ateISO, cfg.id]);
@@ -10929,6 +10920,55 @@ async function _resourceGraphFetchRecursos(token, subscriptionId) {
   return recursos;
 }
 
+// Mudanças de recurso via Azure Resource Graph Change Analysis (2026-09-03, "Inventário 2.0" —
+// substitui o Activity Log como fonte de eventos do Inventário). Tabela `resourcechanges`,
+// mesmo endpoint/api-version/permissão Reader já usados por `_resourceGraphFetchRecursos` acima
+// — zero credencial nova. Diferente do Activity Log (só diz QUE um `/write` aconteceu),
+// Change Analysis grava o antes/depois de cada propriedade que mudou no mesmo evento — por isso
+// já extrai `vmSizeChange` (propriedade `hardwareProfile.vmSize`, a única rastreada nesta v1,
+// paridade com o que o Inventário já tinha antes) direto na query, sem round-trip extra pra
+// descobrir o valor. `changeType` ('Create'|'Update'|'Delete') substitui o truque antigo de
+// checar `RETURNING (xmax=0)` no upsert pra decidir Criação vs. Atualização — Change Analysis já
+// diferencia isso nativamente. `resourceGroup` vem como coluna própria da tabela (não precisa
+// extrair do resource_id), confirmado no exemplo oficial "Resources deleted in a specific
+// resource group" da documentação.
+async function _resourceGraphFetchChanges(token, subscriptionId, desdeISO, ateISO) {
+  const desdeEsc = String(desdeISO).replace(/'/g, "''");
+  const ateEsc = String(ateISO).replace(/'/g, "''");
+  const query = `resourcechanges
+| extend changeTime = todatetime(properties.changeAttributes.timestamp),
+         targetResourceId = tostring(properties.targetResourceId),
+         targetResourceType = tostring(properties.targetResourceType),
+         changeType = tostring(properties.changeType),
+         changedBy = tostring(properties.changeAttributes.changedBy),
+         correlationId = tostring(properties.changeAttributes.correlationId),
+         vmSizeChange = properties.changes["properties.hardwareProfile.vmSize"]
+| where changeTime > datetime('${desdeEsc}') and changeTime <= datetime('${ateEsc}')
+| project changeTime, targetResourceId, targetResourceType, resourceGroup, changeType, changedBy, correlationId, vmSizeChange
+| order by changeTime asc`;
+  const mudancas = [];
+  let skipToken = null;
+  let paginas = 0;
+  do {
+    const body = {
+      subscriptions: [subscriptionId],
+      query,
+      options: { $top: 1000, ...(skipToken ? { $skipToken: skipToken } : {}) },
+    };
+    const resp = await _cbFetch(
+      'https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01',
+      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      { timeoutMs: 30_000 }
+    );
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph Change Analysis falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+    for (const item of (data.data || [])) mudancas.push(item);
+    skipToken = data.$skipToken || null;
+    paginas++;
+  } while (skipToken && paginas < 1000);
+  return mudancas;
+}
+
 // Detalhe completo de UM recurso via Resource Graph (2026-09-02, inspirado no ARI — que lê
 // propriedades reais de cada recurso pro relatório Excel). Diferente de uma chamada ARM
 // direta (`GET /{resourceId}?api-version=...`), que exigiria saber o api-version certo pra
@@ -10951,66 +10991,6 @@ async function _resourceGraphFetchRecursoPorId(token, subscriptionId, resourceId
   if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
   const data = await _safeRespJson(resp);
   return (data.data && data.data[0]) || null;
-}
-
-// Detecta mudança de SKU/tamanho de VM (2026-09-02, pedido do usuário: "a VM tinha um SKU e
-// mudou pra outro, qual o antigo e qual o novo") — Activity Log não carrega valores de
-// propriedade, só o fato de que um `/write` aconteceu; pra saber O QUE mudou é preciso ler o
-// estado atual do recurso via Resource Graph e comparar contra a última leitura conhecida
-// (`azure_recursos_inventario.sku_atual`). `candidatos` é um Map resource_id → {autor, quando}
-// (do evento que disparou a checagem) já filtrado pelo chamador — só VMs, excluindo RGs
-// gerenciados por Databricks/AKS (recriados em horas, "SKU mudou" ali é ruído, não sinal —
-// mesmo raciocínio já usado no Crescimento Líquido). UMA query batched por chunk de 1000 ids
-// (limite do Resource Graph) em vez de uma chamada por VM — essencial num tick com muitas VMs
-// atualizadas (tags, discos, extensões — nem toda ATUALIZACAO troca o SKU, mas não dá pra saber
-// sem olhar). Primeira observação de uma VM (`sku_atual` ainda NULL) só semeia a base — não gera
-// linha de histórico, já que não existe um "antes" real conhecido por nós.
-async function _detectarMudancasSku(token, subId, candidatos) {
-  const ids = [...candidatos.keys()];
-  if (!ids.length) return 0;
-  let mudancas = 0;
-  for (let i = 0; i < ids.length; i += 1000) {
-    const chunk = ids.slice(i, i + 1000);
-    const idsKql = chunk.map((id) => `'${id.replace(/'/g, "''")}'`).join(',');
-    const body = {
-      subscriptions: [subId],
-      query: `Resources | where id in (${idsKql}) | project id, resourceGroup, vmSize=tostring(properties.hardwareProfile.vmSize)`,
-    };
-    const resp = await _cbFetch(
-      'https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01',
-      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-      { timeoutMs: 30_000 }
-    );
-    if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
-    const data = await _safeRespJson(resp);
-    const linhas = (data.data || []).filter((r) => r.vmSize);
-    if (!linhas.length) continue;
-
-    const rAtual = await pool.query(
-      `SELECT resource_id, sku_atual, resource_type FROM azure_recursos_inventario WHERE subscription_id=$1 AND resource_id = ANY($2)`,
-      [subId, linhas.map((l) => l.id)]
-    );
-    const atuaisPorId = new Map(rAtual.rows.map((r) => [r.resource_id, r]));
-
-    for (const l of linhas) {
-      const conhecido = atuaisPorId.get(l.id);
-      const skuNovo = l.vmSize;
-      const skuAnterior = conhecido?.sku_atual || null;
-      if (skuAnterior && skuAnterior !== skuNovo) {
-        const ev = candidatos.get(l.id) || {};
-        await pool.query(
-          `INSERT INTO azure_recursos_sku_historico (subscription_id,resource_id,resource_type,resource_group,sku_anterior,sku_novo,evento_autor,evento_quando)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [subId, l.id, conhecido?.resource_type || 'Microsoft.Compute/virtualMachines', l.resourceGroup || null, skuAnterior, skuNovo, ev.autor || null, ev.quando || null]
-        );
-        mudancas++;
-      }
-      if (skuAnterior !== skuNovo) {
-        await pool.query(`UPDATE azure_recursos_inventario SET sku_atual=$1 WHERE subscription_id=$2 AND resource_id=$3`, [skuNovo, subId, l.id]);
-      }
-    }
-  }
-  return mudancas;
 }
 
 // Recomendações do Azure Advisor (2026-09-02, inspirado no ARI, que integra com Advisor/

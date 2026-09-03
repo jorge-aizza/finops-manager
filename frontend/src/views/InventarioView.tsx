@@ -16,8 +16,9 @@ import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMon
 import RecursoDetalheModal from '../components/RecursoDetalheModal'
 
 // Inventário + Auditoria de Recursos Azure (2026-08-30, pedido do usuário: "ontem tinha X
-// recursos, hoje tenho X+1 — quem criou, quando, quanto custa"). Fonte: Azure Activity Log
-// — ver seção "INVENTÁRIO + AUDITORIA DE RECURSOS AZURE" em server.js. Duas tabelas com
+// recursos, hoje tenho X+1 — quem criou, quando, quanto custa"). Fonte: Azure Resource Graph
+// Change Analysis (2026-09-03, "Inventário 2.0" — antes era Activity Log) — ver seção
+// "INVENTÁRIO + AUDITORIA DE RECURSOS AZURE" em server.js. Duas tabelas com
 // propósitos diferentes: Inventário (permanente, 1 linha por recurso) e Auditoria (log
 // bruto de eventos, sujeito ao período de retenção configurável).
 
@@ -1049,9 +1050,9 @@ export default function InventarioView() {
               </button>
             </div>
             <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-              Fonte: Azure Activity Log — usa a mesma credencial (Service Principal com role Reader) já configurada em Coleta Azure. Nenhuma permissão nova precisa ser concedida.
-              "Criado por"/"Autor" traz um ID (GUID) do Activity Log — pra resolver pro nome real, clique em <strong>🪪 Resolver Nomes</strong> (roda automaticamente após cada coleta também), o que exige a permissão de aplicativo <strong>Directory.Read.All</strong> concedida a esta Service Principal no Entra ID (App registration → API permissions → Microsoft Graph).
-              O Activity Log só aprende sobre um recurso quando há um evento depois da ativação do Inventário — recursos antigos nunca tocados desde então ficam de fora, mesmo ativos. Clique em <strong>🔎 Reconciliar</strong> pra completar com tudo que existe agora (sem "criado por/em", já que o Resource Graph não tem esse histórico).
+              Fonte: Azure Resource Graph Change Analysis — usa a mesma credencial (Service Principal com role Reader) já configurada em Coleta Azure. Nenhuma permissão nova precisa ser concedida.
+              "Criado por"/"Autor" já vem como e-mail na maioria dos casos; quando vem como ID (GUID — comum pra Service Principals), clique em <strong>🪪 Resolver Nomes</strong> (roda automaticamente após cada coleta também), o que exige a permissão de aplicativo <strong>Directory.Read.All</strong> concedida a esta Service Principal no Entra ID (App registration → API permissions → Microsoft Graph).
+              A Change Analysis só aprende sobre um recurso quando há uma mudança depois da ativação do Inventário — recursos antigos nunca tocados desde então ficam de fora, mesmo ativos. Clique em <strong>🔎 Reconciliar</strong> pra completar com tudo que existe agora (sem "criado por/em", já que o Resource Graph não tem esse histórico).
             </div>
             <div style={{ padding: '0 20px 16px', display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560 }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
