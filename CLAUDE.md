@@ -3385,7 +3385,7 @@ demanda); a lógica de comparação é a mesma já usada/testada em outros ponto
 `_coletarInventarioAzure`), e a query Resource Graph em si (sintaxe/campo `vmSize`) foi confirmada válida
 pela ausência de erro na chamada real acima.
 
-### Inventário — Relatório diário por e-mail (2026-09-02)
+### Inventário — Relatório diário por e-mail (comparativo dia anterior) (2026-09-02)
 
 Pedido do usuário: "auditoria rode uma vez por dia e faça um comparativo do dia anterior e informe quantos
 recursos novos". Complementa `_checkRelatorioSemanalInventario()` (já existente, visão de 7 dias corridos)
@@ -3430,6 +3430,29 @@ silencioso, mesma limitação já documentada pra TODO gatilho de e-mail deste s
 entrega real de e-mail neste ambiente, só "Testar Conexão" via SMTP real uma vez, na feature original de
 e-mail). **Não validado**: entrega de e-mail de ponta a ponta (precisa de um servidor SMTP real configurado
 pelo usuário).
+
+**Card "Comparativo Diário" na aba Auditoria (mesmo dia, pedido do usuário: "Ele mostra isso somente por
+e-mail ou em algum painel tbm")** — o e-mail acima é passivo (só chega se SMTP estiver configurado e alguém
+checar a caixa de entrada); pedido explícito de trazer o mesmo dado pra dentro do sistema, sempre visível.
+`_computeRelatorioDiarioInventario()` — extraído do corpo de `_checkRelatorioDiarioInventario()` (que
+antes fazia a query inline) pra uma função própria, retornando os dados brutos (não HTML) — reaproveitada
+por dois consumidores: o e-mail (que só chama depois de `_getSmtpConfig()`+dedup passarem) e a nova rota
+`GET /api/azure-inventario/relatorio-diario` (sem gate nenhum — sempre calcula na hora, não depende de SMTP
+nem do tick horário já ter rodado). Mesma query, mesmo filtro de RG gerenciado, dois lugares — nunca dois
+números divergentes pro "mesmo dia".
+
+Card novo, primeiro da aba Auditoria (acima da tabela de eventos já existente): 3 stat-cards (Novos/
+Atualizados/Excluídos ontem), delta colorido (▲ verde / ▼ vermelho) contra o dia anterior, e a lista dos
+RGs com mais criações — mesmo conteúdo do e-mail, sem precisar de e-mail nenhum configurado. Recalculado a
+cada vez que a aba Auditoria é aberta (`useQuery` sem `enabled` condicionado a período — não usa o mesmo
+`periodo` De/Até da tabela de eventos abaixo, é sempre "ontem vs. anteontem", fixo).
+
+**Verificado contra o servidor real**: `GET /relatorio-diario` retornou os mesmos números já confirmados
+acima direto no banco (`criados:1245, atualizados:789, excluidos:2324, delta:-418`, mesmos RGs no topo);
+via Playwright, card renderiza corretamente na aba Auditoria com esses valores reais, zero erro de console.
+`node --check`, `tsc -b`, suíte completa do frontend 281/281 (1 falha de timeout em `AcoesView.test.tsx`
+sob carga do full-run, não reproduz isolado — mesmo flaky pré-existente já documentado várias vezes nesta
+sessão, não regressão), `npm run frontend:build`, `pm2 restart` sem erro/crash-loop.
 
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.

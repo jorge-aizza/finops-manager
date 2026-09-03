@@ -7,7 +7,7 @@ import type {
   AzureAnomaliaCrescimento, AzureOrcamentoInventario, AzureOrcamentoInventarioInput,
   AzureOrcamentoAlerta, AzureTagsFaltantesResposta, AzureAuditoriaPorTipo,
   AzureResumoPorAssinaturaResposta, AzureRecursoArmDetalhe, AzureAdvisorResposta,
-  AzureRedeTopologiaResposta, AzureSkuMudanca,
+  AzureRedeTopologiaResposta, AzureSkuMudanca, AzureRelatorioDiario,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -98,6 +98,9 @@ export const getAzureSkuHistorico = (filtros?: AzureSkuHistoricoFiltros) => {
     'GET', '/azure-inventario/sku-historico' + (qs ? '?' + qs : '')
   )
 }
+
+export const getAzureRelatorioDiario = () =>
+  apiFetch<AzureRelatorioDiario>('GET', '/azure-inventario/relatorio-diario')
 
 export const getAzureCrescimento = (data_inicio?: string, data_fim?: string, subscription_id?: string) => {
   const q = new URLSearchParams()

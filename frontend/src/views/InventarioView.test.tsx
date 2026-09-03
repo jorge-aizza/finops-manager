@@ -39,6 +39,9 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
   vi.mocked(azureInventarioApi.getAzureSkuHistorico).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, mudancas: [] })
+  vi.mocked(azureInventarioApi.getAzureRelatorioDiario).mockResolvedValue({
+    dia: '2026-09-01', dia_anterior: '2026-08-31', criados: 0, atualizados: 0, excluidos: 0, criados_dia_anterior: 0, delta: 0, top_resource_groups: [],
+  })
   vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockResolvedValue({ nivel: 'assinatura', itens: [] })
   vi.mocked(azureInventarioApi.getAzureCrescimentoLiquido).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
   vi.mocked(azureInventarioApi.getAzureAdvisor).mockResolvedValue({ total: 0, itens: [], por_categoria: {}, erros: [] })
@@ -247,6 +250,24 @@ describe('InventarioView', () => {
     await waitFor(() => expect(azureInventarioApi.getAzureAuditoriaEventos).toHaveBeenLastCalledWith(
       expect.objectContaining({ resource_type: undefined }),
     ))
+  })
+
+  it('aba Auditoria mostra o Comparativo Diário com delta e Resource Groups', async () => {
+    vi.mocked(azureInventarioApi.getAzureRelatorioDiario).mockResolvedValue({
+      dia: '2026-09-01', dia_anterior: '2026-08-31', criados: 12, atualizados: 30, excluidos: 4,
+      criados_dia_anterior: 9, delta: 3,
+      top_resource_groups: [{ resource_group: 'rg-producao', criacoes: 7 }],
+    })
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
+
+    expect(await screen.findByText('Comparativo Diário')).toBeInTheDocument()
+    expect(screen.getByText('12')).toBeInTheDocument()
+    expect(screen.getByText('30')).toBeInTheDocument()
+    expect(screen.getByText('4')).toBeInTheDocument()
+    expect(screen.getByText(/▲ 3 a mais/)).toBeInTheDocument()
+    expect(screen.getByText(/rg-producao — 7 recurso\(s\)/)).toBeInTheDocument()
   })
 
   it('aba Auditoria mostra o histórico de mudanças de SKU de VM e abre o detalhe ao clicar', async () => {

@@ -211,6 +211,22 @@ export interface AzureSkuMudanca {
   evento_autor_nome: string | null
 }
 
+// Comparativo dia-a-dia (2026-09-02, pedido do usuário: "auditoria rode uma vez por dia e faça
+// um comparativo do dia anterior") — mesmo cálculo do relatório diário por e-mail
+// (`_computeRelatorioDiarioInventario`, server.js), exposto sob demanda pro card da aba
+// Auditoria. Exclui RGs gerenciados por Databricks/AKS (mesmo motivo do e-mail: sem isso a
+// contagem é dominada por churn de cluster efêmero).
+export interface AzureRelatorioDiario {
+  dia: string
+  dia_anterior: string
+  criados: number
+  atualizados: number
+  excluidos: number
+  criados_dia_anterior: number
+  delta: number
+  top_resource_groups: { resource_group: string; criacoes: number }[]
+}
+
 // Caixas "por Tipo de Recurso" (2026-08-31, pedido do usuário: "Na parte de Auditoria pode
 // incluir caixas por Tipo de Recurso, Ex VM x Disco x etc") — agregação server-side sobre
 // TODO o período/filtros selecionados (não só os 300 eventos retornados pra tabela), serve

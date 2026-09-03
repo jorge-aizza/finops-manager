@@ -6674,18 +6674,14 @@ async function _checkRelatorioSemanalInventario() {
 // semanal acima (visão de 7 dias corridos) com um dia-a-dia: quantos recursos foram criados
 // ONTEM (dia corrido completo, não "últimas 24h" a partir de agora — evita contar um dia
 // parcial) comparado contra o dia anterior a esse (ANTEONTEM), mesmo espírito de "delta vs.
-// período anterior" já usado no Comparativo manual da UI. Dedup por data (não por bucket de
-// tempo desde a epoch, ao contrário do semanal) — mais simples de raciocinar e já é
-// exatamente o que a chave precisa expressar ("já mandei o relatório de hoje?").
-async function _checkRelatorioDiarioInventario() {
-  const cfg = await _getSmtpConfig();
-  if (!cfg) return;
-  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (!destinatarios.length) return;
-
-  const hojeStr = new Date().toISOString().slice(0, 10);
-  if (!(await _tentarClaimAlerta('relatorio_diario_inventario', `dia:${hojeStr}`))) return;
-
+// período anterior" já usado no Comparativo manual da UI.
+//
+// Cálculo extraído pra uma função própria (2026-09-02, pedido do usuário: "mostra isso só por
+// e-mail ou em algum painel também?") — reaproveitada tanto pelo e-mail (`_checkRelatorioDiarioInventario`,
+// com dedup/SMTP) quanto por `GET /relatorio-diario` (card na aba Auditoria, sempre disponível,
+// sem depender de SMTP configurado) — mesmo dado, dois consumidores, sem duplicar a query nem o
+// filtro de RG gerenciado.
+async function _computeRelatorioDiarioInventario() {
   // Dia corrido em UTC — mesma convenção já usada pra `criado_em`/`quando` (sempre gravados
   // em UTC, ver comentário da migração TIMESTAMPTZ na criação das tabelas de Inventário).
   const ontemFim = new Date(); ontemFim.setUTCHours(0, 0, 0, 0); // meia-noite de hoje = fim de ontem
@@ -6700,7 +6696,7 @@ async function _checkRelatorioDiarioInventario() {
   // `managed-rg-*`). Sem esse filtro, "quantos recursos novos" reportaria um número gigante e
   // sem sentido pro usuário. Classificação em JS (não dá pra fazer em SQL sem duplicar o
   // padrão de nome de `_detectManagedRg`) — tabela de RGs distintos é pequena, barato de
-  // classificar a cada tick.
+  // classificar a cada chamada.
   const rgRows = await pool.query(`SELECT DISTINCT resource_group FROM azure_recursos_auditoria_eventos WHERE resource_group IS NOT NULL AND quando >= $1`, [anteontemInicio.toISOString()]);
   const rgsGerenciados = rgRows.rows
     .map((r) => r.resource_group)
@@ -6731,23 +6727,49 @@ async function _checkRelatorioDiarioInventario() {
   const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
   for (const row of ontemR.rows) eventos[row.acao] = parseInt(row.total, 10);
   const criadosAnteontem = parseInt(criadosAnteontemR.rows[0].total, 10);
-  const delta = eventos.CRIACAO - criadosAnteontem;
-  const deltaTxt = delta === 0
-    ? `igual ao dia anterior (${criadosAnteontem})`
-    : delta > 0
-      ? `<span style="color:#22c55e">▲ ${delta} a mais</span> que o dia anterior (${criadosAnteontem})`
-      : `<span style="color:#ff4d6a">▼ ${Math.abs(delta)} a menos</span> que o dia anterior (${criadosAnteontem})`;
 
-  const topRgHtml = topRgR.rows.length
-    ? `<ul style="margin:8px 0;padding-left:20px">${topRgR.rows.map(r => `<li>${_escHtmlServer(r.resource_group)} — ${r.criacoes} recurso(s) novo(s)</li>`).join('')}</ul>`
+  return {
+    dia: ontemInicio.toISOString().slice(0, 10),
+    dia_anterior: anteontemInicio.toISOString().slice(0, 10),
+    criados: eventos.CRIACAO,
+    atualizados: eventos.ATUALIZACAO,
+    excluidos: eventos.EXCLUSAO,
+    criados_dia_anterior: criadosAnteontem,
+    delta: eventos.CRIACAO - criadosAnteontem,
+    top_resource_groups: topRgR.rows.map((r) => ({ resource_group: r.resource_group, criacoes: parseInt(r.criacoes, 10) })),
+  };
+}
+
+async function _checkRelatorioDiarioInventario() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+
+  // Dedup por data (não por bucket de tempo desde a epoch, ao contrário do semanal) — mais
+  // simples de raciocinar e já expressa exatamente o que precisa ("já mandei o relatório de
+  // hoje?"). Dispara no máximo 1x por dia mesmo com o tick horário rodando o tempo todo.
+  const hojeStr = new Date().toISOString().slice(0, 10);
+  if (!(await _tentarClaimAlerta('relatorio_diario_inventario', `dia:${hojeStr}`))) return;
+
+  const r = await _computeRelatorioDiarioInventario();
+  const delta = r.delta;
+  const deltaTxt = delta === 0
+    ? `igual ao dia anterior (${r.criados_dia_anterior})`
+    : delta > 0
+      ? `<span style="color:#22c55e">▲ ${delta} a mais</span> que o dia anterior (${r.criados_dia_anterior})`
+      : `<span style="color:#ff4d6a">▼ ${Math.abs(delta)} a menos</span> que o dia anterior (${r.criados_dia_anterior})`;
+
+  const topRgHtml = r.top_resource_groups.length
+    ? `<ul style="margin:8px 0;padding-left:20px">${r.top_resource_groups.map(x => `<li>${_escHtmlServer(x.resource_group)} — ${x.criacoes} recurso(s) novo(s)</li>`).join('')}</ul>`
     : '<p style="color:#9ca3af">Nenhum recurso criado ontem.</p>';
 
-  const dataOntemFmt = ontemInicio.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+  const dataOntemFmt = new Date(r.dia + 'T00:00:00Z').toLocaleDateString('pt-BR', { timeZone: 'UTC' });
   await _sendEmail({
     to: destinatarios,
-    subject: `📅 Inventário diário (${dataOntemFmt}) — ${eventos.CRIACAO} recurso(s) novo(s)`,
+    subject: `📅 Inventário diário (${dataOntemFmt}) — ${r.criados} recurso(s) novo(s)`,
     html: _emailTemplate('Relatório diário de crescimento de recursos', `
-      <p><strong>${eventos.CRIACAO}</strong> recurso(s) novo(s) em ${dataOntemFmt}, <strong>${eventos.ATUALIZACAO}</strong> atualizado(s), <strong>${eventos.EXCLUSAO}</strong> excluído(s).</p>
+      <p><strong>${r.criados}</strong> recurso(s) novo(s) em ${dataOntemFmt}, <strong>${r.atualizados}</strong> atualizado(s), <strong>${r.excluidos}</strong> excluído(s).</p>
       <p>Comparado ao dia anterior: ${deltaTxt}.</p>
       <p style="margin-top:16px;font-weight:700">Resource Groups com mais criações:</p>
       ${topRgHtml}
@@ -7788,6 +7810,17 @@ app.get('/api/azure-inventario/sku-historico', authMiddleware, dbMiddleware, asy
       params
     );
     res.json({ periodo: { inicio: data_inicio, fim: data_fim }, total: r.rows.length, mudancas: r.rows });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Comparativo dia-a-dia pra painel (2026-09-02, pedido do usuário: "mostra isso só por e-mail
+// ou em algum painel também?") — mesmo cálculo do relatório diário por e-mail
+// (`_computeRelatorioDiarioInventario`), exposto sob demanda (sempre disponível, não depende
+// de SMTP configurado nem do tick horário já ter rodado — card na aba Auditoria da UI).
+app.get('/api/azure-inventario/relatorio-diario', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    res.json(await _computeRelatorioDiarioInventario());
   } catch (e) { _dbErr(res, e); }
 });
 

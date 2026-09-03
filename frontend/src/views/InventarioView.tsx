@@ -8,7 +8,7 @@ import {
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
   getAzureCrescimentoLiquido, baixarAzureInventarioExcel, getAzureAdvisor, getAzureRedeTopologia,
-  getAzureSkuHistorico,
+  getAzureSkuHistorico, getAzureRelatorioDiario,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -362,6 +362,11 @@ export default function InventarioView() {
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
   })
+  const relatorioDiarioQuery = useQuery({
+    queryKey: ['azure-inv-relatorio-diario'],
+    queryFn: () => getAzureRelatorioDiario(),
+    enabled: tab === 'auditoria',
+  })
   const paNivel1Query = useQuery({
     queryKey: ['azure-inv-resumo-assinatura'],
     queryFn: () => getAzureResumoPorAssinatura(),
@@ -693,6 +698,56 @@ export default function InventarioView() {
                 </div>
               )}
             </>
+          )}
+        </div>
+      )}
+
+      {tab === 'auditoria' && (
+        <div className="card" style={{ margin: '16px 20px' }}>
+          <div className="card-header"><span className="card-title">Comparativo Diário</span></div>
+          <div style={{ padding: '0 20px 16px', fontSize: 11, color: 'var(--text-muted)' }}>
+            Recalculado a cada abertura da tela (não depende de e-mail configurado) — mesmo cálculo do
+            relatório diário enviado por e-mail quando o SMTP está ativo. Exclui Resource Groups
+            gerenciados por Databricks/AKS (clusters efêmeros).
+          </div>
+          {relatorioDiarioQuery.isLoading && <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+          {relatorioDiarioQuery.data && (
+            <div style={{ padding: '0 20px 16px' }}>
+              <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+                <div className="stat-card">
+                  <div className="stat-label">Novos ontem ({new Date(relatorioDiarioQuery.data.dia + 'T00:00:00Z').toLocaleDateString('pt-BR', { timeZone: 'UTC' })})</div>
+                  <div className="stat-value" style={{ color: 'var(--green,#22c55e)' }}>{relatorioDiarioQuery.data.criados}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Atualizados</div>
+                  <div className="stat-value" style={{ color: 'var(--blue,#4da6ff)' }}>{relatorioDiarioQuery.data.atualizados}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Excluídos</div>
+                  <div className="stat-value" style={{ color: 'var(--red,#ff4d6a)' }}>{relatorioDiarioQuery.data.excluidos}</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 12, marginTop: 12 }}>
+                Comparado ao dia anterior ({relatorioDiarioQuery.data.criados_dia_anterior} novo(s)):{' '}
+                {relatorioDiarioQuery.data.delta === 0 ? (
+                  <strong>igual</strong>
+                ) : relatorioDiarioQuery.data.delta > 0 ? (
+                  <strong style={{ color: 'var(--green,#22c55e)' }}>▲ {relatorioDiarioQuery.data.delta} a mais</strong>
+                ) : (
+                  <strong style={{ color: 'var(--red,#ff4d6a)' }}>▼ {Math.abs(relatorioDiarioQuery.data.delta)} a menos</strong>
+                )}
+              </div>
+              {relatorioDiarioQuery.data.top_resource_groups.length > 0 && (
+                <div style={{ fontSize: 12, marginTop: 10 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 4 }}>Resource Groups com mais criações ontem:</div>
+                  <ul style={{ margin: 0, paddingLeft: 20 }}>
+                    {relatorioDiarioQuery.data.top_resource_groups.map((rg) => (
+                      <li key={rg.resource_group}>{rg.resource_group} — {rg.criacoes} recurso(s)</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
