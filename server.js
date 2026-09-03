@@ -6669,6 +6669,92 @@ async function _checkRelatorioSemanalInventario() {
   });
 }
 
+// Relatório diário (2026-09-02, pedido do usuário: "auditoria rode uma vez por dia e faça um
+// comparativo do dia anterior e informe quantos recursos novos") — complementa o relatório
+// semanal acima (visão de 7 dias corridos) com um dia-a-dia: quantos recursos foram criados
+// ONTEM (dia corrido completo, não "últimas 24h" a partir de agora — evita contar um dia
+// parcial) comparado contra o dia anterior a esse (ANTEONTEM), mesmo espírito de "delta vs.
+// período anterior" já usado no Comparativo manual da UI. Dedup por data (não por bucket de
+// tempo desde a epoch, ao contrário do semanal) — mais simples de raciocinar e já é
+// exatamente o que a chave precisa expressar ("já mandei o relatório de hoje?").
+async function _checkRelatorioDiarioInventario() {
+  const cfg = await _getSmtpConfig();
+  if (!cfg) return;
+  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!destinatarios.length) return;
+
+  const hojeStr = new Date().toISOString().slice(0, 10);
+  if (!(await _tentarClaimAlerta('relatorio_diario_inventario', `dia:${hojeStr}`))) return;
+
+  // Dia corrido em UTC — mesma convenção já usada pra `criado_em`/`quando` (sempre gravados
+  // em UTC, ver comentário da migração TIMESTAMPTZ na criação das tabelas de Inventário).
+  const ontemFim = new Date(); ontemFim.setUTCHours(0, 0, 0, 0); // meia-noite de hoje = fim de ontem
+  const ontemInicio = new Date(ontemFim); ontemInicio.setUTCDate(ontemInicio.getUTCDate() - 1);
+  const anteontemInicio = new Date(ontemInicio); anteontemInicio.setUTCDate(anteontemInicio.getUTCDate() - 1);
+
+  // Exclui RGs gerenciados por Databricks/AKS — mesmo filtro e mesma justificativa já usados
+  // em `GET /crescimento-liquido`/`_detectarMudancasSku`: esses RGs são recriados em HORAS
+  // (VMs/discos/NICs efêmeros de cluster), então a contagem bruta de CRIACAO/EXCLUSAO é
+  // dominada por churn de infraestrutura, não crescimento real — confirmado com dados reais
+  // desta sessão (mais de 16 mil "criações" num único dia, quase tudo em RGs `databricks-rg-*`/
+  // `managed-rg-*`). Sem esse filtro, "quantos recursos novos" reportaria um número gigante e
+  // sem sentido pro usuário. Classificação em JS (não dá pra fazer em SQL sem duplicar o
+  // padrão de nome de `_detectManagedRg`) — tabela de RGs distintos é pequena, barato de
+  // classificar a cada tick.
+  const rgRows = await pool.query(`SELECT DISTINCT resource_group FROM azure_recursos_auditoria_eventos WHERE resource_group IS NOT NULL AND quando >= $1`, [anteontemInicio.toISOString()]);
+  const rgsGerenciados = rgRows.rows
+    .map((r) => r.resource_group)
+    .filter((rg) => _detectManagedRg(rg).managed_type)
+    .map((rg) => rg.toUpperCase());
+
+  const [ontemR, criadosAnteontemR, topRgR] = await Promise.all([
+    pool.query(
+      `SELECT acao, COUNT(*) AS total FROM azure_recursos_auditoria_eventos
+       WHERE quando >= $1 AND quando < $2 AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))
+       GROUP BY acao`,
+      [ontemInicio.toISOString(), ontemFim.toISOString(), rgsGerenciados]
+    ),
+    pool.query(
+      `SELECT COUNT(*) AS total FROM azure_recursos_auditoria_eventos
+       WHERE acao='CRIACAO' AND quando >= $1 AND quando < $2 AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))`,
+      [anteontemInicio.toISOString(), ontemInicio.toISOString(), rgsGerenciados]
+    ),
+    pool.query(
+      `SELECT resource_group, COUNT(*) AS criacoes FROM azure_recursos_auditoria_eventos
+       WHERE acao='CRIACAO' AND quando >= $1 AND quando < $2 AND resource_group IS NOT NULL
+         AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))
+       GROUP BY resource_group ORDER BY criacoes DESC LIMIT 5`,
+      [ontemInicio.toISOString(), ontemFim.toISOString(), rgsGerenciados]
+    ),
+  ]);
+
+  const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
+  for (const row of ontemR.rows) eventos[row.acao] = parseInt(row.total, 10);
+  const criadosAnteontem = parseInt(criadosAnteontemR.rows[0].total, 10);
+  const delta = eventos.CRIACAO - criadosAnteontem;
+  const deltaTxt = delta === 0
+    ? `igual ao dia anterior (${criadosAnteontem})`
+    : delta > 0
+      ? `<span style="color:#22c55e">▲ ${delta} a mais</span> que o dia anterior (${criadosAnteontem})`
+      : `<span style="color:#ff4d6a">▼ ${Math.abs(delta)} a menos</span> que o dia anterior (${criadosAnteontem})`;
+
+  const topRgHtml = topRgR.rows.length
+    ? `<ul style="margin:8px 0;padding-left:20px">${topRgR.rows.map(r => `<li>${_escHtmlServer(r.resource_group)} — ${r.criacoes} recurso(s) novo(s)</li>`).join('')}</ul>`
+    : '<p style="color:#9ca3af">Nenhum recurso criado ontem.</p>';
+
+  const dataOntemFmt = ontemInicio.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+  await _sendEmail({
+    to: destinatarios,
+    subject: `📅 Inventário diário (${dataOntemFmt}) — ${eventos.CRIACAO} recurso(s) novo(s)`,
+    html: _emailTemplate('Relatório diário de crescimento de recursos', `
+      <p><strong>${eventos.CRIACAO}</strong> recurso(s) novo(s) em ${dataOntemFmt}, <strong>${eventos.ATUALIZACAO}</strong> atualizado(s), <strong>${eventos.EXCLUSAO}</strong> excluído(s).</p>
+      <p>Comparado ao dia anterior: ${deltaTxt}.</p>
+      <p style="margin-top:16px;font-weight:700">Resource Groups com mais criações:</p>
+      ${topRgHtml}
+      <p style="margin-top:16px;font-size:11px;color:#9ca3af">Exclui recursos de Resource Groups gerenciados por Databricks/AKS (clusters efêmeros, recriados em horas) — só conta infraestrutura que de fato permanece.</p>`),
+  });
+}
+
 function _iniciarAlertasEmail() {
   if (_alertasEmailTimer || !pool) return;
   const tick = async () => {
@@ -6679,6 +6765,7 @@ function _iniciarAlertasEmail() {
     try { await _checkAnomaliasCrescimentoInventario(); } catch (e) { console.warn('[Email] Checagem de anomalias de crescimento falhou:', e.message); }
     try { await _checkOrcamentosInventario(); } catch (e) { console.warn('[Email] Checagem de orçamentos de Inventário falhou:', e.message); }
     try { await _checkRelatorioSemanalInventario(); } catch (e) { console.warn('[Email] Relatório semanal de Inventário falhou:', e.message); }
+    try { await _checkRelatorioDiarioInventario(); } catch (e) { console.warn('[Email] Relatório diário de Inventário falhou:', e.message); }
   };
   setTimeout(tick, 180 * 1000);
   _alertasEmailTimer = setInterval(tick, 60 * 60 * 1000);

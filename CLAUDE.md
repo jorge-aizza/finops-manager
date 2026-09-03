@@ -3385,6 +3385,52 @@ demanda); a lógica de comparação é a mesma já usada/testada em outros ponto
 `_coletarInventarioAzure`), e a query Resource Graph em si (sintaxe/campo `vmSize`) foi confirmada válida
 pela ausência de erro na chamada real acima.
 
+### Inventário — Relatório diário por e-mail (2026-09-02)
+
+Pedido do usuário: "auditoria rode uma vez por dia e faça um comparativo do dia anterior e informe quantos
+recursos novos". Complementa `_checkRelatorioSemanalInventario()` (já existente, visão de 7 dias corridos)
+com um dia-a-dia — `_checkRelatorioDiarioInventario()`, mesmo tick horário de `_iniciarAlertasEmail`, mesma
+tabela de dedup (`email_alertas_enviados`), mas com chave por DATA (`dia:YYYY-MM-DD`, não por bucket de 7
+dias desde a epoch como o semanal) — mais simples de raciocinar e já expressa exatamente o que precisa
+("já mandei o relatório de hoje?"). Dispara no máximo 1x por dia mesmo com o tick rodando de hora em hora.
+
+**Dia corrido completo, não "últimas 24h"**: `ontemInicio`/`ontemFim` são meia-noite UTC a meia-noite UTC
+(o dia de calendário anterior completo) — evita contar um dia parcial dependendo de que horas o tick
+disparar. Compara `CRIACAO` de ontem contra `CRIACAO` de anteontem (mesmo dia da semana anterior seria mais
+"justo" estatisticamente, mas o usuário pediu especificamente "comparativo do dia anterior" — dia-a-dia
+direto, não semana-a-semana).
+
+**Bug real evitado ANTES de reportar pronto, achado testando a query contra dados reais**: a primeira
+versão contava `CRIACAO`/`ATUALIZACAO`/`EXCLUSAO` sem filtro nenhum — testado direto contra o banco real
+(`azure_recursos_auditoria_eventos`) e o resultado foi **16.451 "recursos novos" num único dia**, quase
+tudo (7.721 só num RG) em `databricks-rg-*`/`managed-rg-adbx-*` — a mesma classe de ruído que já motivou o
+Crescimento Líquido (seção acima) e a exclusão de RGs gerenciados em `_detectarMudancasSku`: esses RGs são
+recriados em HORAS (VMs/discos/NICs efêmeros de cluster Databricks/AKS), então a contagem bruta de eventos
+é dominada por churn de infraestrutura, não crescimento real. Reportar "16.451 recursos novos" sem esse
+contexto teria sido tecnicamente correto mas praticamente inútil/alarmante — exatamente o problema que essa
+mesma sessão já resolveu antes pro gráfico de crescimento. Corrigido replicando o MESMO padrão já usado em
+`GET /crescimento-liquido`: busca os RGs distintos que tiveram eventos no período, classifica cada um via
+`_detectManagedRg()` em JS (não dá pra fazer em SQL sem duplicar o padrão de nome), e passa a lista como
+filtro `NOT (UPPER(resource_group) = ANY($N::text[]))` nas 3 queries (evento do dia, criações do dia
+anterior, top RGs). Confirmado contra os mesmos dados reais: o número caiu de 16.451 pra **1.245** — ainda
+alto (dominado por `PCCAgentlessScanResourceGroup`, um RG de scanner de segurança com padrão de nome que
+`_detectManagedRg` não reconhece — fora do escopo desta correção, que só replica o filtro Databricks/AKS já
+estabelecido; não uma tentativa de adivinhar/hardcoded outros padrões sem evidência de que sejam efêmeros
+por natureza), mas na ordem de grandeza certa pra ser lido como "quantos recursos novos" de verdade. E-mail
+inclui uma nota de rodapé explicando a exclusão, mesma transparência já dada na UI do Crescimento Líquido.
+
+**Conteúdo do e-mail**: total criado/atualizado/excluído ontem, delta (▲/▼, verde/vermelho) contra o dia
+anterior, e os 5 Resource Groups com mais criações no dia (mesmo padrão do relatório semanal).
+
+**Verificado contra o servidor real**: `node --check`, `pm2 restart` sem erro/crash-loop. As 3 queries SQL
+testadas diretamente contra o banco de produção (`finops_dev`) — antes e depois do filtro de RG gerenciado,
+confirmando o bug real e a correção (16.451→1.245). SMTP não está configurado neste ambiente (`GET
+/api/integrations` retorna `smtp: {ativo:false}`) — `_getSmtpConfig()` retorna `null` e a função é um no-op
+silencioso, mesma limitação já documentada pra TODO gatilho de e-mail deste sistema (nenhum foi validado com
+entrega real de e-mail neste ambiente, só "Testar Conexão" via SMTP real uma vez, na feature original de
+e-mail). **Não validado**: entrega de e-mail de ponta a ponta (precisa de um servidor SMTP real configurado
+pelo usuário).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)
