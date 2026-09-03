@@ -8,7 +8,7 @@ import {
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
   getAzureCrescimentoLiquido, baixarAzureInventarioExcel, getAzureAdvisor, getAzureRedeTopologia,
-  getAzureSkuHistorico, getAzureRelatorioDiario,
+  getAzurePropriedadeHistorico, getAzureRelatorioDiario,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -357,9 +357,9 @@ export default function InventarioView() {
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
   })
-  const skuHistoricoQuery = useQuery({
-    queryKey: ['azure-inv-sku-historico', periodo.inicio, periodo.fim],
-    queryFn: () => getAzureSkuHistorico({ data_inicio: periodo.inicio, data_fim: periodo.fim }),
+  const propriedadeHistoricoQuery = useQuery({
+    queryKey: ['azure-inv-mudancas-propriedade', periodo.inicio, periodo.fim],
+    queryFn: () => getAzurePropriedadeHistorico({ data_inicio: periodo.inicio, data_fim: periodo.fim }),
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
   })
@@ -841,32 +841,32 @@ export default function InventarioView() {
       {tab === 'auditoria' && (
         <div className="card" style={{ margin: '16px 20px' }}>
           <div className="card-header">
-            <span className="card-title">Mudanças de SKU de VM</span>
-            {skuHistoricoQuery.data && <span className="badge">{skuHistoricoQuery.data.total}</span>}
+            <span className="card-title">Alterações de Propriedade</span>
+            {propriedadeHistoricoQuery.data && <span className="badge">{propriedadeHistoricoQuery.data.total}</span>}
           </div>
           <div style={{ padding: '0 20px 16px', fontSize: 11, color: 'var(--text-muted)' }}>
-            Quando o tamanho (SKU) de uma VM muda — ex: resize de <code>Standard_D2s_v3</code> pra{' '}
-            <code>Standard_D4s_v3</code>. Detectado comparando o valor atual (Resource Graph) contra a
-            última leitura conhecida, a cada coleta — só pra VMs fora de Resource Groups gerenciados por
-            Databricks/AKS (lá a máquina é recriada em horas, não "muda de tamanho"). Usa o mesmo período
-            De/Até da Auditoria acima.
+            Quando uma propriedade rastreada muda — SKU de VM, tag, tamanho/tier de disco, tier de acesso de
+            Storage Account, IP público. O antes/depois vem direto da Azure Resource Graph Change Analysis no
+            mesmo evento — sem RGs gerenciados por Databricks/AKS (lá o recurso é recriado em horas, não
+            "muda de verdade"). Usa o mesmo período De/Até da Auditoria acima.
           </div>
-          {skuHistoricoQuery.data && skuHistoricoQuery.data.total === 0 && (
-            <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma mudança de SKU no período selecionado.</div>
+          {propriedadeHistoricoQuery.data && propriedadeHistoricoQuery.data.total === 0 && (
+            <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma alteração de propriedade no período selecionado.</div>
           )}
-          {skuHistoricoQuery.data && skuHistoricoQuery.data.total > 0 && (
+          {propriedadeHistoricoQuery.data && propriedadeHistoricoQuery.data.total > 0 && (
             <div className="table-wrapper">
               <table className="data-table">
-                <thead><tr><th>Detectado em</th><th>VM</th><th>RG</th><th>SKU anterior</th><th></th><th>SKU novo</th><th>Autor da mudança</th></tr></thead>
+                <thead><tr><th>Detectado em</th><th>Recurso</th><th>RG</th><th>Propriedade</th><th>Valor anterior</th><th></th><th>Valor novo</th><th>Autor da mudança</th></tr></thead>
                 <tbody>
-                  {skuHistoricoQuery.data.mudancas.map((m) => (
+                  {propriedadeHistoricoQuery.data.mudancas.map((m) => (
                     <tr key={m.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: m.resource_id, subscriptionId: m.subscription_id })}>
                       <td style={{ fontSize: 12 }}>{fmtData(m.detectado_em)}</td>
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--accent)' }} title={m.resource_id}>{m.nome || m.resource_id.split('/').pop()}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{m.resource_group || '—'}</td>
-                      <td style={{ fontSize: 12, color: 'var(--red,#ff4d6a)' }}>{m.sku_anterior || '—'}</td>
+                      <td style={{ fontSize: 12, fontWeight: 600 }}>{m.propriedade_label}</td>
+                      <td style={{ fontSize: 12, color: 'var(--red,#ff4d6a)' }}>{m.valor_anterior || '—'}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>→</td>
-                      <td style={{ fontSize: 12, color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.sku_novo || '—'}</td>
+                      <td style={{ fontSize: 12, color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.valor_novo || '—'}</td>
                       <td style={{ fontSize: 12 }} title={m.evento_autor || ''}>{m.evento_autor_nome || m.evento_autor || 'desconhecido'}</td>
                     </tr>
                   ))}

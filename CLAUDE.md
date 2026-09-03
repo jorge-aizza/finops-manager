@@ -3547,6 +3547,54 @@ Service Principal e `"System"`) — plausível porque este ambiente é dominado 
 Coleta Azure), não por mudanças feitas por humanos no portal; o texto da UI já reflete essa possibilidade
 ("já vem como e-mail na maioria dos casos; quando vem como ID — comum pra Service Principals").
 
+### Inventário — expandir rastreio além de SKU de VM (tags, disco, storage, IP público) (2026-09-03)
+
+Logo depois do Inventário 2.0, usuário perguntou "quais os próximos passos?" e escolheu "Expandir o
+rastreio de propriedades" entre as opções apresentadas — já que a Change Analysis captura o antes/depois
+de QUALQUER propriedade de graça, aproveitar além de só SKU de VM.
+
+**Generalização, não adição em paralelo**: `azure_recursos_sku_historico` (0 linhas reais — nenhum resize
+de VM tinha acontecido ainda) foi DROPADA e substituída por `azure_recursos_mudancas_propriedade`
+(`propriedade`/`propriedade_label` genéricos em vez de `sku_anterior`/`sku_novo`) — uma tabela, uma rota
+(`/sku-historico` → `/mudancas-propriedade`), um card de UI ("Mudanças de SKU de VM" → "Alterações de
+Propriedade"), cobrindo SKU de VM + tags + disco + storage + IP público, em vez de manter duas trilhas
+paralelas (uma só-VM, outra genérica).
+
+**Allowlist curada, não o bag inteiro sem filtro**: a Change Analysis devolve TODO `properties.changes`
+por evento, mas o exemplo oficial da própria Microsoft mostra ruído tipo `provisioningState:
+Updating→Succeeded` em toda atualização — confirmado com dados reais desta sessão (ver bug real abaixo)
+que a maioria do tráfego real É esse tipo de ruído (`instanceView`, `powerState`, elementos de array de
+route table, etc.). `_extrairMudancasRastreadas(resourceType, changes)` (server.js, função pura) mantém só
+Tags (`tags.*`, chave dinâmica) + uma lista curada fixa por tipo de recurso (VM SKU, tamanho/tier de disco,
+SKU/tier de Storage Account, IP público) — mesma disciplina de "excluir ruído" já aplicada em toda essa
+sessão pra RGs gerenciados por Databricks/AKS.
+
+**Bug real encontrado e corrigido ANTES de reportar pronto, testando contra a API real** (não só contra
+mocks — esta sessão não tem cobertura automatizada pra lógica de parsing de KQL/Resource Graph, mesma
+limitação de sempre): a primeira versão do allowlist mapeava `sku.name` pra "SKU/Tier do disco" em
+`Microsoft.Compute/disks`, mas os testes end-to-end (coleta real rodando 227-155 mil eventos por execução,
+zero erro) retornavam sistematicamente `total:0` em `/mudancas-propriedade`, apesar de haver candidatos
+reais (41 discos + 26 VMs atualizados fora de RG gerenciado numa janela de 2h, confirmado via query direta
+no Postgres). Investigado direto contra a API do Resource Graph (script descartável, autenticando com a
+mesma Service Principal já configurada) — encontrado que o disco realmente mudou `properties.tier` (ex:
+`"P4"`, o tier de PERFORMANCE dentro de Premium), não `sku.name` (que é o tipo de redundância/storage,
+Premium_LRS/StandardSSD_LRS — propriedade DIFERENTE, nunca vista mudando na amostra real observada).
+Corrigido adicionando `properties.tier` como propriedade própria ("Tier de performance do disco"),
+mantendo `sku.name` também (renomeado pra "Tipo de armazenamento do disco", mais preciso) — as duas são
+conceitos reais e distintos do Azure, vale rastrear ambas.
+
+**Verificado contra o servidor real, incluindo inspeção direta da API do Resource Graph** (nível de
+verificação acima do padrão usual desta sessão, justificado pelo resultado suspeito de `total:0`
+persistente): duas coletas reais rodaram sem erro (227 e 6.592 eventos), migração confirmada via Postgres
+(`azure_recursos_sku_historico` não existe mais, `azure_recursos_mudancas_propriedade` existe), `node
+--check`, `tsc -b`, suíte completa do frontend 281/281, `npm run frontend:build`, `pm2 restart` sem
+crash-loop, Playwright confirmando o card "Alterações de Propriedade" renderizando sem erro de console.
+**Não validado**: uma mudança real capturada de ponta a ponta (tag, disco ou IP público) fora de RG
+gerenciado — as janelas coletadas até agora não continham nenhuma, coerente com a baixíssima frequência
+observada (41 discos/26 VMs num universo de ~6 mil atualizações em 2h, quase tudo descartado pelo filtro
+de ruído ou pelo filtro de RG gerenciado); mecânica de extração confirmada correta via inspeção direta dos
+dados brutos da API, então a detecção deve funcionar assim que uma mudança real qualificada acontecer.
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

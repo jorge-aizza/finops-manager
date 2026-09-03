@@ -191,19 +191,22 @@ export interface AzureAuditoriaEvento {
   autor_nome: string | null
 }
 
-// Mudança de SKU de VM (2026-09-02, pedido do usuário: "a VM tinha um SKU e mudou pra outro,
-// qual o antigo e qual o novo") — gravado por `_detectarMudancasSku` (server.js) quando o
-// tamanho lido via Resource Graph diverge do último valor conhecido. Só VMs nesta v1
-// (`Microsoft.Compute/virtualMachines`), excluindo RGs gerenciados por Databricks/AKS (VMs
-// efêmeras de cluster — "SKU mudou" ali é ruído de recriação, não um resize real).
-export interface AzureSkuMudanca {
+// Alteração de Propriedade (2026-09-02, SKU de VM — "qual o antigo e qual o novo"; expandido
+// 2026-09-03 pra tags/disco/storage/IP público, ver `_extrairMudancasRastreadas` em server.js) —
+// gravado direto por `_coletarInventarioAzure` a partir do antes/depois que a Azure Resource
+// Graph Change Analysis já entrega no próprio evento de mudança. Allowlist curada por tipo de
+// recurso, excluindo RGs gerenciados por Databricks/AKS (recursos efêmeros de cluster — qualquer
+// "mudança" ali é ruído de recriação, não uma mudança real).
+export interface AzurePropriedadeMudanca {
   id: number
   subscription_id: string
   resource_id: string
   resource_type: string | null
   resource_group: string | null
-  sku_anterior: string | null
-  sku_novo: string | null
+  propriedade: string
+  propriedade_label: string
+  valor_anterior: string | null
+  valor_novo: string | null
   detectado_em: string
   evento_autor: string | null
   evento_quando: string | null

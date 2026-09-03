@@ -38,7 +38,7 @@ beforeEach(() => {
   vi.mocked(azureInventarioApi.getAzureInventarioColetaHistorico).mockResolvedValue([])
   vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 0, recursos: [] })
   vi.mocked(azureInventarioApi.getAzureAuditoriaEventos).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, eventos: [], por_tipo: [] })
-  vi.mocked(azureInventarioApi.getAzureSkuHistorico).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, mudancas: [] })
+  vi.mocked(azureInventarioApi.getAzurePropriedadeHistorico).mockResolvedValue({ periodo: { inicio: '', fim: '' }, total: 0, mudancas: [] })
   vi.mocked(azureInventarioApi.getAzureRelatorioDiario).mockResolvedValue({
     dia: '2026-09-01', dia_anterior: '2026-08-31', criados: 0, atualizados: 0, excluidos: 0, criados_dia_anterior: 0, delta: 0, top_resource_groups: [],
   })
@@ -270,13 +270,14 @@ describe('InventarioView', () => {
     expect(screen.getByText(/rg-producao — 7 recurso\(s\)/)).toBeInTheDocument()
   })
 
-  it('aba Auditoria mostra o histórico de mudanças de SKU de VM e abre o detalhe ao clicar', async () => {
-    vi.mocked(azureInventarioApi.getAzureSkuHistorico).mockResolvedValue({
+  it('aba Auditoria mostra o histórico de alterações de propriedade e abre o detalhe ao clicar', async () => {
+    vi.mocked(azureInventarioApi.getAzurePropriedadeHistorico).mockResolvedValue({
       periodo: { inicio: '2026-08-01', fim: '2026-08-30' },
       total: 1,
       mudancas: [{
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
-        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', sku_anterior: 'Standard_E4s_v3', sku_novo: 'Standard_E8s_v3',
+        resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', propriedade: 'sku_vm', propriedade_label: 'SKU da VM',
+        valor_anterior: 'Standard_E4s_v3', valor_novo: 'Standard_E8s_v3',
         detectado_em: '2026-08-20T10:00:00Z', evento_autor: 'joao@vivo.com.br', evento_quando: '2026-08-20T09:58:00Z',
         nome: 'vm-teste', evento_autor_nome: null,
       }],
@@ -294,7 +295,7 @@ describe('InventarioView', () => {
     renderWithClient()
     await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
 
-    expect(await screen.findByText('Mudanças de SKU de VM')).toBeInTheDocument()
+    expect(await screen.findByText('Alterações de Propriedade')).toBeInTheDocument()
     expect(screen.getByText('Standard_E4s_v3')).toBeInTheDocument()
     expect(screen.getByText('Standard_E8s_v3')).toBeInTheDocument()
     expect(screen.getByText('joao@vivo.com.br')).toBeInTheDocument()

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getAzureRecursoDetalhe, getAzureRecursoArmDetalhe, getAzureSkuHistorico } from '../api/azureInventario'
+import { getAzureRecursoDetalhe, getAzureRecursoArmDetalhe, getAzurePropriedadeHistorico } from '../api/azureInventario'
 import { listSubscriptions } from '../api/calculadora'
 import type { AzureAuditoriaAcao } from '../types/azureInventario'
 
@@ -51,16 +51,16 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
     retry: false,
   })
 
-  // Histórico de SKU (2026-09-02, pedido do usuário: "a VM tinha um SKU e mudou pra outro,
-  // qual o antigo e qual o novo") — só faz sentido pra VMs (única classe rastreada nesta v1,
-  // gravado direto durante a coleta a partir do antes/depois que a Azure Resource Graph Change
-  // Analysis já entrega, ver server.js); range bem largo (não os 30 dias padrão da aba
-  // Auditoria) pra cobrir toda a vida do recurso, não só o que está sendo olhado no momento.
-  const ehVm = (data?.recurso.resource_type || '').toUpperCase() === 'MICROSOFT.COMPUTE/VIRTUALMACHINES'
-  const skuHistQuery = useQuery({
-    queryKey: ['azure-inv-sku-historico-recurso', subscriptionId, resourceId],
-    queryFn: () => getAzureSkuHistorico({ resource_id: resourceId, subscription_id: subscriptionId, data_inicio: '2015-01-01', data_fim: new Date().toISOString().slice(0, 10) }),
-    enabled: ehVm,
+  // Histórico de Alterações (2026-09-02, SKU de VM; expandido 2026-09-03 pra tags/disco/storage/
+  // IP público, ver `_extrairMudancasRastreadas` em server.js) — gravado direto durante a coleta
+  // a partir do antes/depois que a Azure Resource Graph Change Analysis já entrega no próprio
+  // evento. Sem gate por tipo de recurso — tags e as demais propriedades curadas se aplicam a
+  // qualquer tipo, não só VM; a rota simplesmente não retorna nada pros tipos sem propriedade
+  // rastreada. Range bem largo (não os 30 dias padrão da aba Auditoria) pra cobrir toda a vida
+  // do recurso, não só o que está sendo olhado no momento.
+  const propHistQuery = useQuery({
+    queryKey: ['azure-inv-mudancas-propriedade-recurso', subscriptionId, resourceId],
+    queryFn: () => getAzurePropriedadeHistorico({ resource_id: resourceId, subscription_id: subscriptionId, data_inicio: '2015-01-01', data_fim: new Date().toISOString().slice(0, 10) }),
   })
 
   return (
@@ -174,17 +174,18 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                 })}
               </div>
 
-              {ehVm && skuHistQuery.data && skuHistQuery.data.total > 0 && (
+              {propHistQuery.data && propHistQuery.data.total > 0 && (
                 <div style={{ marginTop: 16 }}>
                   <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
-                    Histórico de SKU ({skuHistQuery.data.total} mudança{skuHistQuery.data.total !== 1 ? 's' : ''})
+                    Histórico de Alterações ({propHistQuery.data.total} {propHistQuery.data.total === 1 ? 'alteração' : 'alterações'})
                   </div>
                   <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
-                    {skuHistQuery.data.mudancas.map((m) => (
+                    {propHistQuery.data.mudancas.map((m) => (
                       <div key={m.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, flexWrap: 'wrap' }}>
-                        <span style={{ color: 'var(--red,#ff4d6a)' }}>{m.sku_anterior || '—'}</span>
+                        <span style={{ color: 'var(--text-muted)', fontWeight: 600, minWidth: 140 }}>{m.propriedade_label}</span>
+                        <span style={{ color: 'var(--red,#ff4d6a)' }}>{m.valor_anterior || '—'}</span>
                         <span style={{ color: 'var(--text-muted)' }}>→</span>
-                        <span style={{ color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.sku_novo || '—'}</span>
+                        <span style={{ color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.valor_novo || '—'}</span>
                         <span style={{ flex: 1 }} />
                         <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={m.evento_autor || ''}>{m.evento_autor_nome || m.evento_autor || 'desconhecido'}</span>
                         <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{fmtData(m.detectado_em)}</span>

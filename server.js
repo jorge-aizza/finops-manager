@@ -6212,22 +6212,30 @@ async function ensureAzureColetaTable() {
     await pool.query(`ALTER TABLE azure_recursos_inventario DROP COLUMN sku_atual`);
     await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em = NULL`);
   }
+  // Alterações de Propriedade (2026-09-03) — generaliza a antiga `azure_recursos_sku_historico`
+  // (só SKU de VM) pra qualquer propriedade curada (tags, disco, storage, IP público — ver
+  // `_extrairMudancasRastreadas`), já que a Change Analysis entrega o antes/depois de QUALQUER
+  // propriedade de graça no mesmo evento. Tabela de SKU tinha 0 linhas reais (nenhum resize de
+  // VM tinha acontecido ainda neste ambiente) — seguro trocar sem migração de dado.
+  await pool.query(`DROP TABLE IF EXISTS azure_recursos_sku_historico`);
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS azure_recursos_sku_historico (
-      id                SERIAL PRIMARY KEY,
-      subscription_id   VARCHAR(200) NOT NULL,
-      resource_id       TEXT NOT NULL,
-      resource_type     VARCHAR(300),
-      resource_group    VARCHAR(300),
-      sku_anterior      VARCHAR(200),
-      sku_novo          VARCHAR(200),
-      detectado_em      TIMESTAMPTZ DEFAULT NOW(),
-      evento_autor      VARCHAR(300),
-      evento_quando     TIMESTAMPTZ
+    CREATE TABLE IF NOT EXISTS azure_recursos_mudancas_propriedade (
+      id                 SERIAL PRIMARY KEY,
+      subscription_id    VARCHAR(200) NOT NULL,
+      resource_id        TEXT NOT NULL,
+      resource_type      VARCHAR(300),
+      resource_group     VARCHAR(300),
+      propriedade        VARCHAR(100) NOT NULL,
+      propriedade_label  VARCHAR(200) NOT NULL,
+      valor_anterior     TEXT,
+      valor_novo         TEXT,
+      detectado_em       TIMESTAMPTZ DEFAULT NOW(),
+      evento_autor       VARCHAR(300),
+      evento_quando      TIMESTAMPTZ
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_sku_hist_resource ON azure_recursos_sku_historico (subscription_id, resource_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_sku_hist_detectado ON azure_recursos_sku_historico (detectado_em)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_mp_resource ON azure_recursos_mudancas_propriedade (subscription_id, resource_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_mp_detectado ON azure_recursos_mudancas_propriedade (detectado_em)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_recursos_auditoria_eventos (
@@ -7840,12 +7848,13 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
   } catch (e) { _dbErr(res, e); }
 });
 
-// Mudanças de SKU de VM (2026-09-02, atualizado 2026-09-03 — Inventário 2.0) — histórico
-// gravado direto por `_coletarInventarioAzure` a partir do antes/depois que a Change Analysis já
-// entrega no próprio evento. `resource_id` opcional filtra pra um recurso específico (usado por
+// Alterações de Propriedade (2026-09-02, SKU de VM; expandido 2026-09-03 pra tags/disco/storage/
+// IP público — ver `_extrairMudancasRastreadas`) — histórico gravado direto por
+// `_coletarInventarioAzure` a partir do antes/depois que a Change Analysis já entrega no próprio
+// evento. `resource_id` opcional filtra pra um recurso específico (usado por
 // `RecursoDetalheModal.tsx`); sem ele, lista tudo no período (mesmo padrão `periodo`/300 linhas
 // já usado por `/auditoria`).
-app.get('/api/azure-inventario/sku-historico', authMiddleware, dbMiddleware, async (req, res) => {
+app.get('/api/azure-inventario/mudancas-propriedade', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureAzureColetaTable();
     let { data_inicio, data_fim, resource_id, subscription_id } = req.query;
@@ -7862,7 +7871,7 @@ app.get('/api/azure-inventario/sku-historico', authMiddleware, dbMiddleware, asy
     if (subscription_id) { params.push(subscription_id); where += ` AND h.subscription_id = $${params.length}`; }
     const r = await pool.query(
       `SELECT h.*, ri.nome, cac.nome AS evento_autor_nome
-       FROM azure_recursos_sku_historico h
+       FROM azure_recursos_mudancas_propriedade h
        LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = h.subscription_id AND ri.resource_id = h.resource_id
        LEFT JOIN azure_autores_cache cac ON cac.guid = h.evento_autor
        WHERE ${where} ORDER BY h.detectado_em DESC LIMIT 300`,
@@ -10740,7 +10749,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
     histId = hist.rows[0].id;
     _logColetaInv(`Inventário — ${desdeISO} → ${ateISO} | ${subs.length} subscription(s)`);
 
-    let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0, totalMudancasSku = 0;
+    let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0, totalMudancasProp = 0;
     _invColetaProgresso.sub_total = subs.length;
 
     for (let i = 0; i < subs.length; i++) {
@@ -10756,7 +10765,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
         continue;
       }
       _logColetaInv(`  ${subId}: ${mudancas.length} mudança(s) retornada(s)`);
-      let mudancasSkuSub = 0;
+      let mudancasPropSub = 0;
 
       for (const ch of mudancas) {
         const resourceId = ch.targetResourceId;
@@ -10805,25 +10814,25 @@ async function _coletarInventarioAzure(origem = 'manual') {
             [subId, resourceId, resourceType, resourceGroup, acao, autor, quando, ch.changeType, ch.correlationId || null]
           );
 
-          // SKU de VM (paridade com o Inventário antigo) — o valor antes/depois já vem NO
+          // Alterações de Propriedade (paridade com SKU de VM + expansão — tags, disco, storage,
+          // IP público, ver `_extrairMudancasRastreadas`) — o valor antes/depois já vem NO
           // MESMO evento (Change Analysis), sem precisar de uma segunda chamada ao Resource
           // Graph pra comparar contra uma última leitura conhecida (como o detector manual
-          // antigo, `_detectarMudancasSku`, fazia). Mesma exclusão de RGs gerenciados por
-          // Databricks/AKS de sempre — lá a VM é recriada em horas, "SKU mudou" seria ruído de
-          // recriação, não um resize real.
-          if (acao === 'ATUALIZACAO' && ch.vmSizeChange
-              && (resourceType || '').toUpperCase() === 'MICROSOFT.COMPUTE/VIRTUALMACHINES'
-              && !_detectManagedRg(resourceGroup || '').managed_type) {
-            const anterior = ch.vmSizeChange.previousValue;
-            const novo = ch.vmSizeChange.newValue;
-            if (anterior && novo && anterior !== novo) {
+          // antigo de SKU, `_detectarMudancasSku`, fazia). Mesma exclusão de RGs gerenciados por
+          // Databricks/AKS de sempre, aplicada UMA vez antes do loop de propriedades — lá o
+          // recurso é recriado em horas, qualquer "mudança" seria ruído de recriação, não uma
+          // mudança real, vale igualmente pra tag/disco/tier quanto pra SKU de VM.
+          if (acao === 'ATUALIZACAO' && !_detectManagedRg(resourceGroup || '').managed_type) {
+            const propriedades = _extrairMudancasRastreadas(resourceType, ch.changes);
+            for (const p of propriedades) {
+              if (!p.valor_anterior || !p.valor_novo || p.valor_anterior === p.valor_novo) continue;
               await pool.query(
-                `INSERT INTO azure_recursos_sku_historico (subscription_id,resource_id,resource_type,resource_group,sku_anterior,sku_novo,evento_autor,evento_quando)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-                [subId, resourceId, resourceType, resourceGroup, anterior, novo, autor, quando]
+                `INSERT INTO azure_recursos_mudancas_propriedade (subscription_id,resource_id,resource_type,resource_group,propriedade,propriedade_label,valor_anterior,valor_novo,evento_autor,evento_quando)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+                [subId, resourceId, resourceType, resourceGroup, p.propriedade, p.propriedade_label, p.valor_anterior, p.valor_novo, autor, quando]
               );
-              totalMudancasSku++;
-              mudancasSkuSub++;
+              totalMudancasProp++;
+              mudancasPropSub++;
             }
           }
         }
@@ -10832,11 +10841,11 @@ async function _coletarInventarioAzure(origem = 'manual') {
         _invColetaProgresso.atualizados = totalAtualizados;
         _invColetaProgresso.excluidos = totalExcluidos;
       }
-      if (mudancasSkuSub > 0) _logColetaInv(`  ${subId}: ${mudancasSkuSub} mudança(s) de SKU de VM detectada(s)`);
+      if (mudancasPropSub > 0) _logColetaInv(`  ${subId}: ${mudancasPropSub} alteração(ões) de propriedade detectada(s)`);
     }
 
     await pool.query(`UPDATE azure_inventario_config SET ultimo_evento_em=$1, atualizado_em=NOW() WHERE id=$2`, [ateISO, cfg.id]);
-    const msg = `${totalEventos} evento(s) | ${totalNovos} novo(s), ${totalAtualizados} atualizado(s), ${totalExcluidos} excluído(s)${totalMudancasSku > 0 ? ` | ${totalMudancasSku} mudança(s) de SKU de VM` : ''}`;
+    const msg = `${totalEventos} evento(s) | ${totalNovos} novo(s), ${totalAtualizados} atualizado(s), ${totalExcluidos} excluído(s)${totalMudancasProp > 0 ? ` | ${totalMudancasProp} alteração(ões) de propriedade` : ''}`;
     _logColetaInv(`Concluído: ${msg}`);
     await pool.query(
       `UPDATE azure_inventario_coleta_historico SET status='concluido',concluido_em=NOW(),eventos_processados=$1,recursos_novos=$2,recursos_atualizados=$3,recursos_excluidos=$4,mensagem=$5 WHERE id=$6`,
@@ -10935,6 +10944,9 @@ async function _resourceGraphFetchRecursos(token, subscriptionId) {
 async function _resourceGraphFetchChanges(token, subscriptionId, desdeISO, ateISO) {
   const desdeEsc = String(desdeISO).replace(/'/g, "''");
   const ateEsc = String(ateISO).replace(/'/g, "''");
+  // `changes = properties.changes` traz o bag INTEIRO de propriedades alteradas (não só SKU de
+  // VM como antes) — a filtragem pro allowlist curado acontece em Node
+  // (`_extrairMudancasRastreadas`), não em KQL, pra ser mais simples de estender depois.
   const query = `resourcechanges
 | extend changeTime = todatetime(properties.changeAttributes.timestamp),
          targetResourceId = tostring(properties.targetResourceId),
@@ -10942,9 +10954,9 @@ async function _resourceGraphFetchChanges(token, subscriptionId, desdeISO, ateIS
          changeType = tostring(properties.changeType),
          changedBy = tostring(properties.changeAttributes.changedBy),
          correlationId = tostring(properties.changeAttributes.correlationId),
-         vmSizeChange = properties.changes["properties.hardwareProfile.vmSize"]
+         changes = properties.changes
 | where changeTime > datetime('${desdeEsc}') and changeTime <= datetime('${ateEsc}')
-| project changeTime, targetResourceId, targetResourceType, resourceGroup, changeType, changedBy, correlationId, vmSizeChange
+| project changeTime, targetResourceId, targetResourceType, resourceGroup, changeType, changedBy, correlationId, changes
 | order by changeTime asc`;
   const mudancas = [];
   let skipToken = null;
@@ -10967,6 +10979,59 @@ async function _resourceGraphFetchChanges(token, subscriptionId, desdeISO, ateIS
     paginas++;
   } while (skipToken && paginas < 1000);
   return mudancas;
+}
+
+// Extrai as propriedades curadas de um bag de mudanças da Change Analysis (2026-09-03,
+// "expandir rastreio além de SKU de VM" — pedido do usuário logo após o Inventário 2.0: já que
+// a Change Analysis captura o antes/depois de QUALQUER propriedade de graça, aproveitar além de
+// só SKU de VM). Deliberadamente uma ALLOWLIST curada, não o bag inteiro sem filtro — o exemplo
+// oficial da Microsoft mostra que ele inclui ruído tipo `properties.provisioningState:
+// Updating→Succeeded` em toda atualização de VM, que afogaria a feature em ruído sem valor real
+// (mesma classe de problema que já motivou excluir RGs gerenciados por Databricks/AKS em vários
+// pontos desta sessão). Tags são a exceção dinâmica (`tags.<chave>`, qualquer uma) — resto é
+// lookup direto de um caminho de propriedade fixo, sensível ao `resourceType` porque `sku.name`
+// significa coisas diferentes em disco vs. storage account. Função pura (sem I/O) — recebe o
+// bag `changes` já desserializado (objeto JS) e o `resourceType` do evento, devolve um array de
+// `{propriedade, propriedade_label, valor_anterior, valor_novo}` só com o que bateu na allowlist.
+// Fora do escopo (documentado, não implementado): IP privado / NIC — `properties.ipConfigurations`
+// é um array aninhado, e a Change Analysis diffa por path de propriedade escalar — mudanças
+// dentro de um elemento de array não produzem um diff previsível no mesmo formato.
+function _extrairMudancasRastreadas(resourceType, changes) {
+  if (!changes || typeof changes !== 'object') return [];
+  const tipo = (resourceType || '').toUpperCase();
+  const achados = [];
+
+  for (const [chave, valor] of Object.entries(changes)) {
+    if (!valor || typeof valor !== 'object') continue;
+    const anterior = valor.previousValue;
+    const novo = valor.newValue;
+    if (chave.startsWith('tags.')) {
+      const tagNome = chave.slice('tags.'.length);
+      achados.push({ propriedade: `tag:${tagNome}`, propriedade_label: `Tag: ${tagNome}`, valor_anterior: anterior, valor_novo: novo });
+      continue;
+    }
+    if (chave === 'properties.hardwareProfile.vmSize' && tipo === 'MICROSOFT.COMPUTE/VIRTUALMACHINES') {
+      achados.push({ propriedade: 'sku_vm', propriedade_label: 'SKU da VM', valor_anterior: anterior, valor_novo: novo });
+    } else if (chave === 'properties.diskSizeGB' && tipo === 'MICROSOFT.COMPUTE/DISKS') {
+      achados.push({ propriedade: 'disco_tamanho_gb', propriedade_label: 'Tamanho do disco (GB)', valor_anterior: anterior, valor_novo: novo });
+    } else if (chave === 'sku.name' && tipo === 'MICROSOFT.COMPUTE/DISKS') {
+      // Redundância/tipo de armazenamento do disco (Premium_LRS, StandardSSD_LRS, ...) —
+      // diferente de `properties.tier` abaixo (tier de performance dentro de Premium, ex:
+      // P4→P6). Confirmado como propriedades DISTINTAS testando contra dados reais desta
+      // sessão — `properties.tier` foi o que realmente mudou num disco de verdade, `sku.name`
+      // nunca apareceu mudando na amostra observada, mas é um valor real e válido do schema.
+      achados.push({ propriedade: 'disco_sku', propriedade_label: 'Tipo de armazenamento do disco', valor_anterior: anterior, valor_novo: novo });
+    } else if (chave === 'properties.tier' && tipo === 'MICROSOFT.COMPUTE/DISKS') {
+      achados.push({ propriedade: 'disco_tier', propriedade_label: 'Tier de performance do disco', valor_anterior: anterior, valor_novo: novo });
+    } else if (chave === 'sku.name' && tipo === 'MICROSOFT.STORAGE/STORAGEACCOUNTS') {
+      achados.push({ propriedade: 'storage_sku', propriedade_label: 'SKU/Tier da Storage Account', valor_anterior: anterior, valor_novo: novo });
+    } else if (chave === 'properties.accessTier' && tipo === 'MICROSOFT.STORAGE/STORAGEACCOUNTS') {
+      achados.push({ propriedade: 'storage_access_tier', propriedade_label: 'Tier de acesso (Storage)', valor_anterior: anterior, valor_novo: novo });
+    } else if (chave === 'properties.ipAddress' && tipo === 'MICROSOFT.NETWORK/PUBLICIPADDRESSES') {
+      achados.push({ propriedade: 'ip_publico', propriedade_label: 'Endereço IP público', valor_anterior: anterior, valor_novo: novo });
+    }
+  }
+  return achados;
 }
 
 // Detalhe completo de UM recurso via Resource Graph (2026-09-02, inspirado no ARI — que lê
