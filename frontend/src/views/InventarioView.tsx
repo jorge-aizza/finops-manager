@@ -8,9 +8,10 @@ import {
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
   getAzureCrescimentoLiquido, baixarAzureInventarioExcel, getAzureAdvisor, getAzureRedeTopologia,
-  getAzurePropriedadeHistorico, getAzureRelatorioDiario,
+  getAzurePropriedadeHistorico, getAzureRelatorioDiario, getAzureCrescimentoDetalhe, getAzureAnomaliasCrescimento,
+  getAzureDesperdicio,
 } from '../api/azureInventario'
-import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria } from '../types/azureInventario'
+import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria, AzureAnomaliaCrescimento, AzureDesperdicioCategoria } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
 import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMonitor'
 import RecursoDetalheModal from '../components/RecursoDetalheModal'
@@ -34,6 +35,17 @@ function defaultPeriodo(diasAtras: number): { inicio: string; fim: string } {
   const ini = new Date(fim)
   ini.setDate(ini.getDate() - diasAtras)
   return { inicio: ini.toISOString().slice(0, 10), fim: fim.toISOString().slice(0, 10) }
+}
+
+// Rótulos das categorias de desperdício (Usage Optimization, 2026-09-04).
+const DESPERDICIO_LABEL: Record<AzureDesperdicioCategoria, string> = {
+  disco_orfao: '💾 Disco não anexado',
+  snapshot_antigo: '📸 Snapshot antigo',
+  ip_solto: '🌐 IP público sem uso',
+  nic_orfa: '🔌 NIC não anexada',
+}
+function fmtBRLCurto(v: number): string {
+  return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 const ACAO_BADGE: Record<AzureAuditoriaAcao, { color: string; bg: string; label: string }> = {
@@ -171,6 +183,103 @@ function GrowthChart({ dias }: { dias: { dia: string; ativos: number }[] }) {
   )
 }
 
+function DeltaTag({ delta }: { delta: number }) {
+  const cor = delta > 0 ? 'var(--green,#22c55e)' : delta < 0 ? 'var(--red,#ff4d6a)' : 'var(--text-muted)'
+  const seta = delta > 0 ? '▲' : delta < 0 ? '▼' : '—'
+  return <span style={{ color: cor, fontWeight: 700, fontSize: 12, flexShrink: 0 }}>{seta} {Math.abs(delta).toLocaleString('pt-BR')}</span>
+}
+
+// Detalhe do Crescimento Líquido (2026-09-04, pedido do usuário: "controlar e acompanhar no
+// detalhe o crescimento de recursos fixos... pra rastrear e agir mais rápido") — 3 listas lado
+// a lado, quebrando o total do GrowthChart acima por Tipo/Resource Group (quem mudou) e por
+// criador (quem fez), prática de accountability do FinOps Framework (capability Governance) —
+// sem isso, o gráfico só mostra QUE algo mudou, nunca ONDE agir.
+function CrescimentoDetalheCard({ data, loading }: { data: import('../types/azureInventario').AzureCrescimentoDetalheResposta | undefined; loading: boolean }) {
+  return (
+    <div className="card" style={{ margin: '16px 20px 0' }}>
+      <div className="card-header"><span className="card-title">Detalhe do Crescimento</span></div>
+      <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+        Mesmo período e mesma exclusão de cluster efêmero do gráfico acima — quebrado por tipo, por Resource Group, e por quem criou (accountability).
+      </div>
+      {loading && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+      {data && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 20, padding: '0 20px 20px' }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>👤 Top Criadores</div>
+            {data.top_criadores.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma criação (que permaneceu ativa) no período.</div>}
+            {data.top_criadores.map((c) => (
+              <div key={c.criador} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12, padding: '5px 0', borderBottom: '1px solid var(--border)' }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.criador}>{c.criador}</span>
+                <span style={{ fontWeight: 700, flexShrink: 0 }}>{c.total}</span>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>📦 Por Tipo de Recurso</div>
+            {data.por_tipo.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Sem variação no período.</div>}
+            {data.por_tipo.map((t) => (
+              <div key={t.tipo} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, fontSize: 12, padding: '5px 0', borderBottom: '1px solid var(--border)' }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={resourceTypeLabel(t.tipo)}>{resourceTypeIcon(t.tipo)} {resourceTypeLabel(t.tipo)}</span>
+                <DeltaTag delta={t.delta} />
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>🗂 Por Resource Group</div>
+            {data.por_resource_group.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Sem variação no período.</div>}
+            {data.por_resource_group.map((r) => (
+              <div key={r.resource_group} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, fontSize: 12, padding: '5px 0', borderBottom: '1px solid var(--border)' }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.resource_group}>{r.resource_group}</span>
+                <DeltaTag delta={r.delta} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Anomalias de Crescimento (Z-score, ver _computeAnomaliasCrescimento em server.js) —
+// reintroduzida na UI (2026-09-04, pedido do usuário) depois de ter sido removida junto da
+// aba "Governança" em 2026-08-31 ("não quero Orçamento agora... pode retirar Governança") — o
+// backend nunca parou de calcular (e-mail periódico continuou rodando); só faltava um lugar
+// pra ver sem SMTP configurado. Combina 2 sinais (quantidade E custo) — ver AzureAnomaliaCrescimento.
+const ANOMALIA_GATILHO_INFO: Record<string, string> = { criacoes: '📦 Recursos', custo: '💰 Custo', ambos: '📦 Recursos + 💰 Custo' }
+function AnomaliasCard({ data, loading }: { data: AzureAnomaliaCrescimento[] | undefined; loading: boolean }) {
+  return (
+    <div className="card" style={{ margin: '16px 20px 0' }}>
+      <div className="card-header">
+        <span className="card-title">Anomalias de Crescimento</span>
+        {data && <span className="badge">{data.length}</span>}
+      </div>
+      <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+        Z-score sobre os últimos 35 dias, por subscription e por Resource Group — dias fora do padrão histórico de criação de recursos ou de custo.
+      </div>
+      {loading && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+      {data && data.length === 0 && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma anomalia nos últimos 35 dias.</div>}
+      {data && data.length > 0 && (
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead><tr><th>Escopo</th><th>Dia</th><th style={{ textAlign: 'right' }}>Criações</th><th style={{ textAlign: 'right' }}>Custo</th><th>Gatilho</th></tr></thead>
+            <tbody>
+              {data.map((a, i) => (
+                <tr key={i}>
+                  <td style={{ fontSize: 12 }} title={a.subscription_id}>{a.escopo_tipo === 'resource_group' ? a.resource_group : 'Subscription inteira'}</td>
+                  <td style={{ fontSize: 12 }}>{new Date(a.dia + 'T00:00:00').toLocaleDateString('pt-BR')}</td>
+                  <td style={{ textAlign: 'right', fontSize: 12 }} title={`Média ${a.media_criacoes.toFixed(1)}/dia · Z-score ${a.zscore_criacoes.toFixed(2)}`}>{a.criacoes}</td>
+                  <td style={{ textAlign: 'right', fontSize: 12 }} title={`Média ${fmtBRL(a.media_custo)}/dia · Z-score ${a.zscore_custo.toFixed(2)}`}>{fmtBRL(a.custo)}</td>
+                  <td style={{ fontSize: 11 }}>{ANOMALIA_GATILHO_INFO[a.gatilho] || a.gatilho}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Azure Advisor — categorias e impacto (2026-09-02, inspirado no ARI, que integra com
 // Advisor/Security Center). Valores confirmados na documentação oficial (learn.microsoft.com/
 // rest/api/advisor/recommendations/list): category ∈ {Cost,Security,HighAvailability,
@@ -294,7 +403,7 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
 
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'advisor' | 'rede' | 'config'>('recursos')
+  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'advisor' | 'rede' | 'desperdicio' | 'config'>('recursos')
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
@@ -320,12 +429,29 @@ export default function InventarioView() {
     queryFn: () => getAzureCrescimentoLiquido(periodoCrescimento.inicio, periodoCrescimento.fim),
     placeholderData: keepPreviousData,
   })
+  // Mesmo período do gráfico acima — "detalhe" é sempre sobre a mesma janela que está sendo
+  // olhada, não um filtro à parte.
+  const crescimentoDetalheQuery = useQuery({
+    queryKey: ['azure-inv-crescimento-detalhe', periodoCrescimento.inicio, periodoCrescimento.fim],
+    queryFn: () => getAzureCrescimentoDetalhe(periodoCrescimento.inicio, periodoCrescimento.fim),
+    placeholderData: keepPreviousData,
+  })
+  // Janela fixa de 35 dias (calculada no servidor, ver _computeAnomaliasCrescimento) — não
+  // segue periodoCrescimento.
+  const anomaliasQuery = useQuery({ queryKey: ['azure-inv-anomalias'], queryFn: getAzureAnomaliasCrescimento })
   // Advisor pode levar bastante tempo na 1ª chamada (backend cacheia por 20min) — só busca
   // quando a aba está de fato aberta.
   const advisorQuery = useQuery({
     queryKey: ['azure-inv-advisor'],
     queryFn: () => getAzureAdvisor(),
     enabled: tab === 'advisor',
+  })
+  // Chamada real ao Resource Graph (backend cacheia 20min) — só busca com a aba aberta, mesmo
+  // padrão já usado pelo Advisor.
+  const desperdicioQuery = useQuery({
+    queryKey: ['azure-inv-desperdicio'],
+    queryFn: () => getAzureDesperdicio(),
+    enabled: tab === 'desperdicio',
   })
   const redeQuery = useQuery({
     queryKey: ['azure-inv-rede-topologia', redeSub],
@@ -391,12 +517,14 @@ export default function InventarioView() {
   })
   const [ativo, setAtivo] = useState(false)
   const [retencaoDias, setRetencaoDias] = useState(180)
+  const [tagsObrigatorias, setTagsObrigatorias] = useState('')
   const [spId, setSpId] = useState<number | null>(null)
   const [subsSelecionadas, setSubsSelecionadas] = useState<Set<string>>(new Set())
   const [formInicializado, setFormInicializado] = useState(false)
   if (configQuery.data && !formInicializado) {
     setAtivo(configQuery.data.ativo)
     setRetencaoDias(configQuery.data.retencao_dias)
+    setTagsObrigatorias(configQuery.data.tags_obrigatorias || '')
     setSpId(configQuery.data.sp_id)
     setSubsSelecionadas(new Set((configQuery.data.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)))
     setFormInicializado(true)
@@ -417,11 +545,12 @@ export default function InventarioView() {
     mutationFn: () => salvarAzureInventarioConfig({
       ativo, retencao_dias: retencaoDias, sp_id: spId,
       subscription_ids: subsSelecionadas.size ? Array.from(subsSelecionadas).join(',') : null,
-      tags_obrigatorias: configQuery.data?.tags_obrigatorias ?? null,
+      tags_obrigatorias: tagsObrigatorias.trim() || null,
     }),
     onSuccess: () => {
       window.showToast?.('Configuração salva.', 'success')
       queryClient.invalidateQueries({ queryKey: ['azure-inv-config'] })
+      queryClient.invalidateQueries({ queryKey: ['azure-inv-tags-faltantes'] })
     },
     onError: (e: Error) => window.showToast?.('Erro ao salvar: ' + e.message, 'error'),
   })
@@ -484,6 +613,7 @@ export default function InventarioView() {
         <button className={tab === 'comparativo' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('comparativo')}>Comparativo</button>
         <button className={tab === 'advisor' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('advisor')}>Advisor</button>
         <button className={tab === 'rede' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('rede')}>Rede</button>
+        <button className={tab === 'desperdicio' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('desperdicio')}>Desperdício</button>
         <button className={tab === 'config' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('config')}>Configuração</button>
       </div>
 
@@ -506,6 +636,9 @@ export default function InventarioView() {
         </div>
         <GrowthChart dias={crescimentoQuery.data?.dias || []} />
       </div>
+
+      <CrescimentoDetalheCard data={crescimentoDetalheQuery.data} loading={crescimentoDetalheQuery.isLoading} />
+      <AnomaliasCard data={anomaliasQuery.data} loading={anomaliasQuery.isLoading} />
 
       {tab === 'recursos' && (
         <div className="card" style={{ margin: '16px 20px' }}>
@@ -1034,6 +1167,130 @@ export default function InventarioView() {
         </div>
       )}
 
+      {tab === 'desperdicio' && (
+        <>
+          <div className="card" style={{ margin: '16px 20px' }}>
+            <div className="card-header">
+              <span className="card-title">Desperdício de Recursos</span>
+              {desperdicioQuery.data && <span className="badge">{desperdicioQuery.data.total_itens}</span>}
+            </div>
+            <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+              Recursos provisionados que ninguém está usando, detectados via Azure Resource Graph (mesma credencial do
+              Inventário, sem permissão nova). Custo estimado pelo billing <strong>observado</strong> dos últimos 30
+              dias — disco managed e IP estático faturam a mesma taxa anexados ou não, então o que se vê é o que se
+              gasta. <strong>Não inclui rightsizing de VM</strong>: isso exigiria métricas do Azure Monitor.
+            </div>
+
+            {desperdicioQuery.isLoading && (
+              <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>
+                Consultando o Azure… (pode levar alguns segundos)
+              </div>
+            )}
+            {desperdicioQuery.isError && (
+              <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--red,#ff4d6a)' }}>
+                {(desperdicioQuery.error as Error).message}
+              </div>
+            )}
+
+            {desperdicioQuery.data && (
+              <div style={{ padding: '0 20px 16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginBottom: 12 }}>
+                  <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--orange,#ff8c42)' }}>
+                      {fmtBRLCurto(desperdicioQuery.data.custo_mensal_estimado_total)}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Desperdício estimado por mês</div>
+                  </div>
+                  <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                    <div style={{ fontSize: 20, fontWeight: 700 }}>
+                      {fmtBRLCurto(desperdicioQuery.data.custo_mensal_estimado_total * 12)}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Projeção anual</div>
+                  </div>
+                  <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                    <div style={{ fontSize: 20, fontWeight: 700 }}>{desperdicioQuery.data.total_itens}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Recursos ociosos</div>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {desperdicioQuery.data.por_categoria.map((c) => (
+                    <div key={c.categoria} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12, padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                      <span>{DESPERDICIO_LABEL[c.categoria] || c.categoria} <span style={{ color: 'var(--text-muted)' }}>({c.itens})</span></span>
+                      <span style={{ fontWeight: 700 }}>
+                        {fmtBRLCurto(c.custo_mensal_estimado)}
+                        {c.sem_custo_conhecido > 0 && (
+                          <span style={{ fontWeight: 400, color: 'var(--text-muted)', fontSize: 11 }}>
+                            {' '}· {c.sem_custo_conhecido} sem custo conhecido
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {desperdicioQuery.data.sem_custo_conhecido > 0 && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
+                    {desperdicioQuery.data.sem_custo_conhecido} recurso(s) sem nenhuma linha de billing conhecida —
+                    aparecem como &ldquo;—&rdquo;, nunca como R$ 0,00: não saber o custo não é o mesmo que ser de graça.
+                    (NICs, por exemplo, não são cobradas na Azure — continuam sendo entulho, mas não gasto.)
+                  </div>
+                )}
+
+                {desperdicioQuery.data.erros.length > 0 && (
+                  <div style={{ marginTop: 10, padding: 10, borderRadius: 6, fontSize: 11, background: 'color-mix(in srgb, var(--red,#ff4d6a) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--red,#ff4d6a) 35%, transparent)' }}>
+                    {desperdicioQuery.data.erros.map((e) => (
+                      <div key={e.subscription_id}>Falha em {e.subscription_id}: {e.erro}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {desperdicioQuery.data && desperdicioQuery.data.itens.length > 0 && (
+            <div className="card" style={{ margin: '16px 20px' }}>
+              <div className="card-header"><span className="card-title">Recursos ociosos</span></div>
+              {desperdicioQuery.data.total_itens > desperdicioQuery.data.itens.length && (
+                <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+                  Mostrando os {desperdicioQuery.data.itens.length} de maior custo, de {desperdicioQuery.data.total_itens}.
+                </div>
+              )}
+              <div className="table-wrapper">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Recurso</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
+                      <th style={{ textAlign: 'right' }}>Tam.</th>
+                      <th style={{ textAlign: 'right' }}>Custo/mês</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {desperdicioQuery.data.itens.map((it) => (
+                      <tr key={it.resource_id}>
+                        <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
+                          {it.nome || it.resource_id}
+                        </td>
+                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{DESPERDICIO_LABEL[it.categoria] || it.categoria}</td>
+                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.resource_group || '—'}</td>
+                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.sku || '—'}</td>
+                        <td style={{ textAlign: 'right', fontSize: 12 }}>{it.tamanho_gb ? it.tamanho_gb + ' GB' : '—'}</td>
+                        <td
+                          style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}
+                          title={it.custo_mensal_estimado === null ? 'Sem billing conhecido para este recurso — não dá pra afirmar o custo' : ''}
+                        >
+                          {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
       {tab === 'config' && (
         <>
           <div className="card" style={{ margin: '16px 20px' }}>
@@ -1081,6 +1338,17 @@ export default function InventarioView() {
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Retenção do log de Auditoria (dias)</label>
                 <input type="number" min={1} value={retencaoDias} onChange={(e) => setRetencaoDias(Number(e.target.value) || 180)} style={{ maxWidth: 120 }} />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Tags obrigatórias (separadas por vírgula)</label>
+                <input
+                  value={tagsObrigatorias}
+                  onChange={(e) => setTagsObrigatorias(e.target.value)}
+                  placeholder="ex: projeto, sigla, centro_custo"
+                />
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Chaves de tag exigidas em todo recurso. Alimenta o relatório de conformidade — deixe vazio para desativar a checagem.
+                </div>
               </div>
               <button className="btn-primary" style={{ alignSelf: 'flex-start' }} disabled={salvarMutation.isPending} onClick={() => salvarMutation.mutate()}>
                 {salvarMutation.isPending ? 'Salvando...' : 'Salvar'}

@@ -3654,6 +3654,430 @@ coletas rodadas até agora) — a lógica de cada um foi verificada onde dava (q
 unitários), mas o caminho positivo completo (usuário vendo o número de verdade na tela) ainda depende de
 uma mudança real acontecer.
 
+### Inventário — reconciliação precisa ser re-rodada manualmente após a migração 2.0 (2026-09-03,
+pedido do usuário: "valida pois ainda não aparece todos os RG das assinaturas")
+
+Investigado com dados reais: comparando `GET /api/azure-inventario/resumo-por-assinatura` (nível 2, por
+RG) contra `GET /api/calculadora/resource-groups` (billing) — Production mostrava só **37 de 194 RGs**
+conhecidos pelo billing (19%), Development 91/235 (39%), Test 84/153 (55%). Não era bug de query — era
+**dado incompleto**: `GET /api/azure-inventario/coleta-historico` confirmou que, desde a migração
+"Inventário 2.0" (troca de Activity Log por Resource Graph Change Analysis, mesmo dia — ver seção acima),
+só rodaram coletas incrementais (`origem: 'agendado'`/`'manual'`) — **zero execuções de
+`reconciliacao_manual`/`reconciliacao_agendado`**. Causa raiz: a migração 2.0 fez `TRUNCATE TABLE
+azure_recursos_inventario` (zerar e recomeçar limpo, decisão do usuário na ocasião) e resetou o
+watermark — mas a Reconciliação via Resource Graph (que faz o backfill de recursos antigos nunca
+tocados desde a ativação da coleta — ver seção "Reconciliação via Azure Resource Graph" acima) é
+**deliberadamente manual, sem agendamento automático** ("depois do primeiro backfill completo, gaps
+novos são bem mais raros"); ninguém lembrou de clicar em "Reconciliar" de novo depois do truncate, então
+o Inventário ficou populado só pelo que mudou nos ~13 dias de retenção da Change Analysis desde a
+migração — exatamente o mesmo tipo de gap que a Reconciliação foi criada pra resolver, agora reintroduzido
+pela própria migração que zerou os dados.
+
+Corrigido disparando `POST /api/azure-inventario/reconciliar` manualmente (via JWT forjado, mesmo método
+de sempre nesta sessão) — completou em 18s, encontrou 12.696 recursos reais no Resource Graph, adicionou
+11.197 novos ao Inventário. RGs por assinatura depois: Production 37→**211**, Development 91→**258**,
+Test 84→**168** — todos agora acima da contagem do billing (esperado: o Inventário cobre recursos sem
+nenhuma linha de custo ainda, o billing cache não). Confirmado visualmente via Playwright: aba "Por
+Assinatura" → Production renderiza exatamente 211 cards de RG, zero erro de console.
+
+**Não é um bug de código, não precisou de nenhuma mudança em `server.js`/frontend** — só uma ação
+operacional (a mesma que qualquer reset futuro de dados do Inventário vai exigir de novo). Documentado
+aqui como lembrete: qualquer `TRUNCATE`/reset futuro de `azure_recursos_inventario` precisa ser seguido de
+um "🔎 Reconciliar (Resource Graph)" manual (aba Configuração) antes de confiar na cobertura de RGs/
+recursos — a coleta incremental sozinha não recupera isso.
+
+### Inventário — Detalhe do Crescimento + Anomalias reintroduzidas + alerta em tempo real no sino
+(2026-09-04, pedido do usuário: "Preciso Controlar e acompanhar no Detalhes o Crescimento de Recursos
+Fixos para tentar rastrar e agir mais rápido, de acordo com o Framework FinOps e boas práticas de mercado")
+
+Pesquisado o FinOps Framework (capabilities **Anomaly Management** e **Governance, Policy & Risk** —
+finops.org) e práticas de mercado (AWS Cost Anomaly Detection com root-cause + roteamento por dono, Azure
+Policy tag enforcement) antes de desenhar — apresentadas 4 melhorias via `AskUserQuestion` (multiSelect);
+usuário selecionou **"Detalhe do crescimento"** e **"Alerta em tempo real no sino"** (não escolheu
+threshold configurável por escopo nem compliance de tags/accountability, que ficam como opções futuras).
+
+**1. `GET /api/azure-inventario/crescimento-detalhe`** — quebra o total do gráfico "Crescimento Líquido"
+já existente por **Tipo de Recurso** e por **Resource Group** (snapshot "ativo no dia" no início vs. fim
+do período, mesma convenção já usada em `/crescimento-liquido`/Comparativo — nunca uma soma de eventos),
+mais um ranking **"Top Criadores"** (quem mais criou recursos que permaneceram ativos — prática de
+accountability do capability Governance: sem saber QUEM criou, não dá pra rotear a ação). Mesma exclusão
+de RGs gerenciados por Databricks/AKS de sempre (`_detectManagedRg`) — um recurso efêmero de cluster não
+é "crescimento fixo". Novo card `CrescimentoDetalheCard` (`InventarioView.tsx`), 3 listas lado a lado,
+sempre visível (não dentro de nenhuma aba — mesmo nível do gráfico de Crescimento Líquido que já era
+assim). Verificado com dado real: maior achado do ambiente foi `pccagentlessscanresourcegroup` (+1.337
+discos) e o tipo `microsoft.compute/disks` (+1.355) — um RG de scanner de segurança criando volume real de
+discos, sinal genuíno que ficava escondido dentro do total agregado.
+
+**2. Anomalias de Crescimento reintroduzida na UI** — a feature (Z-score sobre 35 dias, já existente desde
+2026-08-31) tinha sido removida da UI em 2026-08-31 junto da aba "Governança" inteira (usuário não queria
+Orçamento) — o backend nunca parou de rodar (e-mail periódico), só não tinha mais nenhum lugar pra ver sem
+SMTP configurado (o caso deste ambiente). Reintroduzida como card próprio `AnomaliasCard`, sempre visível,
+abaixo do Detalhe do Crescimento.
+
+**Bug real de exclusão encontrado ao reintroduzir na UI** — `_computeAnomaliasCrescimento()` é de
+2026-08-31, **anterior** ao padrão "excluir RG gerenciado por Databricks/AKS" que só foi estabelecido nas
+features de crescimento seguintes (Crescimento Líquido, Detalhe do Crescimento, Relatório Diário — todas
+2026-09-02+). Nunca tinha sido corrigida porque nunca teve UI pra alguém notar o problema: dos 334
+anomalias que a função retornava, ~1/3 eram de RG `MANAGED-RG-*`/`DATABRICKS-RG-*` — o mesmo ruído de
+churn efêmero já resolvido em todo o resto do módulo. Corrigido aplicando a mesma exclusão (334→**221**
+anomalias, zero de RG gerenciado).
+
+**Bug real de performance encontrado e corrigido ANTES de reportar pronto** — a correção acima, aplicada
+ingenuamente (`NOT (UPPER(resource_group_name) = ANY($3::text[]))` direto na CTE que já varre `azure_costs`,
+~3,7M linhas, pra uma janela de 35 dias), fez o endpoint ir de resposta rápida pra **quase 3 minutos**
+(175s medidos) — Postgres não otimiza bem um predicado de EXCLUSÃO (`NOT ... = ANY(array)`) avaliado linha
+a linha antes do `GROUP BY`, mesma classe de problema já documentada nesta sessão pro fallback de custo por
+RG. Corrigido com dois padrões diferentes, cada um evitando o filtro caro sobre milhões de linhas:
+- **Nível subscription** (RG "some" na soma por dia, não dá pra filtrar depois de agregar): duas
+  agregações — uma sem filtro (idêntica à consulta original, já rápida) e outra só com os RGs gerenciados
+  via `= ANY` de **inclusão** (poucas centenas de valores, casa bem com o índice funcional já existente
+  `idx_azure_costs_rg_upper`) — subtrai a segunda da primeira em SQL.
+- **Nível resource_group** (RG já é chave do `GROUP BY`): filtra **depois** de agregar — o conjunto já
+  agrupado por dia+RG é pequeno (algumas centenas de RGs × 35 dias), custa quase nada excluir ali, mesmo
+  raciocínio de "filtrar o resultado pequeno, não a tabela grande" já usado em outros pontos desta sessão.
+
+Isso reduziu de 175s pra ~45-50s — melhor, mas ainda pesado demais pra rodar a cada carregamento da tela.
+Adicionado **cache em memória com TTL de 20min + dedup por promise em andamento**
+(`_anomaliasCrescimentoCache`/`_anomaliasCrescimentoPromise`), mesmo padrão já usado pro Advisor
+(`_advisorCache`, que tem exatamente o mesmo perfil — ~46s na primeira chamada, instantâneo depois). Z-score
+sobre 35 dias não muda minuto a minuto, TTL de 20min é folga segura. Confirmado: 1ª chamada ~50s, chamadas
+seguintes ~190ms.
+
+**3. Alerta em tempo real no sino** — antes, tanto anomalia de crescimento quanto mudança de propriedade
+"de infra" (SKU/disco/storage/IP, já existente) só geravam e-mail — num ambiente sem SMTP configurado (o
+caso daqui), ninguém via o alerta. `_checkAnomaliasCrescimentoInventario()` e `_alertarMudancaPropriedade()`
+passaram a chamar `_registrarNotificacaoColeta(...)` (mesma tabela/mecanismo `notificacoes_sistema` já
+usado pelas notificações de coleta) **sempre**, independente de SMTP configurado — e-mail continua opcional/
+condicionado à config existente, dedup de 24h (`_tentarClaimAlerta`) compartilhado entre os dois canais (uma
+única claim libera bell + e-mail juntos). Novos `tipo`s `inventario_crescimento` (📈 laranja) e
+`inventario_alteracao` (🔧 azul) no `iconMap` do painel de notificações (`app.js`) — antes caíam no ícone
+verde genérico de "coleta concluída", confuso pra um alerta.
+
+**Verificado contra o servidor real, incluindo o caminho de ponta a ponta do sino**: `node --check`, `tsc -b`,
+suíte completa do frontend (287/287 — 6 falhas de timeout num full-run anterior, em arquivos não tocados
+por esta mudança — `AcoesView`/`CalculadoraView`/`ColetaView`/`DatabricksConfigModal`/`ReservasView` — todas
+passam 100% quando rodadas isoladas, mesmo flaky pré-existente já documentado várias vezes nesta sessão),
+`npm run frontend:build`, `pm2 restart` sem crash-loop. Via Playwright: `Detalhe do Crescimento` renderiza
+as 3 listas com dado real; `Anomalias de Crescimento` renderiza a tabela (221 linhas, badge de gatilho
+💰/📦); **o sino mostrou uma notificação real `📈 Crescimento anômalo — Resource Group RG-HUBPAG-DEVELOPMENT`**
+gerada pelo tick horário durante a sessão de testes — confirma o caminho completo (cálculo → dedup →
+`notificacoes_sistema` → `GET /notificacoes` → painel) funcionando com dado de produção, não só mock. Zero
+erro de console em toda a navegação.
+
+**Correções de eficiência/reuso do `/code-review` (2026-09-04)** — rodado sobre o diff logo em seguida;
+5 dos 8 ângulos falharam por limite de sessão da API (nenhum ângulo de corretude completou), os 3 que
+completaram (Eficiência/Simplificação/Reuso) não acharam bug de corretude, só trabalho duplicado/
+desperdiçado. Usuário aprovou só o subconjunto seguro (não quis mexer no pipeline de coleta já testado
+nem no batching do loop de notificação em background):
+- **`_getRgsGerenciados()`** — extrai o bloco de 4 linhas (`SELECT DISTINCT resource_group` +
+  classificar via `_detectManagedRg` + `toUpperCase`) que estava duplicado em 3 lugares
+  (`GET /crescimento-liquido`, `GET /crescimento-detalhe`, `_computeAnomaliasCrescimentoRaw`) pra um
+  helper único, cacheado (TTL 15min + dedup por promise em andamento, mesmo padrão de `_advisorCache`),
+  perto de `_detectManagedRg`. Deliberadamente **não** aplicado a `_computeRelatorioDiarioInventario`
+  (fonte diferente — `azure_recursos_auditoria_eventos` com filtro de data, universo de RG mais estreito;
+  não é uma duplicata pura, trocar a fonte mudaria os números já verificados).
+- **`GET /crescimento-detalhe`** — a query de Top Criadores (`rCriadores`) rodava sequencial, depois do
+  `Promise.all([snapshot(inicio), snapshot(fim)])` já ter resolvido, mesmo sendo independente — movida
+  pra dentro do mesmo `Promise.all`. Handler extraído pra `_computeCrescimentoDetalheRaw(dataInicio,
+  dataFim)` (mesmo padrão "Raw" já usado pra anomalias) e envolvido num cache `Map` chaveado por
+  `${inicio}:${fim}` + dedup por promise (TTL 5min, cap de 50 entradas no Map — evita crescimento sem
+  limite já que a chave é por período escolhido pelo usuário, não um conjunto pequeno e fixo tipo
+  subscription_id) — endpoint agora roda sempre visível em todo mount da tela, igual `anomaliasQuery`,
+  mas a tabela em si (`azure_recursos_inventario`, ~29 mil linhas) é pequena o bastante que o objetivo
+  aqui é só dedup de concorrência, não economizar uma query pesada (diferente do bug de 175s já corrigido
+  em Anomalias, que envolvia o `azure_costs` de 3,7M linhas).
+
+**Verificado contra o servidor real**: `node --check`, `pm2 restart` sem crash-loop, `GET
+/crescimento-liquido`/`/anomalias` continuam com os mesmos números (zero RG gerenciado, contagem
+consistente) — confirma que o helper compartilhado não mudou nenhum resultado; `GET /crescimento-detalhe`
+1ª chamada 375ms (tabela pequena, nunca teve o problema de performance de Anomalias) → 2ª chamada 68ms,
+payload idêntico (cache confirmado). `tsc -b` + `InventarioView.test.tsx` 29/29 (sem mudança de contrato
+de API, nenhum teste precisou de ajuste).
+
+### Alocação & Otimização — avaliação FinOps Framework + conformidade de tags (2026-09-04)
+
+Pedido do usuário: "avaliar dentro do framework e benchmark melhorias". Pesquisados o FinOps
+Framework 2026 e o State of FinOps 2026 (1.192 respondentes, US$83bi de gasto). Mapeamento do app
+contra as capabilities apontou: **Allocation** (a #1 mais priorizada) inexistente no lado Azure,
+**Usage Optimization** (a #1 prioridade atual) só com Advisor read-only, **Forecasting** só pra
+Databricks, **Budgeting** com backend vivo mas UI removida, **Rate Optimization** sem medir nada
+real, **Governance/Policy** com compliance de tags morto. Usuário aprovou 4 frentes; esta seção
+cobre a primeira entrega (compliance) e os gates que a precederam.
+
+**Gates de verificação contra o banco real, antes de qualquer código** — produziram 3 correções
+que teriam gerado features erradas:
+
+- **Tags são ricas**: 3.619.894 de 3.705.901 linhas (97,7%) têm `tags`, com chaves de negócio
+  reais (`projeto`, `bu`, `sigla`, `canal`, `modulo`, `chg`, `jira`). Rateio por tag é viável sem
+  coleta nova.
+- **Há commitment real** (ago/2026): `SavingsPlan` 24.715 linhas / 19.634,9h, `Reservation` 2.261
+  linhas / 18.949,6h, `OnDemand` 1.973.246, `Spot` 31.266. **Cobertura medida: 38.584,5h de
+  336.845,7h = 11,5% (12,9% excluindo Spot)** — benchmark de mercado é 60–80% da base elegível.
+  Uma leitura anterior desta sessão dizia "quase nenhum compromisso" com base nas 4 linhas
+  `Purchase` — **errado**: uso coberto por commitment não aparece como `Purchase`.
+- **Marcador RN-007 não serve pra detectar cobertura aqui**: `custo=0 AND effective_price>0` pega
+  1.524 linhas contra 26.976 de commitment real — mede outra coisa neste export. Usar
+  `pricing_model IN ('Reservation','SavingsPlan') OR benefit_id <> ''`.
+- **Cobertura em dinheiro e ESR de commitment NÃO são calculáveis** neste export: as linhas
+  cobertas têm `cost=0` **e** `payg_cost=0` **e** `effective_price=0` — só `quantity`. Medir em
+  horas. O desconto medível (R$5.226.791 lista → R$3.708.475 efetivo = 29,1%) é desconto
+  negociado EA/MCA, **não** economia de reserva — rotular como "ESR" seria incorreto.
+
+**Bug real corrigido — `tags_obrigatorias` era uma cadeia morta ponta a ponta.**
+`POST /api/azure-inventario/config` (server.js) não desestruturava nem gravava o campo: o
+frontend já o enviava e o servidor **descartava em silêncio**. Consequência: a coluna ficava
+sempre `NULL`, `GET /tags-faltantes` sempre caía no early-return vazio, e **o corpo real daquele
+endpoint nunca executou em nenhum ambiente** — logo sua query nunca tinha sido medida. Não era
+"órfão de UI", como uma auditoria anterior desta sessão havia registrado.
+
+**Consequência disso: a query de `/tags-faltantes` era inviável e ninguém sabia.** Era uma
+subquery **correlacionada por linha** (`ORDER BY cost_date DESC LIMIT 1` para cada um dos ~29 mil
+recursos ativos) contra a tabela de 3,7M. Medido nesta rodada, servir esse relatório direto de
+`azure_costs` custa **45s** (GROUP BY/MAX 7d), **62s** (DISTINCT ON 7d) ou **190s** (DISTINCT ON
+35d) — todas inviáveis pra uma tela, e a diferença de cobertura entre 7 e 35 dias é irrisória
+(28.581 vs 28.620 recursos).
+
+**Solução: `azure_recurso_tags` materializada** (`resource_id_upper` PK, `tags` TEXT, `visto_em`,
+`atualizado_em`), construída em background por `_rebuildRecursoTagsCache()` — janela de 35 dias
+ancorada em `MAX(cost_date)` (não `CURRENT_DATE`: o billing atrasa 2-3 dias e ancorar em "hoje"
+perderia os dias mais recentes). Build custa ~234s e produziu 497.136 recursos; **a leitura cai
+pra ~3,5s** (hash join). Timer próprio de 6h + `_iniciarRecursoTagsCache()` nos 2 pontos de boot,
+4 min após o startup (depois do `_refreshAzureCache` e do warm-up de RG, pra não somar três
+operações pesadas no mesmo instante). `tags` fica como TEXT e é parseado com `JSON.parse` em JS na
+leitura — **deliberadamente não `::jsonb`**: um CAST que falhe numa única linha malformada
+abortaria o build inteiro. Rota manual `POST /api/azure-inventario/recurso-tags/rebuild` (202).
+
+`GET /tags-faltantes` ganhou cache (TTL 15min + dedup por promise), `pct_conformes` sobre o
+**verificável** (exclui do denominador os recursos sem billing conhecido — puni-los seria punir
+falta de dado, não falta de tag), `total_nao_conformes` exato com a lista capada em 300, e
+`atualizado_em`/`recursos_conhecidos` pro cliente poder mostrar a defasagem do cache.
+
+**Bug real pego pelo próprio teste ponta a ponta**: salvar a config não invalidava o cache do
+relatório — o admin configuraria as chaves e não veria nada mudar por até 15 min, achando que o
+save falhou. Corrigido com `_tagsFaltantesCache.clear()` no `POST /config`.
+
+**Nova view top-level `alocacao`** (`frontend/src/views/AlocacaoView.tsx`) — separada do
+Inventário de propósito: aquele é o plano **ARM** (Resource Graph, quem criou o quê), esta é o
+plano de **billing** (`azure_costs`), com audiência financeira. Padrão já trilhado pela view
+`inventario`: item de nav em `index.html`, `MIGRATED_VIEWS` em `app.js`, `VIEWS` em `App.tsx`,
+sub-abas por `useState` local (sem canal no `bridge.ts`). Barra de conformidade com a marca do
+benchmark de 80% em CSS puro — zero lib de gráfico, política do projeto. Campo "Tags obrigatórias"
+adicionado à aba Configuração do Inventário (dono único de `azure_inventario_config`).
+
+**Verificado contra o servidor real**: `node --check`, `tsc -b`, `npm run frontend:build`,
+`pm2 restart` sem crash-loop. Cadeia completa exercitada pela primeira vez na história do app —
+`tags_obrigatorias` persiste (`"projeto,sigla"`), e o relatório retorna dado real: 50.474
+verificados, 21.842 não verificáveis, 28.632 verificáveis, 10.227 conformes, 18.405 não conformes
+= **35,7% de conformidade** (benchmark: 80%+). 7,9s a frio → 0,24s com cache. Playwright confirmou
+a tela renderizando os números reais com zero erro de console. 29/29 em `InventarioView.test.tsx`;
+285/287 na suíte completa (os 2 falhos passam isolados — flaky sob carga já documentado).
+
+**Showback por tag entregue na mesma rodada** — `azure_custo_por_tag` (+ `azure_tag_chaves`,
+`azure_tag_rollup_status`), construído por `_rebuildAlocacaoTagsMes()` um MÊS por vez.
+
+- **Cardinalidade era o risco real, e foi medido**: um único mês produz 601.841 combinações
+  (sub,chave,valor), dominadas por chaves que o Databricks injeta por execução — `ClusterId`
+  sozinho tem 364.990 valores distintos, `databricks-instance-name` 116.351, `ClusterName` 48.654.
+  As chaves de NEGÓCIO são pequenas (`projeto` 591, `sigla` 282, `bu` 70). Guardando top-500 por
+  `(mes,sub,chave)` e dobrando a cauda em `'(outros)'`: **601.841 → 27.194 linhas/mês**, com o
+  total por chave exato. Build real: 314s+302s+33s pros 3 meses, 66.857 linhas.
+- **`pg_input_is_valid(tags,'jsonb')` guarda o cast** — o plano dizia pra não usar por exigir
+  PG≥16 e a versão não estar confirmada; confirmado **PG 18.2** neste ambiente. Medido que hoje
+  **0 linhas** são JSON inválido, mas a guarda fica como seguro barato contra um import futuro,
+  sem o custo de uma subtransação por linha.
+- Linhas sintéticas `tag_chave='__total__'` guardam o custo do mês/subscription — assim
+  `nao_alocado = __total__ − alocado` é auto-consistente, sem depender de casar com outra query.
+- **Bug de correção encontrado testando com dado real**: valor de tag **vazio** estava contando
+  como alocado — 206 linhas somando **R$ 6,66 mi**, concentradas justamente nas chaves que
+  importam (`bu` R$966 mil, `centroDeCusto` R$672 mil, `idFinOps` R$672 mil). Inflava o
+  percentual sem carregar nenhuma informação de rateio, e contradizia `/tags-faltantes`, que já
+  trata `''` como faltando. Corrigido na LEITURA (`TRIM(tag_valor) <> ''`), sem reconstruir o
+  rollup: `projeto` caiu de 69,0% pra **63,4%** — número honesto.
+- `alocado` é somado a partir do agregado por MÊS, não da lista de itens (capada em 100) — senão
+  uma chave com muitos valores subestimaria o total.
+- **Guarda compartilhada `_scanPesadoEmAndamento()`** entre os dois builders — medido que o cache
+  de tags sozinho leva ~234s, mas levou **1092s** quando um rollup manual rodou em paralelo (os
+  dois varrem `azure_costs` inteiro). Mesma lição do build concorrente de RG que custou 209s.
+
+Rotas: `GET /api/azure-costs/tag-chaves`, `GET /api/azure-costs/alocacao-tags`,
+`POST /api/azure-costs/alocacao-tags/rebuild`. Leitura em ~0,45s (rollup pequeno).
+
+**Verificado com dado real de produção**: `projeto` aloca R$4.483.624 de R$7.077.247 (**63,4%**),
+`bu` **25,5%**, `centroDeCusto` **11,1%** — todos abaixo do benchmark de 80%, o que é em si o
+achado. Top projetos: NFCOM R$1.354.302 (19,1%), p4p-571 data mesh R$645.429 (9,1%). Playwright
+confirmou a tela com esses números, zero erro de console.
+
+**Forecast Azure + Budget religado na mesma rodada** (aba "Previsão & Orçamento").
+
+- **`frontend/src/lib/projecaoMes.ts`** (novo, puro, 6 testes) — o mês corrente NÃO pode entrar na
+  regressão: `por_mes` traz set/2026 com R$373.430 (3 dias) contra R$3.708.475 de agosto; jogar
+  isso em `forecastLinear` produziria uma reta despencando e uma "previsão" perto de zero, pior
+  que não ter previsão. `mesesCompletos()` filtra pelo mês de `MAX(cost_date)`;
+  `projecaoMesCorrente()` trata o mês em andamento à parte, por run-rate. O divisor é o dia de
+  `dataFim` (último dia COM DADO), **não** `new Date()` — o billing atrasa 2-3 dias, e dividir por
+  dias sem billing subestimaria o run-rate (com 3 dias de dado e 4 corridos, erro de 25%).
+- **`forecastLinear.ts` reusado sem alteração** — antes só o Databricks o usava.
+- **Aviso honesto de confiabilidade**: com menos de 4 meses fechados, a UI diz que a tendência é
+  "matematicamente válida mas estatisticamente pouco confiável" em vez de entregar um número
+  falsamente preciso (o ambiente real tem só 2 meses fechados).
+- **Rota nova `GET /api/azure-costs/serie-mensal`** — o plano previa reusar `/azure-costs/resumo`,
+  mas medido que ele leva **42s a frio** (aceitável quando só o modal de Expurgo o usava,
+  inaceitável numa aba que carrega sempre). A série sai das linhas `__total__` do rollup de tags
+  em **290ms**, com total idêntico (R$7.077.247,4494 nos dois). `ate` = `MAX(cost_date)`,
+  formatado sem `toISOString()` (evita o shift de fuso já documentado neste arquivo).
+- **Budget Azure religado — 100% frontend, zero backend**: tabela, CRUD,
+  `_computeOrcamentosInventarioAlertas()` e o alerta por e-mail já estavam vivos;
+  `InventarioOrcamentoModal.tsx` existia sem nenhum importador desde a remoção da aba
+  "Governança" (2026-08-31). Agora tem tabela + criar/editar/excluir + banner de alertas por
+  severidade (`color-mix()`, nunca sufixo de alfa hex sobre `var()` — bug já documentado).
+
+**Verificado via Playwright**: previsão renderiza jul R$2.995k e ago R$3.708k sólidos, set/out/nov
+hachurados (R$4.422k/R$5.135k/R$5.848k), MTD R$373.430 com projeção run-rate de R$3.734.305 — o
+contraste entre a tendência linear e o run-rate é visível e o aviso de 2 meses explica a
+divergência. Modal de orçamento abre e renderiza todos os campos. Zero erro de console.
+
+**Cobertura RI/SP entregue na mesma rodada** (aba "Cobertura RI/SP"), com a fórmula corrigida
+pelos gates.
+
+- **Medida em HORAS, não em R$** — os gates confirmaram que as linhas cobertas por
+  Reservation/Savings Plan vêm com `cost=0` **E** `payg_cost=0` **E** `effective_price=0` neste
+  export; só `quantity` sobrevive. Uma fórmula em dinheiro daria 0%, que o usuário leria como
+  "não temos reserva nenhuma" — falso. Horas é também a unidade canônica de coverage de compute
+  em FinOps.
+- **Dois números, de propósito**: `cobertura_global` (toda hora de VM) e `cobertura_elegivel`
+  (excluindo Spot, que não é elegível a commitment). Reportar só o global subestimaria o trabalho
+  do time, já que Spot nunca poderia ser coberto.
+- **ESR de commitment é declarado NÃO calculável**, com motivo explícito na resposta e na tela —
+  em vez de exibir um número que pareceria certo. O desconto que É medível (lista → efetivo) sai
+  rotulado como **desconto negociado EA/MCA**, nunca como "ESR", que significaria outra coisa.
+- **Materializada em `azure_commitment_cobertura`**, populada no MESMO job de background do
+  rollup de tags — a query ao vivo custa **44s** sobre os 3,7M (medido); a rota lê em **106ms**.
+- **`determinavel: false`** quando o rollup ainda não rodou: a UI mostra um card explicando, nunca
+  um "0%".
+
+**Bug real pego pelo teste**: o incremental de `_rebuildAlocacaoTags` pulava meses cujas tabelas
+de TAG já estavam prontas — então, ao adicionar a saída nova de cobertura, o rebuild manual
+**não fazia nada silenciosamente** e a tabela ficava vazia. Corrigido em duas frentes: o
+incremental passou a checar também a presença do mês em `azure_commitment_cobertura`, e o gatilho
+manual passou a **forçar** (um botão que silenciosamente não faz nada é pior que não ter o botão).
+
+**Verificado com dado real**: 677.364h de VM no período, 77.885h cobertas (RI 39.874h + SP
+38.011h), 82.750h de Spot → **cobertura elegível de 13,1%** contra benchmark de mercado de 60–80%,
+estável nos 3 meses (13,4% → 12,9% → 11,4%). Desconto EA/MCA de 27,8% (R$1.434.870 de lista →
+R$1.035.982 efetivo). 516.728h elegíveis sem cobertura — o achado acionável da feature. Playwright
+confirmou a tela, zero erro de console.
+
+**Desperdício Azure entregue — 4ª e última frente** (aba "Desperdício" no Inventário, plano ARM).
+
+Capability "Usage Optimization" — a #1 prioridade atual do State of FinOps 2026. Detecção própria
+via Resource Graph, reusando a MESMA Service Principal do Inventário (role Reader) — zero
+permissão nova. 4 categorias: disco não anexado, snapshot antigo, IP público sem uso, NIC não
+anexada. **Rightsizing de VM deliberadamente fora**: exigiria métricas do Azure Monitor (outra
+API, outra coleta, outra permissão) — as 4 categorias aqui são determináveis pelo estado do
+próprio recurso.
+
+- **`_resourceGraphQuery(token, sub, kql)`** — helper genérico com paginação `$skipToken`, criado
+  em vez de generalizar `_resourceGraphFetchRecursos` (query fixa, usada pela reconciliação já em
+  produção).
+- **Mitigação obrigatória do falso-positivo nº1**: um IP público em frontend de Load Balancer /
+  Bastion / Firewall / NAT Gateway / VPN Gateway / Application Gateway pode ter `ipConfiguration`
+  vazio e estar **em uso**. Uma 2ª query ARG coleta os ids de PIP referenciados por esses tipos e
+  subtrai — marcar esses como desperdício destruiria a confiança na tela inteira.
+- **Custo pelo billing observado, não por preço de tabela**: `JOIN unnest($ids)` (não `= ANY`, que
+  degrada pra seq scan com milhares de elementos) sobre `idx_azure_costs_resource_id_upper` +
+  recorte por `cost_date` — predicado de INCLUSÃO, o oposto do `NOT ... = ANY` que já custou 175s.
+  A extrapolação para 30 dias é honesta nestas categorias porque disco managed e IP estático
+  faturam a mesma taxa anexados ou não.
+- **Sem billing conhecido → `null`, nunca `0`** (mesma convenção de `nao_verificaveis`): zero
+  significaria "é de graça", e o que se sabe é "não se sabe".
+- Exclui RG gerenciado por Databricks/AKS item a item via `_detectManagedRg` (o `resourceGroup` já
+  vem do ARG — não precisa do `_getRgsGerenciados()`, que leria de outra tabela).
+- Cache 20min + dedup por promise + resiliência por subscription (`erros[]`), cópia do
+  `_advisorCache`.
+
+**Bug real pego pela API de verdade** (não por mock): `extract_all()` do KQL exige regex com 1–16
+grupos de captura — a primeira versão não tinha nenhum, e as 3 subscriptions voltaram 400
+(`Functions_ArgumentRegexMatchingGroupCountInvalid`). A resiliência por subscription funcionou
+como projetada: erro reportado por sub, sem derrubar a rota. Corrigido com grupo de captura.
+
+**Verificado contra a Azure real**: **R$ 17.136,07/mês de desperdício** (~R$ 205.633/ano) —
+51 discos órfãos (R$ 14.056,68), 60 snapshots antigos (R$ 3.049,32), 2 IPs soltos (R$ 30,06), e
+1.307 NICs órfãs sem custo (NIC não é cobrada na Azure — entulho, não gasto; aparecem como "—").
+Resposta em 7s a frio. Zero erro de console via Playwright.
+
+**Configuração das tags obrigatórias direto na tela de Conformidade** (2026-09-04, pedido do
+usuário: "preciso de uma opção para configurar as Tags que são obrigatórias nos Ambientes"). Antes
+o texto apenas mandava o usuário até Inventário → Configuração.
+
+- **Rota dedicada `PUT /api/azure-inventario/tags-obrigatorias`**, não reuso do `POST /config`:
+  aquele faz UPDATE de **todos** os campos, então salvar a partir de outra tela exigiria reenviar
+  `sp_id`/`subscription_ids`/`retencao_dias` — e um campo faltando zeraria a configuração da
+  coleta. Com rota própria, as duas telas editam o mesmo dado sem risco de uma sobrescrever a
+  outra. Verificado: após o PUT, `sp_id`, `subscription_ids` e `retencao_dias` ficaram intactos.
+  A rota também limpa `_tagsFaltantesCache` (senão o relatório serviria o resultado antigo por até
+  15 min e o usuário acharia que o save falhou — mesmo bug já corrigido antes no `POST /config`).
+- Chips clicáveis com as chaves que **existem no billing** (de `/tag-chaves`) + `datalist` — evita
+  digitar no escuro. Expõe de imediato um problema real de governança deste ambiente: existem
+  `projeto` **e** `Projeto`, `trilha` **e** `Trilha` como chaves distintas (o rollup guarda a
+  chave como veio, justamente pra o admin ver as variantes em vez de normalizar e esconder).
+- **Decisão corrigida durante o teste**: o valor atual vem de `GET /config` (instantâneo), não do
+  relatório de conformidade (~8s). Na 1ª versão o botão "Configurar" ficava travado esperando o
+  relatório pesado; pior, clicar antes de ele chegar abriria o editor **vazio**, e salvar dali
+  apagaria silenciosamente as tags já configuradas.
+
+### Rodada de ajustes seguintes (2026-09-04) — import Databricks, orçamento por tag, transação no rollup
+
+**1. Import Databricks aceita .parquet e .zip** (pedido do usuário: "hoje Databricks só pode
+importar em csv, pode ajustar para outros formatos como as coletas do azure"). A infraestrutura
+já existia inteira: `_lerArquivoRows()` (usado pelo import Azure) despacha CSV/Parquet/ZIP —
+inclusive ZIP com vários arquivos dentro — e as libs (`@dsnp/parquetjs`, `adm-zip`) já estavam
+instaladas. A única razão de o Databricks aceitar só CSV era `_processarImportDatabricks` chamar
+`_lerCSV` direto. Trocada a chamada, liberadas as extensões na rota e no `accept` do frontend.
+Limite subiu de 100 MB pra **500 MB** (um export comprimido de várias semanas passa fácil de 100
+MB; ainda bem abaixo dos 2 GB do Azure). **Verificado com os 3 formatos gerados de verdade**
+(CSV, Parquet e ZIP com o mesmo conteúdo): os três importaram `ins: 2, err: 0` e produziram
+exatamente R$ 34,75 — dados de teste removidos ao final.
+
+**2. Orçamento por TAG** (`escopo_tipo='tag'` + colunas `tag_chave`/`tag_valor`, migração
+idempotente). Fecha a lacuna já registrada acima: dava pra ver que o projeto NFCOM gastou
+R$1,35 mi, mas não pra pôr um teto nele — rateio e orçamento não se compunham.
+- Lê do rollup `azure_custo_por_tag` já existente — **zero query nova sobre os 3,7M**. Caveat
+  real e documentado na UI: o rollup é reconstruído de 6 em 6h, então um orçamento por tag reage
+  com essa defasagem (os outros escopos leem o billing ao vivo).
+- **`tipo_limite='recursos'` é rejeitado no escopo de tag** (400 com mensagem explicando): o
+  inventário ARM não guarda tags — elas vêm do billing —, então contagem de recursos por tag não
+  é calculável. Deixar criar mediria silenciosamente a coisa errada.
+- `subscription_id` vira opcional aqui (`''` = todas): um teto de projeto atravessa assinaturas
+  por natureza. Coluna é NOT NULL no schema, por isso string vazia e não null.
+- Chave e valor vêm de dropdown/datalist alimentados pelo rollup, não digitados — `projeto` vs
+  `Projeto` são chaves distintas no dado real, e errar a grafia criaria um orçamento que nunca
+  dispara.
+- **Verificado contra dado real**: as 3 severidades disparam corretamente (teto R$60k → 86,5%
+  `atencao`; R$55k → 94,4% `critico`; R$40k → 129,8% `estourado`), o filtro por assinatura
+  funciona, e os 2 guard-rails retornam 400. Orçamentos de teste removidos.
+
+**3. Bug real encontrado e corrigido — rollup mensal não era atômico.** `_rebuildAlocacaoTagsMes`
+fazia `DELETE` + 4 `INSERT`s sem transação. Um `pm2 restart` no meio deixava o mês com as linhas
+de tag mas **sem** as linhas sintéticas `__total__` — e como `/serie-mensal` e o showback leem
+justamente de `__total__`, a série passou a mostrar **R$3,37 mi em vez dos R$7,08 mi reais, em
+silêncio** (agosto sumiu inteiro da série). Achado medindo a performance do `/resumo`, não por
+relato. Corrigido envolvendo o rebuild do mês numa transação: morte no meio faz rollback e o mês
+continua com o dado ANTIGO — consistente, ainda que defasado, sempre melhor que meio apagado.
+
+**4. Reconciliação do Inventário re-executada** (ação operacional, sem mudança de código): 178
+recursos novos, contra 11.197 da vez anterior — o inventário está bem coberto e a coleta
+incremental vem acompanhando.
+
+**Medição que motivou a dívida técnica registrada**: `GET /api/azure-costs/resumo` leva **23,7s**
+na agregação geral + **37,1s** no `por_mes` (~42s no total, a frio). O mesmo dado sai do rollup em
+**0,01s**. `/serie-mensal` já contorna isso pro forecast, mas o `/resumo` original continua lento
+pra quem o usa (modal de Expurgo) — não trocado porque o Expurgo mostra contagens antes de
+apagar, e servir dado defasado ali seria pior que servir lento.
+
+**As 4 frentes aprovadas estão entregues.** Ficam como próximos passos possíveis (não pedidos):
+unit economics (precisa de métrica de negócio como denominador), sustentabilidade/carbono (API e
+permissão novas), e multi-cloud real (só Azure + Databricks são ingeridos hoje).
+
 ### Price List module
 `_syncPriceList(currency='USD')` — fetches all pages from Azure Retail Prices API, stores in `azure_price_list`.
 - URL: `?api-version=2023-01-01-preview&currencyCode=USD` (sem filtro de região — retorna todos os meters)

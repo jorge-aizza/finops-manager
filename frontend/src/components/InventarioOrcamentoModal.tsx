@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { criarAzureOrcamentoInventario, atualizarAzureOrcamentoInventario } from '../api/azureInventario'
 import { listResourceGroups } from '../api/calculadora'
+import { getAzureTagChaves, getAzureAlocacaoTags } from '../api/azureInventario'
 import type { AzureOrcamentoEscopoTipo, AzureOrcamentoInventario, AzureOrcamentoTipoLimite } from '../types/azureInventario'
 
 // Orçamento/teto de crescimento — pedido do usuário ("quais melhorias vc me sugere para
@@ -27,17 +28,34 @@ export default function InventarioOrcamentoModal({ orcamento, subscriptions, onC
   const [thresholdAtencao, setThresholdAtencao] = useState(orcamento?.threshold_atencao?.toString() || '75')
   const [thresholdCritico, setThresholdCritico] = useState(orcamento?.threshold_critico?.toString() || '90')
   const [ativo, setAtivo] = useState(orcamento?.ativo ?? true)
+  const [tagChave, setTagChave] = useState(orcamento?.tag_chave || '')
+  const [tagValor, setTagValor] = useState(orcamento?.tag_valor || '')
 
   const rgsQuery = useQuery({
     queryKey: ['calc-rgs', subscriptionId],
     queryFn: () => listResourceGroups([subscriptionId]),
     enabled: escopoTipo === 'resource_group' && !!subscriptionId,
   })
+  // Escopo por tag (2026-09-04): chave e valor vêm do rollup já existente, não digitados —
+  // `projeto` vs `Projeto` são chaves diferentes no dado real, e errar a grafia produziria um
+  // orçamento que nunca dispara.
+  const tagChavesQuery = useQuery({
+    queryKey: ['azure-tag-chaves'],
+    queryFn: () => getAzureTagChaves(),
+    enabled: escopoTipo === 'tag',
+  })
+  const tagValoresQuery = useQuery({
+    queryKey: ['azure-alocacao-tags', tagChave, ''],
+    queryFn: () => getAzureAlocacaoTags({ chave: tagChave }),
+    enabled: escopoTipo === 'tag' && !!tagChave,
+  })
 
   const thAtencaoNum = parseFloat(thresholdAtencao)
   const thCriticoNum = parseFloat(thresholdCritico)
   const thresholdsValidos = thAtencaoNum > 0 && thAtencaoNum < 100 && thCriticoNum > thAtencaoNum && thCriticoNum <= 100
-  const escopoValido = !!subscriptionId && (escopoTipo === 'subscription' || (escopoTipo === 'resource_group' && !!resourceGroup))
+  const escopoValido = escopoTipo === 'tag'
+    ? (!!tagChave && !!tagValor)   // subscription é opcional aqui: '' = todas
+    : (!!subscriptionId && (escopoTipo === 'subscription' || (escopoTipo === 'resource_group' && !!resourceGroup)))
   const limiteValido = parseFloat(limiteValor) > 0
 
   const salvarMutation = useMutation({
@@ -47,7 +65,11 @@ export default function InventarioOrcamentoModal({ orcamento, subscriptions, onC
         escopo_tipo: escopoTipo,
         subscription_id: subscriptionId,
         resource_group: escopoTipo === 'resource_group' ? resourceGroup : null,
-        tipo_limite: tipoLimite,
+        tag_chave: escopoTipo === 'tag' ? tagChave : null,
+        tag_valor: escopoTipo === 'tag' ? tagValor : null,
+        // Contagem de recursos por tag não é calculável (o inventário ARM não guarda tags) —
+        // o servidor rejeita, então o cliente já força 'custo'.
+        tipo_limite: escopoTipo === 'tag' ? 'custo' : tipoLimite,
         limite_valor: parseFloat(limiteValor) || 0,
         threshold_atencao: thAtencaoNum,
         threshold_critico: thCriticoNum,
@@ -67,6 +89,8 @@ export default function InventarioOrcamentoModal({ orcamento, subscriptions, onC
   function handleEscopoTipoChange(v: AzureOrcamentoEscopoTipo) {
     setEscopoTipo(v)
     if (v !== 'resource_group') setResourceGroup('')
+    if (v !== 'tag') { setTagChave(''); setTagValor('') }
+    if (v === 'tag') setTipoLimite('custo')
   }
 
   return (
@@ -82,9 +106,9 @@ export default function InventarioOrcamentoModal({ orcamento, subscriptions, onC
             <input id="invorc-nome" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Ex: Teto de recursos — ambiente Dev" />
           </div>
           <div className="form-group">
-            <label htmlFor="invorc-sub">Subscription</label>
+            <label htmlFor="invorc-sub">Subscription{escopoTipo === 'tag' ? ' (opcional)' : ''}</label>
             <select id="invorc-sub" value={subscriptionId} onChange={(e) => { setSubscriptionId(e.target.value); setResourceGroup('') }}>
-              <option value="">Selecione...</option>
+              <option value="">{escopoTipo === 'tag' ? 'Todas as assinaturas' : 'Selecione...'}</option>
               {subscriptions.map((s) => <option key={s.subscription_id} value={s.subscription_id}>{s.subscription_name || s.subscription_id}</option>)}
             </select>
           </div>
@@ -93,6 +117,7 @@ export default function InventarioOrcamentoModal({ orcamento, subscriptions, onC
             <select id="invorc-escopo-tipo" value={escopoTipo} onChange={(e) => handleEscopoTipoChange(e.target.value as AzureOrcamentoEscopoTipo)}>
               <option value="subscription">Toda a subscription</option>
               <option value="resource_group">Um Resource Group específico</option>
+              <option value="tag">Uma tag específica (ex: projeto = NFCOM)</option>
             </select>
           </div>
           {escopoTipo === 'resource_group' && (
@@ -109,13 +134,45 @@ export default function InventarioOrcamentoModal({ orcamento, subscriptions, onC
               </datalist>
             </div>
           )}
-          <div className="form-group">
-            <label htmlFor="invorc-tipo-limite">Tipo de limite</label>
-            <select id="invorc-tipo-limite" value={tipoLimite} onChange={(e) => setTipoLimite(e.target.value as AzureOrcamentoTipoLimite)}>
-              <option value="recursos">Quantidade de recursos ativos</option>
-              <option value="custo">Custo do mês corrente (R$)</option>
-            </select>
-          </div>
+          {escopoTipo === 'tag' && (
+            <>
+              <div className="form-group">
+                <label htmlFor="invorc-tag-chave">Chave da tag</label>
+                <select id="invorc-tag-chave" value={tagChave} onChange={(e) => { setTagChave(e.target.value); setTagValor('') }}>
+                  <option value="">Selecione...</option>
+                  {(tagChavesQuery.data?.chaves || []).map((c) => (
+                    <option key={c.chave} value={c.chave}>{c.chave} ({c.valores_distintos} valores)</option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label htmlFor="invorc-tag-valor">Valor da tag</label>
+                <input
+                  id="invorc-tag-valor" list="invorc-tag-valores" value={tagValor}
+                  onChange={(e) => setTagValor(e.target.value)}
+                  placeholder={tagChave ? 'Ex: NFCOM' : 'Escolha a chave primeiro'}
+                  disabled={!tagChave}
+                />
+                <datalist id="invorc-tag-valores">
+                  {(tagValoresQuery.data?.itens || []).map((i) => <option key={i.valor} value={i.valor} />)}
+                </datalist>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Orçamento por tag é sempre sobre <strong>custo do mês</strong> — contagem de recursos não é
+                  calculável por tag (o inventário não guarda tags; elas vêm do billing). Lido do rollup, que é
+                  reconstruído a cada 6h.
+                </div>
+              </div>
+            </>
+          )}
+          {escopoTipo !== 'tag' && (
+            <div className="form-group">
+              <label htmlFor="invorc-tipo-limite">Tipo de limite</label>
+              <select id="invorc-tipo-limite" value={tipoLimite} onChange={(e) => setTipoLimite(e.target.value as AzureOrcamentoTipoLimite)}>
+                <option value="recursos">Quantidade de recursos ativos</option>
+                <option value="custo">Custo do mês corrente (R$)</option>
+              </select>
+            </div>
+          )}
           <div className="form-group">
             <label htmlFor="invorc-limite">{tipoLimite === 'custo' ? 'Limite mensal (R$)' : 'Limite de recursos'}</label>
             <input id="invorc-limite" type="number" min={0} step={tipoLimite === 'custo' ? '0.01' : '1'} value={limiteValor} onChange={(e) => setLimiteValor(e.target.value)} />

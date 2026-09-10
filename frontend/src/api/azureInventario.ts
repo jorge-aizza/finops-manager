@@ -8,6 +8,8 @@ import type {
   AzureOrcamentoAlerta, AzureTagsFaltantesResposta, AzureAuditoriaPorTipo,
   AzureResumoPorAssinaturaResposta, AzureRecursoArmDetalhe, AzureAdvisorResposta,
   AzureRedeTopologiaResposta, AzurePropriedadeMudanca, AzureRelatorioDiario,
+  AzureCrescimentoDetalheResposta, AzureTagChavesResposta, AzureAlocacaoResposta,
+  AzureSerieMensalResposta, AzureCoberturaResposta, AzureDesperdicioResposta,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -172,6 +174,20 @@ export const getAzureResumoPorAssinatura = (subscriptionId?: string) => {
   }))
 }
 
+// Detalhe do Crescimento Líquido (2026-09-04) — por Tipo/Resource Group + Top Criadores.
+export const getAzureCrescimentoDetalhe = (data_inicio?: string, data_fim?: string) => {
+  const q = new URLSearchParams()
+  if (data_inicio) q.set('data_inicio', data_inicio)
+  if (data_fim) q.set('data_fim', data_fim)
+  const qs = q.toString()
+  return apiFetch<AzureCrescimentoDetalheResposta>('GET', '/azure-inventario/crescimento-detalhe' + (qs ? '?' + qs : '')).then((r) => ({
+    ...r,
+    por_tipo: r.por_tipo.map((t) => numFields(t, ['inicio', 'fim', 'delta'])),
+    por_resource_group: r.por_resource_group.map((t) => numFields(t, ['inicio', 'fim', 'delta'])),
+    top_criadores: r.top_criadores.map((t) => numFields(t, ['total'])),
+  }))
+}
+
 // Governança de crescimento — anomalias (Z-score), orçamentos/teto por escopo, tags obrigatórias.
 
 export const getAzureAnomaliasCrescimento = () =>
@@ -202,6 +218,70 @@ export const getAzureOrcamentosInventarioAlertas = () =>
       pct: Number(r.pct),
     }))
   )
+
+// ── Alocação de custo por tag (showback) ─────────────────────────────────────
+export const getAzureTagChaves = (mesInicio?: string, mesFim?: string) => {
+  const q = new URLSearchParams()
+  if (mesInicio) q.set('mes_inicio', mesInicio)
+  if (mesFim) q.set('mes_fim', mesFim)
+  const qs = q.toString()
+  return apiFetch<AzureTagChavesResposta>('GET', '/azure-costs/tag-chaves' + (qs ? '?' + qs : '')).then((r) => ({
+    ...r,
+    chaves: r.chaves.map((c) => numFields(c, ['valores_distintos', 'custo'])),
+  }))
+}
+
+export interface AzureAlocacaoFiltros {
+  chave: string
+  mes_inicio?: string
+  mes_fim?: string
+  subscription_id?: string
+}
+export const getAzureAlocacaoTags = (f: AzureAlocacaoFiltros) => {
+  const q = new URLSearchParams({ chave: f.chave })
+  if (f.mes_inicio) q.set('mes_inicio', f.mes_inicio)
+  if (f.mes_fim) q.set('mes_fim', f.mes_fim)
+  if (f.subscription_id) q.set('subscription_id', f.subscription_id)
+  // NUMERIC do Postgres volta como string via `pg` — normalizar na borda (armadilha já
+  // documentada em api/normalize.ts).
+  return apiFetch<AzureAlocacaoResposta>('GET', '/azure-costs/alocacao-tags?' + q.toString()).then((r) => ({
+    ...numFields(r, ['total', 'alocado', 'nao_alocado', 'pct_alocado']),
+    itens: r.itens.map((i) => numFields(i, ['custo', 'linhas', 'pct'])),
+    por_mes: r.por_mes.map((m) => numFields(m, ['alocado', 'total', 'nao_alocado', 'pct_alocado'])),
+  }))
+}
+
+export const getAzureSerieMensal = () =>
+  apiFetch<AzureSerieMensalResposta>('GET', '/azure-costs/serie-mensal').then((r) => ({
+    ...r,
+    por_mes: r.por_mes.map((m) => numFields(m, ['custo'])),
+  }))
+
+export const getAzureCommitmentCobertura = (subscriptionId?: string) => {
+  const q = subscriptionId ? '?subscription_id=' + encodeURIComponent(subscriptionId) : ''
+  return apiFetch<AzureCoberturaResposta>('GET', '/azure-costs/commitment-cobertura' + q)
+}
+
+export const getAzureDesperdicio = (subscriptionId?: string, diasSnapshot?: number) => {
+  const q = new URLSearchParams()
+  if (subscriptionId) q.set('subscription_id', subscriptionId)
+  if (diasSnapshot) q.set('dias_snapshot', String(diasSnapshot))
+  const qs = q.toString()
+  return apiFetch<AzureDesperdicioResposta>('GET', '/azure-inventario/desperdicio' + (qs ? '?' + qs : ''))
+}
+
+export const rebuildAzureAlocacaoTags = () =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-costs/alocacao-tags/rebuild')
+
+// Rebuild do cache materializado de tags por recurso (azure_recurso_tags). Responde 202 na
+// hora — o build leva alguns minutos e roda em background no servidor.
+export const rebuildAzureRecursoTags = () =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-inventario/recurso-tags/rebuild')
+
+// Salva SÓ as tags obrigatórias — rota dedicada, não o POST /config (que grava todos os campos
+// e sobrescreveria sp_id/subscription_ids se chamado de outra tela).
+export const salvarTagsObrigatorias = (tags: string) =>
+  apiFetch<{ ok: boolean; tags_obrigatorias: string | null }>('PUT', '/azure-inventario/tags-obrigatorias', { tags_obrigatorias: tags })
 
 export const getAzureTagsFaltantes = (subscriptionId?: string) => {
   const q = subscriptionId ? '?subscription_id=' + encodeURIComponent(subscriptionId) : ''

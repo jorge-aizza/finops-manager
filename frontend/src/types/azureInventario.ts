@@ -51,15 +51,37 @@ export interface AzureAnomaliaCrescimento {
   gatilho: AzureAnomaliaCrescimentoGatilho
 }
 
-export type AzureOrcamentoEscopoTipo = 'subscription' | 'resource_group'
+// Detalhe do Crescimento Líquido (2026-09-04) — quebra o total do gráfico por Tipo de Recurso
+// e por Resource Group (snapshot início vs. fim do período), mais um ranking de quem mais
+// criou recursos que permaneceram ativos (accountability). Ver GET .../crescimento-detalhe.
+export interface AzureCrescimentoDetalheItem {
+  inicio: number
+  fim: number
+  delta: number
+}
+export interface AzureCrescimentoDetalheTipo extends AzureCrescimentoDetalheItem { tipo: string }
+export interface AzureCrescimentoDetalheRg extends AzureCrescimentoDetalheItem { resource_group: string }
+export interface AzureCrescimentoDetalheCriador { criador: string; total: number }
+export interface AzureCrescimentoDetalheResposta {
+  periodo: { inicio: string; fim: string }
+  por_tipo: AzureCrescimentoDetalheTipo[]
+  por_resource_group: AzureCrescimentoDetalheRg[]
+  top_criadores: AzureCrescimentoDetalheCriador[]
+}
+
+export type AzureOrcamentoEscopoTipo = 'subscription' | 'resource_group' | 'tag'
 export type AzureOrcamentoTipoLimite = 'recursos' | 'custo'
 
 export interface AzureOrcamentoInventario {
   id: number
   nome: string
   escopo_tipo: AzureOrcamentoEscopoTipo
+  /** Vazio em escopo 'tag' significa "todas as assinaturas". */
   subscription_id: string
   resource_group: string | null
+  /** Só em escopo 'tag'. Lê do rollup `azure_custo_por_tag` (reconstruído de 6 em 6h). */
+  tag_chave: string | null
+  tag_valor: string | null
   tipo_limite: AzureOrcamentoTipoLimite
   limite_valor: number
   threshold_atencao: number
@@ -73,6 +95,8 @@ export interface AzureOrcamentoInventarioInput {
   escopo_tipo: AzureOrcamentoEscopoTipo
   subscription_id: string
   resource_group: string | null
+  tag_chave?: string | null
+  tag_valor?: string | null
   tipo_limite: AzureOrcamentoTipoLimite
   limite_valor: number
   threshold_atencao: number
@@ -97,9 +121,19 @@ export interface AzureTagsFaltantesRecurso {
 }
 export interface AzureTagsFaltantesResposta {
   chaves: string[]
+  /** Detalhe capado em 300 itens — use `total_nao_conformes` para a contagem real. */
   nao_conformes: AzureTagsFaltantesRecurso[]
+  /** Recursos sem nenhuma linha de billing conhecida — não dá pra afirmar que faltam tags. */
   nao_verificaveis: number
   total_verificado: number
+  verificaveis: number
+  conformes: number
+  total_nao_conformes: number
+  /** Sobre o verificável (exclui não-verificáveis do denominador). null quando não há base. */
+  pct_conformes: number | null
+  /** Quando o cache materializado de tags foi construído — o dado é defasado por construção. */
+  atualizado_em: string | null
+  recursos_conhecidos: number
 }
 
 export interface AzureInventarioStatus {
@@ -389,4 +423,122 @@ export interface AzureRedeVNet {
 }
 export interface AzureRedeTopologiaResposta {
   vnets: AzureRedeVNet[]
+}
+
+// Alocação de custo por tag (showback, 2026-09-04) — capability "Allocation" do FinOps
+// Framework. Lido do rollup materializado `azure_custo_por_tag`, nunca de azure_costs ao vivo.
+export interface AzureTagChave {
+  chave: string
+  /** Cardinalidade — chaves com dezenas de milhares de valores (ClusterId etc.) são inúteis pra rateio. */
+  valores_distintos: number
+  custo: number
+}
+export interface AzureTagChavesResposta {
+  chaves: AzureTagChave[]
+  meses_construidos: { mes: string; construido_em: string | null }[]
+}
+export interface AzureAlocacaoItem {
+  valor: string
+  custo: number
+  linhas: number
+  pct: number | null
+}
+export interface AzureAlocacaoMes {
+  mes: string
+  alocado: number
+  total: number
+  nao_alocado: number
+  pct_alocado: number | null
+}
+export interface AzureAlocacaoResposta {
+  chave: string
+  total: number
+  alocado: number
+  nao_alocado: number
+  pct_alocado: number | null
+  itens: AzureAlocacaoItem[]
+  por_mes: AzureAlocacaoMes[]
+  /** Rollup é dado defasado por construção — a UI mostra quando foi reconstruído. */
+  atualizado_em: string | null
+}
+
+// Série mensal de custo (base do forecast) — lida do rollup, não do /azure-costs/resumo (42s a
+// frio). `ate` = MAX(cost_date), usado como divisor do run-rate do mês corrente.
+export interface AzureSerieMensalResposta {
+  por_mes: { mes: string; custo: number }[]
+  ate: string | null
+}
+
+// Cobertura de commitment (Reservation / Savings Plan) — capability "Rate Optimization".
+// Medida em HORAS de VM, não em R$: as linhas cobertas vêm com custo e valor de lista zerados
+// neste export de billing, então uma fórmula em dinheiro daria 0% (enganoso). Horas é também a
+// unidade canônica de coverage de compute em FinOps.
+export interface AzureCoberturaMes {
+  mes: string
+  horas_total: number
+  horas_reservation: number
+  horas_savingsplan: number
+  horas_spot: number
+  horas_cobertas: number
+  horas_elegiveis: number
+  cobertura_global: number | null
+  /** Exclui Spot do denominador — Spot não é elegível a Reservation/Savings Plan. */
+  cobertura_elegivel: number | null
+  custo_efetivo: number
+  custo_lista: number
+}
+export interface AzureCoberturaResposta {
+  /** false quando o rollup ainda não foi construído — a UI explica, nunca mostra "0%". */
+  determinavel: boolean
+  total: {
+    horas_total: number
+    horas_cobertas: number
+    horas_spot: number
+    horas_elegiveis: number
+    cobertura_global: number | null
+    cobertura_elegivel: number | null
+    horas_reservation: number
+    horas_savingsplan: number
+  }
+  /** Desconto negociado EA/MCA sobre On-Demand — NÃO é ESR de commitment. */
+  desconto_ondemand: { custo_efetivo: number; custo_lista: number; pct: number | null }
+  esr_commitment: { calculavel: boolean; motivo: string }
+  por_mes: AzureCoberturaMes[]
+  atualizado_em: string | null
+}
+
+// Desperdício Azure (capability "Usage Optimization") — detecção via Resource Graph, sem Azure
+// Monitor. Rightsizing de VM fica de fora de propósito: exigiria métricas de CPU/memória (outra
+// API, outra permissão). Estas categorias são determináveis pelo estado do próprio recurso.
+export type AzureDesperdicioCategoria = 'disco_orfao' | 'nic_orfa' | 'ip_solto' | 'snapshot_antigo'
+export interface AzureDesperdicioItem {
+  categoria: AzureDesperdicioCategoria
+  subscription_id: string
+  resource_id: string
+  nome: string | null
+  resource_group: string | null
+  location: string | null
+  sku: string | null
+  tamanho_gb: number | null
+  criado_em: string | null
+  custo_periodo: number | null
+  dias_observados: number
+  /** null (nunca 0) quando o recurso não tem billing conhecido — "não sabemos", não "é grátis". */
+  custo_mensal_estimado: number | null
+}
+export interface AzureDesperdicioResposta {
+  gerado_em: string
+  dias_snapshot: number
+  total_itens: number
+  custo_mensal_estimado_total: number
+  sem_custo_conhecido: number
+  por_categoria: {
+    categoria: AzureDesperdicioCategoria
+    itens: number
+    custo_mensal_estimado: number
+    sem_custo_conhecido: number
+  }[]
+  /** Capado em 500 — use `total_itens` para a contagem real. */
+  itens: AzureDesperdicioItem[]
+  erros: { subscription_id: string; erro: string }[]
 }

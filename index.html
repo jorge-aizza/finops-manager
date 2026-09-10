@@ -1306,6 +1306,16 @@
           </svg>
           <span class="nav-label">Inventário</span>
         </a>
+        <!-- Alocação & Otimização (2026-09-04) — plano de BILLING (azure_costs): rateio por tag,
+             conformidade, previsão e cobertura de commitment. Separado do Inventário, que é o
+             plano ARM (Resource Graph). -->
+        <a class="nav-item" data-view="alocacao" onclick="showView('alocacao')" title="Alocação de custo, conformidade de tags e otimização">
+          <svg viewBox="0 0 20 20" fill="none" width="17" height="17">
+            <path d="M10 3a7 7 0 1 0 7 7h-7V3z" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M12 2a6 6 0 0 1 6 6h-6V2z" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+          <span class="nav-label">Alocação</span>
+        </a>
         <!-- Databricks — grupo expansível (2026-08-28): Dashboard/Orçamentos e Anomalias/Quotas -->
         <div class="nav-group" id="nav-group-databricks">
           <div class="nav-group-header" data-view="databricks" onclick="openNavGroup('databricks')" title="Databricks">

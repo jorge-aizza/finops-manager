@@ -4332,6 +4332,40 @@ function _detectManagedRg(name) {
   return {};
 }
 
+// Lista de RGs gerenciados por Databricks/AKS, cacheada (2026-09-04, achado real do code
+// review) — antes desta extração, o mesmo bloco de 4 linhas (SELECT DISTINCT + classificar
+// via _detectManagedRg + toUpperCase) estava duplicado em 3 lugares (GET /crescimento-liquido,
+// GET /crescimento-detalhe, _computeAnomaliasCrescimentoRaw), cada um refazendo a mesma query
+// + classificação a cada chamada. Mesmo padrão de TTL + dedup por promise em andamento já
+// usado em `_advisorCache`/`_anomaliasCrescimentoCache` — TTL de 15min é seguro (nome de RG
+// não muda a cada minuto). Deliberadamente NÃO usado por `_computeRelatorioDiarioInventario`
+// — essa função classifica RGs a partir de `azure_recursos_auditoria_eventos` com filtro de
+// data (universo mais estreito, não uma duplicata pura); trocar a fonte mudaria os números já
+// verificados contra dado real.
+const _RGS_GERENCIADOS_TTL = 15 * 60 * 1000;
+let _rgsGerenciadosCache = null; // { lista, ts }
+let _rgsGerenciadosPromise = null;
+async function _getRgsGerenciados() {
+  if (_rgsGerenciadosCache && (Date.now() - _rgsGerenciadosCache.ts) < _RGS_GERENCIADOS_TTL) {
+    return _rgsGerenciadosCache.lista;
+  }
+  if (_rgsGerenciadosPromise) return _rgsGerenciadosPromise;
+  _rgsGerenciadosPromise = (async () => {
+    try {
+      const rgRows = await pool.query(`SELECT DISTINCT resource_group FROM azure_recursos_inventario WHERE resource_group IS NOT NULL`);
+      const lista = rgRows.rows
+        .map((r) => r.resource_group)
+        .filter((rg) => _detectManagedRg(rg).managed_type)
+        .map((rg) => rg.toUpperCase());
+      _rgsGerenciadosCache = { lista, ts: Date.now() };
+      return lista;
+    } finally {
+      _rgsGerenciadosPromise = null;
+    }
+  })();
+  return _rgsGerenciadosPromise;
+}
+
 // ── Helper: resolve parent_rg para RGs gerenciados (AKS e Databricks) ────────
 // rows: array já com managed_type/managed_label; subs: string[] de subscription_ids para filtrar query
 
@@ -6321,6 +6355,11 @@ async function ensureAzureColetaTable() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_inv_orc_ativo ON azure_inventario_orcamentos (ativo)`);
+  // Escopo por TAG (2026-09-04) — sem isso, orçamento e rateio por tag não se compunham: dava
+  // pra ver que o projeto NFCOM gastou R$1,35 mi, mas não pra pôr um teto nele. Lê do rollup
+  // `azure_custo_por_tag` já existente (zero query nova sobre os 3,7M).
+  await pool.query(`ALTER TABLE azure_inventario_orcamentos ADD COLUMN IF NOT EXISTS tag_chave VARCHAR(200)`);
+  await pool.query(`ALTER TABLE azure_inventario_orcamentos ADD COLUMN IF NOT EXISTS tag_valor VARCHAR(500)`);
 
   // Índice composto pra agregação diária de criação por RG (anomalia de crescimento) —
   // as consultas existentes (`idx_azure_recursos_aud_quando`/`idx_azure_recursos_aud_resource`)
@@ -6342,7 +6381,302 @@ async function ensureAzureColetaTable() {
     )
   `);
 
+  // Tags por recurso, materializadas (2026-09-04) — necessário, não otimização prematura.
+  // Medido contra o dado real (3,7M linhas em azure_costs): servir o relatório de compliance
+  // direto de azure_costs custa 45s (GROUP BY/MAX sobre 7 dias), 62s (DISTINCT ON 7 dias) ou
+  // 190s (DISTINCT ON 35 dias) POR REQUISIÇÃO — inviável pra uma tela. Com esta tabela, a mesma
+  // leitura vira um hash join e cai pra ~3,5s. O build custa ~234s, mas roda UMA vez em
+  // background (mesma ordem de grandeza de _refreshAzureCache ~87s e da reconciliação ~190s,
+  // ambos já aceitos neste app).
+  // `tags` fica como TEXT (cru, como veio do export) e é parseado com JSON.parse em JS na
+  // leitura — deliberadamente NÃO `::jsonb` aqui: um CAST que falhe numa única linha malformada
+  // abortaria o build inteiro, e export malformado é risco real (mesma razão já documentada no
+  // handler de /tags-faltantes).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_recurso_tags (
+      resource_id_upper TEXT PRIMARY KEY,
+      tags              TEXT,
+      visto_em          DATE,
+      atualizado_em     TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Rollup de custo por tag (2026-09-04) — capability "Allocation" do FinOps Framework, a mais
+  // priorizada do mercado. Materializado por MÊS: consultar `tags` (TEXT com JSON) ao vivo
+  // significaria ~2M parses por requisição; aqui o parse é pago uma vez por mês de dado.
+  // Cardinalidade é o risco real e foi medido: um único mês produz 601.841 combinações
+  // (sub,chave,valor), dominadas por chaves que o Databricks injeta por execução — `ClusterId`
+  // sozinho tem 364.990 valores distintos, `databricks-instance-name` 116.351. As chaves de
+  // NEGÓCIO são pequenas (`projeto` 591, `sigla` 282, `bu` 70). Por isso o builder guarda o
+  // top-500 valores por (mes,sub,chave) e dobra a cauda num bucket '(outros)': 601.841 → 27.194
+  // linhas, com o total por chave preservado exato (é ele que alimenta o % alocado).
+  // Linhas sintéticas `tag_chave='__total__'` guardam o custo total do mês/subscription — assim
+  // `nao_alocado = __total__ − soma(chave)` é auto-consistente, sem depender de casar com o
+  // resultado de outra query.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_custo_por_tag (
+      mes             CHAR(7)       NOT NULL,
+      subscription_id VARCHAR(200)  NOT NULL DEFAULT '',
+      tag_chave       VARCHAR(200)  NOT NULL,
+      tag_valor       VARCHAR(500)  NOT NULL,
+      custo           NUMERIC(20,6) NOT NULL DEFAULT 0,
+      linhas          BIGINT        NOT NULL DEFAULT 0,
+      PRIMARY KEY (mes, subscription_id, tag_chave, tag_valor)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_custo_por_tag_chave ON azure_custo_por_tag (mes, tag_chave)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_tag_chaves (
+      mes               CHAR(7)       NOT NULL,
+      tag_chave         VARCHAR(200)  NOT NULL,
+      valores_distintos INT           NOT NULL DEFAULT 0,
+      custo             NUMERIC(20,6) NOT NULL DEFAULT 0,
+      PRIMARY KEY (mes, tag_chave)
+    )
+  `);
+  // Cobertura de commitment (Reservation/Savings Plan) — capability "Rate Optimization".
+  // Medida em HORAS, não em dinheiro: confirmado contra o dado real que as linhas cobertas têm
+  // `cost=0` E `payg_cost=0` E `effective_price=0` — só `quantity`. Uma fórmula em R$ daria 0%,
+  // enganoso. Horas é também a unidade canônica de coverage de compute em FinOps.
+  // Materializada porque a query ao vivo custa ~44s sobre os 3,7M (medido).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_commitment_cobertura (
+      mes             CHAR(7)       NOT NULL,
+      subscription_id VARCHAR(200)  NOT NULL DEFAULT '',
+      h_total         NUMERIC(20,4) NOT NULL DEFAULT 0,
+      h_reservation   NUMERIC(20,4) NOT NULL DEFAULT 0,
+      h_savingsplan   NUMERIC(20,4) NOT NULL DEFAULT 0,
+      h_spot          NUMERIC(20,4) NOT NULL DEFAULT 0,
+      custo_efetivo   NUMERIC(20,6) NOT NULL DEFAULT 0,
+      custo_lista     NUMERIC(20,6) NOT NULL DEFAULT 0,
+      PRIMARY KEY (mes, subscription_id)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_tag_rollup_status (
+      mes           CHAR(7) PRIMARY KEY,
+      construido_em TIMESTAMPTZ,
+      linhas_lidas  BIGINT,
+      segundos      NUMERIC(10,1)
+    )
+  `);
+
   _coletaTableReady = true;
+}
+
+// Builder do cache de tags por recurso (2026-09-04). Roda em background — nunca no caminho de
+// uma requisição (custa ~234s pra um mês de billing). Incremental: reprocessa só a janela
+// recente e faz upsert; o `WHERE EXCLUDED.visto_em >= ...` no ON CONFLICT garante que uma
+// execução sobre uma janela antiga nunca sobrescreve uma tag mais nova já gravada.
+let _recursoTagsBuildEmExecucao = false;
+let _recursoTagsUltimoBuild = null;
+const _RECURSO_TAGS_JANELA_DIAS = 35;
+
+async function _rebuildRecursoTagsCache(origem = 'agendado') {
+  if (_scanPesadoEmAndamento()) return { ok: false, motivo: 'outro scan pesado de azure_costs já em execução' };
+  if (!pool) return { ok: false, motivo: 'sem banco' };
+  _recursoTagsBuildEmExecucao = true;
+  const t0 = Date.now();
+  try {
+    await ensureAzureColetaTable();
+    // Janela ancorada em MAX(cost_date), não em CURRENT_DATE — o billing tem 2-3 dias de atraso
+    // documentado, e ancorar em "hoje" perderia os dias mais recentes em bases desatualizadas.
+    const r = await pool.query(
+      `INSERT INTO azure_recurso_tags (resource_id_upper, tags, visto_em, atualizado_em)
+       SELECT UPPER(resource_id), MAX(tags), MAX(cost_date), NOW()
+       FROM azure_costs
+       WHERE resource_id IS NOT NULL AND resource_id <> ''
+         AND cost_date >= (SELECT MAX(cost_date) FROM azure_costs) - ($1 || ' days')::interval
+       GROUP BY 1
+       ON CONFLICT (resource_id_upper) DO UPDATE
+         SET tags = EXCLUDED.tags, visto_em = EXCLUDED.visto_em, atualizado_em = NOW()
+         WHERE EXCLUDED.visto_em >= azure_recurso_tags.visto_em`,
+      [String(_RECURSO_TAGS_JANELA_DIAS)]
+    );
+    _recursoTagsUltimoBuild = new Date();
+    const seg = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`[TagsCache] ${origem}: ${r.rowCount} recurso(s) atualizados em ${seg}s`);
+    return { ok: true, linhas: r.rowCount, segundos: Number(seg) };
+  } catch (e) {
+    console.warn('[TagsCache] Falha:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _recursoTagsBuildEmExecucao = false;
+  }
+}
+
+// Timer próprio, separado do agendador de coleta (mesmo espírito de _iniciarAlertasEmail):
+// tag de recurso não muda de minuto a minuto e o build é caro — 6h é folga larga.
+let _recursoTagsTimer = null;
+function _iniciarRecursoTagsCache() {
+  if (_recursoTagsTimer) return;
+  // 4 min após o boot — depois do _refreshAzureCache (90s) e do warm-up do cache de RG (120s),
+  // pra não somar três operações pesadas no mesmo instante do startup.
+  setTimeout(() => {
+    _rebuildRecursoTagsCache('startup')
+      .then(() => _rebuildAlocacaoTags('startup'))
+      .catch(() => {});
+  }, 240_000);
+  _recursoTagsTimer = setInterval(() => {
+    // Em série, não em paralelo — os dois varrem `azure_costs` e rodar juntos só faria os dois
+    // demorarem mais (mesma lição do build concorrente de RG que levou 209s nesta sessão).
+    _rebuildRecursoTagsCache('agendado')
+      .then(() => _rebuildAlocacaoTags('agendado'))
+      .catch(() => {});
+  }, 6 * 60 * 60 * 1000);
+}
+
+// Builder do rollup de custo por tag (2026-09-04) — roda em background, um MÊS por vez
+// (medido: ~163s/mês contra os 3,7M de azure_costs). Idempotente: apaga e reescreve o mês.
+// `pg_input_is_valid(t,'jsonb')` guarda o cast — confirmado PG 18.2 neste ambiente (a função
+// exige PG≥16), e medido que hoje 0 linhas são JSON inválido; a guarda é seguro barato contra
+// um import futuro trazer lixo, sem o custo de uma subtransação por linha.
+const _TAG_ROLLUP_TOP_N = 500;
+let _tagRollupEmExecucao = false;
+
+// Guarda COMPARTILHADA entre os dois builders pesados (_rebuildRecursoTagsCache e
+// _rebuildAlocacaoTags) — os dois varrem `azure_costs` (3,7M linhas) inteiro. Medido nesta
+// sessão: o cache de tags sozinho leva ~234s, mas levou 1092s quando um rollup manual foi
+// disparado em paralelo. Mesma lição do build concorrente de RG que custou 209s. Rodar em
+// série é mais rápido que rodar junto.
+function _scanPesadoEmAndamento() {
+  return _recursoTagsBuildEmExecucao || _tagRollupEmExecucao;
+}
+
+// Reconstrói UM mês, dentro de uma TRANSAÇÃO (2026-09-04).
+// Bug real encontrado testando: sem transação, o `DELETE` + os 4 `INSERT`s não são atômicos —
+// um `pm2 restart` no meio deixava o mês com as linhas de tag mas SEM as linhas sintéticas
+// `__total__`, e a série mensal passou a mostrar R$3,37 mi em vez dos R$7,08 mi reais, em
+// silêncio (o showback e `/serie-mensal` leem justamente de `__total__`). Com transação, uma
+// morte no meio faz rollback e o mês continua com o dado ANTIGO — consistente, ainda que
+// defasado, que é sempre melhor que meio apagado.
+async function _rebuildAlocacaoTagsMes(mes, origem = 'agendado') {
+  const t0 = Date.now();
+  const ini = mes + '-01';
+  const client = await pool.connect();
+  try {
+  await client.query('BEGIN');
+  await client.query(`DELETE FROM azure_custo_por_tag WHERE mes = $1`, [mes]);
+  await client.query(`DELETE FROM azure_tag_chaves    WHERE mes = $1`, [mes]);
+
+  const r = await client.query(
+    `WITH base AS (
+       SELECT subscription_id::text AS sub,
+              COALESCE(cost_in_billing_currency,0) AS custo,
+              NULLIF(NULLIF(NULLIF(tags,''),'null'),'{}') AS t
+       FROM azure_costs
+       WHERE cost_date >= $2::date AND cost_date < ($2::date + INTERVAL '1 month')
+     ), bruto AS (
+       SELECT b.sub, kv.key AS chave, LEFT(kv.value, 500) AS valor,
+              SUM(b.custo) AS custo, COUNT(*) AS linhas
+       FROM base b
+       CROSS JOIN LATERAL jsonb_each_text(b.t::jsonb) AS kv
+       WHERE b.t IS NOT NULL AND pg_input_is_valid(b.t, 'jsonb')
+       GROUP BY 1, 2, 3
+     ), ranked AS (
+       SELECT *, ROW_NUMBER() OVER (PARTITION BY sub, chave ORDER BY custo DESC) AS rn FROM bruto
+     )
+     INSERT INTO azure_custo_por_tag (mes, subscription_id, tag_chave, tag_valor, custo, linhas)
+     SELECT $1, sub, chave, valor, custo, linhas FROM ranked WHERE rn <= $3
+     UNION ALL
+     SELECT $1, sub, chave, '(outros)', SUM(custo), SUM(linhas) FROM ranked WHERE rn > $3 GROUP BY sub, chave`,
+    [mes, ini, _TAG_ROLLUP_TOP_N]
+  );
+
+  // Linhas '__total__' — custo total do mês por subscription, INCLUSIVE o que não tem tag
+  // nenhuma. É o denominador de pct_alocado.
+  await client.query(
+    `INSERT INTO azure_custo_por_tag (mes, subscription_id, tag_chave, tag_valor, custo, linhas)
+     SELECT $1, subscription_id::text, '__total__', '__total__',
+            SUM(COALESCE(cost_in_billing_currency,0)), COUNT(*)
+     FROM azure_costs
+     WHERE cost_date >= $2::date AND cost_date < ($2::date + INTERVAL '1 month')
+     GROUP BY 2`,
+    [mes, ini]
+  );
+
+  await client.query(
+    `INSERT INTO azure_tag_chaves (mes, tag_chave, valores_distintos, custo)
+     SELECT mes, tag_chave, COUNT(DISTINCT tag_valor), SUM(custo)
+     FROM azure_custo_por_tag WHERE mes = $1 AND tag_chave <> '__total__'
+     GROUP BY 1, 2`,
+    [mes]
+  );
+
+  // Cobertura de commitment do mesmo mês — statement separado (o rollup de tags usa LATERAL
+  // jsonb_each_text, que explode as linhas; misturar os dois numa query só ficaria ilegível).
+  // Roda no MESMO job de background, então nunca no caminho de uma requisição.
+  await client.query(`DELETE FROM azure_commitment_cobertura WHERE mes = $1`, [mes]);
+  await client.query(
+    `INSERT INTO azure_commitment_cobertura
+       (mes, subscription_id, h_total, h_reservation, h_savingsplan, h_spot, custo_efetivo, custo_lista)
+     SELECT $1, subscription_id::text,
+            COALESCE(SUM(quantity),0),
+            COALESCE(SUM(quantity) FILTER (WHERE pricing_model = 'Reservation'),0),
+            COALESCE(SUM(quantity) FILTER (WHERE pricing_model = 'SavingsPlan'),0),
+            COALESCE(SUM(quantity) FILTER (WHERE pricing_model = 'Spot'),0),
+            COALESCE(SUM(cost_in_billing_currency),0),
+            COALESCE(SUM(payg_cost_in_billing_currency),0)
+     FROM azure_costs
+     WHERE cost_date >= $2::date AND cost_date < ($2::date + INTERVAL '1 month')
+       AND charge_type = 'Usage' AND meter_category = 'Virtual Machines'
+       AND unit_of_measure ILIKE '%hour%'
+     GROUP BY 2`,
+    [mes, ini]
+  );
+
+  const seg = Number(((Date.now() - t0) / 1000).toFixed(1));
+  await client.query(
+    `INSERT INTO azure_tag_rollup_status (mes, construido_em, linhas_lidas, segundos)
+     VALUES ($1, NOW(), $2, $3)
+     ON CONFLICT (mes) DO UPDATE SET construido_em = NOW(), linhas_lidas = $2, segundos = $3`,
+    [mes, r.rowCount, seg]
+  );
+  await client.query('COMMIT');
+  console.log(`[TagRollup] ${origem} ${mes}: ${r.rowCount} linha(s) em ${seg}s`);
+  return { mes, linhas: r.rowCount, segundos: seg };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Reconstrói só os meses que mudaram desde o último build (compara MAX(importado_em) do mês
+// contra `construido_em`) — mesma disciplina incremental já usada pelo watermark do Inventário.
+async function _rebuildAlocacaoTags(origem = 'agendado', forcar = false) {
+  if (_scanPesadoEmAndamento()) return { ok: false, motivo: 'outro scan pesado de azure_costs já em execução' };
+  if (!pool) return { ok: false, motivo: 'sem banco' };
+  _tagRollupEmExecucao = true;
+  try {
+    await ensureAzureColetaTable();
+    const r = await pool.query(
+      `SELECT to_char(cost_date,'YYYY-MM') AS mes, MAX(importado_em) AS ultimo_import
+       FROM azure_costs GROUP BY 1 ORDER BY 1`
+    );
+    const st = await pool.query(`SELECT mes, construido_em FROM azure_tag_rollup_status`);
+    const construido = new Map(st.rows.map(x => [x.mes.trim(), x.construido_em]));
+    // Um mês pode ter as tabelas de TAG prontas mas a de COBERTURA vazia — acontece sempre que
+    // uma saída nova é adicionada ao builder depois de um build já ter rodado. Sem checar isso,
+    // o incremental pularia o mês e a saída nova nunca seria preenchida (bug real pego no teste:
+    // o rebuild manual não fazia nada e a tabela de cobertura ficava em zero).
+    const cob = await pool.query(`SELECT DISTINCT mes FROM azure_commitment_cobertura`);
+    const temCobertura = new Set(cob.rows.map(x => x.mes.trim()));
+    const feitos = [];
+    for (const row of r.rows) {
+      const anterior = construido.get(row.mes);
+      const atualizado = anterior && row.ultimo_import && new Date(row.ultimo_import) <= new Date(anterior);
+      if (!forcar && atualizado && temCobertura.has(row.mes)) continue;
+      feitos.push(await _rebuildAlocacaoTagsMes(row.mes, origem));
+    }
+    return { ok: true, meses: feitos };
+  } catch (e) {
+    console.warn('[TagRollup] Falha:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _tagRollupEmExecucao = false;
+  }
 }
 
 async function _registrarNotificacaoColeta(titulo, mensagem, tipo = 'coleta_concluida') {
@@ -6637,26 +6971,45 @@ let _alertasEmailTimer = null;
 // GET .../anomalias e .../orcamentos/alertas que também as usam) — hoisting de function
 // declaration já é o padrão deste arquivo (ex: _checkAnomaliasDatabricks chama
 // _computeAnomaliasDatabricks, definida centenas de linhas depois).
+// Alerta no sino (2026-09-04, pedido do usuário: "controlar e acompanhar no detalhe... pra
+// agir mais rápido") — antes só existia por e-mail, então num ambiente sem SMTP configurado
+// (o caso deste ambiente) a anomalia nunca era vista por ninguém. Reaproveita
+// `notificacoes_sistema`/`_registrarNotificacaoColeta` (mesma tabela já usada pelas
+// notificações de coleta) — some da lista do sino sozinha após 48h (`expira_em`), igual às
+// demais. Roda SEMPRE, independente de SMTP configurado — só o envio de e-mail depende disso.
 async function _checkAnomaliasCrescimentoInventario() {
-  const cfg = await _getSmtpConfig();
-  if (!cfg) return;
-  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (!destinatarios.length) return;
   const anomalias = await _computeAnomaliasCrescimento();
+  if (!anomalias.length) return;
+  const cfg = await _getSmtpConfig();
+  const destinatarios = cfg ? _parseDestinatarios(cfg.destinatarios_padrao) : [];
   for (const a of anomalias) {
     const chave = `crescimento:${a.subscription_id}:${a.resource_group || 'global'}:${a.dia}`;
     if (!(await _tentarClaimAlerta('anomalia_crescimento_inventario', chave))) continue;
     const escopoTxt = a.escopo_tipo === 'resource_group' ? `Resource Group ${a.resource_group}` : `subscription ${a.subscription_id}`;
-    const partes = [];
-    if (a.gatilho === 'criacoes' || a.gatilho === 'ambos') partes.push(`<strong>${a.criacoes}</strong> recurso(s) criado(s) (média: ${a.media_criacoes.toFixed(1)}/dia, Z-score ${a.zscore_criacoes.toFixed(2)})`);
-    if (a.gatilho === 'custo' || a.gatilho === 'ambos') partes.push(`custo de <strong>R$ ${a.custo.toFixed(2)}</strong> (média: R$ ${a.media_custo.toFixed(2)}/dia, Z-score ${a.zscore_custo.toFixed(2)})`);
-    await _sendEmail({
-      to: destinatarios,
-      subject: `📈 Crescimento anômalo — ${escopoTxt}`,
-      html: _emailTemplate('Crescimento anômalo detectado', `
-        <p><strong>${_escHtmlServer(escopoTxt)}</strong> ficou fora do padrão histórico em ${new Date(a.dia).toLocaleDateString('pt-BR')}: ${partes.join(' e ')}.</p>
-        <p>Janela de referência: últimos 35 dias.</p>`),
-    });
+    const partesHtml = [];
+    const partesTexto = [];
+    if (a.gatilho === 'criacoes' || a.gatilho === 'ambos') {
+      partesHtml.push(`<strong>${a.criacoes}</strong> recurso(s) criado(s) (média: ${a.media_criacoes.toFixed(1)}/dia, Z-score ${a.zscore_criacoes.toFixed(2)})`);
+      partesTexto.push(`${a.criacoes} recurso(s) criado(s) (média ${a.media_criacoes.toFixed(1)}/dia)`);
+    }
+    if (a.gatilho === 'custo' || a.gatilho === 'ambos') {
+      partesHtml.push(`custo de <strong>R$ ${a.custo.toFixed(2)}</strong> (média: R$ ${a.media_custo.toFixed(2)}/dia, Z-score ${a.zscore_custo.toFixed(2)})`);
+      partesTexto.push(`custo de R$ ${a.custo.toFixed(2)} (média R$ ${a.media_custo.toFixed(2)}/dia)`);
+    }
+    await _registrarNotificacaoColeta(
+      `📈 Crescimento anômalo — ${escopoTxt}`,
+      `${partesTexto.join(' e ')} em ${new Date(a.dia).toLocaleDateString('pt-BR')}.`,
+      'inventario_crescimento'
+    );
+    if (destinatarios.length) {
+      await _sendEmail({
+        to: destinatarios,
+        subject: `📈 Crescimento anômalo — ${escopoTxt}`,
+        html: _emailTemplate('Crescimento anômalo detectado', `
+          <p><strong>${_escHtmlServer(escopoTxt)}</strong> ficou fora do padrão histórico em ${new Date(a.dia).toLocaleDateString('pt-BR')}: ${partesHtml.join(' e ')}.</p>
+          <p>Janela de referência: últimos 35 dias.</p>`),
+      });
+    }
   }
 }
 
@@ -6879,6 +7232,13 @@ async function _alertarColetaComErro(titulo, mensagem) {
 // "coleta com sucesso" ("viraria spam sem valor"). Chamado pelo próprio `_coletarInventarioAzure`
 // logo após o INSERT bem-sucedido — nunca lança pro chamador (mesma garantia de `_sendEmail`).
 async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, quando) {
+  // Sino primeiro (2026-09-04) — sempre, independente de SMTP configurado (mesmo raciocínio
+  // de _checkAnomaliasCrescimentoInventario). E-mail continua condicionado à config existente.
+  await _registrarNotificacaoColeta(
+    `🔧 ${p.propriedade_label} — ${nomeRecurso}`,
+    `${p.valor_anterior} → ${p.valor_novo} (${resourceGroup || '—'}) · por ${autor || 'desconhecido'}`,
+    'inventario_alteracao'
+  );
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -7397,16 +7757,26 @@ app.get('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (_re
 
 app.post('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { ativo, retencao_dias, sp_id, subscription_ids } = req.body;
+    // `tags_obrigatorias` (2026-09-04): a coluna existia desde 2026-08-31 e o frontend já enviava
+    // o campo, mas ele NUNCA esteve no destructure nem no UPDATE — o servidor descartava em
+    // silêncio. Consequência: a coluna ficava sempre NULL, `/tags-faltantes` sempre caía no
+    // early-return vazio, e o corpo real daquele endpoint nunca executou em nenhum ambiente.
+    // Cadeia morta ponta a ponta, não só "órfão de UI".
+    const { ativo, retencao_dias, sp_id, subscription_ids, tags_obrigatorias } = req.body;
     await ensureAzureColetaTable();
     let r = await pool.query(`SELECT id FROM azure_inventario_config ORDER BY id LIMIT 1`);
     if (!r.rows.length) r = await pool.query(`INSERT INTO azure_inventario_config DEFAULT VALUES RETURNING id`);
     const id = r.rows[0].id;
     await pool.query(
-      `UPDATE azure_inventario_config SET ativo=$1, retencao_dias=$2, sp_id=$3, subscription_ids=$4, atualizado_em=NOW() WHERE id=$5`,
-      [!!ativo, Number(retencao_dias) > 0 ? Number(retencao_dias) : 180, sp_id || null, subscription_ids || null, id]
+      `UPDATE azure_inventario_config SET ativo=$1, retencao_dias=$2, sp_id=$3, subscription_ids=$4, tags_obrigatorias=$5, atualizado_em=NOW() WHERE id=$6`,
+      [!!ativo, Number(retencao_dias) > 0 ? Number(retencao_dias) : 180, sp_id || null, subscription_ids || null,
+       (tags_obrigatorias || '').trim() || null, id]
     );
     if (ativo) _iniciarInventarioAgendador();
+    // Invalida o cache do relatório de compliance — sem isso, mudar `tags_obrigatorias` não
+    // teria efeito visível por até 15 min (o TTL), e o admin acharia que o save não funcionou.
+    // Bug real pego no teste ponta a ponta desta própria rodada.
+    _tagsFaltantesCache.clear();
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
 });
@@ -7772,14 +8142,9 @@ app.get('/api/azure-inventario/crescimento-liquido', authMiddleware, dbMiddlewar
       data_inicio = ini.toISOString().slice(0, 10);
     }
 
-    // Classificação de RG gerenciado é JS (_detectManagedRg), não dá pra fazer em SQL sem
-    // duplicar a lógica de padrão de nome — mas a tabela é pequena (só RGs distintos, algumas
-    // centenas), então classificar em JS e passar a lista pro SQL como filtro é barato.
-    const rgRows = await pool.query(`SELECT DISTINCT resource_group FROM azure_recursos_inventario WHERE resource_group IS NOT NULL`);
-    const rgsGerenciados = rgRows.rows
-      .map((r) => r.resource_group)
-      .filter((rg) => _detectManagedRg(rg).managed_type)
-      .map((rg) => rg.toUpperCase());
+    // Classificação de RG gerenciado (_getRgsGerenciados — cacheada, ver definição perto de
+    // _detectManagedRg) — evita refazer a mesma query+classificação a cada chamada.
+    const rgsGerenciados = await _getRgsGerenciados();
 
     // CROSS JOIN dias × recursos é barato aqui — azure_recursos_inventario é a tabela
     // PERMANENTE do Inventário (só alguns milhares de linhas), nunca a azure_costs (~1,45M).
@@ -7803,6 +8168,130 @@ app.get('/api/azure-inventario/crescimento-liquido', authMiddleware, dbMiddlewar
       periodo: { inicio: data_inicio, fim: data_fim },
       dias: r.rows.map((row) => ({ dia: row.dia.toISOString().slice(0, 10), ativos: parseInt(row.ativos, 10) })),
     });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Detalhe do Crescimento Líquido (2026-09-04, pedido do usuário: "controlar e acompanhar no
+// detalhe o crescimento de recursos fixos... pra rastrear e agir mais rápido") — quebra o
+// total do gráfico acima por Tipo de Recurso e por Resource Group (snapshot "ativo no dia" no
+// início vs. fim do período — mesma convenção já usada em /crescimento-liquido e no
+// Comparativo, nunca uma soma de eventos), mais um ranking "Top Criadores" — prática de
+// accountability do capability Governance/Anomaly Management do FinOps Framework: metadados
+// de posse (quem criou) são o que torna possível rotear e agir sobre um desvio, não só
+// visualizá-lo. Mesma exclusão de RGs gerenciados por Databricks/AKS de sempre — um recurso
+// efêmero de cluster não é "crescimento fixo".
+async function _computeCrescimentoDetalheRaw(data_inicio, data_fim) {
+  const rgsGerenciados = await _getRgsGerenciados();
+
+  async function snapshot(dia) {
+    const r = await pool.query(
+      `SELECT resource_type, resource_group FROM azure_recursos_inventario ri
+       WHERE (ri.criado_em IS NULL OR ri.criado_em::date <= $1) AND (ri.excluido_em IS NULL OR ri.excluido_em::date > $1)
+         AND NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($2::text[]))`,
+      [dia, rgsGerenciados]
+    );
+    return r.rows;
+  }
+  // rCriadores é totalmente independente dos 2 snapshots (WHERE diferente, não depende do
+  // resultado deles) — junto no mesmo Promise.all em vez de um await sequencial à parte
+  // (achado do code review: 2026-09-04).
+  const [inicioRows, fimRows, rCriadores] = await Promise.all([
+    snapshot(data_inicio),
+    snapshot(data_fim),
+    // Top Criadores — quem mais criou recursos que AINDA estão ativos no fim do período
+    // (accountability sobre crescimento líquido real, não churn bruto — um recurso criado e
+    // já excluído de novo não conta aqui, mesma filosofia "só o que nasce e permanece" do
+    // gráfico principal).
+    pool.query(
+      `SELECT COALESCE(ac.nome, ri.criado_por, '(desconhecido)') AS criador, COUNT(*)::int AS total
+       FROM azure_recursos_inventario ri
+       LEFT JOIN azure_autores_cache ac ON ac.guid = ri.criado_por
+       WHERE ri.ativo = true AND ri.criado_em >= $1 AND ri.criado_em < $2::date + INTERVAL '1 day'
+         AND NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($3::text[]))
+       GROUP BY 1 ORDER BY total DESC LIMIT 10`,
+      [data_inicio, data_fim, rgsGerenciados]
+    ),
+  ]);
+
+  function contarPor(rows, keyFn) {
+    const m = new Map();
+    for (const row of rows) { const k = keyFn(row); m.set(k, (m.get(k) || 0) + 1); }
+    return m;
+  }
+  function delta(mapA, mapB) {
+    const chaves = new Set([...mapA.keys(), ...mapB.keys()]);
+    const out = [];
+    for (const k of chaves) {
+      const a = mapA.get(k) || 0, b = mapB.get(k) || 0;
+      if (a === b) continue;
+      out.push({ chave: k, inicio: a, fim: b, delta: b - a });
+    }
+    out.sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
+    return out;
+  }
+
+  const porTipo = delta(
+    contarPor(inicioRows, (r) => _paTipoDisplay(r.resource_type, r.resource_group)),
+    contarPor(fimRows, (r) => _paTipoDisplay(r.resource_type, r.resource_group))
+  ).slice(0, 12).map((x) => ({ tipo: x.chave, inicio: x.inicio, fim: x.fim, delta: x.delta }));
+
+  const porRg = delta(
+    contarPor(inicioRows, (r) => r.resource_group || '(sem Resource Group)'),
+    contarPor(fimRows, (r) => r.resource_group || '(sem Resource Group)')
+  ).slice(0, 12).map((x) => ({ resource_group: x.chave, inicio: x.inicio, fim: x.fim, delta: x.delta }));
+
+  return {
+    periodo: { inicio: data_inicio, fim: data_fim },
+    por_tipo: porTipo,
+    por_resource_group: porRg,
+    top_criadores: rCriadores.rows.map((r) => ({ criador: r.criador, total: r.total })),
+  };
+}
+
+// Cache (2026-09-04, achado do code review) — este endpoint agora roda sempre, em todo mount
+// da tela Inventário (mesmo nível do gráfico de Crescimento Líquido, nunca dentro de uma aba
+// condicional) — sem proteção nenhuma, 2+ requests concorrentes (ex: vários usuários abrindo a
+// tela ao mesmo tempo) disparariam o mesmo cálculo em paralelo. A tabela em si é pequena
+// (azure_recursos_inventario, ~29 mil linhas — não o azure_costs de 3,7M que causou o bug de
+// 175s em Anomalias), então o objetivo aqui é só dedup de concorrência, não economizar uma
+// query pesada — TTL curto (5min) é suficiente. Chave por período (não um conjunto pequeno e
+// fixo tipo subscription_id) — cap simples de tamanho evita crescimento sem limite se usuários
+// navegarem por muitos períodos diferentes ao longo do uptime do processo.
+const _CRESCIMENTO_DETALHE_TTL = 5 * 60 * 1000;
+const _CRESCIMENTO_DETALHE_CACHE_MAX = 50;
+const _crescimentoDetalheCache = new Map(); // `${inicio}:${fim}` -> { dados, ts }
+const _crescimentoDetalhePromises = new Map();
+async function _getCrescimentoDetalheCached(dataInicio, dataFim) {
+  const chave = `${dataInicio}:${dataFim}`;
+  const cached = _crescimentoDetalheCache.get(chave);
+  if (cached && (Date.now() - cached.ts) < _CRESCIMENTO_DETALHE_TTL) return cached.dados;
+  if (_crescimentoDetalhePromises.has(chave)) return _crescimentoDetalhePromises.get(chave);
+  const p = (async () => {
+    try {
+      const dados = await _computeCrescimentoDetalheRaw(dataInicio, dataFim);
+      if (_crescimentoDetalheCache.size >= _CRESCIMENTO_DETALHE_CACHE_MAX) _crescimentoDetalheCache.clear();
+      _crescimentoDetalheCache.set(chave, { dados, ts: Date.now() });
+      return dados;
+    } finally {
+      _crescimentoDetalhePromises.delete(chave);
+    }
+  })();
+  _crescimentoDetalhePromises.set(chave, p);
+  return p;
+}
+
+app.get('/api/azure-inventario/crescimento-detalhe', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    let { data_inicio, data_fim } = req.query;
+    if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || '')) {
+      const fim = new Date();
+      const ini = new Date(fim);
+      ini.setDate(ini.getDate() - 30);
+      data_fim = fim.toISOString().slice(0, 10);
+      data_inicio = ini.toISOString().slice(0, 10);
+    }
+    res.json(await _getCrescimentoDetalheCached(data_inicio, data_fim));
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -8182,23 +8671,67 @@ const _ANOM_CRESCIMENTO_MIN_CUSTO = 50;     // piso em R$ — mesmo raciocínio 
 // via UNION é o que garante que um dia com só criação (sem billing ainda) ou só custo (sem
 // criação nova, ex: recurso existente cresceu de tamanho) apareça na base, com o lado
 // ausente virando 0 — não NULL, pra não quebrar a média/desvio.
-async function _computeAnomaliasCrescimento() {
+// Exclusão de RGs gerenciados por Databricks/AKS (2026-09-04, achado real ao reintroduzir
+// esta feature na UI — antes só existia por e-mail, nunca visível diretamente) — esta
+// função é de 2026-08-31, ANTES do padrão "excluir RG gerenciado" ter sido estabelecido nas
+// features de crescimento seguintes (Crescimento Líquido, Detalhe do Crescimento, Relatório
+// Diário, todas 2026-09-02+). Nunca tinha sido corrigida porque nunca tinha UI pra notar o
+// problema — confirmado testando contra o ambiente real: dos 334 anomalias retornadas, ~1/3
+// eram de RG `MANAGED-RG-*`/`DATABRICKS-RG-*` — recursos efêmeros de cluster (recriados em
+// horas) dominando o Z-score de "crescimento" que deveria ser sobre infraestrutura fixa.
+// Mesma técnica já usada em GET /crescimento-liquido: classifica RGs distintos em JS
+// (_detectManagedRg), passa a lista pro SQL como filtro.
+async function _computeAnomaliasCrescimentoRaw() {
   const hoje = new Date();
   const fim = hoje.toISOString().slice(0, 10);
   const inicio = new Date(hoje); inicio.setDate(inicio.getDate() - 34);
   const inicioStr = inicio.toISOString().slice(0, 10);
 
+  const rgsGerenciados = await _getRgsGerenciados();
+
+  // Exclusão de RG gerenciado SEM filtrar por linha antes de agregar — bug real de
+  // performance encontrado testando contra o ambiente real (~3,7M linhas em `azure_costs`):
+  // um `NOT (UPPER(resource_group_name) = ANY($3))` avaliado linha a linha (antes do GROUP
+  // BY) fez o endpoint ir de resposta imediata pra quase 3 MINUTOS — mesma classe de
+  // problema já documentada antes nesta sessão pro fallback de custo por RG ("Qualquer linha
+  // recente é suficiente... ORDER BY força Sort sobre todo o conjunto"), só que aqui era um
+  // predicado de exclusão sobre a tabela inteira, não um LIMIT 1. Corrigido com dois padrões,
+  // cada um evitando o filtro caro em cima de milhões de linhas:
+  //  - Nível subscription (RG "some" na soma, não dá pra filtrar depois de agregar): 2
+  //    agregações — uma SEM filtro (idêntica à consulta original, já rápida) e outra SÓ com
+  //    os RGs gerenciados via `= ANY` de INCLUSÃO (poucas centenas de valores, casa bem com o
+  //    índice funcional `idx_azure_costs_rg_upper`) — subtrai a segunda da primeira em SQL.
+  //  - Nível resource_group (RG já é chave do GROUP BY): filtra DEPOIS de agregar — o
+  //    conjunto já agrupado por dia+RG é pequeno (algumas centenas de RGs × 35 dias), custa
+  //    quase nada excluir ali, mesmo raciocínio de "filtrar o resultado pequeno, não a
+  //    tabela grande" já usado no resto desta sessão.
   const [rSub, rRg] = await Promise.all([
     pool.query(`
-      WITH criacoes AS (
+      WITH criacoes_todas AS (
         SELECT subscription_id, DATE(quando) AS dia, COUNT(*) AS criacoes
         FROM azure_recursos_auditoria_eventos
         WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day'
         GROUP BY 1, 2
-      ), custos AS (
+      ), criacoes_gerenciadas AS (
+        SELECT subscription_id, DATE(quando) AS dia, COUNT(*) AS criacoes
+        FROM azure_recursos_auditoria_eventos
+        WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day'
+          AND UPPER(COALESCE(resource_group,'')) = ANY($3::text[])
+        GROUP BY 1, 2
+      ), criacoes AS (
+        SELECT t.subscription_id, t.dia, t.criacoes - COALESCE(g.criacoes,0) AS criacoes
+        FROM criacoes_todas t LEFT JOIN criacoes_gerenciadas g ON g.subscription_id=t.subscription_id AND g.dia=t.dia
+      ), custos_todos AS (
         SELECT subscription_id, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
         FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2
         GROUP BY 1, 2
+      ), custos_gerenciados AS (
+        SELECT subscription_id, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
+        FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2 AND UPPER(resource_group_name) = ANY($3::text[])
+        GROUP BY 1, 2
+      ), custos AS (
+        SELECT t.subscription_id, t.dia, t.custo - COALESCE(g.custo,0) AS custo
+        FROM custos_todos t LEFT JOIN custos_gerenciados g ON g.subscription_id=t.subscription_id AND g.dia=t.dia
       ), chaves AS (
         SELECT subscription_id, dia FROM criacoes
         UNION SELECT subscription_id, dia FROM custos
@@ -8219,17 +8752,21 @@ async function _computeAnomaliasCrescimento() {
         CASE WHEN s.desvio_custo > 0 THEN (co.custo - s.media_custo) / s.desvio_custo ELSE 0 END AS zscore_custo
       FROM combinado co JOIN stats s USING (subscription_id)
       ORDER BY co.subscription_id, co.dia
-    `, [inicioStr, fim]),
+    `, [inicioStr, fim, rgsGerenciados]),
     pool.query(`
       WITH criacoes AS (
-        SELECT subscription_id, UPPER(resource_group) AS resource_group, DATE(quando) AS dia, COUNT(*) AS criacoes
-        FROM azure_recursos_auditoria_eventos
-        WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day' AND resource_group IS NOT NULL
-        GROUP BY 1, 2, 3
+        SELECT * FROM (
+          SELECT subscription_id, UPPER(resource_group) AS resource_group, DATE(quando) AS dia, COUNT(*) AS criacoes
+          FROM azure_recursos_auditoria_eventos
+          WHERE acao = 'CRIACAO' AND quando >= $1 AND quando < $2::date + INTERVAL '1 day' AND resource_group IS NOT NULL
+          GROUP BY 1, 2, 3
+        ) g WHERE NOT (resource_group = ANY($3::text[]))
       ), custos AS (
-        SELECT subscription_id, UPPER(resource_group_name) AS resource_group, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
-        FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2 AND resource_group_name IS NOT NULL
-        GROUP BY 1, 2, 3
+        SELECT * FROM (
+          SELECT subscription_id, UPPER(resource_group_name) AS resource_group, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
+          FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2 AND resource_group_name IS NOT NULL
+          GROUP BY 1, 2, 3
+        ) g WHERE NOT (resource_group = ANY($3::text[]))
       ), chaves AS (
         SELECT subscription_id, resource_group, dia FROM criacoes
         UNION SELECT subscription_id, resource_group, dia FROM custos
@@ -8250,7 +8787,7 @@ async function _computeAnomaliasCrescimento() {
         CASE WHEN s.desvio_custo > 0 THEN (co.custo - s.media_custo) / s.desvio_custo ELSE 0 END AS zscore_custo
       FROM combinado co JOIN stats s USING (subscription_id, resource_group)
       ORDER BY co.subscription_id, co.resource_group, co.dia
-    `, [inicioStr, fim]),
+    `, [inicioStr, fim, rgsGerenciados]),
   ]);
 
   function processar(rows, escopoTipo) {
@@ -8279,6 +8816,32 @@ async function _computeAnomaliasCrescimento() {
   return crescimento;
 }
 
+// Cache em memória (2026-09-04) — mesmo padrão já usado pro Advisor (_advisorCache): mesmo
+// depois de otimizar a query (ver comentário acima, de ~3min pra ~45s), ainda é pesado demais
+// pra rodar a cada carregamento da tela — Z-score sobre 35 dias não muda minuto a minuto, TTL
+// de 20min é uma folga segura. Dedup por promise em andamento evita 2 requests concorrentes
+// disparando 2 cálculos completos (mesmo problema de concorrência já documentado e corrigido
+// antes nesta sessão pro cache de custo por RG).
+const _ANOM_CRESCIMENTO_TTL = 20 * 60 * 1000;
+let _anomaliasCrescimentoCache = null; // { dados, ts }
+let _anomaliasCrescimentoPromise = null;
+async function _computeAnomaliasCrescimento() {
+  if (_anomaliasCrescimentoCache && (Date.now() - _anomaliasCrescimentoCache.ts) < _ANOM_CRESCIMENTO_TTL) {
+    return _anomaliasCrescimentoCache.dados;
+  }
+  if (_anomaliasCrescimentoPromise) return _anomaliasCrescimentoPromise;
+  _anomaliasCrescimentoPromise = (async () => {
+    try {
+      const dados = await _computeAnomaliasCrescimentoRaw();
+      _anomaliasCrescimentoCache = { dados, ts: Date.now() };
+      return dados;
+    } finally {
+      _anomaliasCrescimentoPromise = null;
+    }
+  })();
+  return _anomaliasCrescimentoPromise;
+}
+
 app.get('/api/azure-inventario/anomalias', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     res.json(await _computeAnomaliasCrescimento());
@@ -8291,11 +8854,27 @@ app.get('/api/azure-inventario/anomalias', authMiddleware, dbMiddleware, async (
 // corrente — cobre tanto "não deixe esse RG passar de N recursos" quanto "não deixe esse
 // RG passar de R$X/mês", sem duplicar a lógica de threshold configurável já validada lá.
 function _validarOrcamentoInventarioInput(body) {
-  const { nome, subscription_id, limite_valor, ativo } = body;
-  let { escopo_tipo, resource_group, tipo_limite, threshold_atencao, threshold_critico } = body;
-  if (!nome || !subscription_id || limite_valor == null) return { error: 'nome, subscription_id e limite_valor são obrigatórios' };
-  escopo_tipo = escopo_tipo || (resource_group ? 'resource_group' : 'subscription');
-  if (!['subscription', 'resource_group'].includes(escopo_tipo)) return { error: 'escopo_tipo inválido' };
+  const { nome, limite_valor, ativo } = body;
+  let { escopo_tipo, subscription_id, resource_group, tipo_limite, threshold_atencao, threshold_critico, tag_chave, tag_valor } = body;
+  escopo_tipo = escopo_tipo || (resource_group ? 'resource_group' : (tag_chave ? 'tag' : 'subscription'));
+  if (!['subscription', 'resource_group', 'tag'].includes(escopo_tipo)) return { error: 'escopo_tipo inválido' };
+  // Escopo de TAG atravessa assinaturas por natureza ("o projeto NFCOM não pode passar de X"),
+  // então `subscription_id` vira opcional aqui — '' significa "todas". A coluna é NOT NULL no
+  // schema, por isso string vazia e não null.
+  if (escopo_tipo === 'tag') {
+    subscription_id = subscription_id || '';
+    if (!tag_chave || !tag_valor) return { error: 'tag_chave e tag_valor são obrigatórios para escopo "tag"' };
+    resource_group = null;
+    // Contagem de recursos não é calculável por tag: `azure_recursos_inventario` (plano ARM) não
+    // guarda tags — elas vivem no billing. Forçar 'custo' em vez de deixar o usuário criar um
+    // orçamento que silenciosamente mediria a coisa errada.
+    if (tipo_limite && tipo_limite !== 'custo') return { error: 'escopo "tag" só aceita tipo_limite "custo" (contagem de recursos por tag não é calculável)' };
+    tipo_limite = 'custo';
+  } else {
+    if (!subscription_id) return { error: 'subscription_id é obrigatório' };
+    tag_chave = null; tag_valor = null;
+  }
+  if (!nome || limite_valor == null) return { error: 'nome e limite_valor são obrigatórios' };
   if (escopo_tipo === 'resource_group' && !resource_group) return { error: 'resource_group é obrigatório para escopo "resource_group"' };
   if (escopo_tipo !== 'resource_group') resource_group = null;
   tipo_limite = tipo_limite || 'recursos';
@@ -8306,7 +8885,7 @@ function _validarOrcamentoInventarioInput(body) {
   threshold_critico = threshold_critico != null ? parseFloat(threshold_critico) : 90;
   if (!(threshold_atencao > 0 && threshold_atencao < 100)) return { error: 'threshold_atencao deve estar entre 0 e 100' };
   if (!(threshold_critico > threshold_atencao && threshold_critico <= 100)) return { error: 'threshold_critico deve ser maior que threshold_atencao e no máximo 100' };
-  return { value: { nome, escopo_tipo, subscription_id, resource_group, tipo_limite, limite_valor: limiteNum, threshold_atencao, threshold_critico, ativo: ativo !== false } };
+  return { value: { nome, escopo_tipo, subscription_id, resource_group, tipo_limite, limite_valor: limiteNum, threshold_atencao, threshold_critico, ativo: ativo !== false, tag_chave: tag_chave || null, tag_valor: tag_valor || null } };
 }
 
 app.get('/api/azure-inventario/orcamentos', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -8322,9 +8901,9 @@ app.post('/api/azure-inventario/orcamentos', authMiddleware, dbMiddleware, async
     if (v.error) return res.status(400).json({ error: v.error });
     const o = v.value;
     const r = await pool.query(
-      `INSERT INTO azure_inventario_orcamentos (nome, escopo_tipo, subscription_id, resource_group, tipo_limite, limite_valor, threshold_atencao, threshold_critico, ativo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [o.nome, o.escopo_tipo, o.subscription_id, o.resource_group, o.tipo_limite, o.limite_valor, o.threshold_atencao, o.threshold_critico, o.ativo]
+      `INSERT INTO azure_inventario_orcamentos (nome, escopo_tipo, subscription_id, resource_group, tipo_limite, limite_valor, threshold_atencao, threshold_critico, ativo, tag_chave, tag_valor)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [o.nome, o.escopo_tipo, o.subscription_id, o.resource_group, o.tipo_limite, o.limite_valor, o.threshold_atencao, o.threshold_critico, o.ativo, o.tag_chave, o.tag_valor]
     );
     res.json(r.rows[0]);
   } catch (e) { _dbErr(res, e); }
@@ -8336,8 +8915,8 @@ app.put('/api/azure-inventario/orcamentos/:id', authMiddleware, dbMiddleware, as
     if (v.error) return res.status(400).json({ error: v.error });
     const o = v.value;
     const r = await pool.query(
-      `UPDATE azure_inventario_orcamentos SET nome=$1, escopo_tipo=$2, subscription_id=$3, resource_group=$4, tipo_limite=$5, limite_valor=$6, threshold_atencao=$7, threshold_critico=$8, ativo=$9, atualizado_em=NOW() WHERE id=$10 RETURNING *`,
-      [o.nome, o.escopo_tipo, o.subscription_id, o.resource_group, o.tipo_limite, o.limite_valor, o.threshold_atencao, o.threshold_critico, o.ativo, req.params.id]
+      `UPDATE azure_inventario_orcamentos SET nome=$1, escopo_tipo=$2, subscription_id=$3, resource_group=$4, tipo_limite=$5, limite_valor=$6, threshold_atencao=$7, threshold_critico=$8, ativo=$9, tag_chave=$10, tag_valor=$11, atualizado_em=NOW() WHERE id=$12 RETURNING *`,
+      [o.nome, o.escopo_tipo, o.subscription_id, o.resource_group, o.tipo_limite, o.limite_valor, o.threshold_atencao, o.threshold_critico, o.ativo, o.tag_chave, o.tag_valor, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
     res.json(r.rows[0]);
@@ -8365,7 +8944,19 @@ async function _computeOrcamentosInventarioAlertas() {
   const alertas = [];
   for (const o of orcamentos) {
     let atual;
-    if (o.tipo_limite === 'recursos') {
+    if (o.escopo_tipo === 'tag') {
+      // Lê do rollup `azure_custo_por_tag` (mês corrente), não de azure_costs — o rollup já
+      // existe pro showback e é minúsculo. Caveat real: ele é reconstruído de 6 em 6h, então
+      // um orçamento por tag reage com essa defasagem (os outros escopos leem o billing ao
+      // vivo). É o trade-off de não varrer 3,7M linhas por orçamento a cada checagem.
+      const mesAtual = new Date().toISOString().slice(0, 7);
+      const params = [mesAtual, o.tag_chave, o.tag_valor];
+      let sql = `SELECT COALESCE(SUM(custo),0) AS total FROM azure_custo_por_tag
+                 WHERE mes=$1 AND tag_chave=$2 AND tag_valor=$3`;
+      if (o.subscription_id) { params.push(o.subscription_id); sql += ` AND subscription_id=$4`; }
+      const r = await pool.query(sql, params);
+      atual = parseFloat(r.rows[0].total);
+    } else if (o.tipo_limite === 'recursos') {
       const params = [o.subscription_id];
       let sql = `SELECT COUNT(*) AS total FROM azure_recursos_inventario WHERE ativo=true AND subscription_id=$1`;
       if (o.resource_group) { params.push(o.resource_group); sql += ` AND UPPER(resource_group)=UPPER($2)`; }
@@ -8396,49 +8987,528 @@ app.get('/api/azure-inventario/orcamentos/alertas', authMiddleware, dbMiddleware
   } catch (e) { _dbErr(res, e); }
 });
 
-// Tags obrigatórias — checa `azure_costs.tags` (JSON já coletado por toda importação/coleta
-// Azure, zero coleta nova) dos recursos ATIVOS do inventário contra as chaves configuradas em
-// `azure_inventario_config.tags_obrigatorias`. Pega a linha de billing MAIS RECENTE por
-// resource_id (DISTINCT ON) — tags podem mudar ao longo do tempo, a mais recente é a que
-// importa. Parse em JS (não em SQL) — o texto pode não ser JSON válido em casos raros de
-// export malformado (CSV), e um CAST ::jsonb que falha aborta a query inteira; try/catch por
-// linha é mais seguro. Recursos sem NENHUMA linha em azure_costs (comum — ver "custo direto
-// zerado" documentado acima) entram como "não verificável", não como não-conforme — não dá
-// pra afirmar que faltam tags num recurso que nunca vimos no billing.
+// Tags obrigatórias — checa as tags dos recursos ATIVOS do inventário contra as chaves
+// configuradas em `azure_inventario_config.tags_obrigatorias`. Fonte das tags:
+// `azure_recurso_tags`, materializada em background a partir de `azure_costs` (ver
+// _rebuildRecursoTagsCache) — zero coleta nova, mas dado DEFASADO por construção, então a
+// resposta sempre carrega `atualizado_em` pro cliente poder avisar (mesma disciplina do
+// `stale` já adotada noutros caches deste arquivo).
+// Recursos sem NENHUMA linha em azure_costs (comum — ver "custo direto zerado" documentado
+// acima) entram como "não verificável", NUNCA como não-conforme — não dá pra afirmar que
+// faltam tags num recurso que nunca vimos no billing.
+const _TAGS_FALTANTES_TTL = 15 * 60 * 1000;
+const _tagsFaltantesCache = new Map();    // subscription_id|'' -> { dados, ts }
+const _tagsFaltantesPromises = new Map();
+
 app.get('/api/azure-inventario/tags-faltantes', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const cfgRow = await pool.query(`SELECT tags_obrigatorias FROM azure_inventario_config ORDER BY id LIMIT 1`);
-    const chaves = (cfgRow.rows[0]?.tags_obrigatorias || '').split(',').map(s => s.trim()).filter(Boolean);
-    if (!chaves.length) return res.json({ chaves: [], nao_conformes: [], nao_verificaveis: 0, total_verificado: 0 });
+    const chave = String(req.query.subscription_id || '');
+    const cached = _tagsFaltantesCache.get(chave);
+    if (cached && (Date.now() - cached.ts) < _TAGS_FALTANTES_TTL) return res.json(cached.dados);
+    if (_tagsFaltantesPromises.has(chave)) return res.json(await _tagsFaltantesPromises.get(chave));
+    const p = _computeTagsFaltantes(req.query.subscription_id).finally(() => _tagsFaltantesPromises.delete(chave));
+    _tagsFaltantesPromises.set(chave, p);
+    const dados = await p;
+    _tagsFaltantesCache.set(chave, { dados, ts: Date.now() });
+    res.json(dados);
+  } catch (e) { _dbErr(res, e); }
+});
 
+async function _computeTagsFaltantes(subscription_id) {
+  const cfgRow = await pool.query(`SELECT tags_obrigatorias FROM azure_inventario_config ORDER BY id LIMIT 1`);
+  const chaves = (cfgRow.rows[0]?.tags_obrigatorias || '').split(',').map(s => s.trim()).filter(Boolean);
+  const metaRow = await pool.query(`SELECT MAX(atualizado_em) AS atualizado_em, COUNT(*)::int AS recursos_conhecidos FROM azure_recurso_tags`);
+  const meta = {
+    atualizado_em: metaRow.rows[0]?.atualizado_em || null,
+    recursos_conhecidos: metaRow.rows[0]?.recursos_conhecidos || 0,
+  };
+  if (!chaves.length) return { chaves: [], nao_conformes: [], nao_verificaveis: 0, total_verificado: 0, ...meta };
+
+  const params = [];
+  let where = 'ri.ativo = true';
+  if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
+
+  // Query reescrita (2026-09-04). A versão original era uma subquery CORRELACIONADA por linha
+  // (`SELECT ac.tags ... ORDER BY cost_date DESC LIMIT 1` para cada um dos ~29 mil recursos
+  // ativos) contra a tabela de 3,7M — a classe "trabalho por linha contra a tabela grande" que
+  // já custou 175s neste arquivo. Nunca tinha sido medida porque a cadeia estava morta (ver o
+  // fix de `tags_obrigatorias` no POST /config).
+  // Medido: servir isto direto de azure_costs custa 45s (GROUP BY/MAX 7d), 62s (DISTINCT ON 7d)
+  // ou 190s (DISTINCT ON 35d) — todas inviáveis pra uma tela. Lendo de `azure_recurso_tags`
+  // (materializada em background, ver _rebuildRecursoTagsCache) vira hash join: ~3,5s.
+  // JSON.parse por linha em JS mantido de propósito (CAST ::jsonb que falhe abortaria tudo).
+  const r = await pool.query(`
+    SELECT ri.subscription_id, ri.resource_id, ri.nome, ri.resource_group, ri.resource_type, t.tags
+    FROM azure_recursos_inventario ri
+    LEFT JOIN azure_recurso_tags t ON t.resource_id_upper = UPPER(ri.resource_id)
+    WHERE ${where}
+  `, params);
+
+  let naoVerificaveis = 0;
+  let totalNaoConformes = 0;
+  const naoConformes = [];
+  for (const row of r.rows) {
+    if (!row.tags) { naoVerificaveis++; continue; }
+    let tagsObj = null;
+    try { tagsObj = JSON.parse(row.tags); } catch { /* export malformado — trata como sem tags */ }
+    const faltando = chaves.filter(k => !tagsObj || tagsObj[k] == null || tagsObj[k] === '');
+    if (faltando.length) {
+      totalNaoConformes++;
+      // Lista capada — a CONTAGEM (que alimenta pct_conformes) continua exata; só o detalhe é
+      // truncado, mesmo padrão de LIMIT 300 já usado nas outras rotas de listagem do arquivo.
+      if (naoConformes.length < 300) naoConformes.push({
+        subscription_id: row.subscription_id, resource_id: row.resource_id, nome: row.nome,
+        resource_group: row.resource_group, resource_type: row.resource_type, tags_faltando: faltando,
+      });
+    }
+  }
+  // pct_conformes é sobre o VERIFICÁVEL (exclui não-verificáveis do denominador) — incluir
+  // recursos que nunca vimos no billing puniria o número por falta de dado, não por falta de
+  // tag. Benchmark de mercado: 80%+ antes de outros KPIs de FinOps fazerem sentido.
+  const verificaveis = r.rows.length - naoVerificaveis;
+  return {
+    chaves,
+    nao_conformes: naoConformes,
+    nao_verificaveis: naoVerificaveis,
+    total_verificado: r.rows.length,
+    verificaveis,
+    total_nao_conformes: totalNaoConformes,
+    conformes: verificaveis - totalNaoConformes,
+    pct_conformes: verificaveis > 0 ? (verificaveis - totalNaoConformes) / verificaveis : null,
+    ...meta,
+  };
+}
+
+// Atualiza SOMENTE `tags_obrigatorias` (2026-09-04, pedido do usuário: poder configurar as tags
+// obrigatórias direto na tela de Conformidade, sem ir até Inventário → Configuração).
+// Endpoint próprio, não reuso do `POST /azure-inventario/config`: aquele faz UPDATE de TODOS os
+// campos (ativo, sp_id, subscription_ids, retencao_dias), então salvar a partir de outra tela
+// exigiria reenviar tudo — e um campo faltando zeraria a configuração da coleta. Com uma rota
+// dedicada, as duas telas podem editar o mesmo dado sem risco de uma sobrescrever a outra.
+app.put('/api/azure-inventario/tags-obrigatorias', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const valor = String(req.body?.tags_obrigatorias || '')
+      .split(',').map(x => x.trim()).filter(Boolean).join(',');
+    let r = await pool.query(`SELECT id FROM azure_inventario_config ORDER BY id LIMIT 1`);
+    if (!r.rows.length) r = await pool.query(`INSERT INTO azure_inventario_config DEFAULT VALUES RETURNING id`);
+    await pool.query(
+      `UPDATE azure_inventario_config SET tags_obrigatorias = $1, atualizado_em = NOW() WHERE id = $2`,
+      [valor || null, r.rows[0].id]
+    );
+    // Sem isso o relatório continuaria servindo o resultado antigo por até 15 min (o TTL) e o
+    // usuário acharia que o save não funcionou — mesmo bug já corrigido no POST /config.
+    _tagsFaltantesCache.clear();
+    res.json({ ok: true, tags_obrigatorias: valor || null });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Rebuild manual do cache de tags por recurso — o build automático roda de 6 em 6h, mas depois
+// de uma importação grande o admin pode querer forçar. Responde 202 na hora (o build leva
+// ~4min) — erro cru de propósito, é o ponto da rota.
+app.post('/api/azure-inventario/recurso-tags/rebuild', authMiddleware, dbMiddleware, async (_req, res) => {
+  if (_scanPesadoEmAndamento()) return res.status(409).json({ error: 'Outro scan pesado de azure_costs já em execução' });
+  res.status(202).json({ ok: true, message: 'Rebuild do cache de tags iniciado (leva alguns minutos)' });
+  _rebuildRecursoTagsCache('manual')
+    .then(() => { _tagsFaltantesCache.clear(); })
+    .catch(e => console.error('[TagsCache] Erro:', e.message));
+});
+
+// ── ALOCAÇÃO DE CUSTO POR TAG (showback) ─────────────────────────────────────
+// Capability "Allocation" do FinOps Framework. Lê do rollup materializado
+// (azure_custo_por_tag) — nunca de azure_costs ao vivo. Ver _rebuildAlocacaoTagsMes.
+
+// Chaves de tag disponíveis, pro seletor. Ordenadas por custo coberto (a chave que "explica"
+// mais dinheiro primeiro), com `valores_distintos` pra UI poder avisar sobre chaves de
+// cardinalidade absurda (ex: ClusterId, com 364 mil valores — inútil pra rateio).
+app.get('/api/azure-costs/tag-chaves', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const { mes_inicio, mes_fim } = req.query;
+    const params = [];
+    let where = "tag_chave <> '__total__'";
+    if (mes_inicio) { params.push(mes_inicio); where += ` AND mes >= $${params.length}`; }
+    if (mes_fim)    { params.push(mes_fim);    where += ` AND mes <= $${params.length}`; }
+    const r = await pool.query(
+      `SELECT tag_chave, MAX(valores_distintos) AS valores_distintos, SUM(custo) AS custo
+       FROM azure_tag_chaves WHERE ${where}
+       GROUP BY 1 ORDER BY 3 DESC LIMIT 200`, params
+    );
+    const st = await pool.query(`SELECT mes, construido_em FROM azure_tag_rollup_status ORDER BY mes`);
+    res.json({
+      chaves: r.rows.map(x => ({
+        chave: x.tag_chave, valores_distintos: Number(x.valores_distintos), custo: Number(x.custo),
+      })),
+      meses_construidos: st.rows.map(x => ({ mes: x.mes.trim(), construido_em: x.construido_em })),
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Rateio por uma chave. `nao_alocado` vem da linha sintética '__total__' menos o alocado —
+// auto-consistente por construção (ver comentário na criação da tabela).
+// **Valor de tag VAZIO não conta como alocado** (2026-09-04): medido no dado real que 206 linhas
+// do rollup somam R$6,66 mi com `tag_valor` em branco, concentradas justamente nas chaves que
+// importam (`bu` R$966 mil, `centroDeCusto` R$672 mil, `idFinOps` R$672 mil) — contá-las como
+// alocadas inflaria o percentual sem nenhuma informação de rateio. É também o que
+// `/tags-faltantes` já faz (trata `tagsObj[k] === ''` como faltando); as duas telas precisam
+// concordar. Filtrado na LEITURA (não no builder) — evita reconstruir o rollup inteiro.
+app.get('/api/azure-costs/alocacao-tags', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const chave = String(req.query.chave || '').trim();
+    if (!chave) return res.status(400).json({ error: 'Parâmetro `chave` é obrigatório' });
+    const { mes_inicio, mes_fim, subscription_id } = req.query;
+
+    // Dois conjuntos de parâmetros: as queries que filtram por `chave` levam $1 = chave, e a
+    // query de total (que não filtra por chave nenhuma) tem sua própria numeração. Misturar as
+    // duas com um replace de string desalinharia $2/$3 — bug pego antes de rodar.
+    const filtros = (base) => {
+      const cond = [], params = [...base];
+      if (mes_inicio)      { params.push(mes_inicio);      cond.push(`mes >= $${params.length}`); }
+      if (mes_fim)         { params.push(mes_fim);         cond.push(`mes <= $${params.length}`); }
+      if (subscription_id) { params.push(subscription_id); cond.push(`subscription_id = $${params.length}`); }
+      return { extra: cond.length ? ' AND ' + cond.join(' AND ') : '', params };
+    };
+    const comChave = filtros([chave]);
+    const semChave = filtros([]);
+
+    const [rItens, rTotal, rMes, rStatus] = await Promise.all([
+      pool.query(
+        `SELECT tag_valor, SUM(custo) AS custo, SUM(linhas) AS linhas
+         FROM azure_custo_por_tag WHERE tag_chave = $1 AND TRIM(tag_valor) <> ''${comChave.extra}
+         GROUP BY 1 ORDER BY 2 DESC LIMIT 100`, comChave.params),
+      pool.query(
+        `SELECT SUM(custo) AS total FROM azure_custo_por_tag
+         WHERE tag_chave = '__total__'${semChave.extra}`, semChave.params),
+      pool.query(
+        `SELECT mes,
+                SUM(custo) FILTER (WHERE tag_chave = $1 AND TRIM(tag_valor) <> '') AS alocado,
+                SUM(custo) FILTER (WHERE tag_chave = '__total__')                  AS total
+         FROM azure_custo_por_tag
+         WHERE (tag_chave = $1 OR tag_chave = '__total__')${comChave.extra}
+         GROUP BY 1 ORDER BY 1`, comChave.params),
+      pool.query(`SELECT MAX(construido_em) AS construido_em FROM azure_tag_rollup_status`),
+    ]);
+
+    // `alocado` vem da soma por MÊS (que cobre todos os valores), não da lista de itens — essa
+    // é capada em 100 e subestimaria o alocado numa chave com muitos valores.
+    const alocado = rMes.rows.reduce((a, x) => a + Number(x.alocado || 0), 0);
+    const total = Number(rTotal.rows[0]?.total || 0);
+    res.json({
+      chave,
+      total,
+      alocado,
+      nao_alocado: Math.max(0, total - alocado),
+      pct_alocado: total > 0 ? alocado / total : null,
+      itens: rItens.rows.map(x => ({
+        valor: x.tag_valor, custo: Number(x.custo), linhas: Number(x.linhas),
+        pct: total > 0 ? Number(x.custo) / total : null,
+      })),
+      por_mes: rMes.rows.map(x => {
+        const a = Number(x.alocado || 0), t = Number(x.total || 0);
+        return { mes: x.mes.trim(), alocado: a, total: t, nao_alocado: Math.max(0, t - a), pct_alocado: t > 0 ? a / t : null };
+      }),
+      atualizado_em: rStatus.rows[0]?.construido_em || null,
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Série mensal de custo — base do forecast. Lê das linhas sintéticas '__total__' do rollup em
+// vez de `GET /api/azure-costs/resumo`: aquele endpoint faz várias agregações sobre os 3,7M e
+// leva **42s a frio** (medido), aceitável quando só o modal de Expurgo o usava, inaceitável numa
+// aba que carrega sempre. Aqui são 159ms. Confirmado que os totais batem exatamente
+// (R$7.077.247,4494 nos dois). `ate` é MAX(cost_date) — o front precisa dele pra saber quantos
+// dias do mês corrente já têm billing (o divisor do run-rate).
+app.get('/api/azure-costs/serie-mensal', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const [rSerie, rMax] = await Promise.all([
+      pool.query(`SELECT mes, SUM(custo) AS total FROM azure_custo_por_tag WHERE tag_chave = '__total__' GROUP BY 1 ORDER BY 1`),
+      pool.query(`SELECT MAX(cost_date) AS ate FROM azure_costs`),
+    ]);
+    const ate = rMax.rows[0]?.ate;
+    res.json({
+      por_mes: rSerie.rows.map(x => ({ mes: x.mes.trim(), custo: Number(x.total) })),
+      // Formata como YYYY-MM-DD sem passar por toISOString (que converteria pro fuso UTC e
+      // poderia voltar um dia — armadilha de timezone já documentada neste arquivo).
+      ate: ate ? `${ate.getFullYear()}-${String(ate.getMonth() + 1).padStart(2, '0')}-${String(ate.getDate()).padStart(2, '0')}` : null,
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── COBERTURA DE COMMITMENT (Rate Optimization) ──────────────────────────────
+// Medida em HORAS de VM, não em R$ — ver comentário na criação de azure_commitment_cobertura.
+// Dois números, de propósito: `cobertura_global` (toda hora de VM) e `cobertura_elegivel`
+// (excluindo Spot, que não é elegível a Reservation/Savings Plan). Reportar só o global
+// subestimaria o esforço do time, já que Spot nunca poderia ser coberto.
+// **ESR de commitment NÃO é exposto**: as linhas cobertas vêm com custo E valor de lista zero
+// neste export, então não há como medir a economia da reserva. O desconto que É medível
+// (lista → efetivo) é desconto negociado EA/MCA sobre On-Demand — rotulado como tal, nunca
+// como "ESR", que significaria outra coisa.
+app.get('/api/azure-costs/commitment-cobertura', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
     const { subscription_id } = req.query;
     const params = [];
-    let where = 'ri.ativo = true';
-    if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
+    let where = '1=1';
+    if (subscription_id) { params.push(subscription_id); where += ` AND subscription_id = $${params.length}`; }
 
-    const r = await pool.query(`
-      SELECT ri.subscription_id, ri.resource_id, ri.nome, ri.resource_group, ri.resource_type,
-        (SELECT ac.tags FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)
-         ORDER BY ac.cost_date DESC LIMIT 1) AS tags
-      FROM azure_recursos_inventario ri WHERE ${where}
-    `, params);
+    const [rMes, rStatus] = await Promise.all([
+      pool.query(
+        `SELECT mes, SUM(h_total) AS h_total, SUM(h_reservation) AS h_reservation,
+                SUM(h_savingsplan) AS h_savingsplan, SUM(h_spot) AS h_spot,
+                SUM(custo_efetivo) AS custo_efetivo, SUM(custo_lista) AS custo_lista
+         FROM azure_commitment_cobertura WHERE ${where} GROUP BY 1 ORDER BY 1`, params),
+      pool.query(`SELECT MAX(construido_em) AS construido_em FROM azure_tag_rollup_status`),
+    ]);
 
-    let naoVerificaveis = 0;
-    const naoConformes = [];
-    for (const row of r.rows) {
-      if (!row.tags) { naoVerificaveis++; continue; }
-      let tagsObj = null;
-      try { tagsObj = JSON.parse(row.tags); } catch { /* export malformado — trata como sem tags */ }
-      const faltando = chaves.filter(k => !tagsObj || tagsObj[k] == null || tagsObj[k] === '');
-      if (faltando.length) {
-        naoConformes.push({
-          subscription_id: row.subscription_id, resource_id: row.resource_id, nome: row.nome,
-          resource_group: row.resource_group, resource_type: row.resource_type, tags_faltando: faltando,
-        });
-      }
-    }
-    res.json({ chaves, nao_conformes: naoConformes, nao_verificaveis: naoVerificaveis, total_verificado: r.rows.length });
+    const porMes = rMes.rows.map(x => {
+      const hTotal = Number(x.h_total), hSpot = Number(x.h_spot);
+      const hCob = Number(x.h_reservation) + Number(x.h_savingsplan);
+      const elegivel = hTotal - hSpot;
+      return {
+        mes: x.mes.trim(),
+        horas_total: hTotal,
+        horas_reservation: Number(x.h_reservation),
+        horas_savingsplan: Number(x.h_savingsplan),
+        horas_spot: hSpot,
+        horas_cobertas: hCob,
+        horas_elegiveis: elegivel,
+        cobertura_global: hTotal > 0 ? hCob / hTotal : null,
+        cobertura_elegivel: elegivel > 0 ? hCob / elegivel : null,
+        custo_efetivo: Number(x.custo_efetivo),
+        custo_lista: Number(x.custo_lista),
+      };
+    });
+
+    const som = (f) => porMes.reduce((a, m) => a + f(m), 0);
+    const hTotal = som(m => m.horas_total), hSpot = som(m => m.horas_spot);
+    const hCob = som(m => m.horas_cobertas), elegivel = hTotal - hSpot;
+    const efetivo = som(m => m.custo_efetivo), lista = som(m => m.custo_lista);
+
+    res.json({
+      // `determinavel` fica false quando o rollup ainda não foi construído — a UI mostra um card
+      // explicando, nunca um "0%" que o usuário leria como "não temos nenhuma reserva".
+      determinavel: porMes.length > 0,
+      total: {
+        horas_total: hTotal, horas_cobertas: hCob, horas_spot: hSpot, horas_elegiveis: elegivel,
+        cobertura_global: hTotal > 0 ? hCob / hTotal : null,
+        cobertura_elegivel: elegivel > 0 ? hCob / elegivel : null,
+        horas_reservation: som(m => m.horas_reservation),
+        horas_savingsplan: som(m => m.horas_savingsplan),
+      },
+      // Desconto sobre On-Demand (EA/MCA negociado) — NÃO é ESR de commitment. Ver comentário.
+      desconto_ondemand: {
+        custo_efetivo: efetivo, custo_lista: lista,
+        pct: lista > 0 ? 1 - efetivo / lista : null,
+      },
+      esr_commitment: {
+        calculavel: false,
+        motivo: 'As linhas cobertas por Reservation/Savings Plan vêm com custo e valor de lista zerados neste export — não há base para medir a economia do compromisso.',
+      },
+      por_mes: porMes,
+      atualizado_em: rStatus.rows[0]?.construido_em || null,
+    });
   } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/azure-costs/alocacao-tags/rebuild', authMiddleware, dbMiddleware, async (_req, res) => {
+  if (_scanPesadoEmAndamento()) return res.status(409).json({ error: 'Outro scan pesado de azure_costs já em execução' });
+  res.status(202).json({ ok: true, message: 'Rollup de alocação por tag iniciado (leva alguns minutos por mês)' });
+  // Manual = FORÇA. Um gatilho manual que silenciosamente não faz nada (porque o incremental
+  // achou tudo atualizado) é pior que não ter o botão.
+  _rebuildAlocacaoTags('manual', true).catch(e => console.error('[TagRollup] Erro:', e.message));
+});
+
+// ── DESPERDÍCIO AZURE (Usage Optimization) ───────────────────────────────────
+// Capability "Usage Optimization" — a #1 prioridade atual do State of FinOps 2026. Detecção
+// própria via Azure Resource Graph, reusando a MESMA Service Principal do Inventário (role
+// Reader, já concedida) — zero permissão nova.
+//
+// Deliberadamente NÃO inclui rightsizing de VM: isso exigiria métricas do Azure Monitor (CPU/
+// memória), que é outra API, outra coleta e outra permissão. As categorias aqui são todas
+// determináveis pelo estado do próprio recurso.
+const _DESPERDICIO_TTL = 20 * 60 * 1000;
+const _desperdicioCache = new Map();     // subscription_id -> { itens, ts }
+const _desperdicioPromises = new Map();
+
+const _KQL_DISCOS_ORFAOS = `
+  Resources | where type =~ 'microsoft.compute/disks'
+  | extend diskState = tostring(properties.diskState)
+  | where isempty(managedBy) or diskState =~ 'Unattached'
+  | project id, name, resourceGroup, location, sku = tostring(sku.name),
+            sizeGB = toint(properties.diskSizeGB), criadoEm = tostring(properties.timeCreated), diskState`;
+
+const _KQL_NICS_ORFAS = `
+  Resources | where type =~ 'microsoft.network/networkinterfaces'
+  | where isnull(properties.virtualMachine) or isempty(tostring(properties.virtualMachine.id))
+  | project id, name, resourceGroup, location`;
+
+const _KQL_IPS_SOLTOS = `
+  Resources | where type =~ 'microsoft.network/publicipaddresses'
+  | where isnull(properties.ipConfiguration) and isnull(properties.natGateway)
+  | project id, name, resourceGroup, location, sku = tostring(sku.name),
+            tier = tostring(sku.tier), alloc = tostring(properties.publicIPAllocationMethod)`;
+
+// Mitigação obrigatória do falso-positivo nº1 desta feature: um IP público em frontend de Load
+// Balancer / Bastion / Firewall / NAT Gateway / VPN Gateway pode ter `ipConfiguration` vazio e
+// estar perfeitamente EM USO. Marcar esses como desperdício destruiria a confiança na tela
+// inteira — então coletamos os ids de PIP referenciados por esses tipos e subtraímos.
+const _KQL_IPS_REFERENCIADOS = `
+  Resources
+  | where type =~ 'microsoft.network/loadbalancers'
+      or type =~ 'microsoft.network/bastionhosts'
+      or type =~ 'microsoft.network/azurefirewalls'
+      or type =~ 'microsoft.network/natgateways'
+      or type =~ 'microsoft.network/virtualnetworkgateways'
+      or type =~ 'microsoft.network/applicationgateways'
+  | project ids = extract_all(@'"(/subscriptions/[^"]*/publicIPAddresses/[^"]*)"', tostring(properties))
+  | mv-expand ids to typeof(string)
+  | project id = ids`;
+
+function _kqlSnapshotsAntigos(dias) {
+  return `
+    Resources | where type =~ 'microsoft.compute/snapshots'
+    | extend criado = todatetime(properties.timeCreated)
+    | where criado < ago(${dias}d)
+    | project id, name, resourceGroup, location, sizeGB = toint(properties.diskSizeGB),
+              criadoEm = tostring(properties.timeCreated)`;
+}
+
+// Custo observado no billing, não preço de tabela. Predicado de INCLUSÃO sobre
+// idx_azure_costs_resource_id_upper + recorte por cost_date — o oposto do `NOT ... = ANY` que já
+// custou 175s neste arquivo. `JOIN unnest(...)` e não `= ANY(array)`: com milhares de elementos
+// o planner degrada `= ANY` pra seq scan.
+async function _custoObservadoPorResourceId(ids, desdeISO) {
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += 1000) {
+    const lote = ids.slice(i, i + 1000).map((x) => x.toUpperCase());
+    const r = await pool.query(
+      `SELECT UPPER(ac.resource_id) AS rid,
+              SUM(COALESCE(ac.cost_in_billing_currency,0)) AS custo,
+              COUNT(DISTINCT ac.cost_date) AS dias
+       FROM azure_costs ac
+       JOIN unnest($2::text[]) AS t(rid) ON UPPER(ac.resource_id) = t.rid
+       WHERE ac.cost_date >= $1
+       GROUP BY 1`,
+      [desdeISO, lote]
+    );
+    for (const row of r.rows) out.set(row.rid, { custo: Number(row.custo), dias: Number(row.dias) });
+  }
+  return out;
+}
+
+async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
+  const { getToken } = await _getInventarioSpConfig();
+  const token = await getToken();
+
+  const [discos, nics, ipsBrutos, ipsRefs, snapshots] = await Promise.all([
+    _resourceGraphQuery(token, subscriptionId, _KQL_DISCOS_ORFAOS),
+    _resourceGraphQuery(token, subscriptionId, _KQL_NICS_ORFAS),
+    _resourceGraphQuery(token, subscriptionId, _KQL_IPS_SOLTOS),
+    _resourceGraphQuery(token, subscriptionId, _KQL_IPS_REFERENCIADOS),
+    _resourceGraphQuery(token, subscriptionId, _kqlSnapshotsAntigos(diasSnapshot)),
+  ]);
+
+  const referenciados = new Set(ipsRefs.map((x) => String(x.id || '').toUpperCase()).filter(Boolean));
+  const ips = ipsBrutos.filter((x) => !referenciados.has(String(x.id || '').toUpperCase()));
+
+  const brutos = [
+    ...discos.map((x) => ({ ...x, categoria: 'disco_orfao' })),
+    ...nics.map((x) => ({ ...x, categoria: 'nic_orfa' })),
+    ...ips.map((x) => ({ ...x, categoria: 'ip_solto' })),
+    ...snapshots.map((x) => ({ ...x, categoria: 'snapshot_antigo' })),
+  ];
+
+  // Exclui RG gerenciado por Databricks/AKS item a item — o `resourceGroup` já vem do ARG, então
+  // não precisa de `_getRgsGerenciados()` (que leria de azure_recursos_inventario). Um disco
+  // efêmero de nó de cluster não é desperdício, é o ciclo de vida normal do cluster.
+  const itens = brutos.filter((x) => !_detectManagedRg(x.resourceGroup || '').managed_type);
+
+  const desde = new Date();
+  desde.setDate(desde.getDate() - 30);
+  const custos = await _custoObservadoPorResourceId(itens.map((x) => x.id), desde.toISOString().slice(0, 10));
+
+  return itens.map((x) => {
+    const c = custos.get(String(x.id || '').toUpperCase());
+    // Extrapolação honesta NESTAS categorias: disco managed e IP Standard estático faturam a
+    // mesma taxa anexados ou não, então o custo observado É o desperdício. Sem billing conhecido
+    // → null, NUNCA zero (mesma convenção de `nao_verificaveis` no compliance de tags): zero
+    // significaria "não custa nada", e o que sabemos é "não sabemos".
+    const custoMensal = c && c.dias > 0 ? (c.custo / c.dias) * 30 : null;
+    return {
+      categoria: x.categoria,
+      subscription_id: subscriptionId,
+      resource_id: x.id,
+      nome: x.name,
+      resource_group: x.resourceGroup,
+      location: x.location,
+      sku: x.sku || null,
+      tamanho_gb: x.sizeGB ?? null,
+      criado_em: x.criadoEm || null,
+      custo_periodo: c ? c.custo : null,
+      dias_observados: c ? c.dias : 0,
+      custo_mensal_estimado: custoMensal,
+    };
+  });
+}
+
+async function _getDesperdicioCached(subscriptionId, diasSnapshot) {
+  const chave = `${subscriptionId}:${diasSnapshot}`;
+  const cached = _desperdicioCache.get(chave);
+  if (cached && (Date.now() - cached.ts) < _DESPERDICIO_TTL) return cached.itens;
+  if (_desperdicioPromises.has(chave)) return _desperdicioPromises.get(chave);
+  const p = (async () => {
+    try {
+      const itens = await _coletarDesperdicio(subscriptionId, diasSnapshot);
+      _desperdicioCache.set(chave, { itens, ts: Date.now() });
+      return itens;
+    } finally {
+      _desperdicioPromises.delete(chave);
+    }
+  })();
+  _desperdicioPromises.set(chave, p);
+  return p;
+}
+
+app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const dias = Math.max(1, Math.min(3650, parseInt(req.query.dias_snapshot, 10) || 90));
+    const { subscription_id } = req.query;
+    const { subs } = await _getInventarioSpConfig();
+    const alvos = subscription_id ? [String(subscription_id)] : subs;
+    if (!alvos.length) return res.status(400).json({ error: 'Nenhuma subscription configurada no Inventário' });
+
+    // Resiliência por subscription — uma sem permissão não derruba as outras (mesmo padrão do
+    // /advisor).
+    const erros = [];
+    const listas = await Promise.all(alvos.map(async (sid) => {
+      try { return await _getDesperdicioCached(sid, dias); }
+      catch (e) { erros.push({ subscription_id: sid, erro: e.message }); return []; }
+    }));
+    const itens = listas.flat();
+
+    const porCategoria = {};
+    for (const it of itens) {
+      const c = (porCategoria[it.categoria] ||= { categoria: it.categoria, itens: 0, custo_mensal_estimado: 0, sem_custo_conhecido: 0 });
+      c.itens++;
+      if (it.custo_mensal_estimado === null) c.sem_custo_conhecido++;
+      else c.custo_mensal_estimado += it.custo_mensal_estimado;
+    }
+
+    itens.sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
+    res.json({
+      gerado_em: new Date().toISOString(),
+      dias_snapshot: dias,
+      total_itens: itens.length,
+      custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
+      sem_custo_conhecido: itens.filter((x) => x.custo_mensal_estimado === null).length,
+      por_categoria: Object.values(porCategoria).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
+      itens: itens.slice(0, 500),
+      erros,
+    });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -9496,7 +10566,12 @@ async function _processarImportDatabricks(tmpPath, originalname) {
 
   try {
     await ensureAzureColetaTable();
-    const rows = await _lerCSV(tmpPath);
+    // `_lerArquivoRows` (2026-09-04) em vez de `_lerCSV` — mesmo dispatcher de formato que o
+    // import Azure já usa: .csv, .parquet (pyarrow com fallback pro @dsnp/parquetjs) e .zip
+    // (extrai cada .csv/.parquet de dentro). Zero dependência nova — as duas libs já estavam
+    // instaladas; a única razão de o Databricks aceitar só CSV era a chamada estar amarrada
+    // ao leitor de CSV.
+    const rows = await _lerArquivoRows(tmpPath, originalname);
     if (!rows.length) throw new Error('Arquivo vazio ou sem linhas de dados.');
 
     const linhas = [];
@@ -9571,22 +10646,26 @@ if (_multer) {
       destination: (_, __, cb) => cb(null, _uploadDir),
       filename: (_, file, cb) => cb(null, Date.now() + '_' + file.originalname),
     }),
-    limits: { fileSize: 100 * 1024 * 1024, files: 1 }, // 100 MB — bem menor que o limite do Azure
+    // 500 MB (2026-09-04) — subiu de 100 MB junto com o suporte a .parquet/.zip: um export
+    // comprimido de várias semanas passa fácil de 100 MB. Ainda bem abaixo dos 2 GB do Azure,
+    // que aceita o export oficial particionado do Cost Management.
+    limits: { fileSize: 500 * 1024 * 1024, files: 1 },
   });
 
   app.post('/api/databricks-coleta/import', authMiddleware, dbMiddleware, (req, res, next) => {
     _uploadDbx.single('arquivo')(req, res, (err) => {
       if (err) {
-        if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Arquivo muito grande (limite: 100 MB).' });
+        if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Arquivo muito grande (limite: 500 MB).' });
         return res.status(400).json({ error: `Erro no upload: ${err.message}` });
       }
       next();
     });
   }, (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-    if (!req.file.originalname.toLowerCase().endsWith('.csv')) {
+    const _extDbx = (req.file.originalname || '').split('.').pop().toLowerCase();
+    if (!['csv', 'parquet', 'zip'].includes(_extDbx)) {
       require('fs').unlink(req.file.path, () => {});
-      return res.status(400).json({ error: 'Apenas arquivos .csv são aceitos.' });
+      return res.status(400).json({ error: 'Apenas arquivos .csv, .parquet e .zip são aceitos.' });
     }
     if (_dbxColetaEmExecucao) {
       require('fs').unlink(req.file.path, () => {});
@@ -10939,6 +12018,34 @@ async function _getInventarioSpConfig() {
   const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
   const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   return { cfg, spCfg, getToken, subs };
+}
+
+// Query genérica ao Resource Graph com paginação por $skipToken (2026-09-04). Criada em vez de
+// generalizar `_resourceGraphFetchRecursos` (logo abaixo): aquela tem query FIXA e é usada pela
+// reconciliação, que já está em produção — mesma justificativa que levou `_getInventarioSpConfig`
+// a não ser retrofitado nas funções de coleta.
+async function _resourceGraphQuery(token, subscriptionId, kql) {
+  const itens = [];
+  let skipToken = null;
+  let paginas = 0;
+  do {
+    const body = {
+      subscriptions: [subscriptionId],
+      query: kql,
+      options: { $top: 1000, ...(skipToken ? { $skipToken: skipToken } : {}) },
+    };
+    const resp = await _cbFetch(
+      'https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01',
+      { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      { timeoutMs: 30_000 }
+    );
+    if (!resp.ok) { const e = await resp.text(); throw new Error(`Resource Graph falhou (${resp.status}): ${e}`); }
+    const data = await _safeRespJson(resp);
+    for (const item of (data.data || [])) itens.push(item);
+    skipToken = data.$skipToken || null;
+    paginas++;
+  } while (skipToken && paginas < 200);
+  return itens;
 }
 
 async function _resourceGraphFetchRecursos(token, subscriptionId) {
@@ -12392,6 +13499,7 @@ app.get('/health', (_req, res) => {
       _iniciarAgendador();
       _iniciarAlertasEmail();
       _iniciarInventarioAgendador();
+      _iniciarRecursoTagsCache();
       // Carrega caches persistentes imediatamente do banco (sem query pesada)
       pool.query(`SELECT ws_name, parent_rg FROM azure_ws_cache`).then(r => {
         if (r.rows.length) {
@@ -12480,6 +13588,7 @@ app.get('/health', (_req, res) => {
           _iniciarAgendador();
           _iniciarAlertasEmail();
           _iniciarInventarioAgendador();
+          _iniciarRecursoTagsCache();
         }
       } catch (e2) {
         console.error('  Falha ao reconectar:', e2.message);

@@ -44,6 +44,10 @@ beforeEach(() => {
   })
   vi.mocked(azureInventarioApi.getAzureResumoPorAssinatura).mockResolvedValue({ nivel: 'assinatura', itens: [] })
   vi.mocked(azureInventarioApi.getAzureCrescimentoLiquido).mockResolvedValue({ periodo: { inicio: '', fim: '' }, dias: [] })
+  vi.mocked(azureInventarioApi.getAzureCrescimentoDetalhe).mockResolvedValue({
+    periodo: { inicio: '', fim: '' }, por_tipo: [], por_resource_group: [], top_criadores: [],
+  })
+  vi.mocked(azureInventarioApi.getAzureAnomaliasCrescimento).mockResolvedValue([])
   vi.mocked(azureInventarioApi.getAzureAdvisor).mockResolvedValue({ total: 0, itens: [], por_categoria: {}, erros: [] })
   vi.mocked(azureInventarioApi.getAzureRedeTopologia).mockResolvedValue({ vnets: [] })
   vi.mocked(azureInventarioApi.baixarAzureInventarioExcel).mockResolvedValue(undefined)
@@ -668,5 +672,37 @@ describe('InventarioView', () => {
     expect(screen.getByText(/Custo direto zerado, mas o Resource Group/)).toBeInTheDocument()
     expect(screen.getByText('R$ 2.500,75')).toBeInTheDocument()
     expect(screen.getByText(/34 recursos diferentes/)).toBeInTheDocument()
+  })
+
+  it('mostra o Detalhe do Crescimento (Top Criadores, Por Tipo, Por Resource Group) sempre visível, independente da aba', async () => {
+    vi.mocked(azureInventarioApi.getAzureCrescimentoDetalhe).mockResolvedValue({
+      periodo: { inicio: '2026-08-01', fim: '2026-09-01' },
+      por_tipo: [{ tipo: 'Microsoft.Compute/virtualMachines', inicio: 5, fim: 12, delta: 7 }],
+      por_resource_group: [{ resource_group: 'rg-producao', inicio: 10, fim: 14, delta: 4 }],
+      top_criadores: [{ criador: 'joao@vivo.com.br', total: 6 }],
+    })
+    renderWithClient()
+
+    expect(await screen.findByText('joao@vivo.com.br')).toBeInTheDocument()
+    expect(screen.getByText('Detalhe do Crescimento')).toBeInTheDocument()
+    expect(screen.getByText('6')).toBeInTheDocument()
+    expect(screen.getByText('rg-producao')).toBeInTheDocument()
+    expect(screen.getByText('▲ 4')).toBeInTheDocument()
+    expect(screen.getByText('▲ 7')).toBeInTheDocument()
+  })
+
+  it('mostra Anomalias de Crescimento com o gatilho (recursos/custo/ambos) e continua visível fora da aba Auditoria', async () => {
+    vi.mocked(azureInventarioApi.getAzureAnomaliasCrescimento).mockResolvedValue([
+      {
+        escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-teste', dia: '2026-08-30',
+        criacoes: 40, custo: 120.5, media_criacoes: 3.2, desvio_criacoes: 1.1, media_custo: 90, desvio_custo: 10,
+        zscore_criacoes: 33.5, zscore_custo: 3.05, gatilho: 'ambos',
+      },
+    ])
+    renderWithClient()
+
+    expect(await screen.findByText('rg-teste')).toBeInTheDocument()
+    expect(screen.getByText('Anomalias de Crescimento')).toBeInTheDocument()
+    expect(screen.getByText('📦 Recursos + 💰 Custo')).toBeInTheDocument()
   })
 })

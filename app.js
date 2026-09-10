@@ -412,6 +412,8 @@ async function loadNotificacoes() {
       reserva:          { icon:'🔖', bg:'rgba(147,51,234,0.08)',  color:'#c084fc', border:'rgba(147,51,234,0.25)'  },
       coleta_concluida: { icon:'✅', bg:'rgba(34,197,94,0.08)',   color:'var(--green)',  border:'rgba(34,197,94,0.25)'  },
       coleta_erro:      { icon:'❌', bg:'rgba(255,77,106,0.08)',  color:'var(--danger)', border:'rgba(255,77,106,0.25)' },
+      inventario_crescimento: { icon:'📈', bg:'rgba(255,140,66,0.10)', color:'var(--orange,#ff8c42)', border:'rgba(255,140,66,0.25)' },
+      inventario_alteracao:   { icon:'🔧', bg:'rgba(77,166,255,0.08)',  color:'var(--blue,#4da6ff)',   border:'rgba(77,166,255,0.25)'  },
     };
     // Botão ✕ posicionado absoluto, sobreposto no canto da linha — não empurra
     // o layout (data/texto ficam na mesma linha única de antes, sem empilhar).
@@ -594,7 +596,7 @@ let allAcoes = [];
 // C:\Users\jorge\.claude\plans\magical-gliding-gem.md. showView() monta o
 // bundle React em #react-root em vez de ativar a antiga #view-<nome>
 // (que fica no HTML vazia, sem conteúdo, até a migração terminar de vez).
-const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks', 'inventario']);
+const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks', 'inventario', 'alocacao']);
 
 // ── VIEW ROUTING ──────────────────────────────
 function showView(view) {
