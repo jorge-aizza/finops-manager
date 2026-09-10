@@ -1,6 +1,6 @@
 {
   "name": "finops-system",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "description": "Sistema de Cadastro de Ações FinOps",
   "main": "server.js",
   "scripts": {

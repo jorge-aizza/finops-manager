@@ -48,7 +48,22 @@ uploads_tmp/                            Multer temp dir — CSVs deleted automat
 frontend/                               React + Vite — migração incremental tela por tela (ver ## Frontend React abaixo)
 ```
 
-**Documentação (v2.4):**
+## Versão
+
+**v3.0** (Setembro/2026) — versão registrada em 5 lugares, todos alinhados: `package.json`
+(estava defasado em `1.0.0`, agora acompanha), o rodapé de login em `index.html`, os rodapés/capas
+dos 3 arquivos de documentação e as tags de imagem Docker em `docs-implementacao.html`.
+
+Salto de **v2.4 → v3.0** (major, não minor) por dois motivos:
+1. **Três módulos novos de topo** desde a v2.4 — Coleta Databricks (System Tables), Inventário +
+   Auditoria de Recursos Azure, e Alocação & Otimização (FinOps Framework) — além da conclusão da
+   migração do frontend pra React.
+2. **Mudança que quebra o deploy antigo**: `npm run frontend:install && npm run frontend:build`
+   passou a ser obrigatório antes de subir o servidor. Quem seguir o procedimento da v2.4 sobe um
+   app onde o login funciona mas **toda tela migrada renderiza em branco** (404 no bundle, sem erro
+   visível fora do console do browser). Isso sozinho já justifica o major.
+
+**Documentação (v3.0):**
 ```
 docs-implementacao.html   Guia técnico: On-Premises (Linux/Windows), Docker, IaaS VM, PaaS (Railway/Render/Azure App Service), variáveis de ambiente, checklist produção
 docs-usuario.html         Manual do usuário: todos os módulos + regras de negócio (RN-006, RN-007, RN-DB-001, pico, Databricks, Reservas, Portal Público) — versão para impressão
