@@ -59,6 +59,11 @@ export default function AcoesView() {
 
   return (
     <div>
+      <div className="view-hero" style={{ marginBottom: 16 }}>
+        <div className="page-title">Ações FinOps</div>
+        <div className="view-hero-sub">Iniciativas de otimização, responsáveis e retorno mensal esperado</div>
+      </div>
+
       <div className="filters-bar" style={{ alignItems: 'center' }}>
         <input
           type="text"

@@ -939,11 +939,8 @@
       </div>
 
       <div class="login-logo" style="margin-top:16px">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 58 26" width="106" height="52"
-             style="filter:drop-shadow(0 0 8px rgba(147,51,234,.6))">
-          <text x="2" y="22" font-family="Arial Black, Arial" font-weight="900"
-                font-size="26" fill="#9333ea" letter-spacing="-1">vivo</text>
-        </svg>
+        <img src="/finops-logo.png" alt="FinOps" class="finops-logo"
+             style="height:52px;width:auto;display:block;margin:0 auto;">
       </div>
       <div class="login-brand" style="background:linear-gradient(90deg,#c084fc,#9333ea,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">Configuração Inicial</div>
 
@@ -1087,97 +1084,18 @@
     <div class="login-box">
       <div class="login-logo" style="margin-bottom:8px">
         <style>
-          /* mesmo keyframe para vivo-text e mascote — brilho idêntico */
+          /* Pulso do logo na tela de login. As classes .vivo-text/.vivo-mascote
+             sumiram junto com o SVG e o canvas do mascote — o keyframe foi
+             mantido e repontado para a imagem, para nao perder o efeito. */
           @keyframes vivo-logo-glow {
             0%,100% { filter: drop-shadow(0 0 3px rgba(147,51,234,.6)); }
             50%      { filter: drop-shadow(0 0 6px rgba(147,51,234,1)) drop-shadow(0 0 12px rgba(147,51,234,.35)); }
           }
-          .vivo-text    { animation: vivo-logo-glow 3s ease-in-out infinite; }
-          .vivo-mascote { animation: vivo-logo-glow 3s ease-in-out infinite; }
+          .login-logo .finops-logo { animation: vivo-logo-glow 3s ease-in-out infinite; }
         </style>
         <div style="display:inline-flex;align-items:center;justify-content:center;gap:0;margin:0 auto;">
-          <!-- Texto vivo: começa invisível, aparece junto com o mascote após JS extrair a cor -->
-          <svg id="vivo-logo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 54" width="106" height="52"
-               style="opacity:0;transition:opacity .3s ease;">
-            <text id="vivo-logo-text" class="vivo-text" x="2" y="44"
-                  font-family="'Arial Black', 'Arial Bold', Arial"
-                  font-weight="900" font-size="46"
-                  fill="#9333ea" letter-spacing="-1">vivo</text>
-          </svg>
-
-          <!-- Mascote Vivo — pixels transparentes: glow segue o shape, fundo = login card -->
-          <canvas id="vivo-mascote-cvs" height="58" class="vivo-mascote"
-            style="display:block;margin-bottom:2px;margin-left:-8px;opacity:0;transition:opacity .3s ease;flex-shrink:0;"></canvas>
-          <script>
-            (function() {
-              var cvs = document.getElementById('vivo-mascote-cvs');
-              var offImg = new Image();
-              offImg.onload = function() {
-                try {
-                  var W = offImg.naturalWidth, H = offImg.naturalHeight;
-                  var scale = 58 / H;
-                  cvs.width  = Math.round(W * scale);
-                  cvs.height = 58;
-
-                  var tmp = document.createElement('canvas');
-                  tmp.width = W; tmp.height = H;
-                  var tctx = tmp.getContext('2d');
-                  tctx.drawImage(offImg, 0, 0);
-                  var d = tctx.getImageData(0, 0, W, H), px = d.data;
-
-                  // Amostra cor de fundo dos 8 pontos de borda do JPEG
-                  var cs=[[0,0],[W-1,0],[0,H-1],[W-1,H-1],[Math.floor(W/2),0],[0,Math.floor(H/2)],[W-1,Math.floor(H/2)],[Math.floor(W/2),H-1]];
-                  var bgR=0,bgG=0,bgB=0;
-                  for(var ci=0;ci<cs.length;ci++){var p4=(cs[ci][1]*W+cs[ci][0])*4;bgR+=px[p4];bgG+=px[p4+1];bgB+=px[p4+2];}
-                  bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
-
-                  // Limiar agressivo: HARD=corte total; SOFT=transição suave até opaco
-                  // Tinta 65% roxo Vivo (#9333ea = 147,51,234) nos pixels do mascote
-                  var HARD=90, SOFT=130;
-                  for (var i = 0; i < px.length; i += 4) {
-                    var r=px[i],g=px[i+1],b=px[i+2];
-                    var dr=r-bgR,dg=g-bgG,db=b-bgB;
-                    var dSq=dr*dr+dg*dg+db*db;
-                    if (dSq < HARD*HARD) {
-                      px[i+3]=0; // fundo → totalmente transparente
-                    } else if (dSq < SOFT*SOFT) {
-                      var d2=Math.sqrt(dSq);
-                      px[i+3]=Math.round(255*(d2-HARD)/(SOFT-HARD)); // borda suave
-                      px[i]  =Math.round(r*0.35+147*0.65);
-                      px[i+1]=Math.round(g*0.35+ 51*0.65);
-                      px[i+2]=Math.round(b*0.35+234*0.65);
-                    } else {
-                      // mascote → opaco + tinta 65% roxo Vivo
-                      px[i]  =Math.round(r*0.35+147*0.65);
-                      px[i+1]=Math.round(g*0.35+ 51*0.65);
-                      px[i+2]=Math.round(b*0.35+234*0.65);
-                    }
-                  }
-                  tctx.putImageData(d, 0, 0);
-
-                  cvs.getContext('2d').drawImage(tmp, 0, 0, cvs.width, cvs.height);
-
-                  // "vivo" permanece fixo em #9333ea — sem extração de cor dominante
-                  var svg=document.getElementById('vivo-logo-svg');
-                  // revela vivo e mascote ao mesmo tempo (evita flash do estilo antigo)
-                  cvs.style.opacity='1';
-                  if(svg)svg.style.opacity='1';
-                } catch(e) {
-                  // fallback: mostra ambos com cor padrão
-                  cvs.style.opacity='1';
-                  var svg=document.getElementById('vivo-logo-svg');
-                  if(svg)svg.style.opacity='1';
-                }
-              };
-              offImg.onerror = function() {
-                // mascote.png não encontrado — exibe só o texto "vivo"
-                var svg = document.getElementById('vivo-logo-svg');
-                if (svg) svg.style.opacity = '1';
-                cvs.style.display = 'none';
-              };
-              offImg.src = 'mascote.png?' + Date.now();
-            })();
-          </script>
+          <img src="/finops-logo.png" alt="FinOps" class="finops-logo"
+               style="height:56px;width:auto;display:block;">
         </div>
       </div>
       <div class="login-brand">FinOps Manager</div>
@@ -1395,12 +1313,8 @@
 
           <!-- Logo Vivo -->
           <div class="topbar-vivo-brand" style="display:flex;align-items:center;flex-shrink:0;">
-            <svg id="topbar-vivo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="58" height="26"
-                 style="flex-shrink:0;display:block;">
-              <text id="topbar-vivo-text" x="1" y="30"
-                    font-family="'Arial Black','Arial Bold',Arial"
-                    font-weight="900" font-size="32" fill="#9333ea" letter-spacing="-1">vivo</text>
-            </svg>
+            <img src="/finops-logo.png" alt="FinOps" class="finops-logo"
+                 style="height:26px;width:auto;display:block;flex-shrink:0;">
           </div>
         </div>
 

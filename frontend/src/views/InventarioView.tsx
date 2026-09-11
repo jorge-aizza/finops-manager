@@ -403,7 +403,7 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
 
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'advisor' | 'rede' | 'desperdicio' | 'config'>('recursos')
+  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'crescimento' | 'advisor' | 'rede' | 'desperdicio' | 'config'>('recursos')
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
@@ -428,6 +428,7 @@ export default function InventarioView() {
     queryKey: ['azure-inv-crescimento-liquido', periodoCrescimento.inicio, periodoCrescimento.fim],
     queryFn: () => getAzureCrescimentoLiquido(periodoCrescimento.inicio, periodoCrescimento.fim),
     placeholderData: keepPreviousData,
+    enabled: tab === 'crescimento',
   })
   // Mesmo período do gráfico acima — "detalhe" é sempre sobre a mesma janela que está sendo
   // olhada, não um filtro à parte.
@@ -435,10 +436,17 @@ export default function InventarioView() {
     queryKey: ['azure-inv-crescimento-detalhe', periodoCrescimento.inicio, periodoCrescimento.fim],
     queryFn: () => getAzureCrescimentoDetalhe(periodoCrescimento.inicio, periodoCrescimento.fim),
     placeholderData: keepPreviousData,
+    enabled: tab === 'crescimento',
   })
   // Janela fixa de 35 dias (calculada no servidor, ver _computeAnomaliasCrescimento) — não
   // segue periodoCrescimento.
-  const anomaliasQuery = useQuery({ queryKey: ['azure-inv-anomalias'], queryFn: getAzureAnomaliasCrescimento })
+  // ~50s a frio no servidor (cache de 20 min). Antes disparava a TODA entrada
+  // no Inventario, mesmo para quem so queria ver Recursos ou Advisor.
+  const anomaliasQuery = useQuery({
+    queryKey: ['azure-inv-anomalias'],
+    queryFn: getAzureAnomaliasCrescimento,
+    enabled: tab === 'crescimento',
+  })
   // Advisor pode levar bastante tempo na 1ª chamada (backend cacheia por 20min) — só busca
   // quando a aba está de fato aberta.
   const advisorQuery = useQuery({
@@ -611,14 +619,23 @@ export default function InventarioView() {
         <button className={tab === 'porAssinatura' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('porAssinatura')}>Por Assinatura</button>
         <button className={tab === 'auditoria' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('auditoria')}>Auditoria</button>
         <button className={tab === 'comparativo' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('comparativo')}>Comparativo</button>
+        <button className={tab === 'crescimento' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('crescimento')}>Crescimento</button>
         <button className={tab === 'advisor' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('advisor')}>Advisor</button>
         <button className={tab === 'rede' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('rede')}>Rede</button>
         <button className={tab === 'desperdicio' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('desperdicio')}>Desperdício</button>
         <button className={tab === 'config' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('config')}>Configuração</button>
       </div>
 
+      {/* O monitor continua ACIMA das abas de proposito: e progresso ao vivo de
+          uma coleta, precisa aparecer em qualquer aba. Ja os tres cards de
+          crescimento moveram para a aba "Crescimento" (2026-09-10, pedido do
+          usuario) -- antes ficavam sempre visiveis e empurravam o conteudo da
+          aba escolhida para baixo da dobra, dando a impressao de que trocar de
+          aba nao fazia nada. */}
       <AzureInventarioColetaMonitor />
 
+      {tab === 'crescimento' && (
+      <>
       <div className="card" style={{ margin: '16px 20px 0' }}>
         <div className="card-header"><span className="card-title">Crescimento Líquido de Recursos</span></div>
         <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
@@ -639,6 +656,8 @@ export default function InventarioView() {
 
       <CrescimentoDetalheCard data={crescimentoDetalheQuery.data} loading={crescimentoDetalheQuery.isLoading} />
       <AnomaliasCard data={anomaliasQuery.data} loading={anomaliasQuery.isLoading} />
+      </>
+      )}
 
       {tab === 'recursos' && (
         <div className="card" style={{ margin: '16px 20px' }}>

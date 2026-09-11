@@ -75,6 +75,10 @@ describe('InventarioView', () => {
       ],
     })
     renderWithClient()
+    // Os cards de crescimento saíram de "sempre visível" e passaram a viver na
+    // aba Crescimento (2026-09-10) — antes empurravam o conteúdo das outras
+    // abas para baixo da dobra.
+    await userEvent.click(await screen.findByRole('button', { name: 'Crescimento' }))
     expect(await screen.findByText('Crescimento Líquido de Recursos')).toBeInTheDocument()
     expect(await screen.findByText(/100 → 112 recursos no período/)).toBeInTheDocument()
     expect(screen.getByText('+12')).toBeInTheDocument()
@@ -674,7 +678,7 @@ describe('InventarioView', () => {
     expect(screen.getByText(/34 recursos diferentes/)).toBeInTheDocument()
   })
 
-  it('mostra o Detalhe do Crescimento (Top Criadores, Por Tipo, Por Resource Group) sempre visível, independente da aba', async () => {
+  it('mostra o Detalhe do Crescimento (Top Criadores, Por Tipo, Por Resource Group) na aba Crescimento', async () => {
     vi.mocked(azureInventarioApi.getAzureCrescimentoDetalhe).mockResolvedValue({
       periodo: { inicio: '2026-08-01', fim: '2026-09-01' },
       por_tipo: [{ tipo: 'Microsoft.Compute/virtualMachines', inicio: 5, fim: 12, delta: 7 }],
@@ -682,6 +686,10 @@ describe('InventarioView', () => {
       top_criadores: [{ criador: 'joao@vivo.com.br', total: 6 }],
     })
     renderWithClient()
+    // Os cards de crescimento saíram de "sempre visível" e passaram a viver na
+    // aba Crescimento (2026-09-10) — antes empurravam o conteúdo das outras
+    // abas para baixo da dobra.
+    await userEvent.click(await screen.findByRole('button', { name: 'Crescimento' }))
 
     expect(await screen.findByText('joao@vivo.com.br')).toBeInTheDocument()
     expect(screen.getByText('Detalhe do Crescimento')).toBeInTheDocument()
@@ -691,7 +699,7 @@ describe('InventarioView', () => {
     expect(screen.getByText('▲ 7')).toBeInTheDocument()
   })
 
-  it('mostra Anomalias de Crescimento com o gatilho (recursos/custo/ambos) e continua visível fora da aba Auditoria', async () => {
+  it('mostra Anomalias de Crescimento com o gatilho (recursos/custo/ambos) na aba Crescimento', async () => {
     vi.mocked(azureInventarioApi.getAzureAnomaliasCrescimento).mockResolvedValue([
       {
         escopo_tipo: 'resource_group', subscription_id: 'sub-1', resource_group: 'rg-teste', dia: '2026-08-30',
@@ -700,6 +708,10 @@ describe('InventarioView', () => {
       },
     ])
     renderWithClient()
+    // Os cards de crescimento saíram de "sempre visível" e passaram a viver na
+    // aba Crescimento (2026-09-10) — antes empurravam o conteúdo das outras
+    // abas para baixo da dobra.
+    await userEvent.click(await screen.findByRole('button', { name: 'Crescimento' }))
 
     expect(await screen.findByText('rg-teste')).toBeInTheDocument()
     expect(screen.getByText('Anomalias de Crescimento')).toBeInTheDocument()

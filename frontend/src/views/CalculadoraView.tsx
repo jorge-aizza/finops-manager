@@ -80,6 +80,14 @@ export default function CalculadoraView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      {/* flexShrink:0 e obrigatorio aqui: a raiz e uma coluna flex de altura
+          fixa com rolagem interna -- sem isso o hero seria espremido conforme
+          o corpo cresce, em vez de manter a propria altura. */}
+      <div className="view-hero" style={{ flexShrink: 0, marginBottom: 16 }}>
+        <div className="page-title">Calculadora</div>
+        <div className="view-hero-sub">Estimativa de custo Azure a partir do billing real — por assinatura, resource group e período</div>
+      </div>
+
       {/* Filtros */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 10, alignItems: 'end', padding: '13px 24px', background: 'var(--bg-card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
         <div className="cfg">

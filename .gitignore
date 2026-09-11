@@ -26,3 +26,7 @@ Thumbs.db
 # Claude Code
 .claude/
 skills-lock.json
+
+# Logo do produto: *.png acima o pegaria, mas este NAO e opcional --
+# sem ele a top-bar, o login e o portal ficam sem marca.
+!finops-logo.png

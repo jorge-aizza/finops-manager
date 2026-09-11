@@ -46,6 +46,14 @@ function EstStatusBadge({ status }: { status: string }) {
   )
 }
 
+// Hero por sub-aba, mesmo padrao de DBX_TAB_INFO (DatabricksDashboardView):
+// o titulo da top-bar fica fixo em "Dashboard" para o grupo inteiro, entao e o
+// subtitulo que diz em qual das duas abas o usuario esta.
+const DASH_TAB_INFO: Record<'acoes' | 'estimativas', { titulo: string; sub: string }> = {
+  acoes: { titulo: 'Dashboard', sub: 'Ações FinOps — retorno planejado, em andamento e concluído, por cloud' },
+  estimativas: { titulo: 'Dashboard', sub: 'Estimativas — totais por projeto e situação de aprovação' },
+}
+
 export default function DashboardView() {
   const [tab, setTab] = useState<'acoes' | 'estimativas'>('acoes')
   useEffect(() => setDashboardTabListener((t) => setTab(t === 'estimativas' ? 'estimativas' : 'acoes')), [])
@@ -169,6 +177,11 @@ export default function DashboardView() {
 
   return (
     <div>
+      <div className="view-hero" style={{ marginBottom: 16 }}>
+        <div className="page-title">{DASH_TAB_INFO[tab].titulo}</div>
+        <div className="view-hero-sub">{DASH_TAB_INFO[tab].sub}</div>
+      </div>
+
       {tab === 'acoes' && (
         <>
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>

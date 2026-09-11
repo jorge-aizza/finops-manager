@@ -103,6 +103,11 @@ export default function EstimativasView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="view-hero">
+        <div className="page-title">Estimativas</div>
+        <div className="view-hero-sub">Estimativas de custo geradas na Calculadora — aprovação e histórico</div>
+      </div>
+
       <div className="filters-bar">
         <input
           type="text" className="filter-input" placeholder="Buscar por número, projeto, título..."

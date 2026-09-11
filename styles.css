@@ -1780,3 +1780,162 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   background: #faf8ff !important;           /* fundo levemente lavanda p/ destacar */
 }
 
+
+
+/* ===========================================================================
+   LOOK DO COCKPIT "GESTAO DE COTAS" -- SOMENTE NO TEMA CLARO
+   ---------------------------------------------------------------------------
+   Traz o visual do cockpit (Cotas/cockpit-quotas-v51.html) para o app: fundo
+   lavanda, cartoes arredondados e elevados, titulo de cartao em caixa mista,
+   faixa colorida no KPI, botao primario em gradiente.
+
+   ESCOPO: todo seletor abaixo comeca com [data-theme="light"]. O tema escuro
+   fica byte a byte como na v3.0 -- nenhuma regra daqui o alcanca. Isso e
+   deliberado: o cockpit e claro-apenas, entao qualquer leitura escura seria
+   invencao, nao porte de algo existente.
+
+   Somente propriedade de PINTURA (cor, sombra, raio, tipografia de titulo).
+   Nada aqui altera posicionamento, empilhamento ou area clicavel -- uma
+   versao anterior mexia nisso e quebrou funcionalidade; as regras culpadas
+   nao voltaram:
+     .stat-card > * { position:relative; z-index:1 }  criava contexto de
+        empilhamento em todo filho do cartao (dropdown dentro de KPI recortava)
+     .stat-card::after (anel decorativo)  pseudo-elemento sobreposto no canto
+     border-top: 4px no KPI  mudava a caixa e deslocava o conteudo em 3px --
+        a faixa agora e background-image, que nao entra no box model
+     uppercase/12px no botao  mudava a metrica do texto e podia quebrar o
+        rotulo em duas linhas
+   =========================================================================== */
+
+[data-theme="light"] {
+  --ck-radius:      18px;
+  --ck-shadow:      0 12px 30px rgba(31, 25, 88, .06);
+  --ck-shadow-soft: 0 8px 18px rgba(31, 25, 88, .08);
+  --ck-grad:        linear-gradient(135deg, #400056, #660099, #8a00c4);
+  --ck-grad-hover:  linear-gradient(135deg, #50006f, #7800ad, #9b22d2);
+  --ck-stripe-h:    4px;
+}
+
+/* 1. fundo lavanda -- a primeira coisa que se ve do cockpit */
+[data-theme="light"] body {
+  background: radial-gradient(circle at 40% -10%, #efe9ff 0, #faf8fc 38%, #f5f7fb 100%);
+  background-attachment: fixed;
+}
+
+/* 2. cartoes mais arredondados e elevados */
+[data-theme="light"] .card,
+[data-theme="light"] .stat-card {
+  border-radius: var(--ck-radius);
+  box-shadow: var(--ck-shadow);
+}
+
+/* 3. titulo de cartao legivel, em caixa mista como no cockpit */
+[data-theme="light"] .card-title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+
+/* 4. faixa colorida no topo do KPI, pintada no fundo.
+   background-image nao participa do box model: o cartao mantem exatamente as
+   medidas originais, ao contrario de um border-top. */
+[data-theme="light"] .stats-grid .stat-card {
+  background-image: linear-gradient(to bottom, var(--accent) 0, var(--accent) var(--ck-stripe-h), transparent var(--ck-stripe-h));
+  background-repeat: no-repeat;
+}
+[data-theme="light"] .stats-grid .stat-card:nth-child(4n+2) {
+  background-image: linear-gradient(to bottom, var(--blue) 0, var(--blue) var(--ck-stripe-h), transparent var(--ck-stripe-h));
+}
+[data-theme="light"] .stats-grid .stat-card:nth-child(4n+3) {
+  background-image: linear-gradient(to bottom, var(--green) 0, var(--green) var(--ck-stripe-h), transparent var(--ck-stripe-h));
+}
+[data-theme="light"] .stats-grid .stat-card:nth-child(4n+4) {
+  background-image: linear-gradient(to bottom, var(--orange) 0, var(--orange) var(--ck-stripe-h), transparent var(--ck-stripe-h));
+}
+
+/* 5. botao primario em gradiente (sem mexer na metrica do texto) */
+[data-theme="light"] .btn-primary {
+  border-radius: 10px;
+  background: var(--ck-grad);
+  box-shadow: var(--ck-shadow-soft);
+  color: #fff;
+}
+[data-theme="light"] .btn-primary:hover { background: var(--ck-grad-hover); }
+
+
+
+/* ---------------------------------------------------------------------------
+   Portal Publico no mesmo padrao -- tema claro
+   ---------------------------------------------------------------------------
+   portal.html carrega este arquivo, mas tem um <style> inline proprio DEPOIS
+   do <link>. Em empate de especificidade quem vem depois vence, entao as
+   regras abaixo sobem um nivel (body.portal-mode) para alcancar o que o
+   inline ja define -- nao e enfeite de seletor, e o minimo para valer.
+
+   Continua valendo so no claro: o escuro do portal fica como na v3.0.
+   --------------------------------------------------------------------------- */
+
+/* fundo lavanda -- vence [data-theme="light"] body do inline (0,1,1 -> 0,2,1) */
+[data-theme="light"] body.portal-mode {
+  background: radial-gradient(circle at 40% -10%, #efe9ff 0, #faf8fc 38%, #f5f7fb 100%);
+  background-attachment: fixed;
+}
+
+/* hero com a mesma faixa roxa das telas internas (.view-hero) */
+[data-theme="light"] body.portal-mode .portal-hero {
+  background: linear-gradient(135deg, #4a0080 0%, #6d28d9 55%, #7c3aed 100%);
+  border-bottom: none;
+}
+/* O h1 do portal pinta o texto com gradiente recortado
+   (-webkit-background-clip:text). Sobre a faixa roxa isso sumiria, entao o
+   preenchimento volta a ser solido. */
+[data-theme="light"] body.portal-mode .portal-hero h1 {
+  background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  -webkit-text-fill-color: #ffffff;
+  color: #ffffff;
+}
+[data-theme="light"] body.portal-mode .portal-hero p {
+  color: rgba(255, 255, 255, 0.88);
+}
+/* Folga sob a faixa. .portal-calc-wrap tem 'padding: 0 16px 40px' -- sem topo.
+   Antes nao aparecia porque o hero era um gradiente suave que se dissolvia no
+   fundo; com a faixa solida o painel encostava numa borda dura. So no claro:
+   no escuro o hero continua sendo o gradiente suave original. */
+[data-theme="light"] body.portal-mode .portal-calc-wrap {
+  padding-top: 16px;
+}
+
+/* chips sobre fundo roxo: vidro claro, nao a pilula lilas de fundo claro */
+[data-theme="light"] body.portal-mode .portal-chip {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+  color: #ffffff;
+}
+
+
+/* ---------------------------------------------------------------------------
+   Logo FinOps
+   ---------------------------------------------------------------------------
+   Substituiu o logo "vivo" (SVG de texto) na top-bar, no login e no wizard, e
+   o icone generico do cabecalho do portal. O PNG traz o wordmark em roxo
+   escuro sobre fundo transparente -- legivel no tema claro, apagado sobre o
+   #04000c do escuro e sobre a barra roxa do portal.
+
+   Por isso o realce e por contexto, nao global: no claro a arte vai como e.
+   --------------------------------------------------------------------------- */
+.finops-logo {
+  /* escuro e o padrao em :root neste projeto */
+  filter: brightness(1.9) saturate(1.15);
+}
+[data-theme="light"] .finops-logo {
+  filter: none;
+}
+/* O cabecalho do portal e roxo solido nos DOIS temas, entao o realce ali nao
+   depende do tema -- sem isso o roxo do logo se perde no roxo da barra. */
+.portal-header .finops-logo,
+[data-theme="light"] .portal-header .finops-logo {
+  filter: brightness(0) invert(1);
+}

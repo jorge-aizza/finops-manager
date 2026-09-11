@@ -105,7 +105,10 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
 
   return (
     <div className="portal-calc-wrap">
-      <div style={{ display: 'flex', flexDirection: 'column', border: '1px solid var(--border)', borderRadius: 14, overflow: 'hidden', background: 'var(--bg-card)' }}>
+      {/* --ck-radius / --ck-shadow so existem sob [data-theme="light"] (bloco do
+          cockpit em styles.css). O fallback mantem o escuro exatamente como
+          estava -- e por isso sao variaveis e nao valores fixos aqui. */}
+      <div style={{ display: 'flex', flexDirection: 'column', border: '1px solid var(--border)', borderRadius: 'var(--ck-radius, 14px)', boxShadow: 'var(--ck-shadow, none)', overflow: 'hidden', background: 'var(--bg-card)' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 10, alignItems: 'end', padding: '13px 20px', borderBottom: '1px solid var(--border)' }}>
           <div className="cfg">
             <label className="cl">Assinatura</label>

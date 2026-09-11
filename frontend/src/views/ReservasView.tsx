@@ -100,6 +100,11 @@ export default function ReservasView() {
 
   return (
     <div>
+      <div className="view-hero" style={{ marginBottom: 16 }}>
+        <div className="page-title">Reservas Cloud</div>
+        <div className="view-hero-sub">Compromissos de reserva e savings plan — vigência, custo e vencimento</div>
+      </div>
+
       <div className="stats-grid" style={{ marginBottom: 16 }}>
         <div className="stat-card accent">
           <div className="stat-label">Total de Reservas</div>

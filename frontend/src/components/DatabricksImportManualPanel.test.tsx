@@ -26,9 +26,9 @@ beforeEach(() => {
 })
 
 describe('DatabricksImportManualPanel', () => {
-  it('mostra o botão "Selecionar Arquivo .csv" no estado inicial', () => {
+  it('mostra o botão de seleção de arquivo no estado inicial', () => {
     renderWithClient()
-    expect(screen.getByRole('button', { name: 'Selecionar Arquivo .csv' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Selecionar Arquivo (.csv, .parquet, .zip)' })).toBeInTheDocument()
   });
 
   it('arquivo com extensão inválida é rejeitado com toast, sem chamar upload', async () => {

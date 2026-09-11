@@ -74,10 +74,8 @@ export default function PortalApp() {
     <>
       <header className="portal-header">
         <div className="portal-brand">
-          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-            <rect width="32" height="32" rx="8" fill="rgba(147,51,234,.15)" />
-            <path d="M8 16h4l3-8 4 16 3-8h4" stroke="#9333ea" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <img src="/finops-logo.png" alt="FinOps" className="finops-logo"
+               style={{ height: 30, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div>
             <div className="portal-brand-name">{titulo}</div>
             <div className="portal-brand-sub">Calculadora Azure</div>

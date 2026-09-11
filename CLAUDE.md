@@ -34,18 +34,23 @@ node encrypt-env.js run       # load .env.enc and start server
 ## File Map
 
 ```
-server.js               (~6 500 lines)  All API routes, auth, DB init, middleware, Excel export
-app.js                  (~5 030 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
-calculadora.js          (~5 600 lines)  Azure cost calculator — self-contained IIFE
-index.html              (~3 650 lines)  SPA shell — all views toggled by showView()
-portal.html             (~335 lines)    Portal público — 100% migrado pra React (chrome + calculadora, ver ## Frontend React)
-styles.css              (~1 650 lines)  Dark/light-mode CSS, Vivo purple theme
-encrypt-env.js          (139 lines)     AES-256-GCM .env encryption utility
+server.js               (~13 620 lines) All API routes, auth, DB init, middleware, Excel export
+app.js                  (~6 610 lines)  Setup wizard, login, projects/actions CRUD, reservas, portal config, session mgmt
+calculadora.js          (~3 860 lines)  Azure cost calculator — self-contained IIFE. NÃO é mais carregado por
+                                        nenhum HTML desde a migração React (ver ## Frontend React); mantido no
+                                        repo, mas nenhum código vivo o alcança
+index.html              (~4 040 lines)  SPA shell — all views toggled by showView()
+portal.html             (335 lines)     Portal público — 100% migrado pra React (chrome + calculadora, ver ## Frontend React)
+styles.css              (~1 780 lines)  Dark/light-mode CSS, Vivo purple theme
+encrypt-env.js          (138 lines)     AES-256-GCM .env encryption utility
 favicon.svg                             App icon (SVG)
 mascote.png                             Vivo mascot used in login screen (not tracked by git — keep locally)
 .finops_setup                           AES-256-CBC encrypted setup config — do not delete
+libs/xlsx.full.min.js                   SheetJS — carregado por index.html (export client-side); o export
+                                        .xlsx do servidor usa ExcelJS, não este
+fonts/                                  Fontes locais servidas pelo express.static
 uploads_tmp/                            Multer temp dir — CSVs deleted automatically after import
-frontend/                               React + Vite — migração incremental tela por tela (ver ## Frontend React abaixo)
+frontend/                               React + Vite — migração concluída (ver ## Frontend React abaixo)
 ```
 
 ## Versão
@@ -62,6 +67,36 @@ Salto de **v2.4 → v3.0** (major, não minor) por dois motivos:
    passou a ser obrigatório antes de subir o servidor. Quem seguir o procedimento da v2.4 sobe um
    app onde o login funciona mas **toda tela migrada renderiza em branco** (404 no bundle, sem erro
    visível fora do console do browser). Isso sozinho já justifica o major.
+
+**Auditoria deste arquivo contra o código (2026-09-10)** — o CLAUDE.md tinha crescido registrando features
+novas sem revisar as seções antigas, e várias delas descreviam um sistema que não existe mais. Corrigido:
+
+- **File Map com números até 2× errados** — `server.js` estava documentado como "~6 500 lines" contra 13 623
+  reais; `calculadora.js` como "~5 600" contra 3 863 (encolheu com a remoção de dead code). Faltavam `libs/`,
+  `fonts/` e `rollback_performance_indexes.sql`; sobrava `gerar_dados_teste_databricks.py`, que foi deletado
+  a pedido do usuário e outra seção do próprio arquivo já dizia isso — contradição interna.
+- **`## Architecture` descrevia a arquitetura pré-migração** — "vanilla-JS SPA", "No build step" e
+  "`index.html` loads ... `calculadora.js`", os três falsos, e os três contraditos pela seção `## Commands`
+  logo acima (que já avisava que o build do frontend é obrigatório).
+- **Nome de tabela inexistente** — `azure_coleta_sps` aparecia em 3 lugares; a tabela real sempre foi
+  `azure_coleta_config` (0 ocorrências de `azure_coleta_sps` em `server.js`). O nome errado vinha do path
+  das rotas (`/api/azure-coleta/sps*`), que de fato não acompanha o nome da tabela.
+- **Startup sequence incompleta** — faltavam 3 dos 4 timers (`_iniciarAlertasEmail`,
+  `_iniciarInventarioAgendador`, `_iniciarRecursoTagsCache`), o warm-up do `_dbWsCache` e 2 das 4 tarefas
+  escalonadas por `setTimeout`.
+- **Índices de `azure_costs`: 11 documentados, 18 reais** — faltavam os 3 mais relevantes para performance,
+  incluindo `idx_azure_costs_resource_id_upper` e `idx_azure_costs_sub_date_rg`, ambos citados em prosa
+  noutras seções como essenciais mas ausentes da lista canônica.
+- **37 rotas sem citação alguma** — entre elas `/health`, `/api/auth/refresh`, as 4 de `/api/db-connections`,
+  as 3 do wizard de setup, e todas as de Storage Account da Coleta Azure. As listas de endpoints do
+  Inventário e da Coleta Databricks foram consolidadas (antes só existiam em prosa espalhada).
+- **Achado de segurança registrado, não corrigido** — `/api/db-connections*` (incluindo `apply`, que troca a
+  conexão de banco do processo) exige apenas `authMiddleware`. Ver `### Rotas de infraestrutura, setup e sessão`.
+
+Não foi tocado o histórico de bugs reais/decisões de design — é a parte mais densa e mais útil do arquivo, e
+a amostragem feita (afirmações de remoção de `_activityLogFetchEventos`, `_detectarMudancasSku`,
+`azure_recursos_sku_historico`, `pl_best_mv`/`pl_sku_mv`, `_buildPDFHtml`, e as rotas mortas `/api/dashboard`
+e `/api/azure-coleta/agendamentos`) confirmou que essas afirmações continuam corretas.
 
 **Documentação (v3.0):**
 ```
@@ -83,6 +118,7 @@ azure_costs_migration.sql    azure_costs full schema (80+ fields)
 indices_performance.sql      Functional index reference
 migration_fix_nulls.sql      NULL deduplication / data cleanup
 normalizar_resource_group.sql  resource_group_name case normalisation
+rollback_performance_indexes.sql  DROP dos índices de performance (reversão manual)
 ```
 
 ---
@@ -738,8 +774,14 @@ Exigência de produção: migrar a UI pra React, sem tirar o sistema do ar. Plan
 
 ## Architecture
 
-Single-process Node.js + Express backend serving a vanilla-JS SPA. No build step.
-`index.html` loads `styles.css`, `app.js`, `calculadora.js` directly from the same directory.
+Single-process Node.js + Express servindo uma SPA **React** (a migração descrita em `## Frontend React`
+está concluída — esta seção descrevia uma SPA vanilla sem build step, o que deixou de valer).
+
+**Há build step, e ele é obrigatório**: `index.html` carrega `styles.css`, `libs/xlsx.full.min.js` e `app.js`
+(scripts clássicos, do mesmo diretório) **mais** `/react-app/react-app.js` (`type="module"`, produzido por
+`npm run frontend:build`); `portal.html` carrega só `/react-app/portal-app.js`. **`calculadora.js` não é
+carregado por nenhum dos dois** — ver `## Frontend React` → `portal` para por que o arquivo continua no repo.
+Sem `frontend/dist/*`, o servidor sobe e o login funciona, mas toda tela renderiza em branco.
 
 ### Startup sequence
 1. Load env (`loadEnv()`) — reads `.env.enc`+`.env.key` → falls back to `.env` → system env
@@ -748,11 +790,23 @@ Single-process Node.js + Express backend serving a vanilla-JS SPA. No build step
 4. `isConfigured()` — checks for `.finops_setup`; if absent, serves only the setup wizard
 5. `initDB()` — creates all core tables with `IF NOT EXISTS`
 6. `ensureAzureCostsTable()` — CREATE TABLE only (synchronous, fast); all CREATE INDEX run in background `_bgIdx` after 5s delay; `_azureTableReady = true` set immediately after table check
-7. `ensureAzureColetaTable()` — creates `azure_coleta_historico` + `azure_coleta_sps`
+7. `ensureAzureColetaTable()` — creates `azure_coleta_historico` + `azure_coleta_config` + todas as tabelas
+   de Coleta Databricks e do Inventário Azure (46 tabelas no total são criadas entre `initDB()` e os
+   `ensure*`, todas com `IF NOT EXISTS` + migrações idempotentes)
 8. `ensurePriceListTable()` — creates `azure_price_list` + indexes + `azure_price_list_meta` + materialized views `pl_best_mv` / `pl_sku_mv` (awaited before agendador so meta table exists on first tick)
-9. `_iniciarAgendador()` — starts automated Azure cost collection scheduler (first tick at 120s)
-10. `_refreshAzureCache()` — rebuilds `azure_subs_cache` + `azure_rg_cache` in background (90s delay)
-11. SIGTERM/SIGINT handlers registered — close pool + clear keep-alive timer before exit
+9. Quatro timers iniciados juntos, cada um com seu próprio intervalo (todos idempotentes — guardados por
+   uma variável de timer própria, e re-chamados nos mesmos pontos em caso de reconexão do banco):
+   `_iniciarAgendador()` (coleta Azure/Databricks), `_iniciarAlertasEmail()` (alertas por e-mail, de hora em
+   hora), `_iniciarInventarioAgendador()` (Inventário, 1º tick em 150s, depois horário),
+   `_iniciarRecursoTagsCache()` (rebuild de `azure_recurso_tags`, 1º em 4 min, depois de 6 em 6h)
+10. Warm-up de `_dbWsCache` (workspaces Databricks) direto do banco, para o mapeamento de RG gerenciado já
+    valer na primeira request
+11. Quatro tarefas de background escalonadas por `setTimeout`, deliberadamente em instantes diferentes para
+    não somar vários scans pesados de `azure_costs` no mesmo momento do startup:
+    `_refreshAzureCache()` (90s — `azure_subs_cache` + `azure_rg_cache`), `_getRgStatsCache()` (120s —
+    pré-aquece o custo por Resource Group usado pelo Inventário), migração de `fonte` para registros de
+    coleta API/Storage marcados como `'manual'` (60s), e `CREATE INDEX idx_azure_costs_sub_date_rg` (3 min)
+12. SIGTERM/SIGINT handlers registered — close pool + clear keep-alive timer before exit
 
 **Startup performance notes:**
 - `ensureAzureCostsTable()` never blocks on CREATE INDEX — all indexes created sequentially in background; server is fully usable in < 1s after DB connect
@@ -817,7 +871,11 @@ Rate limiting: 20 req / 15 min on `/api/auth/login` and `/api/auth/ad`.
 ```javascript
 const _SENSITIVE = /^\/?(server\.js|encrypt-env\.js|package(-lock)?\.json|\.env(\.\w+)?|\.finops_setup|CLAUDE\.md|README\.md|.*\.sql$|.*\.key$|.*\.enc$)/i;
 app.use((req, res, next) => {
-  if (_SENSITIVE.test(req.path) || req.path.includes('node_modules')) return res.status(403).end();
+  // _FRONTEND_SRC bloqueia frontend/* (fonte + config do bundle) exceto frontend/dist —
+  // sem isso, frontend/package.json, vite.config.ts etc. ficariam publicamente acessíveis
+  if (_SENSITIVE.test(req.path) || req.path.includes('node_modules') || _FRONTEND_SRC.test(req.path)) {
+    return res.status(403).end();
+  }
   next();
 });
 // HTML: no-cache para evitar que o browser sirva versão desatualizada após deploy
@@ -833,6 +891,33 @@ app.use(express.static(path.join(__dirname), { index: 'index.html', etag: true, 
 ```
 Blocks HTTP access to source code and secrets while serving `index.html`, `app.js`, `styles.css`, `calculadora.js`, `favicon.svg`, `mascote.png` normally.
 JS/CSS served with ETag + Last-Modified for cache revalidation. HTML always bypasses cache (`no-store`) — garante que o browser nunca use versão antiga após deploy.
+
+### Rotas de infraestrutura, setup e sessão
+
+Nunca documentadas até esta auditoria (2026-09-10) — existem desde muito antes, só nunca tinham aparecido em
+nenhuma lista de endpoints deste arquivo:
+
+```
+GET  /health                    — health check público (200 ok / 503 degraded conforme o pool)
+GET  /api/health                — idem, dentro do prefixo /api ({status:'setup'} antes da configuração)
+POST /api/auth/refresh          — reemite o JWT relendo `perfil`/`ativo` do banco; devolve 401 se o
+                                  usuário foi desativado (é o que faz a revogação de acesso valer sem
+                                  esperar o token expirar)
+GET  /api/setup/status          — estado do wizard (pré-configuração)
+POST /api/setup/test-db         — testa credenciais de banco antes de gravar
+POST /api/setup/complete        — grava `.finops_setup` e finaliza o wizard
+GET  /api/db-connections        — lista conexões de banco salvas
+POST /api/db-connections        — grava uma conexão
+POST /api/db-connections/test   — testa uma conexão sem aplicá-la
+POST /api/db-connections/apply  — troca a conexão ativa do processo
+GET  /api/calculadora/debug-recurso — dump cru de um resource_id (diagnóstico, sem UI)
+```
+
+⚠️ **As 4 rotas `/api/db-connections*` usam só `authMiddleware`, sem `adminMiddleware`** — qualquer usuário
+autenticado (inclusive `reader`) pode listar as conexões salvas e trocar a conexão de banco do processo
+inteiro. É a mesma classe de gap já corrigida em 2026-08-24 para `/api/usuarios/*` e `/api/integrations`
+(ver `### Authentication`), mas neste caso **ainda não foi corrigida** — registrado aqui como achado da
+auditoria, sem mudança de código, porque a auditoria era de documentação e mexer em auth é escopo próprio.
 
 ### Database — PostgreSQL only
 Tables created by `initDB()` at startup with `IF NOT EXISTS`. No migration framework.
@@ -887,6 +972,16 @@ GET    /api/azure-costs/imports         — lista de arquivos importados com lin
 GET    /api/azure-costs/purge/preview   — conta registros que seriam removidos (por período ou arquivo)
 DELETE /api/azure-costs/purge           — expurgo: sem params = TRUNCATE TABLE (evita deadlock); com params = DELETE com retry 3x em deadlock (código 40P01)
 GET    /api/price-list/diag             — cobertura meter_ids billing × PL
+GET    /api/azure-costs/serie-mensal    — série de custo por mês, lida das linhas `__total__` do rollup
+                                          de tags (290ms) — existe porque `/resumo` custa ~42s a frio
+GET    /api/azure-costs/tag-chaves      — chaves de tag vistas no billing
+GET    /api/azure-costs/alocacao-tags   — showback por tag (rollup materializado)
+POST   /api/azure-costs/alocacao-tags/rebuild  — força o rebuild do rollup (mês a mês, transacional)
+GET    /api/azure-costs/commitment-cobertura   — cobertura RI/SP medida em HORAS (nunca em R$ — as linhas
+                                          cobertas vêm com cost/payg_cost/effective_price todos zerados
+                                          neste export); `determinavel:false` enquanto o rollup não rodou
+GET    /api/calculadora/reconciliacao   — usado só por `ReconciliacaoModal.tsx`, que continua no código
+                                          mas sem nenhum gatilho na UI (botão removido a pedido do usuário)
 ```
 
 **Expurgo — notas importantes:**
@@ -897,7 +992,9 @@ GET    /api/price-list/diag             — cobertura meter_ids billing × PL
 
 **Azure Coleta tables:**
 - `azure_coleta_historico` — log of each automated collection run
-- `azure_coleta_sps` — Service Principals (tenantId, clientId, clientSecret encrypted)
+- `azure_coleta_config` — Service Principals (tenantId, clientId, clientSecret encrypted). **A tabela
+  nunca se chamou `azure_coleta_sps`** apesar de as rotas serem `/api/azure-coleta/sps*` — este arquivo
+  documentou o nome errado por muito tempo; não escrever query contra `azure_coleta_sps`
 - `azure_coleta_pendentes` — one-time reprocessing jobs (sp_id, subscription_id, data_inicio, data_fim); scheduler processes and DELETE's them after each run (guaranteed single execution)
 - `azure_storage_config.price_list_prefix` — optional blob prefix for Price List CSV/ZIP auto-collection
 
@@ -909,12 +1006,23 @@ idx_azure_costs_rg                resource_group_name
 idx_azure_costs_resource_id       resource_id
 idx_azure_costs_service           consumed_service
 idx_azure_costs_meter_cat         meter_category
+idx_azure_costs_charge_type       charge_type
+idx_azure_costs_pricing_model     pricing_model
 idx_azure_costs_importado         importado_em
+idx_azure_costs_dedup             chave de deduplicação do UPSERT
 idx_azure_costs_sub_rg            (subscription_id, resource_group_name)
 idx_azure_costs_sub_date          (subscription_id, cost_date)
-idx_azure_costs_rg_upper          UPPER(resource_group_name)             — functional
-idx_azure_costs_sub_rg_upper      (subscription_id, UPPER(resource_group_name))  — functional
+idx_azure_costs_sub_rg_date       (subscription_id, resource_group_name, cost_date)
+idx_azure_costs_rg_upper          UPPER(resource_group_name)                          — functional
+idx_azure_costs_sub_rg_upper      (subscription_id, UPPER(resource_group_name))       — functional
+idx_azure_costs_resource_id_upper UPPER(resource_id)                                  — functional
+idx_azure_costs_sub_date_rg       (subscription_id, cost_date, UPPER(resource_group_name)) — functional,
+                                  criado em background 3 min após o boot (o mais caro dos 18)
+idx_azure_costs_uom_trgm          trigram sobre unit_of_measure (busca por ILIKE)
 ```
+Os dois functional sobre `UPPER(...)` de `resource_id`/`resource_group_name` não são opcionais: o Azure
+devolve o mesmo identificador com casing diferente entre serviços, então vários JOINs do Inventário e da
+Alocação comparam por `UPPER()` — sem esses índices, essas queries caem em seq scan sobre milhões de linhas.
 
 ### Dropdown cache (`_refreshAzureCache`)
 Rebuilds `azure_subs_cache` and `azure_rg_cache` from `azure_costs`.
@@ -963,7 +1071,7 @@ _importsCache   / _importsCacheTs     GET /api/azure-costs/imports             T
 ### Azure Coleta Automática
 Automated cost collection via Azure Management + Storage APIs (no manual CSV needed).
 
-**Service Principals (`azure_coleta_sps`):** each SP stores `tenant_id`, `client_id`, `client_secret` (encrypted with MASTER_KEY). Required Azure RBAC: `Reader` + `Storage Blob Data Reader`.
+**Service Principals (`azure_coleta_config` — note que o nome da tabela não acompanha o path `/sps` das rotas):** each SP stores `tenant_id`, `client_id`, `client_secret` (encrypted with MASTER_KEY). Required Azure RBAC: `Reader` + `Storage Blob Data Reader`.
 
 **Scheduler (`_iniciarAgendador`):** runs at configured time/days. Uses `_computeProximaColeta()` to calculate next run. Stores results in `azure_coleta_historico`.
 
@@ -989,6 +1097,14 @@ POST /api/azure-coleta/sps/:id/listar-subs  — list subscriptions for saved SP
 POST /api/azure-coleta/sps/:id/listar-rgs   — list resource groups for SP
 PATCH /api/azure-coleta/sps/:id/ativo       — toggle SP active
 PATCH /api/azure-coleta/sps/:id/padrao      — set SP as default
+GET  /api/azure-coleta/storages             — list Storage Accounts
+POST /api/azure-coleta/storages             — add Storage Account
+PUT  /api/azure-coleta/storages/:id         — update (grava TODOS os campos — ver pegadinha em setStorageAtivo)
+DELETE /api/azure-coleta/storages/:id       — remove
+POST /api/azure-coleta/storages/:id/testar  — test blob credentials
+POST /api/azure-coleta/storages/:id/executar — trigger manual collection from blob
+PUT  /api/azure-coleta/storages/:id/agendamento — hora/dias da coleta recorrente do storage
+GET  /api/azure-coleta/diag-agendador       — dump read-only de por que cada SP/Storage deveria rodar
 GET  /api/azure-coleta/pendentes            — list pending one-time reprocessing jobs
 POST /api/azure-coleta/pendentes            — add pending job (sp_id optional, subscription_id, data_inicio, data_fim)
 DELETE /api/azure-coleta/pendentes/:id      — remove pending job
@@ -1253,6 +1369,34 @@ de validação em si foi confirmado com dados reais gravados via o import manual
 é só o caminho da coleta AO VIVO via API (`_executarColetaDatabricks`) — nenhuma conta Databricks real
 disponível neste ambiente pra isso.
 
+### Coleta Databricks — endpoints ainda não listados
+
+Complementa os blocos de endpoints das Fases 1-3 acima; auditado contra `server.js` em 2026-09-10.
+Todas exigem `authMiddleware, dbMiddleware` (nenhuma rota Databricks usa `adminMiddleware`).
+
+```
+GET    /api/databricks-coleta/anomalias          — Z-score de custo diário + crescimento por usuário
+GET    /api/databricks-coleta/tags               — chaves de custom_tags vistas no dado real
+GET    /api/databricks-coleta/tags/:chave/valores — valores de uma chave (datalist do modal de orçamento)
+GET    /api/databricks-coleta/job-runs           — execuções de Job (duração + custo por run_id)
+GET    /api/databricks-coleta/cluster-utilizacao — CPU média por cluster/dia + flag `ocioso`
+GET    /api/databricks-coleta/query-history      — queries de SQL Warehouse + custo ALOCADO por rateio
+GET    /api/databricks-coleta/ai-gateway-usage   — volume de modelos externos (SEM custo — a system table
+                                                   não tem coluna de gasto; ver a seção de Controle de Custos)
+GET    /api/databricks-coleta/storage-otimizacao — operações de otimização preditiva (ESTIMATED_DBU)
+GET    /api/databricks-coleta/historico          — histórico de execuções
+DELETE /api/databricks-coleta/historico          — limpa o histórico
+POST   /api/databricks-coleta/historico/:id/validar — revalidação manual
+POST   /api/databricks-coleta/import             — importação manual (.csv/.parquet/.zip, até 500 MB)
+GET    /api/databricks-coleta/purge/preview      — conta o que seria removido
+DELETE /api/databricks-coleta/purge              — expurgo de `databricks_consumo` (período ou workspace;
+                                                   sem params = TRUNCATE). Nunca toca no histórico
+GET/POST/PUT/DELETE /api/databricks-coleta/genie-budgets[/:id] — Quotas Genie (proxy da Budgets API real,
+                                                   ou a tabela de demonstração quando não há conexão
+                                                   OAuth M2M padrão — ver "modo demonstração")
+GET    /api/databricks-coleta/genie-principals   — busca de usuário/grupo via Account SCIM (operador `co`)
+```
+
 ### Coleta Databricks — Importação Manual (2026-08-27)
 
 Pedido do usuário: "igual temos para os demais" (Azure já tem uma aba "📥 Importação Manual" —
@@ -1313,8 +1457,9 @@ reflete o novo custo total e workspace corretamente → histórico de teste limp
 /databricks-coleta/historico`, única linha existente na tabela). Botão "Selecionar Arquivo .csv" confirmado
 visível e funcional na tela real via Playwright, zero erro de console.
 
-**Script de dados de teste** — `gerar_dados_teste_databricks.py` (raiz do repo, script solto, não faz parte
-do app) gera um CSV sintético no formato aceito pela Importação Manual, com mistura de SKUs pagas/free-tier,
+**Script de dados de teste** — `gerar_dados_teste_databricks.py` (script solto, nunca fez parte do app).
+**Não existe mais na raiz do repo** — foi descartado depois de gerar os dados, a pedido do usuário (ver
+"dados de teste sintéticos" abaixo: "delete o script e mande só os dados"). O que ele fazia) gera um CSV sintético no formato aceito pela Importação Manual, com mistura de SKUs pagas/free-tier,
 `custom_tags`/`usage_metadata` variados por recurso (testa a granularidade por recurso) e, opcionalmente
 (`--criar-orcamentos`), Orçamentos de teste via API. Só biblioteca padrão do Python pra gerar o CSV;
 `requests` só é necessário com `--criar-orcamentos`.
@@ -2669,6 +2814,53 @@ custo reduzida de 30px pra 20px (mesmo risco de overflow pra valores maiores tip
 teste novo cobrindo a nota de custo do RG quando o direto é zero), `npm run frontend:build`, `pm2 restart`
 sem erro/crash-loop contra o ambiente real, rota respondendo 401 sem token, dois ticks hourly consecutivos
 da coleta de Inventário completando com sucesso pela primeira vez desde a ativação da feature.
+
+### Inventário Azure — lista consolidada de endpoints
+
+As seções do Inventário descrevem cada feature em prosa e citam os endpoints de forma esparsa; esta é a
+lista completa (auditada contra `server.js` em 2026-09-10). Todas exigem `authMiddleware, dbMiddleware`.
+
+```
+GET    /api/azure-inventario/config              — configuração (SP, subscriptions, retenção, tags obrigatórias)
+POST   /api/azure-inventario/config              — grava TODOS os campos (não é PATCH parcial)
+PUT    /api/azure-inventario/tags-obrigatorias   — grava só as tags obrigatórias, preservando o resto
+                                                   (rota dedicada justamente para a tela de Conformidade
+                                                   não zerar sp_id/subscription_ids ao salvar)
+GET    /api/azure-inventario/status              — progresso ao vivo da coleta/reconciliação em execução
+POST   /api/azure-inventario/coletar             — dispara coleta incremental (Change Analysis)
+POST   /api/azure-inventario/reconciliar         — backfill completo via Resource Graph (manual, sem agendamento)
+GET    /api/azure-inventario/coleta-historico    — histórico de execuções
+DELETE /api/azure-inventario/coleta-historico    — limpa o histórico
+GET    /api/azure-inventario/recursos            — inventário (filtros: ativo, criado_por, subscription, RG)
+GET    /api/azure-inventario/recurso-detalhe     — detalhe + timeline + custo diário (resource_id por QUERY PARAM)
+GET    /api/azure-inventario/recurso-arm-detalhe — propriedades completas via Resource Graph (sob demanda)
+GET    /api/azure-inventario/auditoria           — eventos + agregação `por_tipo`
+GET    /api/azure-inventario/mudancas-propriedade — SKU de VM, tags, disco, storage, IP público
+GET    /api/azure-inventario/comparativo         — dois períodos lado a lado (snapshot + eventos + custo)
+GET    /api/azure-inventario/resumo-por-assinatura — níveis 1 e 2 do drill-down (assinatura → RG)
+GET    /api/azure-inventario/crescimento-liquido — série de recursos ativos/dia (exclui RG gerenciado)
+GET    /api/azure-inventario/crescimento-detalhe — quebra por tipo/RG + top criadores (cache 5 min)
+GET    /api/azure-inventario/crescimento         — gráfico antigo, baseado em azure_costs — SEM CHAMADOR
+                                                   (UI removida em 2026-08-31; rota mantida)
+GET    /api/azure-inventario/anomalias           — Z-score de criações E custo (cache 20 min — a query
+                                                   custa ~50s a frio sobre azure_costs)
+GET    /api/azure-inventario/relatorio-diario    — comparativo ontem × anteontem (mesma fonte do e-mail)
+GET    /api/azure-inventario/tags-faltantes      — conformidade de tags (cache 15 min)
+POST   /api/azure-inventario/recurso-tags/rebuild — reconstrói `azure_recurso_tags` (202, background)
+GET    /api/azure-inventario/desperdicio         — disco órfão, snapshot antigo, IP solto, NIC órfã
+GET    /api/azure-inventario/advisor             — recomendações do Azure Advisor (cache 20 min, ~46s a frio)
+GET    /api/azure-inventario/rede-topologia      — VNets + peerings para o diagrama
+GET    /api/azure-inventario/export/excel        — .xlsx sem LIMIT de linhas (attachment)
+POST   /api/azure-inventario/resolver-autores    — resolve GUID → nome via Microsoft Graph
+GET/POST/PUT/DELETE /api/azure-inventario/orcamentos[/:id]  — CRUD de orçamento
+GET    /api/azure-inventario/orcamentos/alertas  — orçamentos ativos que cruzaram o threshold
+```
+
+**As rotas de orçamento continuam vivas e o alerta por e-mail continua rodando**, apesar de a aba
+"Governança" ter sido removida da UI em 2026-08-31 — `InventarioOrcamentoModal.tsx` foi reimportado pela
+aba "Previsão & Orçamento" de `AlocacaoView.tsx` (ver `### Alocação & Otimização`), então o CRUD tem UI de
+novo, agora noutra tela. `/anomalias` e `/tags-faltantes` também voltaram a ter UI (cards próprios do
+Inventário e a aba de Conformidade, respectivamente).
 
 ### Inventário — Governança de crescimento (2026-08-31, pedido do usuário: "quais melhorias vc me
 sugere para poder ter o controle de crescimento de recursos na cloud")
@@ -4127,6 +4319,7 @@ POST /api/price-list/import        — upload CSV/ZIP/Parquet (clearBefore=true)
 GET  /api/price-list/import-status — import progress
 GET  /api/price-list/diag          — meter_id coverage diagnostic
 POST /api/price-list/reset-cb      — reset circuit breaker
+GET/POST /api/price-list/schedule  — lê/grava o agendamento do sync automático
 ```
 
 ### Calculadora module

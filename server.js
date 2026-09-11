@@ -13572,28 +13572,71 @@ app.get('/health', (_req, res) => {
     console.log('  Acesse http://localhost:' + PORT + ' para configurar o sistema.');
   }
 
-  // Keep-alive: ping DB every 4 minutes to prevent idle disconnection
+  // Keep-alive: ping no banco a cada 4 min e reconexao automatica.
+  //
+  // A versao anterior desistia para sempre: comecava com `if (!pool) return`
+  // e, no primeiro fracasso de reconexao, fazia `pool = null` -- entao todo
+  // tick seguinte caia no return e nunca mais tentava. Na pratica, uma queda
+  // de rede de 30s virava indisponibilidade ate alguem reiniciar o processo a
+  // mao (observado: 19h fora do ar apos uma troca de IP da maquina).
+  //
+  // Isto pesa MAIS em producao, onde banco e aplicacao ficam em hosts
+  // separados e reinicio de banco, failover e timeout de firewall sao
+  // rotina -- exatamente os casos em que o processo precisa se recuperar
+  // sozinho.
+  //
+  // Agora: tenta reconectar tambem com o pool nulo, com recuo progressivo
+  // para nao martelar um banco que esta reiniciando.
+  //
+  // Sequencia real dos intervalos entre tentativas (tick de 4 min):
+  //   4, 4, 8, 12, 16, 20, 20, 20...  -- teto em 20 min
+  // ou seja, as DUAS primeiras tentativas ficam a 4 min uma da outra (o recuo
+  // so comeca a crescer da terceira em diante), o que cobre de graca o caso
+  // mais comum: reinicio rapido do banco, resolvido em ate 8 min sem espera
+  // longa. As tentativas caem nos minutos 4, 8, 16, 28, 44 e 64 apos a queda.
+  let _dbFalhas = 0;      // fracassos consecutivos de reconexao
+  let _dbPularTicks = 0;  // ticks a ignorar (recuo progressivo)
+  let _dbCaiuEm = null;   // instante da queda, so para medir o tempo fora
+
   const _keepAliveTimer = setInterval(async () => {
-    if (!pool) return;
-    try {
-      await pool.query('SELECT 1');
-    } catch (err) {
-      console.warn('  Keep-alive falhou, reconectando...', err.message);
+    if (pool) {
       try {
-        const cfg = getDbConfig();
-        if (cfg) {
-          createPool(cfg);
-          await pool.query('SELECT 1');
-          console.log('  Banco reconectado com sucesso.');
-          _iniciarAgendador();
-          _iniciarAlertasEmail();
-          _iniciarInventarioAgendador();
-          _iniciarRecursoTagsCache();
-        }
-      } catch (e2) {
-        console.error('  Falha ao reconectar:', e2.message);
-        pool = null;
+        await pool.query('SELECT 1');
+        return;                       // saudavel, nada a fazer
+      } catch (err) {
+        console.warn('  Keep-alive falhou:', err.message);
+        pool = null;                  // derruba o pool quebrado
+        if (!_dbCaiuEm) _dbCaiuEm = Date.now();
       }
+    }
+
+    // Daqui para baixo o pool esta nulo -- inclusive quando a conexao inicial
+    // do boot falhou, caso que a versao antiga tambem nunca recuperava.
+    if (_dbPularTicks > 0) { _dbPularTicks--; return; }
+    if (!_dbCaiuEm) _dbCaiuEm = Date.now();
+
+    try {
+      const cfg = getDbConfig();      // relido a cada tentativa: env vars em
+      if (!cfg) return;               // producao, .finops_setup no local
+      createPool(cfg);
+      await pool.query('SELECT 1');
+
+      const fora = Math.round((Date.now() - _dbCaiuEm) / 1000);
+      console.log(`  Banco reconectado apos ${fora}s fora e ${_dbFalhas + 1} tentativa(s).`);
+      _dbFalhas = 0; _dbPularTicks = 0; _dbCaiuEm = null;
+
+      // Os timers sao idempotentes (cada um guarda a propria variavel), entao
+      // re-chamar aqui e seguro e devolve os agendadores que pararam na queda.
+      _iniciarAgendador();
+      _iniciarAlertasEmail();
+      _iniciarInventarioAgendador();
+      _iniciarRecursoTagsCache();
+    } catch (e2) {
+      pool = null;
+      _dbFalhas++;
+      _dbPularTicks = Math.min(4, _dbFalhas - 1);   // teto: 5 ticks = 20 min
+      const proxima = (_dbPularTicks + 1) * 4;
+      console.error(`  Reconexao falhou (tentativa ${_dbFalhas}): ${e2.message}. Nova tentativa em ${proxima} min.`);
     }
   }, 4 * 60 * 1000);
 
