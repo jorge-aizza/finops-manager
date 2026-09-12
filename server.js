@@ -6042,6 +6042,22 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS threshold_atencao NUMERIC(5,2) NOT NULL DEFAULT 75`);
   await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS threshold_critico NUMERIC(5,2) NOT NULL DEFAULT 90`);
   await run(`UPDATE databricks_budgets SET escopo_tipo = 'global' WHERE workspace_id IS NULL AND escopo_tipo = 'workspace'`);
+  // Cotas por usuario (2026-09-11) -- trazido do cockpit "Gestao de Cotas", que
+  // trabalha com um teto valendo para CADA usuario do workspace. Dois escopos
+  // novos, deliberadamente distintos:
+  //   'workspace_por_usuario' -> workspace_id + valor = teto de CADA usuario
+  //                              daquele workspace (o modelo do cockpit: define
+  //                              uma vez, vale para todo mundo que usar o ws)
+  //   'usuario'              -> teto de UM usuario, opcionalmente restrito a um
+  //                              workspace (excecao individual sobre a regra)
+  // Nao confundir com as Quotas Genie: aquelas sao a Budgets API nativa do
+  // Databricks e controlam acesso ao Genie, nao o consumo geral.
+  await run(`ALTER TABLE databricks_budgets ADD COLUMN IF NOT EXISTS usuario VARCHAR(300)`);
+  // escopo_tipo nasceu VARCHAR(20) e 'workspace_por_usuario' tem 21 caracteres --
+  // o INSERT falhava com "value too long for type character varying(20)".
+  // Alargar varchar e idempotente de verdade (repetir nao muda nada), diferente
+  // da conversao de TIMESTAMP->TIMESTAMPTZ que precisou de guard neste arquivo.
+  await run(`ALTER TABLE databricks_budgets ALTER COLUMN escopo_tipo TYPE VARCHAR(40)`);
 
   // ── Quotas Genie — modo demonstração (2026-08-28, pedido do usuário) ──────────────
   // As rotas /genie-budgets sempre proxeiam a Budgets API real do Databricks — sem uma
@@ -10920,19 +10936,24 @@ app.get('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (_
 // por orçamento (antes fixos em 75%/90% direto no código de _computeAlertasDatabricks).
 function _validarBudgetInput(body) {
   const { nome, valor_mensal, ativo } = body;
-  let { escopo_tipo, workspace_id, tag_key, tag_valor, threshold_atencao, threshold_critico } = body;
+  let { escopo_tipo, workspace_id, tag_key, tag_valor, usuario, threshold_atencao, threshold_critico } = body;
   if (!nome || !valor_mensal) return { error: 'nome e valor_mensal são obrigatórios' };
   escopo_tipo = escopo_tipo || (workspace_id ? 'workspace' : 'global');
-  if (!['global', 'workspace', 'tag'].includes(escopo_tipo)) return { error: 'escopo_tipo inválido' };
+  if (!['global', 'workspace', 'tag', 'workspace_por_usuario', 'usuario'].includes(escopo_tipo)) return { error: 'escopo_tipo inválido' };
   if (escopo_tipo === 'workspace' && !workspace_id) return { error: 'workspace_id é obrigatório para escopo "workspace"' };
   if (escopo_tipo === 'tag' && (!tag_key || !tag_valor)) return { error: 'tag_key e tag_valor são obrigatórios para escopo "tag"' };
-  if (escopo_tipo !== 'workspace') workspace_id = null;
+  if (escopo_tipo === 'workspace_por_usuario' && !workspace_id) return { error: 'workspace_id é obrigatório para escopo "workspace_por_usuario"' };
+  if (escopo_tipo === 'usuario' && !usuario) return { error: 'usuario é obrigatório para escopo "usuario"' };
+  // workspace_id sobrevive em 'workspace_por_usuario' (define de qual ws e o
+  // teto) e e OPCIONAL em 'usuario' (restringe a excecao aquele workspace).
+  if (!['workspace', 'workspace_por_usuario', 'usuario'].includes(escopo_tipo)) workspace_id = null;
+  if (escopo_tipo !== 'usuario') usuario = null;
   if (escopo_tipo !== 'tag') { tag_key = null; tag_valor = null; }
   threshold_atencao = threshold_atencao != null ? parseFloat(threshold_atencao) : 75;
   threshold_critico = threshold_critico != null ? parseFloat(threshold_critico) : 90;
   if (!(threshold_atencao > 0 && threshold_atencao < 100)) return { error: 'threshold_atencao deve estar entre 0 e 100' };
   if (!(threshold_critico > threshold_atencao && threshold_critico <= 100)) return { error: 'threshold_critico deve ser maior que threshold_atencao e no máximo 100' };
-  return { value: { nome, escopo_tipo, workspace_id: workspace_id || null, tag_key, tag_valor, valor_mensal, threshold_atencao, threshold_critico, ativo: ativo !== false } };
+  return { value: { nome, escopo_tipo, workspace_id: workspace_id || null, tag_key, tag_valor, usuario: usuario || null, valor_mensal, threshold_atencao, threshold_critico, ativo: ativo !== false } };
 }
 
 app.post('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (req, res) => {
@@ -10941,9 +10962,9 @@ app.post('/api/databricks-coleta/budgets', authMiddleware, dbMiddleware, async (
     if (v.error) return res.status(400).json({ error: v.error });
     const b = v.value;
     const r = await pool.query(
-      `INSERT INTO databricks_budgets (nome, escopo_tipo, workspace_id, tag_key, tag_valor, valor_mensal, threshold_atencao, threshold_critico, ativo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [b.nome, b.escopo_tipo, b.workspace_id, b.tag_key, b.tag_valor, b.valor_mensal, b.threshold_atencao, b.threshold_critico, b.ativo]
+      `INSERT INTO databricks_budgets (nome, escopo_tipo, workspace_id, tag_key, tag_valor, usuario, valor_mensal, threshold_atencao, threshold_critico, ativo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [b.nome, b.escopo_tipo, b.workspace_id, b.tag_key, b.tag_valor, b.usuario, b.valor_mensal, b.threshold_atencao, b.threshold_critico, b.ativo]
     );
     res.json(r.rows[0]);
   } catch (e) { _dbErr(res, e); }
@@ -10955,11 +10976,111 @@ app.put('/api/databricks-coleta/budgets/:id', authMiddleware, dbMiddleware, asyn
     if (v.error) return res.status(400).json({ error: v.error });
     const b = v.value;
     const r = await pool.query(
-      `UPDATE databricks_budgets SET nome=$1, escopo_tipo=$2, workspace_id=$3, tag_key=$4, tag_valor=$5, valor_mensal=$6, threshold_atencao=$7, threshold_critico=$8, ativo=$9, atualizado_em=NOW() WHERE id=$10 RETURNING *`,
-      [b.nome, b.escopo_tipo, b.workspace_id, b.tag_key, b.tag_valor, b.valor_mensal, b.threshold_atencao, b.threshold_critico, b.ativo, req.params.id]
+      `UPDATE databricks_budgets SET nome=$1, escopo_tipo=$2, workspace_id=$3, tag_key=$4, tag_valor=$5, usuario=$6, valor_mensal=$7, threshold_atencao=$8, threshold_critico=$9, ativo=$10, atualizado_em=NOW() WHERE id=$11 RETURNING *`,
+      [b.nome, b.escopo_tipo, b.workspace_id, b.tag_key, b.tag_valor, b.usuario, b.valor_mensal, b.threshold_atencao, b.threshold_critico, b.ativo, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
     res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ─── COTAS (consumo x teto) ───────────────────────────────────────────────────
+// Alimenta a aba "Cotas", o semaforo trazido do cockpit "Gestao de Cotas".
+//
+// Diferenca essencial para o cockpit original: la os percentuais vinham
+// prontos numa planilha, DESCOLADOS das linhas de consumo -- auditado e
+// medido: o declarado chegava a 28x o que as linhas sustentavam. Aqui o
+// percentual e sempre DERIVADO de databricks_consumo, que ja e coletado.
+// Nao existe caminho onde a % venha de outro lugar que nao a soma real.
+//
+// Devolve duas listas para o mes corrente:
+//   por_workspace -> consumo do ws x cota do orcamento de escopo 'workspace'
+//   por_usuario   -> consumo do usuario x teto aplicavel, que e o mais
+//                    especifico entre um orcamento 'usuario' (excecao
+//                    individual) e o 'workspace_por_usuario' do ws dele.
+function _cotaStatus(pct, thAtencao, thCritico) {
+  if (pct == null) return 'sem_cota';
+  if (pct >= 100) return 'estourado';
+  if (pct >= thCritico) return 'critico';
+  if (pct >= thAtencao) return 'atencao';
+  return 'ok';
+}
+
+app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const inicioMes = req.query.mes
+      ? String(req.query.mes) + '-01'
+      : new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
+
+    const [budgets, consWs, consUser] = await Promise.all([
+      // ORDER BY id: podem existir dois orcamentos ativos para o mesmo escopo
+      // (nada impede hoje). Sem ordem explicita o Postgres nao garante qual vem
+      // primeiro, e o .find() abaixo escolheria um deles a cada request --
+      // o percentual exibido mudaria sozinho entre recargas. Fixado no mais
+      // antigo, que e o previsivel para quem configurou primeiro.
+      pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true ORDER BY id`),
+      pool.query(`SELECT workspace_id, COALESCE(SUM(custo_estimado),0) AS custo,
+                         COALESCE(SUM(usage_quantity),0) AS dbus
+                  FROM databricks_consumo WHERE usage_date >= $1
+                  GROUP BY workspace_id`, [inicioMes]),
+      pool.query(`SELECT workspace_id, COALESCE(usuario,'') AS usuario,
+                         COALESCE(SUM(custo_estimado),0) AS custo
+                  FROM databricks_consumo WHERE usage_date >= $1
+                  GROUP BY workspace_id, usuario`, [inicioMes]),
+    ]);
+
+    const bs = budgets.rows;
+    const num = (v, d) => (v != null ? parseFloat(v) : d);
+
+    // --- workspaces ---
+    const porWs = consWs.rows.map(r => {
+      const b = bs.find(x => x.escopo_tipo === 'workspace' && x.workspace_id === r.workspace_id);
+      const custo = parseFloat(r.custo);
+      const cota = b ? parseFloat(b.valor_mensal) : null;
+      const pct = cota > 0 ? (custo / cota) * 100 : null;
+      return {
+        workspace_id: r.workspace_id,
+        custo, dbus: parseFloat(r.dbus),
+        cota, pct,
+        budget_nome: b ? b.nome : null,
+        status: _cotaStatus(pct, num(b && b.threshold_atencao, 75), num(b && b.threshold_critico, 90)),
+      };
+    }).sort((a, b2) => b2.custo - a.custo);
+
+    // --- usuarios ---
+    // Teto aplicavel = o mais especifico: um orcamento 'usuario' vence o
+    // 'workspace_por_usuario' do workspace dele. Entre dois de escopo
+    // 'usuario', o que amarra workspace vence o global daquele usuario.
+    const porUser = consUser.rows.map(r => {
+      const indivWs = bs.find(x => x.escopo_tipo === 'usuario' && x.usuario === r.usuario && x.workspace_id === r.workspace_id);
+      const indiv   = indivWs || bs.find(x => x.escopo_tipo === 'usuario' && x.usuario === r.usuario && !x.workspace_id);
+      const doWs    = bs.find(x => x.escopo_tipo === 'workspace_por_usuario' && x.workspace_id === r.workspace_id);
+      const b = indiv || doWs;
+      const custo = parseFloat(r.custo);
+      const limite = b ? parseFloat(b.valor_mensal) : null;
+      const pct = limite > 0 ? (custo / limite) * 100 : null;
+      return {
+        workspace_id: r.workspace_id,
+        usuario: r.usuario || '(não identificado)',
+        custo, limite, pct,
+        origem_limite: b ? (indiv ? 'individual' : 'workspace') : null,
+        budget_nome: b ? b.nome : null,
+        status: _cotaStatus(pct, num(b && b.threshold_atencao, 75), num(b && b.threshold_critico, 90)),
+      };
+    }).sort((a, b2) => b2.custo - a.custo);
+
+    const comCota = porWs.filter(w => w.cota != null);
+    res.json({
+      mes: inicioMes.slice(0, 7),
+      por_workspace: porWs,
+      por_usuario: porUser,
+      resumo: {
+        custo_total: porWs.reduce((a, w) => a + w.custo, 0),
+        cota_total: comCota.reduce((a, w) => a + w.cota, 0),
+        workspaces_sem_cota: porWs.length - comCota.length,
+        usuarios_acima_do_limite: porUser.filter(u => u.status === 'estourado').length,
+      },
+    });
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -10994,6 +11115,18 @@ async function _computeAlertasDatabricks() {
     } else if (b.escopo_tipo === 'tag' && b.tag_key && b.tag_valor) {
       params.push(b.tag_key, b.tag_valor);
       sql += ` AND custom_tags ->> $2 = $3`;
+    } else if (b.escopo_tipo === 'usuario' && b.usuario) {
+      sql += ` AND usuario = $2`; params.push(b.usuario);
+      if (b.workspace_id) { sql += ` AND workspace_id = $3`; params.push(b.workspace_id); }
+    } else if (b.escopo_tipo === 'workspace_por_usuario' && b.workspace_id) {
+      // O teto vale para CADA usuario, entao o que interessa aqui e o MAIOR
+      // consumo individual do workspace -- nao a soma. Somar diria que o
+      // workspace estourou quando na verdade ninguem passou do proprio limite.
+      sql = `SELECT COALESCE(MAX(c),0) AS custo FROM (
+               SELECT COALESCE(SUM(custo_estimado),0) AS c FROM databricks_consumo
+               WHERE usage_date >= $1 AND workspace_id = $2 GROUP BY usuario
+             ) t`;
+      params.push(b.workspace_id);
     }
     const r = await pool.query(sql, params);
     const custoAtual = parseFloat(r.rows[0].custo);

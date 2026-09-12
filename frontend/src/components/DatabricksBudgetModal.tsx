@@ -16,6 +16,7 @@ export default function DatabricksBudgetModal({ budget, workspaces, onClose }: P
   const [workspaceId, setWorkspaceId] = useState(budget?.workspace_id || '')
   const [tagKey, setTagKey] = useState(budget?.tag_key || '')
   const [tagValor, setTagValor] = useState(budget?.tag_valor || '')
+  const [usuario, setUsuario] = useState(budget?.usuario || '')
   const [valorMensal, setValorMensal] = useState(budget?.valor_mensal?.toString() || '')
   const [thresholdAtencao, setThresholdAtencao] = useState(budget?.threshold_atencao?.toString() || '75')
   const [thresholdCritico, setThresholdCritico] = useState(budget?.threshold_critico?.toString() || '90')
@@ -31,16 +32,24 @@ export default function DatabricksBudgetModal({ budget, workspaces, onClose }: P
   const thAtencaoNum = parseFloat(thresholdAtencao)
   const thCriticoNum = parseFloat(thresholdCritico)
   const thresholdsValidos = thAtencaoNum > 0 && thAtencaoNum < 100 && thCriticoNum > thAtencaoNum && thCriticoNum <= 100
-  const escopoValido = escopoTipo === 'global' || (escopoTipo === 'workspace' && !!workspaceId) || (escopoTipo === 'tag' && !!tagKey && !!tagValor)
+  const escopoValido =
+    escopoTipo === 'global' ||
+    (escopoTipo === 'workspace' && !!workspaceId) ||
+    (escopoTipo === 'tag' && !!tagKey && !!tagValor) ||
+    (escopoTipo === 'workspace_por_usuario' && !!workspaceId) ||
+    (escopoTipo === 'usuario' && !!usuario)
 
   const salvarMutation = useMutation({
     mutationFn: () => {
       const input = {
         nome,
         escopo_tipo: escopoTipo,
-        workspace_id: escopoTipo === 'workspace' ? workspaceId : null,
+        // workspace_id sobrevive em 'workspace_por_usuario' (de qual ws é o teto)
+        // e é opcional em 'usuario' (restringe a exceção àquele workspace).
+        workspace_id: ['workspace', 'workspace_por_usuario', 'usuario'].includes(escopoTipo) ? (workspaceId || null) : null,
         tag_key: escopoTipo === 'tag' ? tagKey : null,
         tag_valor: escopoTipo === 'tag' ? tagValor : null,
+        usuario: escopoTipo === 'usuario' ? usuario : null,
         valor_mensal: parseFloat(valorMensal) || 0,
         threshold_atencao: thAtencaoNum,
         threshold_critico: thCriticoNum,
@@ -60,6 +69,10 @@ export default function DatabricksBudgetModal({ budget, workspaces, onClose }: P
   function handleEscopoTipoChange(v: DatabricksBudgetEscopoTipo) {
     setEscopoTipo(v)
     if (v !== 'tag') { setTagKey(''); setTagValor('') }
+    if (v !== 'usuario') setUsuario('')
+    // workspace_id NÃO é limpo: os três escopos que o usam compartilham o campo,
+    // então trocar entre eles preserva a escolha em vez de obrigar a refazer.
+    if (!['workspace', 'workspace_por_usuario', 'usuario'].includes(v)) setWorkspaceId('')
   }
 
   return (
@@ -80,15 +93,36 @@ export default function DatabricksBudgetModal({ budget, workspaces, onClose }: P
               <option value="global">Global (todos os workspaces)</option>
               <option value="workspace">Um workspace específico</option>
               <option value="tag">Por tag (projeto, time, centro de custo...)</option>
+              <option value="workspace_por_usuario">Teto por usuário de um workspace</option>
+              <option value="usuario">Um usuário específico</option>
             </select>
+            {escopoTipo === 'workspace_por_usuario' && (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                O valor vale para <strong>cada</strong> usuário do workspace, não para a soma.
+              </div>
+            )}
+            {escopoTipo === 'usuario' && (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                Exceção individual — vence o teto por usuário do workspace.
+              </div>
+            )}
           </div>
-          {escopoTipo === 'workspace' && (
+          {['workspace', 'workspace_por_usuario', 'usuario'].includes(escopoTipo) && (
             <div className="form-group">
-              <label htmlFor="dbxb-ws">Workspace</label>
+              <label htmlFor="dbxb-ws">Workspace{escopoTipo === 'usuario' ? ' (opcional)' : ''}</label>
               <select id="dbxb-ws" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
                 <option value="">Selecione...</option>
                 {workspaces.map((w) => <option key={w} value={w}>{w}</option>)}
               </select>
+            </div>
+          )}
+          {escopoTipo === 'usuario' && (
+            <div className="form-group">
+              <label htmlFor="dbxb-usuario">Usuário</label>
+              <input
+                id="dbxb-usuario" value={usuario} onChange={(e) => setUsuario(e.target.value)}
+                placeholder="Ex: ana.silva@empresa.com"
+              />
             </div>
           )}
           {escopoTipo === 'tag' && (

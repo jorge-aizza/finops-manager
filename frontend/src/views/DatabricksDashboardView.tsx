@@ -5,6 +5,7 @@ import { deleteGenieBudget, listGenieBudgets } from '../api/genieBudgets'
 import type { DatabricksBudget, DatabricksResumoMes } from '../types/databricksResumo'
 import type { GenieBudget } from '../types/genieBudgets'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
+import DatabricksCotasPanel from '../components/DatabricksCotasPanel'
 import DatabricksJobRunsCard from '../components/DatabricksJobRunsCard'
 import DatabricksClusterUtilizacaoCard from '../components/DatabricksClusterUtilizacaoCard'
 import DatabricksQueryHistoryCard from '../components/DatabricksQueryHistoryCard'
@@ -14,10 +15,11 @@ import GenieBudgetModal from '../components/GenieBudgetModal'
 import { forecastLinear } from '../lib/forecastLinear'
 import { setDatabricksTabListener } from '../bridge'
 
-type DbxTab = 'dashboard' | 'orcamentos' | 'quotas'
+type DbxTab = 'dashboard' | 'orcamentos' | 'cotas' | 'quotas'
 const DBX_TAB_INFO: Record<DbxTab, { titulo: string; sub: string }> = {
   dashboard: { titulo: 'Dashboard Databricks', sub: 'Consumo mensal, custo por workspace/SKU/usuário/job/cluster/warehouse e free-tier vs. pago' },
   orcamentos: { titulo: 'Orçamentos e Anomalias', sub: 'Orçamentos internos com alerta por e-mail e detecção automática de anomalias de consumo' },
+  cotas: { titulo: 'Cotas', sub: 'Consumo do mês contra o teto configurado, por workspace e por usuário — semáforo derivado de databricks_consumo' },
   quotas: { titulo: 'Quotas Genie', sub: 'Limites nativos do Databricks (Unity AI Gateway) para o uso do Genie — por workspace, usuário ou grupo' },
 }
 
@@ -273,7 +275,7 @@ export default function DatabricksDashboardView() {
   // Estimativas), canal próprio da ponte (setDatabricksTabListener), separado do de
   // Dashboard.
   const [dbxTab, setDbxTab] = useState<DbxTab>('dashboard')
-  useEffect(() => setDatabricksTabListener((t) => setDbxTab(t === 'orcamentos' || t === 'quotas' ? t : 'dashboard')), [])
+  useEffect(() => setDatabricksTabListener((t) => setDbxTab(t === 'orcamentos' || t === 'quotas' || t === 'cotas' ? t : 'dashboard')), [])
   const [periodo, setPeriodo] = useState(defaultPeriodo)
   const [inicioInput, setInicioInput] = useState(periodo.inicio)
   const [fimInput, setFimInput] = useState(periodo.fim)
@@ -332,7 +334,7 @@ export default function DatabricksDashboardView() {
   const toggleAtivoMutation = useMutation({
     mutationFn: (b: DatabricksBudget) => updateDatabricksBudget(b.id, {
       nome: b.nome, escopo_tipo: b.escopo_tipo, workspace_id: b.workspace_id,
-      tag_key: b.tag_key, tag_valor: b.tag_valor, valor_mensal: b.valor_mensal,
+      tag_key: b.tag_key, tag_valor: b.tag_valor, usuario: b.usuario, valor_mensal: b.valor_mensal,
       threshold_atencao: b.threshold_atencao, threshold_critico: b.threshold_critico,
       ativo: !b.ativo,
     }),
@@ -610,6 +612,7 @@ export default function DatabricksDashboardView() {
         </>
       )}
 
+      {dbxTab === 'cotas' && <DatabricksCotasPanel />}
       {dbxTab === 'quotas' && <GenieBudgetsCard />}
 
       {budgetModalOpen && (

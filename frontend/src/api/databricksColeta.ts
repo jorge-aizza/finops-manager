@@ -5,6 +5,7 @@ import type {
 } from '../types/databricksColeta'
 import type {
   DatabricksAlerta, DatabricksAnomalias, DatabricksBudget, DatabricksBudgetInput, DatabricksResumo,
+  DatabricksCotas,
 } from '../types/databricksResumo'
 import type { HistoricoItem, PurgeResult } from '../types/coleta'
 import type { DatabricksJobRunsResposta } from '../types/databricksJobRuns'
@@ -121,6 +122,29 @@ export const updateDatabricksBudget = (id: number, input: DatabricksBudgetInput)
 
 export const deleteDatabricksBudget = (id: number) =>
   apiFetch<{ ok: boolean }>('DELETE', '/databricks-coleta/budgets/' + id)
+
+// Os campos numéricos vêm de colunas NUMERIC (string via pg) e de somas feitas
+// em JS no servidor — normalizados aqui na borda, como o resto do módulo.
+export const getDatabricksCotas = (mes?: string) =>
+  apiFetch<DatabricksCotas>('GET', '/databricks-coleta/cotas' + (mes ? '?mes=' + encodeURIComponent(mes) : ''))
+    .then((c) => ({
+      ...c,
+      por_workspace: c.por_workspace.map((w) => ({
+        ...w, custo: Number(w.custo), dbus: Number(w.dbus),
+        cota: w.cota == null ? null : Number(w.cota),
+        pct: w.pct == null ? null : Number(w.pct),
+      })),
+      por_usuario: c.por_usuario.map((u) => ({
+        ...u, custo: Number(u.custo),
+        limite: u.limite == null ? null : Number(u.limite),
+        pct: u.pct == null ? null : Number(u.pct),
+      })),
+      resumo: {
+        ...c.resumo,
+        custo_total: Number(c.resumo.custo_total),
+        cota_total: Number(c.resumo.cota_total),
+      },
+    }))
 
 export const getDatabricksAlertas = () =>
   apiFetch<DatabricksAlerta[]>('GET', '/databricks-coleta/alertas').then((rows) =>

@@ -326,7 +326,7 @@ describe('DatabricksDashboardView', () => {
     vi.mocked(databricksColetaApi.listDatabricksBudgets).mockResolvedValue([
       {
         id: 1, nome: 'Orçamento Global', escopo_tipo: 'global', workspace_id: null,
-        tag_key: null, tag_valor: null, valor_mensal: 4000, threshold_atencao: 75, threshold_critico: 90,
+        tag_key: null, tag_valor: null, usuario: null, valor_mensal: 4000, threshold_atencao: 75, threshold_critico: 90,
         ativo: true, criado_em: '', atualizado_em: '',
       },
     ])

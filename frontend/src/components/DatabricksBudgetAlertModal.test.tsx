@@ -11,7 +11,7 @@ vi.mock('../api/databricksColeta')
 function budget(overrides: Partial<DatabricksBudget> = {}): DatabricksBudget {
   return {
     id: 1, nome: 'Orçamento Global', escopo_tipo: 'global', workspace_id: null,
-    tag_key: null, tag_valor: null, valor_mensal: 1000,
+    tag_key: null, tag_valor: null, usuario: null, valor_mensal: 1000,
     threshold_atencao: 75, threshold_critico: 90,
     ativo: true, criado_em: '2026-01-01T00:00:00.000Z', atualizado_em: '2026-01-01T00:00:00.000Z',
     ...overrides,

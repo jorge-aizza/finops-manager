@@ -10,7 +10,7 @@ vi.mock('../api/databricksColeta')
 
 const existingBudget: DatabricksBudget = {
   id: 5, nome: 'Orçamento Time Dados', escopo_tipo: 'workspace', workspace_id: 'ws-123',
-  tag_key: null, tag_valor: null, valor_mensal: 5000, threshold_atencao: 75, threshold_critico: 90,
+  tag_key: null, tag_valor: null, usuario: null, valor_mensal: 5000, threshold_atencao: 75, threshold_critico: 90,
   ativo: true, criado_em: '2026-01-01T00:00:00.000Z', atualizado_em: '2026-01-01T00:00:00.000Z',
 }
 
@@ -43,7 +43,7 @@ describe('DatabricksBudgetModal', () => {
 
     expect(databricksColetaApi.createDatabricksBudget).toHaveBeenCalledWith({
       nome: 'Orçamento Mensal', escopo_tipo: 'global', workspace_id: null,
-      tag_key: null, tag_valor: null, valor_mensal: 3000,
+      tag_key: null, tag_valor: null, usuario: null, valor_mensal: 3000,
       threshold_atencao: 75, threshold_critico: 90, ativo: true,
     })
   })
@@ -108,7 +108,7 @@ describe('DatabricksBudgetModal', () => {
 
     expect(databricksColetaApi.updateDatabricksBudget).toHaveBeenCalledWith(5, {
       nome: 'Orçamento Time Dados', escopo_tipo: 'workspace', workspace_id: 'ws-123',
-      tag_key: null, tag_valor: null, valor_mensal: 5000,
+      tag_key: null, tag_valor: null, usuario: null, valor_mensal: 5000,
       threshold_atencao: 75, threshold_critico: 90, ativo: true,
     })
   })
