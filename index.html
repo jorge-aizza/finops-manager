@@ -1084,14 +1084,35 @@
     <div class="login-box">
       <div class="login-logo" style="margin-bottom:8px">
         <style>
-          /* Pulso do logo na tela de login. As classes .vivo-text/.vivo-mascote
-             sumiram junto com o SVG e o canvas do mascote — o keyframe foi
-             mantido e repontado para a imagem, para nao perder o efeito. */
+          /* Pulso do logo na tela de login.
+             O efeito era `filter: drop-shadow` na PROPRIA imagem: a sombra e
+             desenhada a partir da silhueta alfa, entao com 6px+12px de blur em
+             roxo opaco ela se sobrepunha ao desenho e borrava o logo no pico da
+             animacao -- a contraforma branca do "p", que e pequena e fica colada
+             na roda, era engolida pelo roxo, e as cores da roda ficavam sob um
+             veu. Agora o brilho e um halo ATRAS (::before com gradiente radial):
+             a imagem nunca recebe filtro e fica nitida o tempo todo. */
           @keyframes vivo-logo-glow {
-            0%,100% { filter: drop-shadow(0 0 3px rgba(147,51,234,.6)); }
-            50%      { filter: drop-shadow(0 0 6px rgba(147,51,234,1)) drop-shadow(0 0 12px rgba(147,51,234,.35)); }
+            0%,100% { opacity: .35; transform: translate(-50%,-50%) scale(.94); }
+            50%      { opacity: .75; transform: translate(-50%,-50%) scale(1.06); }
           }
-          .login-logo .finops-logo { animation: vivo-logo-glow 3s ease-in-out infinite; }
+          .login-logo { position: relative; }
+          .login-logo::before {
+            content: '';
+            position: absolute;
+            left: 50%; top: 50%;
+            width: 118%; height: 190%;
+            transform: translate(-50%,-50%);
+            background: radial-gradient(ellipse at center, rgba(147,51,234,.45) 0%, rgba(147,51,234,0) 68%);
+            animation: vivo-logo-glow 3s ease-in-out infinite;
+            pointer-events: none;
+            z-index: 0;
+          }
+          .login-logo .finops-logo { position: relative; z-index: 1; }
+          /* quem prefere menos movimento nao ve o pulso */
+          @media (prefers-reduced-motion: reduce) {
+            .login-logo::before { animation: none; opacity: .4; }
+          }
         </style>
         <div style="display:inline-flex;align-items:center;justify-content:center;gap:0;margin:0 auto;">
           <img src="/finops-logo.png" alt="FinOps" class="finops-logo"
