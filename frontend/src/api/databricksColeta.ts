@@ -322,9 +322,9 @@ export const getDatabricksStorageOtimizacao = (data_inicio?: string, data_fim?: 
 }
 
 /** Serie diaria que alimenta os dois graficos da aba Cotas. */
-export interface DatabricksCotaSerieDia { dia: string; custo: number; dbus_free: number }
+export interface DatabricksCotaSerieDia { dia: string; custo: number; dbus: number; dbus_free: number }
 /** Uma linha produto x dia — alimenta o grafico empilhado "Consumo por produto". */
-export interface DatabricksCotaSerieProduto { produto: string; dia: string; custo: number }
+export interface DatabricksCotaSerieProduto { produto: string; dia: string; custo: number; dbus: number }
 export interface DatabricksCotaSerie {
   workspace: DatabricksCotaSerieDia[]
   usuario: DatabricksCotaSerieDia[]
@@ -333,16 +333,19 @@ export interface DatabricksCotaSerie {
 
 export const getDatabricksCotaSerie = (
   r: DatabricksCotaRange, workspaceId?: string | null, usuario?: string | null,
+  /** Restringe a Genie (sku_name com GENIE) — a tela de Cotas e dedicada a ele. */
+  soGenie = false,
 ) => {
   const q = rangeQS(r)
+  if (soGenie) q.set('genie', '1')
   if (workspaceId) q.set('workspace_id', workspaceId)
   // string vazia e um valor legitimo aqui (usuario nao identificado), por isso
   // o teste e contra null/undefined e nao contra falsy
   if (usuario != null) q.set('usuario', usuario)
   return apiFetch<DatabricksCotaSerie>('GET', '/databricks-coleta/cotas-serie?' + q.toString())
     .then((r) => ({
-      workspace: (r.workspace || []).map((d) => ({ ...d, custo: Number(d.custo), dbus_free: Number(d.dbus_free) })),
-      usuario: (r.usuario || []).map((d) => ({ ...d, custo: Number(d.custo), dbus_free: Number(d.dbus_free) })),
-      produto: (r.produto || []).map((d) => ({ ...d, custo: Number(d.custo) })),
+      workspace: (r.workspace || []).map((d) => ({ ...d, custo: Number(d.custo), dbus: Number(d.dbus), dbus_free: Number(d.dbus_free) })),
+      usuario: (r.usuario || []).map((d) => ({ ...d, custo: Number(d.custo), dbus: Number(d.dbus), dbus_free: Number(d.dbus_free) })),
+      produto: (r.produto || []).map((d) => ({ ...d, custo: Number(d.custo), dbus: Number(d.dbus) })),
     }))
 }

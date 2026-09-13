@@ -223,8 +223,9 @@ export default function DatabricksCotasPanel() {
   const wsSel = fWs.length === 1 ? fWs[0] : null
   const userSel = fUser.length === 1 ? fUser[0] : null
   const serieQuery = useQuery({
-    queryKey: ['databricks-cotas-serie', range.data_inicio || '', range.data_fim || '', wsSel, userSel],
-    queryFn: () => getDatabricksCotaSerie(range, wsSel, userSel),
+    queryKey: ['databricks-cotas-serie', range.data_inicio || '', range.data_fim || '', wsSel, userSel, 'genie'],
+    // a tela e dedicada ao Genie: as series sempre vem filtradas nele
+    queryFn: () => getDatabricksCotaSerie(range, wsSel, userSel, true),
     // sempre: sem workspace escolhido o painel mostra a serie agregada
   })
 
@@ -345,36 +346,17 @@ export default function DatabricksCotasPanel() {
   // parece errado pra quem cadastrou a cota.
   const mesesConsid = d.meses_considerados || 1
 
-  // ---- Graficos do cockpit v51 ----
-  // "Consumo por periodo": consumo diario x cota de workspace x cota de usuario.
-  // "Consumo por produto": um empilhamento por dia, uma cor por produto.
-  //
-  // A cota e um teto do PERIODO e o grafico e DIARIO. Desenhar o teto cheio como
-  // barra (o que o cockpit faz) deixa o consumo rente ao chao -- medido: cota de
-  // US$ 24.000 contra ~US$ 300/dia, so a cota aparecia. A referencia vira o
-  // RITMO diario que cada teto permite, e o rotulo diz isso.
-  const porDia = (teto: number | null, dias: number) =>
-    teto == null || dias <= 0 ? null : teto / dias
-
+  // ---- Graficos do cockpit v51, restritos ao Genie ----
+  // Genie e cobrado como free-tier: nos dados reais sao 1.466 DBU com custo
+  // US$ 0,00. Medir em dolar daria um grafico inteiro em zero, entao as series
+  // do Genie sao em DBU -- e por isso tambem nao ha barra de cota aqui: as
+  // cotas sao configuradas em USD e nao tem como comparar com DBU.
   const dias = (serieQuery.data?.workspace || []).map((x) => x.dia)
-  const limiteTotal = usuarios.reduce((a, u) => a + (u.limite || 0), 0)
-  const ritmoCotaWs = porDia(cotaTotal > 0 ? cotaTotal : null, dias.length)
-  const ritmoCotaUser = porDia(limiteTotal > 0 ? limiteTotal : null, dias.length)
+  const dbu = (v: number) => fmt(v) + ' DBU'
 
-  // cores verbatim do v51
   const seriePeriodo: CkSerie[] = [
-    { label: 'Consumo (USD)', cor: 'var(--ck-teal)', fmt: usd,
-      valores: (serieQuery.data?.workspace || []).map((x) => x.custo) },
-    // so desenha o teto quando ele existe: uma barra fixa em zero passaria a
-    // falsa impressao de "cota zero" pra quem nao configurou nenhuma
-    ...(ritmoCotaWs != null ? [{
-      label: 'Cota Workspace (USD/dia)', cor: 'var(--ck-lilac-hover)', fmt: usd,
-      valores: dias.map(() => ritmoCotaWs),
-    }] : []),
-    ...(ritmoCotaUser != null ? [{
-      label: 'Cota Usuário (USD/dia)', cor: 'var(--ck-rosa)', fmt: usd,
-      valores: dias.map(() => ritmoCotaUser),
-    }] : []),
+    { label: 'Consumo Genie (DBU)', cor: 'var(--ck-teal)', fmt: dbu,
+      valores: (serieQuery.data?.workspace || []).map((x) => x.dbus) },
   ]
 
   // paleta ciclica categorica do v51, na mesma ordem
@@ -384,19 +366,19 @@ export default function DatabricksCotasPanel() {
   ]
   const linhasProduto = serieQuery.data?.produto || []
   const totalPorProduto = new Map<string, number>()
-  for (const r of linhasProduto) totalPorProduto.set(r.produto, (totalPorProduto.get(r.produto) || 0) + r.custo)
+  for (const r of linhasProduto) totalPorProduto.set(r.produto, (totalPorProduto.get(r.produto) || 0) + r.dbus)
   // do maior pro menor consumo total: define a ordem da pilha e da legenda
   const produtos = [...totalPorProduto.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n)
-  const custoProdutoDia = new Map<string, Map<string, number>>()
+  const dbuProdutoDia = new Map<string, Map<string, number>>()
   for (const r of linhasProduto) {
-    if (!custoProdutoDia.has(r.produto)) custoProdutoDia.set(r.produto, new Map())
-    custoProdutoDia.get(r.produto)!.set(r.dia, r.custo)
+    if (!dbuProdutoDia.has(r.produto)) dbuProdutoDia.set(r.produto, new Map())
+    dbuProdutoDia.get(r.produto)!.set(r.dia, r.dbus)
   }
   const serieProduto: CkSerie[] = produtos.map((nome, i) => ({
     label: nome,
     cor: PALETA_PRODUTO[i % PALETA_PRODUTO.length],
-    fmt: usd,
-    valores: dias.map((dia) => custoProdutoDia.get(nome)?.get(dia) || 0),
+    fmt: dbu,
+    valores: dias.map((dia) => dbuProdutoDia.get(nome)?.get(dia) || 0),
   }))
 
   return (
@@ -431,10 +413,13 @@ export default function DatabricksCotasPanel() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gap: 16, margin: '0 20px 16px' }}>
+      {/* layout do cockpit (.grid): graficos empilhados a esquerda, semaforos
+          a direita, alinhados no topo */}
+      <div className="ck-analise" style={{ margin: '0 20px 16px' }}>
+        <div className="ck-chart-stack">
         <PainelGrafico
           titulo="Consumo por período"
-          nota="Comparação entre consumo, cota de workspace e cota de usuário"
+          nota="Consumo do Genie por dia, em DBU — o Genie é free-tier e não gera custo em USD"
           vazio={dias.length ? null : 'Sem consumo no período escolhido.'}
         >
           <CkBarChart dias={dias} series={seriePeriodo} />
@@ -442,14 +427,14 @@ export default function DatabricksCotasPanel() {
 
         <PainelGrafico
           titulo="Consumo por produto"
-          nota="Custo diário em USD, por produto"
+          nota="Consumo diário do Genie em DBU, por produto de origem"
           vazio={serieProduto.length ? null : 'Sem consumo no período escolhido.'}
         >
           <CkBarChart dias={dias} series={serieProduto} empilhado />
         </PainelGrafico>
-      </div>
+        </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, margin: '0 20px', alignItems: 'start' }}>
+        <div className="ck-chart-stack">
         <PainelCotas
           titulo="Cotas Workspace"
           substantivo={['workspace', 'workspaces']}
@@ -482,20 +467,13 @@ export default function DatabricksCotasPanel() {
             />
           )}
         />
+        </div>
       </div>
 
       {detalhe && (
         <DatabricksCotaDetalheModal
           item={detalhe.item}
           tipo={detalhe.tipo}
-          usuariosDoWs={detalhe.tipo === 'workspace'
-            // ja escopado ao workspace: a linha aberta no drill-down e a
-            // daquele workspace, nunca a soma do usuario em todos eles
-            ? d.por_usuario.filter((x) => x.workspace_id === detalhe.item.workspace_id)
-            : []}
-          onAbrirUsuario={detalhe.tipo === 'workspace'
-            ? (u) => setDetalhe({ tipo: 'usuario', item: u, origem: detalhe.item })
-            : undefined}
           voltarPara={detalhe.tipo === 'usuario' ? detalhe.origem?.workspace_id ?? null : null}
           onVoltar={detalhe.tipo === 'usuario' && detalhe.origem
             ? () => setDetalhe({ tipo: 'workspace', item: detalhe.origem! })

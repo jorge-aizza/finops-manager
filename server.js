@@ -11147,9 +11147,14 @@ app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, asyn
     const _janela = _cotasPeriodo(req.query);
     const ws = req.query.workspace_id ? String(req.query.workspace_id) : null;
     const usuario = req.query.usuario != null ? String(req.query.usuario) : null;
+    // A tela de Cotas e dedicada ao Genie. `produto_origem` NAO tem um valor
+    // "GENIE" (so INTERACTIVE/SQL/JOBS/MODEL_SERVING) -- o que identifica Genie
+    // e o sku_name (GENIE_FREE_USAGE). Nome fixo aqui, nunca vindo do request.
+    const soGenie = String(req.query.genie || '') === '1';
 
     const params = [..._janela.params];
     const cond = _janela.where ? [_janela.where.replace(/^WHERE /, '')] : [];
+    if (soGenie) cond.push(`sku_name ILIKE '%GENIE%'`);
 
     const serie = async (extraCond, extraParams) => {
       const p = params.concat(extraParams);
@@ -11160,12 +11165,16 @@ app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, asyn
       const r = await pool.query(
         `SELECT to_char(usage_date,'YYYY-MM-DD') AS dia,
                 COALESCE(SUM(custo_estimado),0) AS custo,
+                COALESCE(SUM(usage_quantity),0) AS dbus,
                 COALESCE(SUM(CASE WHEN sku_name ILIKE '%FREE%' OR custo_estimado = 0
                                   THEN usage_quantity ELSE 0 END),0) AS dbus_free
            FROM databricks_consumo
           ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
           GROUP BY 1 ORDER BY 1`, p);
-      return r.rows.map(x => ({ dia: x.dia, custo: parseFloat(x.custo), dbus_free: parseFloat(x.dbus_free) }));
+      return r.rows.map(x => ({
+        dia: x.dia, custo: parseFloat(x.custo),
+        dbus: parseFloat(x.dbus), dbus_free: parseFloat(x.dbus_free),
+      }));
     };
 
     // O MESMO usuario aparece em varios workspaces (nos dados reais, os 6
@@ -11191,7 +11200,8 @@ app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, asyn
     }
     const prodSql = `SELECT COALESCE(NULLIF(produto_origem,''),'Não informado') AS produto,
                             to_char(usage_date,'YYYY-MM-DD') AS dia,
-                            COALESCE(SUM(custo_estimado),0) AS custo
+                            COALESCE(SUM(custo_estimado),0) AS custo,
+                            COALESCE(SUM(usage_quantity),0) AS dbus
                        FROM databricks_consumo
                       ${cond.concat(condProd).length ? 'WHERE ' + cond.concat(condProd).join(' AND ') : ''}
                       GROUP BY 1, 2 ORDER BY 2`;
@@ -11206,7 +11216,8 @@ app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, asyn
       workspace: porDiaWs,
       usuario: porDiaUser,
       produto: porProduto.rows.map(r => ({
-        produto: r.produto, dia: r.dia, custo: parseFloat(r.custo),
+        produto: r.produto, dia: r.dia,
+        custo: parseFloat(r.custo), dbus: parseFloat(r.dbus),
       })),
     });
   } catch (e) { _dbErr(res, e); }

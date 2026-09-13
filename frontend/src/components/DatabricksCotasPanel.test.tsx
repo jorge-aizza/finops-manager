@@ -7,13 +7,14 @@ import type { DatabricksCotas, DatabricksCotaWorkspace } from '../types/databric
 
 vi.mock('../api/databricksColeta')
 
+// Genie e free-tier: custo zero, so DBU -- e assim que a serie chega na tela
 const serie = (dias: string[]) => ({
-  workspace: dias.map((dia, i) => ({ dia, custo: 100 + i * 10, dbus_free: 5 })),
-  usuario: dias.map((dia, i) => ({ dia, custo: 50 + i * 5, dbus_free: 2 })),
+  workspace: dias.map((dia, i) => ({ dia, custo: 0, dbus: 100 + i * 10, dbus_free: 100 + i * 10 })),
+  usuario: dias.map((dia, i) => ({ dia, custo: 0, dbus: 50 + i * 5, dbus_free: 50 + i * 5 })),
   // SQL sempre maior que JOBS: fixa a ordem da pilha e da legenda
   produto: dias.flatMap((dia) => [
-    { produto: 'SQL', dia, custo: 80 },
-    { produto: 'JOBS', dia, custo: 20 },
+    { produto: 'SQL', dia, custo: 0, dbus: 80 },
+    { produto: 'JOBS', dia, custo: 0, dbus: 20 },
   ]),
 })
 
@@ -217,8 +218,8 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByText('US$ 146,92')).toBeInTheDocument()
     // % disponível = 100 - 97,90
     expect(screen.getByText('2,1%')).toBeInTheDocument()
-    // os usuários daquele workspace vêm junto
-    expect(screen.getByText(/Usuários deste workspace/)).toBeInTheDocument()
+    // a lista de usuarios saiu daqui: quem mostra e o painel "Cotas Usuario"
+    expect(screen.queryByText(/Usuários deste workspace/)).toBeNull()
   })
 
   it('clicar num workspace seleciona ele no filtro e restringe "Cotas Usuário"', async () => {
@@ -252,40 +253,6 @@ describe('DatabricksCotasPanel', () => {
     expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
   })
 
-  it('mostra os dois gráficos do cockpit: por período e por produto', async () => {
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
-    renderPanel()
-
-    expect(await screen.findByText('Consumo por período')).toBeInTheDocument()
-    expect(screen.getByText('Comparação entre consumo, cota de workspace e cota de usuário')).toBeInTheDocument()
-    expect(screen.getByText('Consumo por produto')).toBeInTheDocument()
-    expect(screen.getByText('Custo diário em USD, por produto')).toBeInTheDocument()
-
-    // as tres series do v51 — consumo + os dois tetos, porque a fixture tem os dois
-    expect(await screen.findByText('Consumo (USD)')).toBeInTheDocument()
-    expect(screen.getByText('Cota Workspace (USD/dia)')).toBeInTheDocument()
-    expect(screen.getByText('Cota Usuário (USD/dia)')).toBeInTheDocument()
-  })
-
-  it('sem cota configurada, não desenha uma barra de teto em zero', async () => {
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas({
-      por_workspace: [
-        { workspace_id: 'ws-sem', custo: 1200, dbus: 20, dbus_free: 0, dbus_pago: 20, cota: null, pct: null, budget_nome: null, status: 'sem_cota' },
-      ],
-      por_usuario: [
-        { workspace_id: 'ws-sem', usuario: 'ana@vivo.com.br', custo: 120, dbus: 8, dbus_free: 0, dbus_pago: 8, limite: null, pct: null, origem_limite: null, budget_nome: null, status: 'sem_cota' },
-      ],
-    }))
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
-    renderPanel()
-
-    // uma reta em zero passaria a falsa impressao de "cota zero"
-    expect(await screen.findByText('Consumo (USD)')).toBeInTheDocument()
-    expect(screen.queryByText('Cota Workspace (USD/dia)')).toBeNull()
-    expect(screen.queryByText('Cota Usuário (USD/dia)')).toBeNull()
-  })
-
   it('empilha "Consumo por produto" do maior consumo para o menor', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
     vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
@@ -298,28 +265,40 @@ describe('DatabricksCotasPanel', () => {
     expect(produtos).toEqual(['SQL', 'JOBS'])
   })
 
-  it('a lista do workspace mostra a fatia de cada usuário e abre o detalhe dele', async () => {
+  it('mostra os dois gráficos, restritos ao Genie e medidos em DBU', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
+    renderPanel()
+
+    expect(await screen.findByText('Consumo por período')).toBeInTheDocument()
+    expect(screen.getByText('Consumo por produto')).toBeInTheDocument()
+    // Genie e free-tier: em USD o grafico seria todo zero, entao a unidade e DBU
+    expect(await screen.findByText('Consumo Genie (DBU)')).toBeInTheDocument()
+    expect(screen.getByText(/não gera custo em USD/)).toBeInTheDocument()
+    // a serie e pedida ja filtrada no Genie (4o argumento)
+    expect(vi.mocked(api.getDatabricksCotaSerie).mock.calls[0][3]).toBe(true)
+  })
+
+  it('não promete cota nos gráficos: as cotas são em USD e o Genie não tem custo', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
+    renderPanel()
+    await screen.findByText('Consumo por período')
+
+    expect(screen.queryByText(/Cota Workspace/)).toBeNull()
+    expect(screen.queryByText(/Cota Usuário \(USD/)).toBeNull()
+  })
+
+  it('o detalhe do workspace não repete a lista de usuários', async () => {
+    // ela divergia do painel "Cotas Usuário" (que e um Top 10 global) e agora
+    // e ele quem mostra os usuarios do workspace selecionado
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
     renderPanel()
     await screen.findByText('Cotas Workspace')
 
     fireEvent.click(cartao('Workspace', 'ws-dev'))
     expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
-
-    // fatia no consumo DO WORKSPACE (1786,79 / 6853,08 = 26%), nao o % da
-    // cota do usuario -- esse ja e o que os cartoes da tela mostram
-    expect(screen.getByText('US$ 1.786,79 · 26%')).toBeInTheDocument()
-    expect(screen.getByText('US$ 120 · 2%')).toBeInTheDocument()
-
-    // clicar no usuario troca pro detalhe dele, com caminho de volta
-    // escopado ao modal: o mesmo rotulo existe no cartao do painel atras dele
-    const modal = document.querySelector('.ck-modal-box') as HTMLElement
-    fireEvent.click(within(modal).getByRole('button', { name: 'Ver detalhes de Usuário pedro@vivo.com.br' }))
-    expect(await screen.findByRole('heading', { name: 'Usuário · pedro@vivo.com.br' })).toBeInTheDocument()
-
-    const voltar = screen.getByRole('button', { name: '← Voltar para ws-dev' })
-    fireEvent.click(voltar)
-    expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
+    expect(screen.queryByText(/Usuários deste workspace/)).toBeNull()
   })
 
   it('no detalhe de quem estourou, % disponível e saldo ficam negativos em vez de zerados', async () => {
