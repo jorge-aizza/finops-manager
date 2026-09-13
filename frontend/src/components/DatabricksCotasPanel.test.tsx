@@ -295,6 +295,37 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByText(/Selecione um usuário no filtro/)).toBeInTheDocument()
   })
 
+  it('clicar num workspace seleciona ele no filtro e restringe "Cotas Usuário"', async () => {
+    // o painel de usuario e um ranking GLOBAL por (workspace, usuario): sem
+    // selecao ele mistura workspaces, e so parte dos usuarios de um workspace
+    // aparece nele -- divergindo do modal, que lista todos os daquele. Clicar
+    // no cartao passa a selecionar o workspace no filtro, como no cockpit.
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas({
+      por_usuario: [
+        { workspace_id: 'ws-dev', usuario: 'pedro@vivo.com.br', custo: 1786.79, dbus: 50, dbus_free: 5, dbus_pago: 45, limite: 400, pct: 446.7, origem_limite: 'workspace', budget_nome: 'Teto', status: 'estourado' },
+        { workspace_id: 'ws-sem', usuario: 'outro@vivo.com.br', custo: 900, dbus: 9, dbus_free: 0, dbus_pago: 9, limite: null, pct: null, origem_limite: null, budget_nome: null, status: 'sem_cota' },
+      ],
+    }))
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
+    renderPanel()
+    await screen.findByText('Cotas Workspace')
+
+    // antes: os dois usuarios, de workspaces diferentes
+    expect(cartao('Usuário', 'outro@vivo.com.br')).toBeInTheDocument()
+
+    fireEvent.click(cartao('Workspace', 'ws-dev'))
+
+    // escopado ao painel: o modal aberto repete os mesmos rotulos de usuario
+    const painelUsuarios = document.querySelectorAll('.ck-semaphores')[1] as HTMLElement
+    // o usuario do outro workspace sai do painel...
+    expect(within(painelUsuarios).queryByRole('button', { name: 'Ver detalhes de Usuário outro@vivo.com.br' })).toBeNull()
+    expect(within(painelUsuarios).getByRole('button', { name: 'Ver detalhes de Usuário pedro@vivo.com.br' })).toBeInTheDocument()
+    // ...o workspace vira um chip do filtro...
+    expect(screen.getByRole('button', { name: 'Remover ws-dev' })).toBeInTheDocument()
+    // ...e o detalhe abre junto, como no cockpit
+    expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
+  })
+
   it('a lista do workspace mostra a fatia de cada usuário e abre o detalhe dele', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
     renderPanel()

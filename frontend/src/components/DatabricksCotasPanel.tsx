@@ -149,8 +149,8 @@ function PainelCotas<T>({ titulo, substantivo, itens, chave, render }: {
           <h2>{titulo}</h2>
           <div className="ck-panel-note">
             {tudo
-              ? `Todos os ${itens.length} ${substantivo[1]} com consumo no mês`
-              : `Top ${n} ${n === 1 ? substantivo[0] : substantivo[1]} com maior consumo no mês`}
+              ? `Todos os ${itens.length} ${substantivo[1]} com consumo no período`
+              : `Top ${n} ${n === 1 ? substantivo[0] : substantivo[1]} com maior consumo no período`}
             {' · clique num item para ver o detalhe'}
           </div>
         </div>
@@ -234,6 +234,21 @@ export default function DatabricksCotasPanel() {
   // o mes escolhido entra na lista mesmo sem consumo, senao o <select> ficaria
   // exibindo um mes diferente do que esta sendo consultado
   const temFiltro = fWs.length > 0 || fUser.length > 0 || periodo !== ''
+
+  // Clicar num cartao SELECIONA aquele item no filtro e abre o detalhe -- as
+  // duas coisas, como no cockpit (selectEntityFromCard -> combo.setValue(v, true),
+  // e setValue faz replaceValues([v]), ou seja SUBSTITUI a selecao em vez de
+  // somar). Isso e o que faz "Cotas Usuario" passar a mostrar os usuarios
+  // daquele workspace: sem isso o painel e um ranking GLOBAL e so 2 ou 3 dos 6
+  // usuarios de um workspace apareciam nele, divergindo do modal.
+  const selecionarWs = (w: DatabricksCotaWorkspace) => {
+    setFWs([w.workspace_id])
+    setDetalhe({ tipo: 'workspace', item: w })
+  }
+  const selecionarUser = (u: DatabricksCotaUsuario) => {
+    setFUser([u.usuario])
+    setDetalhe({ tipo: 'usuario', item: u })
+  }
 
   const seletor = (
     <div className="ck-cotas ck-controls" style={{ margin: '0 20px' }}>
@@ -459,7 +474,7 @@ export default function DatabricksCotasPanel() {
               titulo={w.workspace_id}
               custo={w.custo} teto={w.cota} pct={w.pct} status={w.status}
               extra={w.budget_nome}
-              onClick={() => setDetalhe({ tipo: 'workspace', item: w })}
+              onClick={() => selecionarWs(w)}
             />
           )}
         />
@@ -476,7 +491,7 @@ export default function DatabricksCotasPanel() {
               custo={u.custo} teto={u.limite} pct={u.pct} status={u.status}
               extra={u.origem_limite === 'individual' ? 'limite individual'
                 : u.origem_limite === 'workspace' ? 'teto do workspace' : u.workspace_id}
-              onClick={() => setDetalhe({ tipo: 'usuario', item: u })}
+              onClick={() => selecionarUser(u)}
             />
           )}
         />
