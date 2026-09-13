@@ -351,12 +351,33 @@ export default function DatabricksCotasPanel() {
   // US$ 0,00. Medir em dolar daria um grafico inteiro em zero, entao as series
   // do Genie sao em DBU -- e por isso tambem nao ha barra de cota aqui: as
   // cotas sao configuradas em USD e nao tem como comparar com DBU.
-  const dias = (serieQuery.data?.workspace || []).map((x) => x.dia)
   const dbu = (v: number) => fmt(v) + ' DBU'
 
+  // O servidor so devolve dias COM registro (Genie: 43 de 88). Desenhar so
+  // esses comprime a linha do tempo e faz dois dias distantes virarem barras
+  // vizinhas -- os vazios entram como zero para o eixo ser um calendario de
+  // verdade e a leitura "quanto por dia" bater.
+  const serieWs = serieQuery.data?.workspace || []
+  const porDiaDbu = new Map(serieWs.map((x) => [x.dia, x.dbus]))
+  const dias = (() => {
+    if (!serieWs.length) return []
+    const lista: string[] = []
+    const fim = new Date(serieWs[serieWs.length - 1].dia + 'T12:00:00')
+    for (const d = new Date(serieWs[0].dia + 'T12:00:00'); d <= fim; d.setDate(d.getDate() + 1)) {
+      lista.push(ymd(d))
+    }
+    return lista
+  })()
+  const valoresDia = dias.map((d) => porDiaDbu.get(d) || 0)
+
+  // o maior dia: e a pergunta que o painel responde, entao vai destacado na
+  // barra e escrito na nota
+  const picoIdx = valoresDia.reduce((melhor, v, i) => (v > valoresDia[melhor] ? i : melhor), 0)
+  const temPico = valoresDia.length > 0 && valoresDia[picoIdx] > 0
+  const diaBR = (d: string) => d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4)
+
   const seriePeriodo: CkSerie[] = [
-    { label: 'Consumo Genie (DBU)', cor: 'var(--ck-teal)', fmt: dbu,
-      valores: (serieQuery.data?.workspace || []).map((x) => x.dbus) },
+    { label: 'Consumo Genie (DBU)', cor: 'var(--ck-teal)', fmt: dbu, valores: valoresDia },
   ]
 
   // paleta ciclica categorica do v51, na mesma ordem
@@ -419,10 +440,11 @@ export default function DatabricksCotasPanel() {
         <div className="ck-chart-stack">
         <PainelGrafico
           titulo="Consumo por período"
-          nota="Consumo do Genie por dia, em DBU — o Genie é free-tier e não gera custo em USD"
+          nota={'Consumo do Genie por dia, em DBU (free-tier, não gera custo em USD)'
+            + (temPico ? ` · maior dia: ${diaBR(dias[picoIdx])} com ${dbu(valoresDia[picoIdx])}` : '')}
           vazio={dias.length ? null : 'Sem consumo no período escolhido.'}
         >
-          <CkBarChart dias={dias} series={seriePeriodo} />
+          <CkBarChart dias={dias} series={seriePeriodo} destaqueIndice={temPico ? picoIdx : undefined} />
         </PainelGrafico>
 
         <PainelGrafico
@@ -430,7 +452,7 @@ export default function DatabricksCotasPanel() {
           nota="Consumo diário do Genie em DBU, por produto de origem"
           vazio={serieProduto.length ? null : 'Sem consumo no período escolhido.'}
         >
-          <CkBarChart dias={dias} series={serieProduto} empilhado />
+          <CkBarChart dias={dias} series={serieProduto} empilhado destaqueIndice={temPico ? picoIdx : undefined} />
         </PainelGrafico>
         </div>
 

@@ -20,11 +20,13 @@ interface Props {
   series: CkSerie[]
   /** Empilha as series numa barra por dia (grafico "Consumo por produto" do v51). */
   empilhado?: boolean
+  /** Indice do dia de pico: pinta a barra em destaque e rotula o valor. */
+  destaqueIndice?: number
 }
 
 const W = 900
 const H = 300
-const PAD = { top: 12, right: 12, bottom: 30, left: 52 }
+const PAD = { top: 22, right: 12, bottom: 30, left: 52 }
 
 const nice = (max: number) => {
   if (max <= 0) return 1
@@ -36,7 +38,7 @@ const curto = (v: number) =>
   Math.abs(v) >= 1000 ? (v / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + 'k'
     : v.toLocaleString('pt-BR', { maximumFractionDigits: 1 })
 
-export default function CkBarChart({ dias, series, empilhado = false }: Props) {
+export default function CkBarChart({ dias, series, empilhado = false, destaqueIndice }: Props) {
   const largura = W - PAD.left - PAD.right
   const altura = H - PAD.top - PAD.bottom
 
@@ -88,7 +90,8 @@ export default function CkBarChart({ dias, series, empilhado = false }: Props) {
 
           {dias.map((dia, i) => {
             const x0 = PAD.left + i * passo + vao / 2
-            let base = 0   // altura ja ocupada na pilha deste dia
+            let base = 0        // altura ja ocupada na pilha deste dia
+            let topo = 0        // altura do ponto mais alto do dia (rotulo do pico)
             return (
               <g key={dia}>
                 {series.map((s, j) => {
@@ -98,17 +101,31 @@ export default function CkBarChart({ dias, series, empilhado = false }: Props) {
                   const x = empilhado ? x0 : x0 + j * larguraBarra
                   const y = PAD.top + altura - h - base
                   if (empilhado) base += h
+                  // empilhado: o topo e a soma; agrupado: a maior barra do dia
+                  topo = empilhado ? base : Math.max(topo, h)
                   return (
                     <rect
                       key={s.label}
                       x={x} y={y}
                       width={Math.max(1, larguraBarra - 1)} height={h}
-                      fill={s.cor} rx={2}
+                      // o dia de pico sai na cor de destaque, o resto na cor da serie
+                      fill={i === destaqueIndice ? 'var(--ck-magenta)' : s.cor} rx={2}
                     >
                       <title>{`${dia} · ${s.label}: ${(s.fmt || curto)(v)}`}</title>
                     </rect>
                   )
                 })}
+                {i === destaqueIndice && (
+                  // valor do pico rotulado: e a pergunta "qual foi o maior dia"
+                  <text
+                    className="ck-chart-pico"
+                    x={x0 + (passo - vao) / 2}
+                    y={PAD.top + altura - topo - 6}
+                    textAnchor="middle"
+                  >
+                    {curto(series.reduce((a, s) => a + (s.valores[i] || 0), 0))}
+                  </text>
+                )}
                 {i % saltoRotulo === 0 && (
                   <text className="ck-chart-axis" x={x0 + (passo - vao) / 2} y={H - 10} textAnchor="middle">
                     {dia.slice(8, 10)}/{dia.slice(5, 7)}

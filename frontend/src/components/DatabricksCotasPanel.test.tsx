@@ -279,6 +279,30 @@ describe('DatabricksCotasPanel', () => {
     expect(vi.mocked(api.getDatabricksCotaSerie).mock.calls[0][3]).toBe(true)
   })
 
+  it('preenche os dias sem consumo e aponta o maior dia', async () => {
+    // o servidor so devolve dias COM registro; sem preencher, 01 e 05/08
+    // virariam barras vizinhas e a leitura "quanto por dia" ficaria errada
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue({
+      workspace: [
+        { dia: '2026-08-01', custo: 0, dbus: 10, dbus_free: 10 },
+        { dia: '2026-08-05', custo: 0, dbus: 90, dbus_free: 90 },
+      ],
+      usuario: [],
+      produto: [{ produto: 'INTERACTIVE', dia: '2026-08-05', custo: 0, dbus: 90 }],
+    })
+    renderPanel()
+    await screen.findByText('Consumo por período')
+
+    // 01..05 = 5 dias no eixo, nao 2
+    const svg = document.querySelector('.ck-chart-wrap svg') as SVGElement
+    const rotulos = [...svg.querySelectorAll('text')].map((t) => t.textContent)
+    expect(rotulos).toContain('03/08')
+
+    // o maior dia aparece na nota, com data e valor
+    expect(await screen.findByText(/maior dia: 05\/08\/2026 com 90 DBU/)).toBeInTheDocument()
+  })
+
   it('não promete cota nos gráficos: as cotas são em USD e o Genie não tem custo', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
     vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
