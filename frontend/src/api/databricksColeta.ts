@@ -125,8 +125,18 @@ export const deleteDatabricksBudget = (id: number) =>
 
 // Os campos numéricos vêm de colunas NUMERIC (string via pg) e de somas feitas
 // em JS no servidor — normalizados aqui na borda, como o resto do módulo.
-export const getDatabricksCotas = (mes?: string) =>
-  apiFetch<DatabricksCotas>('GET', '/databricks-coleta/cotas' + (mes ? '?mes=' + encodeURIComponent(mes) : ''))
+/** Recorte de datas dos filtros de Cotas. Sem datas = "Todos os periodos". */
+export interface DatabricksCotaRange { data_inicio?: string | null; data_fim?: string | null }
+
+const rangeQS = (r: DatabricksCotaRange) => {
+  const q = new URLSearchParams()
+  if (r.data_inicio) q.set('data_inicio', r.data_inicio)
+  if (r.data_fim) q.set('data_fim', r.data_fim)
+  return q
+}
+
+export const getDatabricksCotas = (r: DatabricksCotaRange = {}) =>
+  apiFetch<DatabricksCotas>('GET', '/databricks-coleta/cotas?' + rangeQS(r).toString())
     .then((c) => ({
       ...c,
       por_workspace: c.por_workspace.map((w) => ({
@@ -309,4 +319,26 @@ export const getDatabricksStorageOtimizacao = (data_inicio?: string, data_fim?: 
     ...r,
     operacoes: r.operacoes.map((o) => ({ ...o, operacoes: Number(o.operacoes), dbus: Number(o.dbus), sucesso: Number(o.sucesso) })),
   }))
+}
+
+/** Serie diaria que alimenta os dois graficos da aba Cotas. */
+export interface DatabricksCotaSerieDia { dia: string; custo: number; dbus_free: number }
+export interface DatabricksCotaSerie {
+  workspace: DatabricksCotaSerieDia[]
+  usuario: DatabricksCotaSerieDia[]
+}
+
+export const getDatabricksCotaSerie = (
+  r: DatabricksCotaRange, workspaceId?: string | null, usuario?: string | null,
+) => {
+  const q = rangeQS(r)
+  if (workspaceId) q.set('workspace_id', workspaceId)
+  // string vazia e um valor legitimo aqui (usuario nao identificado), por isso
+  // o teste e contra null/undefined e nao contra falsy
+  if (usuario != null) q.set('usuario', usuario)
+  return apiFetch<DatabricksCotaSerie>('GET', '/databricks-coleta/cotas-serie?' + q.toString())
+    .then((r) => ({
+      workspace: (r.workspace || []).map((d) => ({ ...d, custo: Number(d.custo), dbus_free: Number(d.dbus_free) })),
+      usuario: (r.usuario || []).map((d) => ({ ...d, custo: Number(d.custo), dbus_free: Number(d.dbus_free) })),
+    }))
 }

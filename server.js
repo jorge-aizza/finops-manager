@@ -11006,11 +11006,32 @@ function _cotaStatus(pct, thAtencao, thCritico) {
   return 'ok';
 }
 
+// Recorte de datas dos filtros de Cotas. O cockpit oferece periodos livres
+// (todos / hoje / mes atual / 7 / 30 / 90 dias / este ano / personalizado),
+// entao a rota aceita um intervalo em vez de so um mes. Sem data nenhuma =
+// "Todos os periodos", que e o padrao do cockpit. `mes=YYYY-MM` continua
+// aceito como atalho de um mes fechado.
+function _cotasPeriodo(q) {
+  const dia = v => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+  const di = dia(q.data_inicio), df = dia(q.data_fim);
+  if (di || df) {
+    const w = [], p = [];
+    if (di) { p.push(di); w.push(`usage_date >= $${p.length}`); }
+    if (df) { p.push(df); w.push(`usage_date <= $${p.length}`); }
+    return { where: 'WHERE ' + w.join(' AND '), params: p };
+  }
+  if (typeof q.mes === 'string' && /^\d{4}-\d{2}$/.test(q.mes)) {
+    return {
+      where: `WHERE usage_date >= $1 AND usage_date < ($1::date + INTERVAL '1 month')`,
+      params: [q.mes + '-01'],
+    };
+  }
+  return { where: '', params: [] };
+}
+
 app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const inicioMes = req.query.mes
-      ? String(req.query.mes) + '-01'
-      : new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
+    const _janela = _cotasPeriodo(req.query);
 
     const [budgets, consWs, consUser, meses] = await Promise.all([
       // ORDER BY id: podem existir dois orcamentos ativos para o mesmo escopo
@@ -11029,9 +11050,8 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_free,
                          COALESCE(SUM(CASE WHEN NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_pago
-                  FROM databricks_consumo
-                  WHERE usage_date >= $1 AND usage_date < ($1::date + INTERVAL '1 month')
-                  GROUP BY workspace_id`, [inicioMes]),
+                  FROM databricks_consumo ${_janela.where}
+                  GROUP BY workspace_id`, _janela.params),
       pool.query(`SELECT workspace_id, COALESCE(usuario,'') AS usuario,
                          COALESCE(SUM(custo_estimado),0) AS custo,
                          COALESCE(SUM(usage_quantity),0) AS dbus,
@@ -11039,24 +11059,30 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_free,
                          COALESCE(SUM(CASE WHEN NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_pago
-                  FROM databricks_consumo
-                  WHERE usage_date >= $1 AND usage_date < ($1::date + INTERVAL '1 month')
-                  GROUP BY workspace_id, usuario`, [inicioMes]),
-      // alimenta o seletor de Periodo da barra de filtros: so meses que tem
-      // dado de verdade -- escolher um mes vazio num <input type=month> cego
-      // so levava pro estado "sem consumo no mes".
+                  FROM databricks_consumo ${_janela.where}
+                  GROUP BY workspace_id, usuario`, _janela.params),
+      // meses DENTRO do recorte escolhido -- e por eles que a cota mensal e
+      // escalada logo abaixo. Global daria o numero errado em qualquer
+      // periodo que nao fosse "todos".
       pool.query(`SELECT DISTINCT to_char(usage_date,'YYYY-MM') AS mes
-                  FROM databricks_consumo ORDER BY 1 DESC`),
+                  FROM databricks_consumo ${_janela.where} ORDER BY 1 DESC`, _janela.params),
     ]);
 
     const bs = budgets.rows;
     const num = (v, d) => (v != null ? parseFloat(v) : d);
+    // A cota cadastrada e MENSAL. Num recorte que atravessa varios meses, medir
+    // o acumulado contra o teto de UM mes inflaria o percentual na proporcao do
+    // periodo -- entao a cota e escalada pelo numero de meses com dado dentro
+    // do recorte. Para recortes menores que um mes o fator e 1: o percentual
+    // passa a ler "quanto da cota do mes esse periodo ja queimou", que e a
+    // leitura util. A tela diz qual dos dois casos esta valendo.
+    const mesesConsid = Math.max(1, meses.rows.length);
 
     // --- workspaces ---
     const porWs = consWs.rows.map(r => {
       const b = bs.find(x => x.escopo_tipo === 'workspace' && x.workspace_id === r.workspace_id);
       const custo = parseFloat(r.custo);
-      const cota = b ? parseFloat(b.valor_mensal) : null;
+      const cota = b ? parseFloat(b.valor_mensal) * mesesConsid : null;
       const pct = cota > 0 ? (custo / cota) * 100 : null;
       return {
         workspace_id: r.workspace_id,
@@ -11078,7 +11104,7 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
       const doWs    = bs.find(x => x.escopo_tipo === 'workspace_por_usuario' && x.workspace_id === r.workspace_id);
       const b = indiv || doWs;
       const custo = parseFloat(r.custo);
-      const limite = b ? parseFloat(b.valor_mensal) : null;
+      const limite = b ? parseFloat(b.valor_mensal) * mesesConsid : null;
       const pct = limite > 0 ? (custo / limite) * 100 : null;
       return {
         workspace_id: r.workspace_id,
@@ -11094,8 +11120,10 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
 
     const comCota = porWs.filter(w => w.cota != null);
     res.json({
-      mes: inicioMes.slice(0, 7),
+      // meses realmente cobertos pelo recorte -- a tela usa pra dizer se o
+      // percentual esta medido contra uma cota mensal ou contra N meses
       meses_disponiveis: meses.rows.map(r => r.mes),
+      meses_considerados: mesesConsid,
       por_workspace: porWs,
       por_usuario: porUser,
       resumo: {
@@ -11105,6 +11133,55 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
         usuarios_acima_do_limite: porUser.filter(u => u.status === 'estourado').length,
       },
     });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Serie DIARIA que alimenta os dois graficos da aba Cotas (porte do usageChart
+// e do productChart do cockpit v56). Separada de /cotas de proposito: so e
+// consultada quando ha exatamente 1 workspace ou 1 usuario selecionado no
+// filtro -- somar dias de varios workspaces numa serie so nao diria nada, e a
+// "cota" viraria uma soma sem significado.
+app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    // mesmo recorte livre de /cotas (todos / hoje / N dias / este ano / ...)
+    const _janela = _cotasPeriodo(req.query);
+    const ws = req.query.workspace_id ? String(req.query.workspace_id) : null;
+    const usuario = req.query.usuario != null ? String(req.query.usuario) : null;
+
+    const params = [..._janela.params];
+    const cond = _janela.where ? [_janela.where.replace(/^WHERE /, '')] : [];
+
+    const serie = async (extraCond, extraParams) => {
+      const p = params.concat(extraParams);
+      const w = cond.concat(extraCond);
+      // to_char, nao a coluna DATE crua: o driver pg desserializa DATE como
+      // objeto Date do Node e res.json() o serializa como ISO datetime completo
+      // ("2026-08-05T03:00:00.000Z"), que o cliente teria de reparsear.
+      const r = await pool.query(
+        `SELECT to_char(usage_date,'YYYY-MM-DD') AS dia,
+                COALESCE(SUM(custo_estimado),0) AS custo,
+                COALESCE(SUM(CASE WHEN sku_name ILIKE '%FREE%' OR custo_estimado = 0
+                                  THEN usage_quantity ELSE 0 END),0) AS dbus_free
+           FROM databricks_consumo
+          ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
+          GROUP BY 1 ORDER BY 1`, p);
+      return r.rows.map(x => ({ dia: x.dia, custo: parseFloat(x.custo), dbus_free: parseFloat(x.dbus_free) }));
+    };
+
+    // O MESMO usuario aparece em varios workspaces (nos dados reais, os 6
+    // usuarios aparecem nos 4 workspaces). Com um workspace tambem selecionado,
+    // a serie do usuario e escopada nele -- senao o grafico somaria o consumo
+    // dele em workspaces que a tela nem esta mostrando, divergindo dos cartoes.
+    const condUser = [`COALESCE(usuario,'') = $${params.length + 1}`];
+    const parUser = [usuario];
+    if (ws) { condUser.push(`workspace_id = $${params.length + 2}`); parUser.push(ws); }
+
+    const [porDiaWs, porDiaUser] = await Promise.all([
+      ws ? serie([`workspace_id = $${params.length + 1}`], [ws]) : Promise.resolve([]),
+      usuario != null ? serie(condUser, parUser) : Promise.resolve([]),
+    ]);
+
+    res.json({ workspace: porDiaWs, usuario: porDiaUser });
   } catch (e) { _dbErr(res, e); }
 });
 

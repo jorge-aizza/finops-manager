@@ -2457,3 +2457,29 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 }
 .ck-combo-list .ck-combo-empty { color: var(--ck-muted); font-size: 12px; cursor: default; }
 .ck-combo-list .ck-combo-empty:hover { background: none; }
+
+/* ============================================================
+   COTAS — graficos (usageChart / productChart do cockpit v56)
+   SVG proprio, sem lib de grafico: e a politica do projeto e o
+   cockpit desenha barras agrupadas simples, que cabem em SVG.
+   ============================================================ */
+.ck-chart-wrap { height: 345px; position: relative; }
+.ck-chart-wrap svg { width: 100%; height: 100%; display: block; }
+.ck-chart-empty {
+  padding: 42px 20px;
+  text-align: center;
+  color: var(--ck-muted);
+  font-size: 14px;
+}
+.ck-chart-grid { stroke: var(--ck-bar); stroke-width: 1; }
+.ck-chart-axis { fill: var(--ck-muted); font-size: 10px; }
+.ck-chart-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 10px;
+  color: var(--ck-muted);
+  font-size: 11px;
+}
+.ck-chart-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
