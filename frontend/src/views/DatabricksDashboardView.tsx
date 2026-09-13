@@ -16,6 +16,15 @@ import { forecastLinear } from '../lib/forecastLinear'
 import { setDatabricksTabListener } from '../bridge'
 
 type DbxTab = 'dashboard' | 'orcamentos' | 'cotas' | 'quotas'
+// Rotulo da aba != titulo do hero: na fileira o texto precisa ser curto, no
+// hero ele pode ser descritivo ("Dashboard Databricks", "Quotas Genie").
+const DBX_TAB_LABEL: Record<DbxTab, string> = {
+  dashboard: 'Dashboard',
+  orcamentos: 'Orçamentos e Anomalias',
+  cotas: 'Cotas',
+  quotas: 'Genie (nativo)',
+}
+
 const DBX_TAB_INFO: Record<DbxTab, { titulo: string; sub: string }> = {
   dashboard: { titulo: 'Dashboard Databricks', sub: 'Consumo mensal, custo por workspace/SKU/usuário/job/cluster/warehouse e free-tier vs. pago' },
   orcamentos: { titulo: 'Orçamentos e Anomalias', sub: 'Orçamentos internos com alerta por e-mail e detecção automática de anomalias de consumo' },
@@ -373,6 +382,24 @@ export default function DatabricksDashboardView() {
       <div className="view-hero">
         <div className="page-title">{DBX_TAB_INFO[dbxTab].titulo}</div>
         <div className="view-hero-sub">{DBX_TAB_INFO[dbxTab].sub}</div>
+      </div>
+
+      {/* Barra de abas na pagina, no idioma da .nav do cockpit. Antes as abas
+          do Databricks so existiam no menu lateral -- com a sidebar recolhida
+          nao havia como trocar de aba pela pagina.
+          Chama window.showDbxTab (nao setDbxTab direto) para que o realce do
+          submenu lateral acompanhe: aquela funcao atualiza os dois. */}
+      <div className="view-tabs" role="tablist" aria-label="Seções do Databricks">
+        {(Object.keys(DBX_TAB_INFO) as DbxTab[]).map((t) => (
+          <button
+            key={t}
+            role="tab"
+            aria-current={dbxTab === t ? 'page' : undefined}
+            onClick={() => window.showDbxTab?.(t)}
+          >
+            {DBX_TAB_LABEL[t]}
+          </button>
+        ))}
       </div>
 
       {dbxTab === 'dashboard' && (

@@ -131,11 +131,13 @@ export const getDatabricksCotas = (mes?: string) =>
       ...c,
       por_workspace: c.por_workspace.map((w) => ({
         ...w, custo: Number(w.custo), dbus: Number(w.dbus),
+        dbus_free: Number(w.dbus_free), dbus_pago: Number(w.dbus_pago),
         cota: w.cota == null ? null : Number(w.cota),
         pct: w.pct == null ? null : Number(w.pct),
       })),
       por_usuario: c.por_usuario.map((u) => ({
-        ...u, custo: Number(u.custo),
+        ...u, custo: Number(u.custo), dbus: Number(u.dbus),
+        dbus_free: Number(u.dbus_free), dbus_pago: Number(u.dbus_pago),
         limite: u.limite == null ? null : Number(u.limite),
         pct: u.pct == null ? null : Number(u.pct),
       })),

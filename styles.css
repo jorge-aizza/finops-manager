@@ -1939,3 +1939,348 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 [data-theme="light"] .portal-header .finops-logo {
   filter: brightness(0) invert(1);
 }
+
+
+/* ---------------------------------------------------------------------------
+   Barra de abas na pagina (.view-tabs)
+   ---------------------------------------------------------------------------
+   Porte da .nav do cockpit "Gestao de Cotas": fileira horizontal compacta,
+   rotulo pequeno e encorpado, canto arredondado, realce roxo no hover.
+
+   Existe porque o Databricks so tinha as abas no menu LATERAL -- com a sidebar
+   recolhida (o estado padrao em telas menores) nao havia como trocar de aba
+   pela pagina. O Inventario ja resolve isso com botoes .btn-primary/.btn-ghost;
+   aqui a fileira segue o idioma do cockpit, que e mais compacta e nao compete
+   com o botao de acao primaria da tela.
+
+   Vale nos dois temas: e navegacao, nao a pintura do cockpit.
+   --------------------------------------------------------------------------- */
+.view-tabs {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  overflow-x: auto;
+  scrollbar-width: none;          /* a fileira rola sem barra visivel */
+  margin: 0 20px 16px;
+  padding-bottom: 2px;
+}
+.view-tabs::-webkit-scrollbar { display: none; }
+
+.view-tabs button {
+  white-space: nowrap;            /* rotulo nunca quebra em duas linhas */
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.view-tabs button:hover { background: var(--accent-dim); color: var(--accent); }
+
+.view-tabs button[aria-current="page"] {
+  background: var(--accent);
+  color: #ffffff;
+}
+[data-theme="light"] .view-tabs button[aria-current="page"] {
+  background: var(--ck-grad, var(--accent));
+}
+
+/* ============================================================
+   COTAS — porte fiel do cockpit "Gestão de Cotas" (v56)
+   ------------------------------------------------------------
+   O cockpit e claro-apenas e tem paleta PROPRIA (verde #1c9a68,
+   ambar #d79520, vermelho #df554c, roxo #660099), diferente dos
+   tokens do app. Por decisao do usuario: identico no tema claro,
+   adaptado no escuro -- mesmas formas e estrutura, cores legiveis
+   sobre o fundo quase-preto.
+
+   Tudo fica sob .ck-cotas para nao vazar nenhuma dessas cores pro
+   resto do sistema.
+   ============================================================ */
+.ck-cotas {
+  /* escuro (padrao do app) — cores claras o bastante pro fundo #04000c */
+  --ck-green: #2fd08a;
+  --ck-yellow: #e8b13c;
+  --ck-red: #ff6b60;
+  --ck-neutral: #8d7fae;
+  --ck-teal: var(--accent);
+  --ck-magenta: #ff4d9e;
+  --ck-ring: rgba(255, 255, 255, 0.05);
+  --ck-line: var(--border);
+  --ck-muted: var(--text-muted);
+  --ck-panel: var(--bg-card);
+  --ck-ink: var(--text);
+  --ck-bar: rgba(255, 255, 255, 0.09);
+  --ck-halo-green: color-mix(in srgb, var(--ck-green) 22%, transparent);
+  --ck-halo-yellow: color-mix(in srgb, var(--ck-yellow) 22%, transparent);
+  --ck-halo-red: color-mix(in srgb, var(--ck-red) 22%, transparent);
+  --ck-halo-neutral: color-mix(in srgb, var(--ck-neutral) 22%, transparent);
+  --ck-pill-bg: rgba(255, 255, 255, 0.07);
+  --ck-hover-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+[data-theme="light"] .ck-cotas {
+  /* valores verbatim do cockpit v56 */
+  --ck-green: #1c9a68;
+  --ck-yellow: #d79520;
+  --ck-red: #df554c;
+  --ck-neutral: #9aa5a8;
+  --ck-teal: #660099;
+  --ck-magenta: #e6007e;
+  --ck-ring: #e7e9ee;
+  --ck-line: #e2dbe8;
+  --ck-muted: #716879;
+  --ck-panel: #ffffff;
+  --ck-ink: #2d1b3d;
+  --ck-bar: #f0eaf4;
+  --ck-halo-green: #e2f4eb;
+  --ck-halo-yellow: #fcf2dc;
+  --ck-halo-red: #fbe5e2;
+  --ck-halo-neutral: #edf0f0;
+  --ck-pill-bg: #eef0f8;
+  --ck-hover-shadow: 0 8px 20px rgba(102, 0, 153, 0.10);
+}
+
+/* --- grade de cartoes (era .semaphores no cockpit) --- */
+.ck-semaphores { display: grid; gap: 10px; align-content: start; }
+
+/* --- cartao de cota --- */
+.ck-quota {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--ck-ink);
+  background: var(--ck-panel);
+  border: 1px solid var(--ck-line);
+  border-left: 4px solid var(--ck-line);
+  border-radius: 14px;
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.ck-quota.green   { border-left-color: var(--ck-green); }
+.ck-quota.yellow  { border-left-color: var(--ck-yellow); }
+.ck-quota.red     { border-left-color: var(--ck-red); }
+.ck-quota.neutral { border-left-color: var(--ck-neutral); }
+
+.ck-quota:hover,
+.ck-quota:focus-visible {
+  border-top-color: var(--ck-teal);
+  border-right-color: var(--ck-teal);
+  border-bottom-color: var(--ck-teal);
+  box-shadow: var(--ck-hover-shadow);
+  outline: none;
+}
+
+.ck-quota-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.ck-quota-top > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ck-quota-meta { color: var(--ck-muted); font-size: 11px; margin-top: 4px; }
+
+.ck-traffic { display: flex; align-items: center; gap: 8px; margin-top: 13px; }
+.ck-traffic strong {
+  min-width: 45px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ck-light { width: 13px; height: 13px; border-radius: 50%; background: var(--ck-neutral); flex: none; }
+.ck-quota.green   .ck-light { background: var(--ck-green);   box-shadow: 0 0 0 4px var(--ck-halo-green); }
+.ck-quota.yellow  .ck-light { background: var(--ck-yellow);  box-shadow: 0 0 0 4px var(--ck-halo-yellow); }
+.ck-quota.red     .ck-light { background: var(--ck-red);     box-shadow: 0 0 0 4px var(--ck-halo-red); }
+.ck-quota.neutral .ck-light { background: var(--ck-neutral); box-shadow: 0 0 0 4px var(--ck-halo-neutral); }
+
+/* barra QUADRADA (sem border-radius) e de 7px, como no cockpit */
+.ck-bar { height: 7px; background: var(--ck-bar); flex: 1; overflow: hidden; min-width: 50px; }
+.ck-bar > span { display: block; height: 100%; background: var(--ck-teal); }
+.ck-quota.green   .ck-bar > span { background: var(--ck-green); }
+.ck-quota.yellow  .ck-bar > span { background: var(--ck-yellow); }
+.ck-quota.red     .ck-bar > span { background: var(--ck-red); }
+.ck-quota.neutral .ck-bar > span { background: var(--ck-neutral); }
+
+/* --- legenda das faixas --- */
+.ck-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: var(--ck-muted);
+  font-size: 11px;
+  margin-top: 17px;
+}
+.ck-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+
+/* --- cabecalho do painel --- */
+.ck-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.ck-panel-head h2 { font-size: 16px; font-weight: 700; color: var(--ck-ink); margin: 0; }
+.ck-panel-note { color: var(--ck-muted); font-size: 12px; margin-top: 4px; }
+
+/* ============================================================
+   COTAS — modal de detalhe (renderEntityModalContent do v56)
+   ============================================================ */
+.ck-modal-box {
+  position: relative;
+  background: var(--ck-panel);
+  border: 1px solid var(--ck-line);
+  border-top: 5px solid var(--ck-teal);
+  border-radius: 18px;
+  width: min(540px, 100%);
+  max-height: 86vh;
+  overflow: auto;
+  padding: 26px;
+  color: var(--ck-ink);
+  box-shadow: 0 30px 80px rgba(15, 10, 30, 0.35);
+}
+.ck-modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--ck-line);
+  border-radius: 999px;
+  background: var(--ck-bar);
+  color: var(--ck-muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ck-modal-close:hover { border-color: var(--ck-teal); color: var(--ck-teal); }
+
+.ck-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--ck-pill-bg);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ck-ink);
+  white-space: nowrap;
+}
+.ck-status-pill:before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ck-green);
+  flex: none;
+}
+/* o fundo da pilula e tingido pelo status, como no v56 (verde usa o neutro) */
+.ck-status-pill.yellow  { background: var(--ck-halo-yellow); }
+.ck-status-pill.red     { background: var(--ck-halo-red); }
+.ck-status-pill.neutral { background: var(--ck-halo-neutral); }
+.ck-status-pill.yellow:before  { background: var(--ck-yellow); }
+.ck-status-pill.red:before     { background: var(--ck-red); }
+.ck-status-pill.neutral:before { background: var(--ck-neutral); }
+
+/* no modal a pilula cai pra linha de baixo quando nao cabe ao lado do titulo */
+.ck-modal-box .ck-panel-head { padding-right: 40px; flex-wrap: wrap; }
+.ck-modal-box .ck-status-pill { white-space: normal; }
+
+/* 2x2, nao 4 colunas -- e a grade do cockpit */
+.ck-highlights { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 18px; }
+.ck-metric {
+  position: relative;
+  overflow: hidden;
+  background: var(--ck-panel);
+  border: 1px solid var(--ck-line);
+  border-top: 4px solid var(--ck-teal);
+  border-radius: 18px;
+  box-shadow: 0 12px 30px rgba(31, 25, 88, 0.06);
+  padding: 14px 16px;
+  min-height: 88px;
+}
+/* anel decorativo no canto superior direito, atras do conteudo */
+.ck-metric:after {
+  content: '';
+  width: 65px;
+  height: 65px;
+  border-radius: 50%;
+  border: 14px solid var(--ck-ring);
+  position: absolute;
+  right: -18px;
+  top: -18px;
+  z-index: 0;
+}
+.ck-metric-label {
+  position: relative;
+  z-index: 1;
+  display: block;
+  color: var(--ck-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.ck-metric-value {
+  position: relative;
+  z-index: 1;
+  display: block;
+  font-size: clamp(17px, 2vw, 23px);
+  font-weight: 800;
+  line-height: 1.15;
+  margin-top: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ck-fields { display: grid; gap: 10px; margin-top: 14px; }
+.ck-field-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--ck-line);
+  border-radius: 14px;
+  background: var(--ck-panel);
+}
+.ck-field-label {
+  color: var(--ck-muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.ck-field-value {
+  font-weight: 800;
+  font-size: 15px;
+  color: var(--ck-ink);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+.ck-divider { border: none; border-top: 1px solid var(--ck-line); margin: 22px 0; }

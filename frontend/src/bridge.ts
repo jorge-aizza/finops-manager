@@ -82,6 +82,10 @@ declare global {
     showToast?: (msg: string, type?: 'success' | 'error' | 'warn') => void
     exportarExcel?: () => void
     showView?: (view: string) => void
+    // app.js: troca a sub-aba do Databricks E o realce do submenu lateral.
+    // A barra de abas na pagina chama esta, nao setDbxTab direto, para os dois
+    // ficarem em sincronia.
+    showDbxTab?: (tab: string) => void
     suspendInactivityTimer?: () => void
     resumeInactivityTimer?: () => void
   }

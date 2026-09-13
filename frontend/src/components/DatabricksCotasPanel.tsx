@@ -1,74 +1,87 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getDatabricksCotas } from '../api/databricksColeta'
+import DatabricksCotaDetalheModal from './DatabricksCotaDetalheModal'
 import type { DatabricksCotaStatus, DatabricksCotaUsuario, DatabricksCotaWorkspace } from '../types/databricksResumo'
 
-// Semáforo de cotas — porte do cockpit "Gestão de Cotas" (Cotas/cockpit-quotas-v51.html)
-// para dentro do app.
+// Semáforo de cotas — porte fiel do cockpit "Gestão de Cotas" (v56).
 //
 // A diferença que importa: no cockpit o percentual vinha pronto numa planilha,
 // descolado das linhas de consumo — auditado e medido, o declarado chegava a 28×
 // o que as linhas sustentavam. Aqui o percentual é sempre DERIVADO de
 // databricks_consumo no servidor, então não existe caminho onde ele divirja do
 // custo exibido ao lado.
+//
+// O visual (cartões, farol com halo, barra quadrada de 7px, paleta própria) vem
+// do CSS .ck-* em styles.css.
 
-const STATUS: Record<DatabricksCotaStatus, { rotulo: string; cor: string }> = {
-  ok:         { rotulo: 'Dentro da cota', cor: 'var(--green)' },
-  atencao:    { rotulo: 'Atenção',        cor: 'var(--orange)' },
-  critico:    { rotulo: 'Crítico',        cor: 'var(--red)' },
-  estourado:  { rotulo: 'Estourado',      cor: 'var(--red)' },
-  sem_cota:   { rotulo: 'Sem cota',       cor: 'var(--text-muted)' },
+// O servidor classifica com os thresholds configuráveis do orçamento (75/90 por
+// padrão) e tem um estado `estourado` próprio. O cockpit usa 70/90 fixos e não
+// distingue estourado de crítico. Mantemos a classificação do servidor — é ela
+// que o alerta por e-mail usa — e traduzimos só a APRESENTAÇÃO.
+const STATUS: Record<DatabricksCotaStatus, { cls: string; rotulo: string }> = {
+  ok:        { cls: 'green',   rotulo: 'Normal' },
+  atencao:   { cls: 'yellow',  rotulo: 'Atenção' },
+  critico:   { cls: 'red',     rotulo: 'Crítico' },
+  estourado: { cls: 'red',     rotulo: 'Crítico' },
+  sem_cota:  { cls: 'neutral', rotulo: 'Sem cota' },
 }
 
-const brl = (v: number) =>
-  'US$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+// Igual ao `format` do cockpit: no máximo 2 casas, sem mínimo — US$ 1.500, e
+// não US$ 1.500,00.
+const fmt = (v: number) => new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 2 }).format(v)
+const usd = (v: number) => 'US$ ' + fmt(v)
+const pctTxt = (v: number | null) => (v == null ? '—' : fmt(v) + '%')
 
-function Medidor({ pct, cor }: { pct: number | null; cor: string }) {
-  // A barra satura em 100% para não transbordar o cartão; o número ao lado
-  // continua mostrando o valor real (243% aparece como barra cheia + "243%").
-  const largura = pct == null ? 0 : Math.min(100, pct)
+const TOP_N = 25
+
+function Cartao({ prefixo, titulo, custo, teto, pct, status, extra, onClick }: {
+  prefixo: string; titulo: string; custo: number
+  teto: number | null; pct: number | null; status: DatabricksCotaStatus
+  extra?: string | null; onClick: () => void
+}) {
+  const s = STATUS[status]
+  // A barra satura em 100% para não transbordar o cartão; o número em cima
+  // continua mostrando o valor real (446,7% aparece como barra cheia + "446,7%").
+  const largura = Math.min(pct ?? 0, 100)
   return (
-    <div style={{
-      height: 6, borderRadius: 20, background: 'var(--bg-hover)',
-      overflow: 'hidden', flex: 1, minWidth: 60,
-    }}>
-      <div style={{ height: '100%', width: largura + '%', background: cor, borderRadius: 20 }} />
-    </div>
+    <button
+      type="button"
+      className={'ck-quota ' + s.cls}
+      onClick={onClick}
+      aria-label={`Ver detalhes de ${prefixo} ${titulo}`}
+    >
+      <div className="ck-quota-top">
+        <span>{prefixo} · {titulo}</span>
+        <b>{pctTxt(pct)}</b>
+      </div>
+      <div className="ck-quota-meta">
+        {usd(custo)} consumidos {teto != null ? `de ${usd(teto)} disponíveis` : '· limite não informado'}
+        {extra ? ' · ' + extra : ''}
+      </div>
+      <div className="ck-traffic">
+        <i className="ck-light" />
+        <div className="ck-bar"><span style={{ width: largura + '%' }} /></div>
+        <strong>{s.rotulo}</strong>
+      </div>
+    </button>
   )
 }
 
-function Linha({ titulo, sub, custo, teto, pct, status, extra }: {
-  titulo: string; sub?: string | null; custo: number
-  teto: number | null; pct: number | null; status: DatabricksCotaStatus; extra?: string | null
-}) {
-  const s = STATUS[status]
+function Legenda() {
+  // O cockpit escreve "acima de 90% ou bloqueado"; nossos orçamentos alertam e
+  // nunca bloqueiam (bloqueio real só existe nas Quotas Genie), então a faixa é
+  // rotulada pelo que de fato acontece aqui.
+  const itens: [string, string][] = [
+    ['até 70%', 'var(--ck-green)'],
+    ['71–90%', 'var(--ck-yellow)'],
+    ['acima de 90% ou estourado', 'var(--ck-red)'],
+  ]
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', gap: 6, padding: '12px 16px',
-      borderLeft: '3px solid ' + s.cor, borderBottom: '1px solid var(--border)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {titulo}
-          </div>
-          {sub && <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{sub}</div>}
-        </div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, whiteSpace: 'nowrap' }}>
-          {pct == null ? '—' : pct.toFixed(0) + '%'}
-        </div>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span style={{
-          width: 9, height: 9, borderRadius: '50%', background: s.cor, flexShrink: 0,
-        }} />
-        <Medidor pct={pct} cor={s.cor} />
-        <span style={{ fontSize: 11, color: s.cor, fontWeight: 600, whiteSpace: 'nowrap' }}>{s.rotulo}</span>
-      </div>
-      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-        {brl(custo)} {teto != null ? 'de ' + brl(teto) + ' disponíveis' : '— nenhum teto configurado'}
-        {extra ? ' · ' + extra : ''}
-      </div>
+    <div className="ck-legend">
+      {itens.map(([r, c]) => (
+        <span key={r}><i style={{ background: c }} />{r}</span>
+      ))}
     </div>
   )
 }
@@ -78,12 +91,60 @@ function mesAtual() {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
 }
 
+// Painel de um lado (Workspace ou Usuário): ordena por maior consumo, corta no
+// Top 25 como o cockpit, mas deixa expandir — o cockpit não tem saída quando o
+// item que interessa cai fora do corte.
+function PainelCotas<T>({ titulo, substantivo, itens, chave, render }: {
+  titulo: string
+  substantivo: [string, string]           // [singular, plural]
+  itens: T[]
+  chave: (x: T) => string
+  render: (x: T) => React.ReactNode
+}) {
+  const [tudo, setTudo] = useState(false)
+  const visiveis = tudo ? itens : itens.slice(0, TOP_N)
+  const n = visiveis.length
+  return (
+    <div className="card ck-cotas" style={{ padding: 20 }}>
+      <div className="ck-panel-head">
+        <div>
+          <h2>{titulo}</h2>
+          <div className="ck-panel-note">
+            {tudo
+              ? `Todos os ${itens.length} ${substantivo[1]} com consumo no mês`
+              : `Top ${n} ${n === 1 ? substantivo[0] : substantivo[1]} com maior consumo no mês`}
+            {' · clique num item para ver o detalhe'}
+          </div>
+        </div>
+        <span className="badge">{itens.length}</span>
+      </div>
+      <div className="ck-semaphores">
+        {visiveis.map((x) => <div key={chave(x)}>{render(x)}</div>)}
+      </div>
+      {itens.length > TOP_N && (
+        <button
+          className="btn-ghost"
+          style={{ marginTop: 12 }}
+          onClick={() => setTudo((v) => !v)}
+        >
+          {tudo ? `Mostrar só o top ${TOP_N}` : `Ver todos os ${itens.length}`}
+        </button>
+      )}
+      <Legenda />
+    </div>
+  )
+}
+
 export default function DatabricksCotasPanel() {
   // Cota é apurada por MÊS, então o padrão é o mês corrente — é dele que o
   // alerta por e-mail fala. O seletor existe porque a coleta pode estar
   // atrasada (ou o mês recém-virou), e nesses casos olhar o mês anterior é o
   // que responde "como fechamos?".
   const [mes, setMes] = useState(mesAtual())
+  const [detalhe, setDetalhe] = useState<
+    { tipo: 'workspace'; item: DatabricksCotaWorkspace } |
+    { tipo: 'usuario'; item: DatabricksCotaUsuario } | null
+  >(null)
   const cotasQuery = useQuery({
     queryKey: ['databricks-cotas', mes],
     queryFn: () => getDatabricksCotas(mes),
@@ -130,6 +191,11 @@ export default function DatabricksCotasPanel() {
 
   const semCota = d.resumo.workspaces_sem_cota
   const acima = d.resumo.usuarios_acima_do_limite
+  // Como no cockpit: maior consumo primeiro. abs() porque um estorno pode
+  // deixar o custo negativo, e ele continua sendo um item de peso.
+  const porConsumo = <T extends { custo: number }>(a: T, b: T) => Math.abs(b.custo) - Math.abs(a.custo)
+  const workspaces = [...d.por_workspace].sort(porConsumo)
+  const usuarios = [...d.por_usuario].sort(porConsumo)
 
   return (
     <>
@@ -137,12 +203,12 @@ export default function DatabricksCotasPanel() {
       <div className="stats-grid" style={{ margin: '0 20px 16px' }}>
         <div className="stat-card">
           <div className="stat-label">Consumo no mês</div>
-          <div className="stat-value">{brl(d.resumo.custo_total)}</div>
+          <div className="stat-value">{usd(d.resumo.custo_total)}</div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>mês {d.mes}</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Cota configurada</div>
-          <div className="stat-value">{brl(d.resumo.cota_total)}</div>
+          <div className="stat-value">{usd(d.resumo.cota_total)}</div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>soma dos orçamentos por workspace</div>
         </div>
         <div className="stat-card">
@@ -157,42 +223,51 @@ export default function DatabricksCotasPanel() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, margin: '0 20px' }}>
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">Cotas por Workspace</span>
-            <span className="badge">{d.por_workspace.length}</span>
-          </div>
-          <div style={{ maxHeight: 460, overflowY: 'auto' }}>
-            {d.por_workspace.map((w: DatabricksCotaWorkspace) => (
-              <Linha
-                key={w.workspace_id}
-                titulo={w.workspace_id}
-                sub={w.budget_nome}
-                custo={w.custo} teto={w.cota} pct={w.pct} status={w.status}
-              />
-            ))}
-          </div>
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, margin: '0 20px', alignItems: 'start' }}>
+        <PainelCotas
+          titulo="Cotas Workspace"
+          substantivo={['workspace', 'workspaces']}
+          itens={workspaces}
+          chave={(w) => w.workspace_id}
+          render={(w) => (
+            <Cartao
+              prefixo="Workspace"
+              titulo={w.workspace_id}
+              custo={w.custo} teto={w.cota} pct={w.pct} status={w.status}
+              extra={w.budget_nome}
+              onClick={() => setDetalhe({ tipo: 'workspace', item: w })}
+            />
+          )}
+        />
 
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">Cotas por Usuário</span>
-            <span className="badge">{d.por_usuario.length}</span>
-          </div>
-          <div style={{ maxHeight: 460, overflowY: 'auto' }}>
-            {d.por_usuario.map((u: DatabricksCotaUsuario) => (
-              <Linha
-                key={u.workspace_id + '|' + u.usuario}
-                titulo={u.usuario}
-                sub={u.workspace_id}
-                custo={u.custo} teto={u.limite} pct={u.pct} status={u.status}
-                extra={u.origem_limite === 'individual' ? 'limite individual' : u.origem_limite === 'workspace' ? 'teto do workspace' : null}
-              />
-            ))}
-          </div>
-        </div>
+        <PainelCotas
+          titulo="Cotas Usuário"
+          substantivo={['usuário', 'usuários']}
+          itens={usuarios}
+          chave={(u) => u.workspace_id + '|' + u.usuario}
+          render={(u) => (
+            <Cartao
+              prefixo="Usuário"
+              titulo={u.usuario}
+              custo={u.custo} teto={u.limite} pct={u.pct} status={u.status}
+              extra={u.origem_limite === 'individual' ? 'limite individual'
+                : u.origem_limite === 'workspace' ? 'teto do workspace' : u.workspace_id}
+              onClick={() => setDetalhe({ tipo: 'usuario', item: u })}
+            />
+          )}
+        />
       </div>
+
+      {detalhe && (
+        <DatabricksCotaDetalheModal
+          item={detalhe.item}
+          tipo={detalhe.tipo}
+          usuariosDoWs={detalhe.tipo === 'workspace'
+            ? d.por_usuario.filter((x) => x.workspace_id === detalhe.item.workspace_id)
+            : []}
+          onClose={() => setDetalhe(null)}
+        />
+      )}
     </>
   )
 }

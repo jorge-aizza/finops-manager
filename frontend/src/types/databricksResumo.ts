@@ -127,6 +127,10 @@ export interface DatabricksCotaWorkspace {
   workspace_id: string
   custo: number
   dbus: number
+  // free x pago: o card de custo esconde o volume free, que custa zero por
+  // definição mas consome DBU de verdade. O modal mostra os dois.
+  dbus_free: number
+  dbus_pago: number
   cota: number | null       // null = nenhum orçamento de escopo 'workspace'
   pct: number | null
   budget_nome: string | null
@@ -137,6 +141,9 @@ export interface DatabricksCotaUsuario {
   workspace_id: string
   usuario: string
   custo: number
+  dbus: number
+  dbus_free: number
+  dbus_pago: number
   limite: number | null
   pct: number | null
   // 'individual' = orçamento de escopo 'usuario' venceu; 'workspace' = herdou

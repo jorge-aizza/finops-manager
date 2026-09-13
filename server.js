@@ -11019,12 +11019,25 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
       // o percentual exibido mudaria sozinho entre recargas. Fixado no mais
       // antigo, que e o previsivel para quem configurou primeiro.
       pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true ORDER BY id`),
+      // free x pago: mesma heuristica ja usada por free_vs_pago em /resumo
+      // (SKU com FREE no nome ou custo zerado). Alimenta os dois medidores de
+      // DBU do modal de detalhe -- o card de custo esconde o volume free, que
+      // sempre custa zero por definicao mas consome DBU de verdade.
       pool.query(`SELECT workspace_id, COALESCE(SUM(custo_estimado),0) AS custo,
-                         COALESCE(SUM(usage_quantity),0) AS dbus
+                         COALESCE(SUM(usage_quantity),0) AS dbus,
+                         COALESCE(SUM(CASE WHEN sku_name ILIKE '%FREE%' OR custo_estimado = 0
+                                           THEN usage_quantity ELSE 0 END),0) AS dbus_free,
+                         COALESCE(SUM(CASE WHEN NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)
+                                           THEN usage_quantity ELSE 0 END),0) AS dbus_pago
                   FROM databricks_consumo WHERE usage_date >= $1
                   GROUP BY workspace_id`, [inicioMes]),
       pool.query(`SELECT workspace_id, COALESCE(usuario,'') AS usuario,
-                         COALESCE(SUM(custo_estimado),0) AS custo
+                         COALESCE(SUM(custo_estimado),0) AS custo,
+                         COALESCE(SUM(usage_quantity),0) AS dbus,
+                         COALESCE(SUM(CASE WHEN sku_name ILIKE '%FREE%' OR custo_estimado = 0
+                                           THEN usage_quantity ELSE 0 END),0) AS dbus_free,
+                         COALESCE(SUM(CASE WHEN NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)
+                                           THEN usage_quantity ELSE 0 END),0) AS dbus_pago
                   FROM databricks_consumo WHERE usage_date >= $1
                   GROUP BY workspace_id, usuario`, [inicioMes]),
     ]);
@@ -11041,6 +11054,7 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
       return {
         workspace_id: r.workspace_id,
         custo, dbus: parseFloat(r.dbus),
+        dbus_free: parseFloat(r.dbus_free), dbus_pago: parseFloat(r.dbus_pago),
         cota, pct,
         budget_nome: b ? b.nome : null,
         status: _cotaStatus(pct, num(b && b.threshold_atencao, 75), num(b && b.threshold_critico, 90)),
@@ -11063,6 +11077,8 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
         workspace_id: r.workspace_id,
         usuario: r.usuario || '(não identificado)',
         custo, limite, pct,
+        dbus: parseFloat(r.dbus),
+        dbus_free: parseFloat(r.dbus_free), dbus_pago: parseFloat(r.dbus_pago),
         origem_limite: b ? (indiv ? 'individual' : 'workspace') : null,
         budget_nome: b ? b.nome : null,
         status: _cotaStatus(pct, num(b && b.threshold_atencao, 75), num(b && b.threshold_critico, 90)),
