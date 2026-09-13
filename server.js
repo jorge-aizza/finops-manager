@@ -11012,7 +11012,7 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
       ? String(req.query.mes) + '-01'
       : new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
 
-    const [budgets, consWs, consUser] = await Promise.all([
+    const [budgets, consWs, consUser, meses] = await Promise.all([
       // ORDER BY id: podem existir dois orcamentos ativos para o mesmo escopo
       // (nada impede hoje). Sem ordem explicita o Postgres nao garante qual vem
       // primeiro, e o .find() abaixo escolheria um deles a cada request --
@@ -11029,7 +11029,8 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_free,
                          COALESCE(SUM(CASE WHEN NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_pago
-                  FROM databricks_consumo WHERE usage_date >= $1
+                  FROM databricks_consumo
+                  WHERE usage_date >= $1 AND usage_date < ($1::date + INTERVAL '1 month')
                   GROUP BY workspace_id`, [inicioMes]),
       pool.query(`SELECT workspace_id, COALESCE(usuario,'') AS usuario,
                          COALESCE(SUM(custo_estimado),0) AS custo,
@@ -11038,8 +11039,14 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_free,
                          COALESCE(SUM(CASE WHEN NOT (sku_name ILIKE '%FREE%' OR custo_estimado = 0)
                                            THEN usage_quantity ELSE 0 END),0) AS dbus_pago
-                  FROM databricks_consumo WHERE usage_date >= $1
+                  FROM databricks_consumo
+                  WHERE usage_date >= $1 AND usage_date < ($1::date + INTERVAL '1 month')
                   GROUP BY workspace_id, usuario`, [inicioMes]),
+      // alimenta o seletor de Periodo da barra de filtros: so meses que tem
+      // dado de verdade -- escolher um mes vazio num <input type=month> cego
+      // so levava pro estado "sem consumo no mes".
+      pool.query(`SELECT DISTINCT to_char(usage_date,'YYYY-MM') AS mes
+                  FROM databricks_consumo ORDER BY 1 DESC`),
     ]);
 
     const bs = budgets.rows;
@@ -11088,6 +11095,7 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
     const comCota = porWs.filter(w => w.cota != null);
     res.json({
       mes: inicioMes.slice(0, 7),
+      meses_disponiveis: meses.rows.map(r => r.mes),
       por_workspace: porWs,
       por_usuario: porUser,
       resumo: {

@@ -2011,6 +2011,9 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   --ck-teal: var(--accent);
   --ck-magenta: #ff4d9e;
   --ck-ring: rgba(255, 255, 255, 0.05);
+  --ck-lilac: rgba(147, 51, 234, 0.18);
+  --ck-lilac-ink: #d9c2f5;
+  --ck-lilac-hover: rgba(147, 51, 234, 0.30);
   --ck-line: var(--border);
   --ck-muted: var(--text-muted);
   --ck-panel: var(--bg-card);
@@ -2032,6 +2035,9 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   --ck-teal: #660099;
   --ck-magenta: #e6007e;
   --ck-ring: #e7e9ee;
+  --ck-lilac: #f4eafa;
+  --ck-lilac-ink: #3d1a66;
+  --ck-lilac-hover: #ddd0ee;
   --ck-line: #e2dbe8;
   --ck-muted: #716879;
   --ck-panel: #ffffff;
@@ -2284,3 +2290,170 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   max-width: 280px;
 }
 .ck-divider { border: none; border-top: 1px solid var(--ck-line); margin: 22px 0; }
+
+/* ============================================================
+   COTAS — barra de filtros (".controls" do cockpit v56)
+   Sem o campo "Produto": esta tela le do banco e o produto nao
+   e uma escolha do usuario aqui.
+   ============================================================ */
+.ck-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr .8fr auto;   /* v56: 1fr 1fr .8fr .8fr auto, menos o Produto */
+  gap: 10px;
+  padding: 18px 0;
+  align-items: start;
+}
+@media (max-width: 900px) { .ck-controls { grid-template-columns: 1fr; } }
+
+.ck-field { position: relative; min-width: 0; }
+.ck-field > label {
+  display: block;
+  margin: 0 0 6px;
+  color: var(--ck-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.ck-field select {
+  width: 100%;
+  border: 1px solid var(--ck-line);
+  border-radius: 10px;
+  background: var(--ck-panel);
+  padding: 11px 10px;
+  color: var(--ck-ink);
+  min-height: 41px;
+}
+
+.ck-ghost {
+  border: 0;
+  border-radius: 10px;
+  color: var(--ck-ink);
+  background: var(--ck-pill-bg);
+  box-shadow: 0 8px 18px rgba(31, 25, 88, .08);
+  padding: 11px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  min-height: 41px;
+  white-space: nowrap;
+  cursor: pointer;
+  align-self: end;
+}
+.ck-ghost:hover { background: var(--ck-halo-neutral); }
+
+/* --- combo com chips (workspace / usuario) --- */
+.ck-combo-control {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  height: 41px;
+  overflow: hidden;
+  border: 1px solid var(--ck-line);
+  border-radius: 10px;
+  background: var(--ck-panel);
+  padding: 5px 34px 5px 8px;
+  cursor: text;
+}
+.ck-combo-control:focus-within { border-color: var(--ck-teal); }
+.ck-combo-control input {
+  flex: 1 1 50px;
+  min-width: 40px;
+  width: auto;
+  border: none;
+  background: transparent;
+  padding: 5px 2px;
+  min-height: auto;
+  color: var(--ck-ink);
+}
+.ck-combo-control input:focus { outline: none; }
+
+.ck-combo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 130px;
+  flex: none;
+  background: var(--ck-lilac);
+  color: var(--ck-lilac-ink);
+  border-radius: 999px;
+  padding: 5px 6px 5px 11px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.ck-combo-chip .ck-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-combo-chip button {
+  border: none;
+  background: transparent;
+  color: var(--ck-lilac-ink);
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  min-height: auto;
+  padding: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+}
+.ck-combo-chip button:hover { background: var(--ck-lilac-hover); }
+.ck-combo-chip.ck-combo-more { background: var(--ck-lilac-hover); padding: 5px 11px; }
+
+.ck-combo-clear {
+  position: absolute;
+  right: 4px;
+  top: 29px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--ck-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ck-combo-clear:hover { background: var(--ck-pill-bg); }
+
+.ck-combo-list {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--ck-panel);
+  border: 1px solid var(--ck-line);
+  border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(15, 10, 30, .18);
+}
+.ck-combo-list li {
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ck-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ck-combo-list li:hover { background: var(--ck-lilac); }
+.ck-combo-list li.ck-combo-selected {
+  background: var(--ck-lilac);
+  color: var(--ck-lilac-ink);
+  font-weight: 700;
+}
+.ck-combo-list .ck-combo-empty { color: var(--ck-muted); font-size: 12px; cursor: default; }
+.ck-combo-list .ck-combo-empty:hover { background: none; }

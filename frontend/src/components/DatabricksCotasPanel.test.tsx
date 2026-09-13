@@ -9,6 +9,7 @@ vi.mock('../api/databricksColeta')
 
 const cotas = (over: Partial<DatabricksCotas> = {}): DatabricksCotas => ({
   mes: '2026-08',
+  meses_disponiveis: ['2026-08', '2026-07'],
   por_workspace: [
     { workspace_id: 'ws-dev', custo: 6853.08, dbus: 100, dbus_free: 10, dbus_pago: 90, cota: 7000, pct: 97.9, budget_nome: 'Quota Dev', status: 'critico' },
     { workspace_id: 'ws-sem', custo: 1200, dbus: 20, dbus_free: 0, dbus_pago: 20, cota: null, pct: null, budget_nome: null, status: 'sem_cota' },
@@ -88,17 +89,48 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByText(/escolha outro mês/)).toBeInTheDocument()
   })
 
-  it('troca o mês pelo seletor e refaz a consulta', async () => {
+  it('o Período lista só os meses com consumo e refaz a consulta ao trocar', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
     renderPanel()
     await screen.findByText('Cotas Workspace')
 
-    // fireEvent.change, nao userEvent.type: um <input type="month"> e composto
-    // por segmentos (mes/ano) e o jsdom nao os simula -- digitar caractere a
-    // caractere nao produz um value valido nem dispara o onChange.
-    fireEvent.change(screen.getByLabelText('Mês'), { target: { value: '2026-07' } })
+    const periodo = screen.getByLabelText('Período') as HTMLSelectElement
+    expect([...periodo.options].map((o) => o.textContent)).toContain('ago/2026')
+    expect([...periodo.options].map((o) => o.textContent)).toContain('jul/2026')
 
+    fireEvent.change(periodo, { target: { value: '2026-07' } })
     expect(vi.mocked(api.getDatabricksCotas).mock.calls.some((c) => c[0] === '2026-07')).toBe(true)
+  })
+
+  it('filtra os dois painéis por workspace e reflete nos KPIs', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    renderPanel()
+    await screen.findByText('Cotas Workspace')
+
+    // sem filtro: os dois workspaces e os dois usuarios aparecem
+    expect(cartao('Workspace', 'ws-sem')).toBeInTheDocument()
+    expect(screen.getByText('US$ 8.053,08')).toBeInTheDocument()   // 6853,08 + 1200
+
+    fireEvent.click(screen.getByLabelText('Workspace'))
+    fireEvent.click(screen.getByText('ws-dev'))
+
+    // ws-sem sai dos cartoes e o consumo do KPI cai pro do ws-dev sozinho
+    expect(screen.queryByRole('button', { name: 'Ver detalhes de Workspace ws-sem' })).toBeNull()
+    expect(cartao('Workspace', 'ws-dev')).toBeInTheDocument()
+    expect(screen.getByText('US$ 6.853,08')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
+    expect(cartao('Workspace', 'ws-sem')).toBeInTheDocument()
+  })
+
+  it('não oferece filtro de Produto — a tela lê do banco', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    renderPanel()
+    await screen.findByText('Cotas Workspace')
+
+    expect(screen.queryByLabelText('Produto')).toBeNull()
+    expect(screen.getByLabelText('Workspace')).toBeInTheDocument()
+    expect(screen.getByLabelText('Usuário')).toBeInTheDocument()
   })
 
   it('ordena por maior consumo, corta no top 25 e deixa expandir', async () => {

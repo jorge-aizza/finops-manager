@@ -155,6 +155,8 @@ export interface DatabricksCotaUsuario {
 
 export interface DatabricksCotas {
   mes: string
+  /** meses que tem consumo gravado, mais recente primeiro — alimenta o seletor de Periodo */
+  meses_disponiveis: string[]
   por_workspace: DatabricksCotaWorkspace[]
   por_usuario: DatabricksCotaUsuario[]
   resumo: {

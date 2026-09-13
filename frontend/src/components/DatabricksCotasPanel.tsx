@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getDatabricksCotas } from '../api/databricksColeta'
 import DatabricksCotaDetalheModal from './DatabricksCotaDetalheModal'
+import CkCombo from './CkCombo'
 import type { DatabricksCotaStatus, DatabricksCotaUsuario, DatabricksCotaWorkspace } from '../types/databricksResumo'
 
 // Semáforo de cotas — porte fiel do cockpit "Gestão de Cotas" (v56).
@@ -86,6 +87,13 @@ function Legenda() {
   )
 }
 
+// "2026-08" -> "ago/2026", mesmo idioma curto ja usado nos eixos do dashboard
+function rotuloMes(m: string) {
+  const [a, mm] = m.split('-')
+  const nomes = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
+  return (nomes[Number(mm) - 1] || mm) + '/' + a
+}
+
 function mesAtual() {
   const d = new Date()
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
@@ -141,6 +149,11 @@ export default function DatabricksCotasPanel() {
   // atrasada (ou o mês recém-virou), e nesses casos olhar o mês anterior é o
   // que responde "como fechamos?".
   const [mes, setMes] = useState(mesAtual())
+  // Filtros de EXIBICAO (nao mexem na conta da cota, so em o que aparece).
+  // O campo "Produto" do cockpit ficou de fora: esta tela le do banco e o
+  // produto nao e uma escolha de quem consulta.
+  const [fWs, setFWs] = useState<string[]>([])
+  const [fUser, setFUser] = useState<string[]>([])
   const [detalhe, setDetalhe] = useState<
     { tipo: 'workspace'; item: DatabricksCotaWorkspace } |
     { tipo: 'usuario'; item: DatabricksCotaUsuario } | null
@@ -151,20 +164,37 @@ export default function DatabricksCotasPanel() {
   })
 
   const d = cotasQuery.data
+  const wsOpts = [...new Set((d?.por_workspace || []).map((w) => w.workspace_id))].sort()
+  const userOpts = [...new Set((d?.por_usuario || []).map((u) => u.usuario).filter(Boolean))].sort()
+  // o mes escolhido entra na lista mesmo sem consumo, senao o <select> ficaria
+  // exibindo um mes diferente do que esta sendo consultado
+  const mesesOpts = [...new Set([...(d?.meses_disponiveis || []), mes])].sort().reverse()
+  const temFiltro = fWs.length > 0 || fUser.length > 0 || mes !== mesAtual()
 
   const seletor = (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 20px 14px' }}>
-      <label htmlFor="dbx-cotas-mes" style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 }}>
-        Mês
-      </label>
-      <input
-        id="dbx-cotas-mes" type="month" value={mes}
-        onChange={(e) => e.target.value && setMes(e.target.value)}
-        style={{ width: 'auto' }}
+    <div className="ck-cotas ck-controls" style={{ margin: '0 20px' }}>
+      <CkCombo
+        id="dbx-cotas-ws" rotulo="Workspace" placeholder="Todos os workspaces"
+        opcoes={wsOpts} valor={fWs} onChange={setFWs}
       />
-      {mes !== mesAtual() && (
-        <button className="btn-ghost" onClick={() => setMes(mesAtual())}>Voltar ao mês atual</button>
-      )}
+      <CkCombo
+        id="dbx-cotas-user" rotulo="Usuário" placeholder="Todos os usuários"
+        opcoes={userOpts} valor={fUser} onChange={setFUser}
+      />
+      <div className="ck-field">
+        <label htmlFor="dbx-cotas-mes">Período</label>
+        <select
+          id="dbx-cotas-mes" value={mes}
+          onChange={(e) => e.target.value && setMes(e.target.value)}
+        >
+          {mesesOpts.map((m) => <option key={m} value={m}>{rotuloMes(m)}</option>)}
+        </select>
+      </div>
+      <button
+        type="button" className="ck-ghost" disabled={!temFiltro}
+        style={temFiltro ? undefined : { opacity: .5, cursor: 'default' }}
+        onClick={() => { setFWs([]); setFUser([]); setMes(mesAtual()) }}
+      >Limpar filtros</button>
     </div>
   )
 
@@ -189,13 +219,30 @@ export default function DatabricksCotasPanel() {
     )
   }
 
-  const semCota = d.resumo.workspaces_sem_cota
-  const acima = d.resumo.usuarios_acima_do_limite
   // Como no cockpit: maior consumo primeiro. abs() porque um estorno pode
   // deixar o custo negativo, e ele continua sendo um item de peso.
   const porConsumo = <T extends { custo: number }>(a: T, b: T) => Math.abs(b.custo) - Math.abs(a.custo)
-  const workspaces = [...d.por_workspace].sort(porConsumo)
-  const usuarios = [...d.por_usuario].sort(porConsumo)
+  // Workspace e Usuario filtram os DOIS paineis: escolher um workspace tambem
+  // restringe a lista de usuarios aos dele, senao os dois lados da tela
+  // estariam falando de recortes diferentes.
+  const workspaces = d.por_workspace
+    .filter((w) => (!fWs.length || fWs.includes(w.workspace_id))
+      && (!fUser.length || d.por_usuario.some((u) => u.workspace_id === w.workspace_id && fUser.includes(u.usuario))))
+    .sort(porConsumo)
+  const usuarios = d.por_usuario
+    .filter((u) => (!fWs.length || fWs.includes(u.workspace_id))
+      && (!fUser.length || fUser.includes(u.usuario)))
+    .sort(porConsumo)
+
+  // KPIs recalculados sobre o que esta filtrado -- mesmas formulas que o
+  // servidor usa em `resumo` (ele tambem as deriva destas listas), entao sem
+  // filtro os numeros batem exatamente com os dele.
+  const comCota = workspaces.filter((w) => w.cota != null)
+  const custoTotal = workspaces.reduce((a, w) => a + w.custo, 0)
+  const cotaTotal = comCota.reduce((a, w) => a + (w.cota || 0), 0)
+  const semCota = workspaces.length - comCota.length
+  const acima = usuarios.filter((u) => u.status === 'estourado').length
+  const filtrando = fWs.length > 0 || fUser.length > 0
 
   return (
     <>
@@ -203,12 +250,12 @@ export default function DatabricksCotasPanel() {
       <div className="stats-grid" style={{ margin: '0 20px 16px' }}>
         <div className="stat-card">
           <div className="stat-label">Consumo no mês</div>
-          <div className="stat-value">{usd(d.resumo.custo_total)}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>mês {d.mes}</div>
+          <div className="stat-value">{usd(custoTotal)}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{rotuloMes(d.mes)}{filtrando ? ' · filtrado' : ''}</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Cota configurada</div>
-          <div className="stat-value">{usd(d.resumo.cota_total)}</div>
+          <div className="stat-value">{usd(cotaTotal)}</div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>soma dos orçamentos por workspace</div>
         </div>
         <div className="stat-card">
