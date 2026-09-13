@@ -206,9 +206,11 @@ export default function DatabricksCotasPanel() {
   // produto nao e uma escolha de quem consulta.
   const [fWs, setFWs] = useState<string[]>([])
   const [fUser, setFUser] = useState<string[]>([])
+  // `origem` guarda o workspace de onde o usuario foi aberto, para o caminho
+  // de volta -- sem isso o drill-down substitui o modal e nao ha como voltar.
   const [detalhe, setDetalhe] = useState<
     { tipo: 'workspace'; item: DatabricksCotaWorkspace } |
-    { tipo: 'usuario'; item: DatabricksCotaUsuario } | null
+    { tipo: 'usuario'; item: DatabricksCotaUsuario; origem?: DatabricksCotaWorkspace } | null
   >(null)
   const cotasQuery = useQuery({
     queryKey: ['databricks-cotas', range.data_inicio || '', range.data_fim || ''],
@@ -223,7 +225,7 @@ export default function DatabricksCotasPanel() {
   const serieQuery = useQuery({
     queryKey: ['databricks-cotas-serie', range.data_inicio || '', range.data_fim || '', wsSel, userSel],
     queryFn: () => getDatabricksCotaSerie(range, wsSel, userSel),
-    enabled: wsSel != null || userSel != null,
+    // sempre: sem workspace escolhido o painel mostra a serie agregada
   })
 
   const d = cotasQuery.data
@@ -357,9 +359,14 @@ export default function DatabricksCotasPanel() {
     teto == null || dias <= 0 ? null : teto / dias
 
   const diasWs = (serieQuery.data?.workspace || []).map((x) => x.dia)
-  const ritmoWs = porDia(cotaWsSel, diasWs.length)
+  // sem workspace escolhido a serie e a de todos: a referencia comparavel e a
+  // soma das cotas configuradas (zero delas = sem referencia, nunca uma reta
+  // em zero que passaria por "cota zero")
+  const tetoWs = wsSel ? cotaWsSel : (cotaTotal > 0 ? cotaTotal : null)
+  const ritmoWs = porDia(tetoWs, diasWs.length)
   const serieWs: CkSerie[] = [
-    { label: 'Consumo do Workspace (USD)', cor: 'var(--ck-teal)', fmt: usd,
+    { label: wsSel ? 'Consumo do Workspace (USD)' : 'Consumo de todos (USD)',
+      cor: 'var(--ck-teal)', fmt: usd,
       valores: (serieQuery.data?.workspace || []).map((x) => x.custo) },
     ...(ritmoWs != null ? [{
       label: 'Ritmo da cota (USD/dia)', cor: 'var(--ck-lilac-hover)', fmt: usd,
@@ -416,13 +423,13 @@ export default function DatabricksCotasPanel() {
 
       <div style={{ display: 'grid', gap: 16, margin: '0 20px 16px' }}>
         <PainelGrafico
-          titulo="Cota e consumo do Workspace"
+          titulo={wsSel ? 'Cota e consumo do Workspace' : 'Consumo diário'}
           nota={wsSel
             ? `${wsSel} — ${cotaWsSel != null
                 ? 'cota configurada de ' + usd(cotaWsSel)
                 : 'sem cota de workspace configurada'}, dia a dia`
-            : 'Cota e consumo (USD) do workspace selecionado, dia a dia'}
-          vazio={wsSel ? null : 'Selecione um workspace no filtro para ver a cota e o consumo dele ao longo do tempo.'}
+            : `Todos os ${workspaces.length} workspaces do recorte, dia a dia — escolha um no filtro para ver a cota dele`}
+          vazio={null}
         >
           <CkBarChart dias={diasWs} series={serieWs} />
         </PainelGrafico>
@@ -480,8 +487,17 @@ export default function DatabricksCotasPanel() {
           item={detalhe.item}
           tipo={detalhe.tipo}
           usuariosDoWs={detalhe.tipo === 'workspace'
+            // ja escopado ao workspace: a linha aberta no drill-down e a
+            // daquele workspace, nunca a soma do usuario em todos eles
             ? d.por_usuario.filter((x) => x.workspace_id === detalhe.item.workspace_id)
             : []}
+          onAbrirUsuario={detalhe.tipo === 'workspace'
+            ? (u) => setDetalhe({ tipo: 'usuario', item: u, origem: detalhe.item })
+            : undefined}
+          voltarPara={detalhe.tipo === 'usuario' ? detalhe.origem?.workspace_id ?? null : null}
+          onVoltar={detalhe.tipo === 'usuario' && detalhe.origem
+            ? () => setDetalhe({ tipo: 'workspace', item: detalhe.origem! })
+            : undefined}
           onClose={() => setDetalhe(null)}
         />
       )}

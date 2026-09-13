@@ -11176,8 +11176,12 @@ app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, asyn
     const parUser = [usuario];
     if (ws) { condUser.push(`workspace_id = $${params.length + 2}`); parUser.push(ws); }
 
+    // Sem workspace escolhido a serie e a AGREGADA (todos os workspaces) em vez
+    // de vazia: o painel abria com uma caixa "selecione um workspace" e passava
+    // a impressao de que o grafico nao existia. A serie do usuario continua
+    // exigindo um usuario -- sem um, ela seria identica a agregada acima.
     const [porDiaWs, porDiaUser] = await Promise.all([
-      ws ? serie([`workspace_id = $${params.length + 1}`], [ws]) : Promise.resolve([]),
+      ws ? serie([`workspace_id = $${params.length + 1}`], [ws]) : serie([], []),
       usuario != null ? serie(condUser, parUser) : Promise.resolve([]),
     ]);
 

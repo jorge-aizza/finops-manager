@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import DatabricksCotasPanel from './DatabricksCotasPanel'
@@ -176,18 +176,6 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByLabelText('Usuário')).toBeInTheDocument()
   })
 
-  it('os dois gráficos pedem uma seleção antes de desenhar', async () => {
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    renderPanel()
-
-    // sem filtro: nenhuma serie faz sentido, entao os paineis explicam em vez
-    // de desenhar uma soma de workspaces/usuarios diferentes
-    expect(await screen.findByText('Cota e consumo do Workspace')).toBeInTheDocument()
-    expect(screen.getByText(/Selecione um workspace no filtro/)).toBeInTheDocument()
-    expect(screen.getByText(/Selecione um usuário no filtro/)).toBeInTheDocument()
-    expect(vi.mocked(api.getDatabricksCotaSerie)).not.toHaveBeenCalled()
-  })
-
   it('com 1 workspace selecionado, desenha a série diária e anuncia a cota', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
     vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
@@ -291,6 +279,44 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByText('2,1%')).toBeInTheDocument()
     // os usuários daquele workspace vêm junto
     expect(screen.getByText(/Usuários deste workspace/)).toBeInTheDocument()
+  })
+
+  it('o gráfico abre com a série agregada em vez de pedir uma seleção', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
+    renderPanel()
+
+    // duas caixas vazias na abertura passavam a impressao de que o grafico
+    // nao existia -- sem selecao o painel mostra o consumo de todos
+    expect(await screen.findByText('Consumo diário')).toBeInTheDocument()
+    expect(screen.queryByText(/Selecione um workspace no filtro/)).toBeNull()
+    expect(await screen.findByText('Consumo de todos (USD)')).toBeInTheDocument()
+    // o painel do usuario segue pedindo um usuario: sem um, seria identico
+    expect(screen.getByText(/Selecione um usuário no filtro/)).toBeInTheDocument()
+  })
+
+  it('a lista do workspace mostra a fatia de cada usuário e abre o detalhe dele', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    renderPanel()
+    await screen.findByText('Cotas Workspace')
+
+    fireEvent.click(cartao('Workspace', 'ws-dev'))
+    expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
+
+    // fatia no consumo DO WORKSPACE (1786,79 / 6853,08 = 26%), nao o % da
+    // cota do usuario -- esse ja e o que os cartoes da tela mostram
+    expect(screen.getByText('US$ 1.786,79 · 26%')).toBeInTheDocument()
+    expect(screen.getByText('US$ 120 · 2%')).toBeInTheDocument()
+
+    // clicar no usuario troca pro detalhe dele, com caminho de volta
+    // escopado ao modal: o mesmo rotulo existe no cartao do painel atras dele
+    const modal = document.querySelector('.ck-modal-box') as HTMLElement
+    fireEvent.click(within(modal).getByRole('button', { name: 'Ver detalhes de Usuário pedro@vivo.com.br' }))
+    expect(await screen.findByRole('heading', { name: 'Usuário · pedro@vivo.com.br' })).toBeInTheDocument()
+
+    const voltar = screen.getByRole('button', { name: '← Voltar para ws-dev' })
+    fireEvent.click(voltar)
+    expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
   })
 
   it('no detalhe de quem estourou, % disponível e saldo ficam negativos em vez de zerados', async () => {

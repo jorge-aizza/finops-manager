@@ -50,10 +50,17 @@ interface Props {
   item: DatabricksCotaWorkspace | DatabricksCotaUsuario
   tipo: 'workspace' | 'usuario'
   usuariosDoWs?: DatabricksCotaUsuario[]   // só no modal de workspace
+  /** Abre o detalhe de um usuário da lista (drill-down workspace -> usuário). */
+  onAbrirUsuario?: (u: DatabricksCotaUsuario) => void
+  /** Quando veio de um workspace, o rótulo do caminho de volta. */
+  voltarPara?: string | null
+  onVoltar?: () => void
   onClose: () => void
 }
 
-export default function DatabricksCotaDetalheModal({ item, tipo, usuariosDoWs = [], onClose }: Props) {
+export default function DatabricksCotaDetalheModal({
+  item, tipo, usuariosDoWs = [], onAbrirUsuario, voltarPara, onVoltar, onClose,
+}: Props) {
   const ehWs = tipo === 'workspace'
   const w = item as DatabricksCotaWorkspace
   const u = item as DatabricksCotaUsuario
@@ -73,6 +80,20 @@ export default function DatabricksCotaDetalheModal({ item, tipo, usuariosDoWs = 
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="ck-cotas ck-modal-box">
         <button className="ck-modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
+
+        {voltarPara && onVoltar && (
+          // sem isso o drill-down seria um beco sem saida: o modal do usuario
+          // substitui o do workspace e nao havia como voltar ao que abriu
+          <button
+            type="button"
+            onClick={onVoltar}
+            style={{
+              border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
+              marginBottom: 10, font: 'inherit', fontSize: 12, fontWeight: 700,
+              color: 'var(--ck-teal)',
+            }}
+          >← Voltar para {voltarPara}</button>
+        )}
 
         <div className="ck-panel-head">
           <div>
@@ -116,26 +137,48 @@ export default function DatabricksCotaDetalheModal({ item, tipo, usuariosDoWs = 
           <>
             <hr className="ck-divider" />
             <div className="ck-field-label" style={{ display: 'block', marginBottom: 10 }}>
-              Usuários deste workspace ({usuariosDoWs.length})
+              Usuários deste workspace ({usuariosDoWs.length}) — fatia do consumo
             </div>
-            <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
               {usuariosDoWs.map((x) => {
                 const cs = STATUS_PILL[x.status]
+                // A barra e a FATIA do usuario no consumo DESTE workspace --
+                // nao o % da cota dele, que ja e o que os cartoes da tela
+                // mostram e aqui seria so repeticao. Quando um workspace esta
+                // em 97% da cota, a pergunta e "quem esta comendo isso".
+                const fatia = w.custo > 0 ? (x.custo / w.custo) * 100 : 0
                 return (
-                  <div key={x.usuario} style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    gap: 12, padding: '8px 2px', borderBottom: '1px solid var(--ck-line)',
-                  }}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: cs.cor, flexShrink: 0 }} />
-                      <span style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {x.usuario}
+                  <button
+                    type="button"
+                    key={x.usuario}
+                    onClick={() => onAbrirUsuario?.(x)}
+                    disabled={!onAbrirUsuario}
+                    aria-label={`Ver detalhes de Usuário ${x.usuario}`}
+                    style={{
+                      display: 'block', width: '100%', textAlign: 'left', font: 'inherit',
+                      color: 'inherit', background: 'transparent', border: 'none',
+                      borderBottom: '1px solid var(--ck-line)', padding: '9px 2px',
+                      cursor: onAbrirUsuario ? 'pointer' : 'default',
+                    }}
+                  >
+                    <span style={{
+                      display: 'flex', justifyContent: 'space-between',
+                      alignItems: 'center', gap: 12,
+                    }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: cs.cor, flexShrink: 0 }} />
+                        <span style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {x.usuario}
+                        </span>
+                      </span>
+                      <span style={{ fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                        {usd(x.custo)} · {fmt(Math.round(fatia))}%
                       </span>
                     </span>
-                    <span style={{ fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                      {usd(x.custo)}{x.pct != null ? ` · ${fmt(Math.round(x.pct))}%` : ''}
+                    <span className="ck-bar" style={{ display: 'block', marginTop: 6 }}>
+                      <span style={{ width: Math.min(100, fatia) + '%', background: cs.cor }} />
                     </span>
-                  </div>
+                  </button>
                 )
               })}
             </div>
