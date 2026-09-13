@@ -10,6 +10,11 @@ vi.mock('../api/databricksColeta')
 const serie = (dias: string[]) => ({
   workspace: dias.map((dia, i) => ({ dia, custo: 100 + i * 10, dbus_free: 5 })),
   usuario: dias.map((dia, i) => ({ dia, custo: 50 + i * 5, dbus_free: 2 })),
+  // SQL sempre maior que JOBS: fixa a ordem da pilha e da legenda
+  produto: dias.flatMap((dia) => [
+    { produto: 'SQL', dia, custo: 80 },
+    { produto: 'JOBS', dia, custo: 20 },
+  ]),
 })
 
 const cotas = (over: Partial<DatabricksCotas> = {}): DatabricksCotas => ({
@@ -176,71 +181,6 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByLabelText('Usuário')).toBeInTheDocument()
   })
 
-  it('com 1 workspace selecionado, desenha a série diária e anuncia a cota', async () => {
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
-    renderPanel()
-    await screen.findByText('Cotas Workspace')
-
-    fireEvent.click(screen.getByLabelText('Workspace'))
-    fireEvent.click(screen.getByText('ws-dev'))
-
-    // a nota do painel passa a nomear o workspace e a cota dele
-    expect(await screen.findByText(/ws-dev — cota configurada de US\$ 7\.000, dia a dia/)).toBeInTheDocument()
-    expect(screen.queryByText(/Selecione um workspace no filtro/)).toBeNull()
-    // range vazio = "Todos os periodos", o padrao do seletor
-    expect(vi.mocked(api.getDatabricksCotaSerie)).toHaveBeenCalledWith({}, 'ws-dev', null)
-    // a legenda traz consumo + cota (a cota so aparece porque existe de verdade)
-    expect(screen.getByText('Consumo do Workspace (USD)')).toBeInTheDocument()
-    // a barra de referencia so entra quando a serie diaria chega
-    expect(await screen.findByText('Ritmo da cota (USD/dia)')).toBeInTheDocument()
-  })
-
-  it('o teto do usuário vem do workspace selecionado, não de uma linha qualquer', async () => {
-    // o mesmo usuario tem UMA LINHA POR WORKSPACE (nos dados reais os 6
-    // usuarios aparecem nos 4 workspaces) e o teto e configurado por
-    // workspace -- procurar so pelo nome pegava a primeira linha e podia
-    // anunciar "sem cota" para quem tem cota
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas({
-      por_workspace: [
-        { workspace_id: 'ws-a', custo: 10, dbus: 1, dbus_free: 0, dbus_pago: 1, cota: null, pct: null, budget_nome: null, status: 'sem_cota' },
-        { workspace_id: 'ws-b', custo: 10, dbus: 1, dbus_free: 0, dbus_pago: 1, cota: null, pct: null, budget_nome: null, status: 'sem_cota' },
-      ],
-      por_usuario: [
-        // a PRIMEIRA linha da ana e a sem teto; a de ws-b tem teto de 500
-        { workspace_id: 'ws-a', usuario: 'ana@vivo.com.br', custo: 10, dbus: 1, dbus_free: 0, dbus_pago: 1, limite: null, pct: null, origem_limite: null, budget_nome: null, status: 'sem_cota' },
-        { workspace_id: 'ws-b', usuario: 'ana@vivo.com.br', custo: 10, dbus: 1, dbus_free: 0, dbus_pago: 1, limite: 500, pct: 2, origem_limite: 'workspace', budget_nome: 'Teto B', status: 'ok' },
-      ],
-    }))
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
-    renderPanel()
-    await screen.findByText('Cotas Workspace')
-
-    fireEvent.click(screen.getByLabelText('Workspace'))
-    fireEvent.click(screen.getByText('ws-b'))
-    fireEvent.click(screen.getByLabelText('Usuário'))
-    fireEvent.click(screen.getByText('ana@vivo.com.br'))
-
-    // tem de anunciar o teto de ws-b, nao "sem cota" da linha de ws-a
-    expect(await screen.findByText(/ana@vivo\.com\.br — cota configurada de US\$ 500/)).toBeInTheDocument()
-    expect(await screen.findByText('Ritmo da cota (USD/dia)')).toBeInTheDocument()
-  })
-
-  it('workspace sem cota não desenha a barra de cota nem promete um teto', async () => {
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
-    renderPanel()
-    await screen.findByText('Cotas Workspace')
-
-    fireEvent.click(screen.getByLabelText('Workspace'))
-    fireEvent.click(screen.getByText('ws-sem'))
-
-    expect(await screen.findByText(/ws-sem — sem cota de workspace configurada/)).toBeInTheDocument()
-    // uma barra fixa em zero passaria a falsa impressao de "cota zero"
-    expect(screen.queryByText('Ritmo da cota (USD/dia)')).toBeNull()
-    expect(screen.getByText('Consumo do Workspace (USD)')).toBeInTheDocument()
-  })
-
   it('ordena por maior consumo, corta no top 10 e deixa expandir', async () => {
     // 30 workspaces com consumo crescente: o corte tem que esconder os 20
     // MENORES, e o maior tem que aparecer primeiro.
@@ -281,20 +221,6 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByText(/Usuários deste workspace/)).toBeInTheDocument()
   })
 
-  it('o gráfico abre com a série agregada em vez de pedir uma seleção', async () => {
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
-    renderPanel()
-
-    // duas caixas vazias na abertura passavam a impressao de que o grafico
-    // nao existia -- sem selecao o painel mostra o consumo de todos
-    expect(await screen.findByText('Consumo diário')).toBeInTheDocument()
-    expect(screen.queryByText(/Selecione um workspace no filtro/)).toBeNull()
-    expect(await screen.findByText('Consumo de todos (USD)')).toBeInTheDocument()
-    // o painel do usuario segue pedindo um usuario: sem um, seria identico
-    expect(screen.getByText(/Selecione um usuário no filtro/)).toBeInTheDocument()
-  })
-
   it('clicar num workspace seleciona ele no filtro e restringe "Cotas Usuário"', async () => {
     // o painel de usuario e um ranking GLOBAL por (workspace, usuario): sem
     // selecao ele mistura workspaces, e so parte dos usuarios de um workspace
@@ -324,6 +250,52 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByRole('button', { name: 'Remover ws-dev' })).toBeInTheDocument()
     // ...e o detalhe abre junto, como no cockpit
     expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
+  })
+
+  it('mostra os dois gráficos do cockpit: por período e por produto', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
+    renderPanel()
+
+    expect(await screen.findByText('Consumo por período')).toBeInTheDocument()
+    expect(screen.getByText('Comparação entre consumo, cota de workspace e cota de usuário')).toBeInTheDocument()
+    expect(screen.getByText('Consumo por produto')).toBeInTheDocument()
+    expect(screen.getByText('Custo diário em USD, por produto')).toBeInTheDocument()
+
+    // as tres series do v51 — consumo + os dois tetos, porque a fixture tem os dois
+    expect(await screen.findByText('Consumo (USD)')).toBeInTheDocument()
+    expect(screen.getByText('Cota Workspace (USD/dia)')).toBeInTheDocument()
+    expect(screen.getByText('Cota Usuário (USD/dia)')).toBeInTheDocument()
+  })
+
+  it('sem cota configurada, não desenha uma barra de teto em zero', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas({
+      por_workspace: [
+        { workspace_id: 'ws-sem', custo: 1200, dbus: 20, dbus_free: 0, dbus_pago: 20, cota: null, pct: null, budget_nome: null, status: 'sem_cota' },
+      ],
+      por_usuario: [
+        { workspace_id: 'ws-sem', usuario: 'ana@vivo.com.br', custo: 120, dbus: 8, dbus_free: 0, dbus_pago: 8, limite: null, pct: null, origem_limite: null, budget_nome: null, status: 'sem_cota' },
+      ],
+    }))
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
+    renderPanel()
+
+    // uma reta em zero passaria a falsa impressao de "cota zero"
+    expect(await screen.findByText('Consumo (USD)')).toBeInTheDocument()
+    expect(screen.queryByText('Cota Workspace (USD/dia)')).toBeNull()
+    expect(screen.queryByText('Cota Usuário (USD/dia)')).toBeNull()
+  })
+
+  it('empilha "Consumo por produto" do maior consumo para o menor', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
+    renderPanel()
+    await screen.findByText('Consumo por produto')
+
+    // a legenda do 2o grafico segue a ordem da pilha: SQL (80/dia) antes de JOBS (20/dia)
+    const legendas = document.querySelectorAll('.ck-chart-legend')
+    const produtos = [...legendas[legendas.length - 1].querySelectorAll('span')].map((x) => x.textContent)
+    expect(produtos).toEqual(['SQL', 'JOBS'])
   })
 
   it('a lista do workspace mostra a fatia de cada usuário e abre o detalhe dele', async () => {

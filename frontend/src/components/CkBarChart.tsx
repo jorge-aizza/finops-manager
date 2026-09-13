@@ -18,7 +18,8 @@ export interface CkSerie {
 interface Props {
   dias: string[]
   series: CkSerie[]
-  alturaViewBox?: number
+  /** Empilha as series numa barra por dia (grafico "Consumo por produto" do v51). */
+  empilhado?: boolean
 }
 
 const W = 900
@@ -35,22 +36,33 @@ const curto = (v: number) =>
   Math.abs(v) >= 1000 ? (v / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + 'k'
     : v.toLocaleString('pt-BR', { maximumFractionDigits: 1 })
 
-export default function CkBarChart({ dias, series }: Props) {
+export default function CkBarChart({ dias, series, empilhado = false }: Props) {
   const largura = W - PAD.left - PAD.right
   const altura = H - PAD.top - PAD.bottom
 
   // uma escala por eixo usado; sem dado, `nice` devolve 1 e a barra fica rente
   // ao chao em vez de dividir por zero
   const maxPorEixo: Record<string, number> = {}
-  for (const s of series) {
-    const e = s.eixo || 'a'
-    maxPorEixo[e] = Math.max(maxPorEixo[e] || 0, ...s.valores.map((v) => Math.abs(v)), 0)
+  if (empilhado) {
+    // o topo da barra e a SOMA do dia; usar o maior valor isolado cortaria a pilha
+    let maxDia = 0
+    for (let i = 0; i < dias.length; i++) {
+      maxDia = Math.max(maxDia, series.reduce((a, s) => a + Math.abs(s.valores[i] || 0), 0))
+    }
+    maxPorEixo.a = nice(maxDia)
+  } else {
+    for (const s of series) {
+      const e = s.eixo || 'a'
+      maxPorEixo[e] = Math.max(maxPorEixo[e] || 0, ...s.valores.map((v) => Math.abs(v)), 0)
+    }
+    for (const e of Object.keys(maxPorEixo)) maxPorEixo[e] = nice(maxPorEixo[e])
   }
-  for (const e of Object.keys(maxPorEixo)) maxPorEixo[e] = nice(maxPorEixo[e])
 
   const passo = dias.length ? largura / dias.length : largura
   const vao = Math.min(6, passo * 0.2)
-  const larguraBarra = series.length ? Math.max(1, (passo - vao) / series.length) : passo
+  const larguraBarra = empilhado
+    ? Math.max(1, passo - vao)
+    : (series.length ? Math.max(1, (passo - vao) / series.length) : passo)
 
   // no maximo ~12 rotulos no eixo X, senao as datas viram um borrao
   const saltoRotulo = Math.max(1, Math.ceil(dias.length / 12))
@@ -76,17 +88,20 @@ export default function CkBarChart({ dias, series }: Props) {
 
           {dias.map((dia, i) => {
             const x0 = PAD.left + i * passo + vao / 2
+            let base = 0   // altura ja ocupada na pilha deste dia
             return (
               <g key={dia}>
                 {series.map((s, j) => {
                   const v = s.valores[i] || 0
                   const max = maxPorEixo[s.eixo || 'a'] || 1
                   const h = Math.max(v > 0 ? 1 : 0, (Math.abs(v) / max) * altura)
-                  const x = x0 + j * larguraBarra
+                  const x = empilhado ? x0 : x0 + j * larguraBarra
+                  const y = PAD.top + altura - h - base
+                  if (empilhado) base += h
                   return (
                     <rect
                       key={s.label}
-                      x={x} y={PAD.top + altura - h}
+                      x={x} y={y}
                       width={Math.max(1, larguraBarra - 1)} height={h}
                       fill={s.cor} rx={2}
                     >

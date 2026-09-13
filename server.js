@@ -11180,12 +11180,35 @@ app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, asyn
     // de vazia: o painel abria com uma caixa "selecione um workspace" e passava
     // a impressao de que o grafico nao existia. A serie do usuario continua
     // exigindo um usuario -- sem um, ela seria identica a agregada acima.
-    const [porDiaWs, porDiaUser] = await Promise.all([
+    // Consumo por PRODUTO e dia (Genie, SQL, JOBS, ...) — alimenta o grafico
+    // empilhado do cockpit v51. Respeita os mesmos filtros de workspace/usuario
+    // do resto da rota, senao a soma das fatias nao bateria com o outro grafico.
+    const condProd = ws ? [`workspace_id = $${params.length + 1}`] : [];
+    const parProd = ws ? [ws] : [];
+    if (usuario != null) {
+      condProd.push(`COALESCE(usuario,'') = $${params.length + parProd.length + 1}`);
+      parProd.push(usuario);
+    }
+    const prodSql = `SELECT COALESCE(NULLIF(produto_origem,''),'Não informado') AS produto,
+                            to_char(usage_date,'YYYY-MM-DD') AS dia,
+                            COALESCE(SUM(custo_estimado),0) AS custo
+                       FROM databricks_consumo
+                      ${cond.concat(condProd).length ? 'WHERE ' + cond.concat(condProd).join(' AND ') : ''}
+                      GROUP BY 1, 2 ORDER BY 2`;
+
+    const [porDiaWs, porDiaUser, porProduto] = await Promise.all([
       ws ? serie([`workspace_id = $${params.length + 1}`], [ws]) : serie([], []),
       usuario != null ? serie(condUser, parUser) : Promise.resolve([]),
+      pool.query(prodSql, params.concat(parProd)),
     ]);
 
-    res.json({ workspace: porDiaWs, usuario: porDiaUser });
+    res.json({
+      workspace: porDiaWs,
+      usuario: porDiaUser,
+      produto: porProduto.rows.map(r => ({
+        produto: r.produto, dia: r.dia, custo: parseFloat(r.custo),
+      })),
+    });
   } catch (e) { _dbErr(res, e); }
 });
 

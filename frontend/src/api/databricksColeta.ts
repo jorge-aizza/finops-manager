@@ -323,9 +323,12 @@ export const getDatabricksStorageOtimizacao = (data_inicio?: string, data_fim?: 
 
 /** Serie diaria que alimenta os dois graficos da aba Cotas. */
 export interface DatabricksCotaSerieDia { dia: string; custo: number; dbus_free: number }
+/** Uma linha produto x dia — alimenta o grafico empilhado "Consumo por produto". */
+export interface DatabricksCotaSerieProduto { produto: string; dia: string; custo: number }
 export interface DatabricksCotaSerie {
   workspace: DatabricksCotaSerieDia[]
   usuario: DatabricksCotaSerieDia[]
+  produto: DatabricksCotaSerieProduto[]
 }
 
 export const getDatabricksCotaSerie = (
@@ -340,5 +343,6 @@ export const getDatabricksCotaSerie = (
     .then((r) => ({
       workspace: (r.workspace || []).map((d) => ({ ...d, custo: Number(d.custo), dbus_free: Number(d.dbus_free) })),
       usuario: (r.usuario || []).map((d) => ({ ...d, custo: Number(d.custo), dbus_free: Number(d.dbus_free) })),
+      produto: (r.produto || []).map((d) => ({ ...d, custo: Number(d.custo) })),
     }))
 }

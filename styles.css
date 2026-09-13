@@ -2011,6 +2011,13 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   --ck-teal: var(--accent);
   --ck-magenta: #ff4d9e;
   --ck-ring: rgba(255, 255, 255, 0.05);
+  /* paleta categorica do grafico "Consumo por produto" (v51) + rosa da cota
+     de usuario -- no escuro, versoes mais claras para ler sobre #04000c */
+  --ck-rosa: #ff8ac9;
+  --ck-azul: #6f9dff;
+  --ck-lilas: #a77bff;
+  --ck-vermelho: #ff7a7a;
+  --ck-ciano: #3fc7d4;
   --ck-lilac: rgba(147, 51, 234, 0.18);
   --ck-lilac-ink: #d9c2f5;
   --ck-lilac-hover: rgba(147, 51, 234, 0.30);
@@ -2035,6 +2042,12 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   --ck-teal: #660099;
   --ck-magenta: #e6007e;
   --ck-ring: #e7e9ee;
+  /* valores verbatim do v51: productPalette + #f2b8de da Cota Usuario */
+  --ck-rosa: #f2b8de;
+  --ck-azul: #2f6fed;
+  --ck-lilas: #8a4fff;
+  --ck-vermelho: #c93b3b;
+  --ck-ciano: #0e9aa7;
   --ck-lilac: #f4eafa;
   --ck-lilac-ink: #3d1a66;
   --ck-lilac-hover: #ddd0ee;

@@ -345,64 +345,59 @@ export default function DatabricksCotasPanel() {
   // parece errado pra quem cadastrou a cota.
   const mesesConsid = d.meses_considerados || 1
 
-  // Series dos graficos. A cota nao varia dia a dia (e um teto configurado),
-  // entao vira uma barra de referencia constante -- e so e desenhada quando
-  // existe de verdade: uma barra fixa em zero passaria a falsa impressao de
-  // "cota zero" pra quem simplesmente nao configurou teto.
-  const cotaWsSel = wsSel ? (d.por_workspace.find((w) => w.workspace_id === wsSel)?.cota ?? null) : null
-  // O MESMO usuario tem uma linha por workspace (nos dados reais, os 6 usuarios
-  // aparecem nos 4 workspaces), e o teto por usuario e configurado POR
-  // workspace. Procurar so pelo nome pegava uma linha arbitraria -- podia
-  // anunciar "sem cota" tendo cota, ou a cota de outro workspace.
-  const linhasUser = userSel != null ? d.por_usuario.filter((u) => u.usuario === userSel) : []
-  const limiteUserSel = !linhasUser.length ? null
-    : wsSel
-      // com um workspace escolhido, o teto e o daquele workspace
-      ? (linhasUser.find((u) => u.workspace_id === wsSel)?.limite ?? null)
-      // sem workspace escolhido, o consumo mostrado e a soma de todos eles --
-      // o teto comparavel e a soma dos tetos que existem; null se nenhum existe
-      : (linhasUser.some((u) => u.limite != null)
-          ? linhasUser.reduce((a, u) => a + (u.limite || 0), 0) : null)
-
-  // A cota e um teto do PERIODO; o grafico e DIARIO. Desenhar o teto cheio como
-  // barra (o que o cockpit faz) deixa o consumo do dia rente ao chao -- medido
-  // com dado real: cota de US$ 24.000 contra ~US$ 300/dia, e so a cota aparece.
-  // A referencia vira o RITMO diario que a cota permite (teto / dias do
-  // recorte), que e a leitura util: consumi acima ou abaixo do ritmo? O rotulo
-  // diz exatamente isso, e a nota do painel segue anunciando o teto cheio.
+  // ---- Graficos do cockpit v51 ----
+  // "Consumo por periodo": consumo diario x cota de workspace x cota de usuario.
+  // "Consumo por produto": um empilhamento por dia, uma cor por produto.
+  //
+  // A cota e um teto do PERIODO e o grafico e DIARIO. Desenhar o teto cheio como
+  // barra (o que o cockpit faz) deixa o consumo rente ao chao -- medido: cota de
+  // US$ 24.000 contra ~US$ 300/dia, so a cota aparecia. A referencia vira o
+  // RITMO diario que cada teto permite, e o rotulo diz isso.
   const porDia = (teto: number | null, dias: number) =>
     teto == null || dias <= 0 ? null : teto / dias
 
-  const diasWs = (serieQuery.data?.workspace || []).map((x) => x.dia)
-  // sem workspace escolhido a serie e a de todos: a referencia comparavel e a
-  // soma das cotas configuradas (zero delas = sem referencia, nunca uma reta
-  // em zero que passaria por "cota zero")
-  const tetoWs = wsSel ? cotaWsSel : (cotaTotal > 0 ? cotaTotal : null)
-  const ritmoWs = porDia(tetoWs, diasWs.length)
-  const serieWs: CkSerie[] = [
-    { label: wsSel ? 'Consumo do Workspace (USD)' : 'Consumo de todos (USD)',
-      cor: 'var(--ck-teal)', fmt: usd,
+  const dias = (serieQuery.data?.workspace || []).map((x) => x.dia)
+  const limiteTotal = usuarios.reduce((a, u) => a + (u.limite || 0), 0)
+  const ritmoCotaWs = porDia(cotaTotal > 0 ? cotaTotal : null, dias.length)
+  const ritmoCotaUser = porDia(limiteTotal > 0 ? limiteTotal : null, dias.length)
+
+  // cores verbatim do v51
+  const seriePeriodo: CkSerie[] = [
+    { label: 'Consumo (USD)', cor: 'var(--ck-teal)', fmt: usd,
       valores: (serieQuery.data?.workspace || []).map((x) => x.custo) },
-    ...(ritmoWs != null ? [{
-      label: 'Ritmo da cota (USD/dia)', cor: 'var(--ck-lilac-hover)', fmt: usd,
-      valores: diasWs.map(() => ritmoWs),
+    // so desenha o teto quando ele existe: uma barra fixa em zero passaria a
+    // falsa impressao de "cota zero" pra quem nao configurou nenhuma
+    ...(ritmoCotaWs != null ? [{
+      label: 'Cota Workspace (USD/dia)', cor: 'var(--ck-lilac-hover)', fmt: usd,
+      valores: dias.map(() => ritmoCotaWs),
+    }] : []),
+    ...(ritmoCotaUser != null ? [{
+      label: 'Cota Usuário (USD/dia)', cor: 'var(--ck-rosa)', fmt: usd,
+      valores: dias.map(() => ritmoCotaUser),
     }] : []),
   ]
 
-  const diasUser = (serieQuery.data?.usuario || []).map((x) => x.dia)
-  const ritmoUser = porDia(limiteUserSel, diasUser.length)
-  const serieUser: CkSerie[] = [
-    // DBU e USD em escalas separadas: na mesma, uma das duas viraria uma
-    // linha rente ao chao (DBU costuma ser ordens de grandeza maior)
-    { label: 'DBU Free', cor: 'var(--ck-lilac-hover)', eixo: 'b',
-      valores: (serieQuery.data?.usuario || []).map((x) => x.dbus_free) },
-    { label: 'Uso do usuário (USD)', cor: 'var(--ck-teal)', fmt: usd,
-      valores: (serieQuery.data?.usuario || []).map((x) => x.custo) },
-    ...(ritmoUser != null ? [{
-      label: 'Ritmo da cota (USD/dia)', cor: 'var(--ck-red)', fmt: usd,
-      valores: diasUser.map(() => ritmoUser),
-    }] : []),
+  // paleta ciclica categorica do v51, na mesma ordem
+  const PALETA_PRODUTO = [
+    'var(--ck-teal)', 'var(--ck-magenta)', 'var(--ck-green)', 'var(--ck-yellow)',
+    'var(--ck-azul)', 'var(--ck-lilas)', 'var(--ck-vermelho)', 'var(--ck-ciano)',
   ]
+  const linhasProduto = serieQuery.data?.produto || []
+  const totalPorProduto = new Map<string, number>()
+  for (const r of linhasProduto) totalPorProduto.set(r.produto, (totalPorProduto.get(r.produto) || 0) + r.custo)
+  // do maior pro menor consumo total: define a ordem da pilha e da legenda
+  const produtos = [...totalPorProduto.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n)
+  const custoProdutoDia = new Map<string, Map<string, number>>()
+  for (const r of linhasProduto) {
+    if (!custoProdutoDia.has(r.produto)) custoProdutoDia.set(r.produto, new Map())
+    custoProdutoDia.get(r.produto)!.set(r.dia, r.custo)
+  }
+  const serieProduto: CkSerie[] = produtos.map((nome, i) => ({
+    label: nome,
+    cor: PALETA_PRODUTO[i % PALETA_PRODUTO.length],
+    fmt: usd,
+    valores: dias.map((dia) => custoProdutoDia.get(nome)?.get(dia) || 0),
+  }))
 
   return (
     <>
@@ -438,27 +433,19 @@ export default function DatabricksCotasPanel() {
 
       <div style={{ display: 'grid', gap: 16, margin: '0 20px 16px' }}>
         <PainelGrafico
-          titulo={wsSel ? 'Cota e consumo do Workspace' : 'Consumo diário'}
-          nota={wsSel
-            ? `${wsSel} — ${cotaWsSel != null
-                ? 'cota configurada de ' + usd(cotaWsSel)
-                : 'sem cota de workspace configurada'}, dia a dia`
-            : `Todos os ${workspaces.length} workspaces do recorte, dia a dia — escolha um no filtro para ver a cota dele`}
-          vazio={null}
+          titulo="Consumo por período"
+          nota="Comparação entre consumo, cota de workspace e cota de usuário"
+          vazio={dias.length ? null : 'Sem consumo no período escolhido.'}
         >
-          <CkBarChart dias={diasWs} series={serieWs} />
+          <CkBarChart dias={dias} series={seriePeriodo} />
         </PainelGrafico>
 
         <PainelGrafico
-          titulo="Cota e uso do usuário"
-          nota={userSel != null
-            ? `${userSel || '(não identificado)'} — ${limiteUserSel != null
-                ? 'cota configurada de ' + usd(limiteUserSel)
-                : 'sem cota por usuário configurada'}, dia a dia`
-            : 'Cota, uso (USD) e DBU Free do usuário selecionado, dia a dia'}
-          vazio={userSel != null ? null : 'Selecione um usuário no filtro para ver a cota, o uso e o DBU Free dele ao longo do tempo.'}
+          titulo="Consumo por produto"
+          nota="Custo diário em USD, por produto"
+          vazio={serieProduto.length ? null : 'Sem consumo no período escolhido.'}
         >
-          <CkBarChart dias={diasUser} series={serieUser} />
+          <CkBarChart dias={dias} series={serieProduto} empilhado />
         </PainelGrafico>
       </div>
 
