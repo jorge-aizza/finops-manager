@@ -135,8 +135,10 @@ const rangeQS = (r: DatabricksCotaRange) => {
   return q
 }
 
-export const getDatabricksCotas = (r: DatabricksCotaRange = {}) =>
-  apiFetch<DatabricksCotas>('GET', '/databricks-coleta/cotas?' + rangeQS(r).toString())
+export const getDatabricksCotas = (r: DatabricksCotaRange = {}, soGenie = false) => {
+  const q = rangeQS(r)
+  if (soGenie) q.set('genie', '1')
+  return apiFetch<DatabricksCotas>('GET', '/databricks-coleta/cotas?' + q.toString())
     .then((c) => ({
       ...c,
       por_workspace: c.por_workspace.map((w) => ({
@@ -157,6 +159,7 @@ export const getDatabricksCotas = (r: DatabricksCotaRange = {}) =>
         cota_total: Number(c.resumo.cota_total),
       },
     }))
+}
 
 export const getDatabricksAlertas = () =>
   apiFetch<DatabricksAlerta[]>('GET', '/databricks-coleta/alertas').then((rows) =>

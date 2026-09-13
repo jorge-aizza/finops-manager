@@ -11033,6 +11033,12 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
   try {
     const _janela = _cotasPeriodo(req.query);
 
+    // mesma restricao das series: a tela e dedicada ao Genie. `produto_origem`
+    // nao tem um valor "GENIE" -- quem identifica e o sku_name.
+    if (String(req.query.genie || '') === '1') {
+      _janela.where = (_janela.where ? _janela.where + ' AND ' : 'WHERE ') + `sku_name ILIKE '%GENIE%'`;
+    }
+
     const [budgets, consWs, consUser, meses] = await Promise.all([
       // ORDER BY id: podem existir dois orcamentos ativos para o mesmo escopo
       // (nada impede hoje). Sem ordem explicita o Postgres nao garante qual vem

@@ -213,8 +213,8 @@ export default function DatabricksCotasPanel() {
     { tipo: 'usuario'; item: DatabricksCotaUsuario; origem?: DatabricksCotaWorkspace } | null
   >(null)
   const cotasQuery = useQuery({
-    queryKey: ['databricks-cotas', range.data_inicio || '', range.data_fim || ''],
-    queryFn: () => getDatabricksCotas(range),
+    queryKey: ['databricks-cotas', range.data_inicio || '', range.data_fim || '', 'genie'],
+    queryFn: () => getDatabricksCotas(range, true),
   })
 
   // Os dois graficos so fazem sentido com UM workspace / UM usuario: somar dias
@@ -223,15 +223,14 @@ export default function DatabricksCotasPanel() {
   const wsSel = fWs.length === 1 ? fWs[0] : null
   const userSel = fUser.length === 1 ? fUser[0] : null
   const serieQuery = useQuery({
-    queryKey: ['databricks-cotas-serie', range.data_inicio || '', range.data_fim || '', wsSel, userSel],
-    // Os dois graficos do v56 sao em USD (consumo x cota). Medido: com o
-    // recorte de Genie o consumo em dolar e ZERO -- o Genie e free-tier -- e os
-    // dois graficos ficam em branco (ws-ml-platform: 88 dias/US$ 21.965 sem o
-    // filtro, 10 dias/US$ 0,00 com ele; e o usuario, 0 dias). Por isso a serie
-    // vem sem o recorte; o sinal do Genie fica na serie "DBU Free", que e o
-    // volume free-tier de verdade. O parametro `genie=1` continua existindo na
-    // rota para quando houver Genie pago.
-    queryFn: () => getDatabricksCotaSerie(range, wsSel, userSel, false),
+    queryKey: ['databricks-cotas-serie', range.data_inicio || '', range.data_fim || '', wsSel, userSel, 'genie'],
+    // Toda a tela e restrita ao Genie, a pedido -- inclusive os cartoes de
+    // cota. Nos dados de hoje o Genie e 100% free-tier (custo US$ 0,00), entao
+    // os valores em dolar saem zerados; o sinal que sobra e o DBU. Isso e uma
+    // caracteristica do dado atual, nao da tela: a cobranca de Genie existe
+    // desde 2026-07-08 e uma coleta real com Genie pago preenche os mesmos
+    // graficos sem nenhuma mudanca aqui.
+    queryFn: () => getDatabricksCotaSerie(range, wsSel, userSel, true),
     // sempre: sem workspace escolhido o painel mostra a serie agregada
   })
 

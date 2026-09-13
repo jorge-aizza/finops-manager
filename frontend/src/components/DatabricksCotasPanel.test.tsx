@@ -263,9 +263,9 @@ describe('DatabricksCotasPanel', () => {
     // so nao diria nada e a cota viraria uma soma sem significado
     expect(screen.getByText(/Selecione um workspace no filtro/)).toBeInTheDocument()
     expect(screen.getByText(/Selecione um usuário no filtro/)).toBeInTheDocument()
-    // a serie NAO vem filtrada no Genie: estes graficos sao em USD e o Genie
-    // e free-tier -- medido, com o recorte eles ficam em branco
-    expect(vi.mocked(api.getDatabricksCotaSerie).mock.calls[0]?.[3]).toBe(false)
+    // toda a tela e restrita ao Genie: cartoes e series
+    expect(vi.mocked(api.getDatabricksCotaSerie).mock.calls[0]?.[3]).toBe(true)
+    expect(vi.mocked(api.getDatabricksCotas).mock.calls[0]?.[1]).toBe(true)
   })
 
   it('com 1 workspace, desenha consumo + cota e preenche os dias sem registro', async () => {
@@ -292,6 +292,24 @@ describe('DatabricksCotasPanel', () => {
     // 01..05 = 5 dias no eixo, nao 2
     const svg = document.querySelector('.ck-chart-wrap svg') as SVGElement
     expect([...svg.querySelectorAll('text')].map((t) => t.textContent)).toContain('03/08')
+  })
+
+  it('a legenda declara a cor do maior dia', async () => {
+    // o pico sai em magenta; sem a entrada na legenda aparecia uma cor no
+    // grafico que nao existia em lugar nenhum
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue({
+      workspace: [
+        { dia: '2026-08-01', custo: 10, dbus: 1, dbus_free: 1 },
+        { dia: '2026-08-02', custo: 90, dbus: 9, dbus_free: 9 },
+      ],
+      usuario: [], produto: [],
+    })
+    renderPanel()
+    await screen.findByText('Cota e consumo do Workspace')
+    fireEvent.click(cartao('Workspace', 'ws-dev'))
+
+    expect(await screen.findByText('Maior dia')).toBeInTheDocument()
   })
 
   it('o gráfico de usuário separa DBU de USD em escalas próprias', async () => {

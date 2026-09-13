@@ -2507,3 +2507,12 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 .ck-chart-stack { display: grid; gap: 16px; align-content: start; min-width: 0; }
 @media (max-width: 1100px) { .ck-analise { grid-template-columns: 1fr; } }
 .ck-chart-pico { fill: var(--ck-magenta); font-size: 11px; font-weight: 800; }
+
+/* alinhamento do cockpit (.panel-flex): os semaforos ganham altura fixa para
+   casar com a coluna dos graficos, rolando a lista por dentro */
+@media (min-width: 1100px) {
+  .ck-analise .ck-chart-stack > .card { height: 444px; display: flex; flex-direction: column; }
+  .ck-analise .ck-chart-stack > .card .ck-semaphores { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 6px; margin-right: -6px; }
+  .ck-analise .ck-chart-stack > .card .ck-panel-head,
+  .ck-analise .ck-chart-stack > .card .ck-legend { flex: none; }
+}

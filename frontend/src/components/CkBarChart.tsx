@@ -150,6 +150,11 @@ export default function CkBarChart({ dias, series, empilhado = false, destaqueIn
         {series.map((s) => (
           <span key={s.label}><i style={{ background: s.cor }} />{s.label}</span>
         ))}
+        {destaqueIndice != null && (
+          // a barra do pico sai em magenta: sem esta entrada, aparecia uma cor
+          // no grafico que nao existia na legenda
+          <span><i style={{ background: 'var(--ck-magenta)' }} />Maior dia</span>
+        )}
       </div>
     </>
   )
