@@ -26,7 +26,7 @@ interface Props {
 
 const W = 900
 const H = 300
-const PAD = { top: 22, right: 12, bottom: 30, left: 52 }
+const PAD_BASE = { top: 22, bottom: 30, left: 52 }
 
 const nice = (max: number) => {
   if (max <= 0) return 1
@@ -39,6 +39,8 @@ const curto = (v: number) =>
     : v.toLocaleString('pt-BR', { maximumFractionDigits: 1 })
 
 export default function CkBarChart({ dias, series, empilhado = false, destaqueIndice }: Props) {
+  const temEixoB = series.some((s) => s.eixo === 'b')
+  const PAD = { ...PAD_BASE, right: temEixoB ? 44 : 12 }
   const largura = W - PAD.left - PAD.right
   const altura = H - PAD.top - PAD.bottom
 
@@ -69,6 +71,9 @@ export default function CkBarChart({ dias, series, empilhado = false, destaqueIn
   // no maximo ~12 rotulos no eixo X, senao as datas viram um borrao
   const saltoRotulo = Math.max(1, Math.ceil(dias.length / 12))
   const eixoPrincipal = series.find((s) => (s.eixo || 'a') === 'a') || series[0]
+  // quando ha uma 2a escala, ela ganha seu proprio eixo a DIREITA -- senao os
+  // numeros de DBU seriam lidos contra a regua de USD
+  const eixoB = series.find((s) => s.eixo === 'b')
 
   return (
     <>
@@ -84,6 +89,11 @@ export default function CkBarChart({ dias, series, empilhado = false, destaqueIn
                 <text className="ck-chart-axis" x={PAD.left - 6} y={y + 3} textAnchor="end">
                   {eixoPrincipal ? curto(maxPorEixo[eixoPrincipal.eixo || 'a'] * f) : ''}
                 </text>
+                {eixoB && (
+                  <text className="ck-chart-axis" x={W - PAD.right + 4} y={y + 3} textAnchor="start">
+                    {curto((maxPorEixo.b || 0) * f)}
+                  </text>
+                )}
               </g>
             )
           })}

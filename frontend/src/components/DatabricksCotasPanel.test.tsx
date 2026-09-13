@@ -253,64 +253,59 @@ describe('DatabricksCotasPanel', () => {
     expect(await screen.findByRole('heading', { name: 'Workspace · ws-dev' })).toBeInTheDocument()
   })
 
-  it('empilha "Consumo por produto" do maior consumo para o menor', async () => {
+  it('mostra os dois painéis do cockpit v56 e pede uma seleção antes de desenhar', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
-    renderPanel()
-    await screen.findByText('Consumo por produto')
-
-    // a legenda do 2o grafico segue a ordem da pilha: SQL (80/dia) antes de JOBS (20/dia)
-    const legendas = document.querySelectorAll('.ck-chart-legend')
-    const produtos = [...legendas[legendas.length - 1].querySelectorAll('span')].map((x) => x.textContent)
-    expect(produtos).toEqual(['SQL', 'JOBS'])
-  })
-
-  it('mostra os dois gráficos, restritos ao Genie e medidos em DBU', async () => {
-    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
     renderPanel()
 
-    expect(await screen.findByText('Consumo por período')).toBeInTheDocument()
-    expect(screen.getByText('Consumo por produto')).toBeInTheDocument()
-    // Genie e free-tier: em USD o grafico seria todo zero, entao a unidade e DBU
-    expect(await screen.findByText('Consumo Genie (DBU)')).toBeInTheDocument()
-    expect(screen.getByText(/não gera custo em USD/)).toBeInTheDocument()
-    // a serie e pedida ja filtrada no Genie (4o argumento)
-    expect(vi.mocked(api.getDatabricksCotaSerie).mock.calls[0][3]).toBe(true)
+    expect(await screen.findByText('Cota e consumo do Workspace')).toBeInTheDocument()
+    expect(screen.getByText('Genie · Cota e uso do usuário')).toBeInTheDocument()
+    // cada um so faz sentido com UM item: somar varios workspaces numa serie
+    // so nao diria nada e a cota viraria uma soma sem significado
+    expect(screen.getByText(/Selecione um workspace no filtro/)).toBeInTheDocument()
+    expect(screen.getByText(/Selecione um usuário no filtro/)).toBeInTheDocument()
+    // a serie NAO vem filtrada no Genie: estes graficos sao em USD e o Genie
+    // e free-tier -- medido, com o recorte eles ficam em branco
+    expect(vi.mocked(api.getDatabricksCotaSerie).mock.calls[0]?.[3]).toBe(false)
   })
 
-  it('preenche os dias sem consumo e aponta o maior dia', async () => {
-    // o servidor so devolve dias COM registro; sem preencher, 01 e 05/08
-    // virariam barras vizinhas e a leitura "quanto por dia" ficaria errada
+  it('com 1 workspace, desenha consumo + cota e preenche os dias sem registro', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
     vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue({
+      // 01 e 05/08: sem preencher virariam barras vizinhas e a leitura
+      // "quanto por dia" ficaria errada
       workspace: [
-        { dia: '2026-08-01', custo: 0, dbus: 10, dbus_free: 10 },
-        { dia: '2026-08-05', custo: 0, dbus: 90, dbus_free: 90 },
+        { dia: '2026-08-01', custo: 10, dbus: 1, dbus_free: 1 },
+        { dia: '2026-08-05', custo: 90, dbus: 9, dbus_free: 9 },
       ],
-      usuario: [],
-      produto: [{ produto: 'INTERACTIVE', dia: '2026-08-05', custo: 0, dbus: 90 }],
+      usuario: [], produto: [],
     })
     renderPanel()
-    await screen.findByText('Consumo por período')
+    await screen.findByText('Cota e consumo do Workspace')
 
+    fireEvent.click(cartao('Workspace', 'ws-dev'))
+
+    expect(await screen.findByText(/ws-dev — cota configurada de US\$ 7\.000, dia a dia/)).toBeInTheDocument()
+    expect(screen.getByText('Consumo do Workspace (USD)')).toBeInTheDocument()
+    expect(screen.getByText('Cota do Workspace (USD)')).toBeInTheDocument()
+    // espera a serie chegar: a nota do titulo vem do estado e resolve antes dela
+    expect(await screen.findByText(/maior dia: 05\/08\/2026/)).toBeInTheDocument()
     // 01..05 = 5 dias no eixo, nao 2
     const svg = document.querySelector('.ck-chart-wrap svg') as SVGElement
-    const rotulos = [...svg.querySelectorAll('text')].map((t) => t.textContent)
-    expect(rotulos).toContain('03/08')
-
-    // o maior dia aparece na nota, com data e valor
-    expect(await screen.findByText(/maior dia: 05\/08\/2026 com 90 DBU/)).toBeInTheDocument()
+    expect([...svg.querySelectorAll('text')].map((t) => t.textContent)).toContain('03/08')
   })
 
-  it('não promete cota nos gráficos: as cotas são em USD e o Genie não tem custo', async () => {
+  it('o gráfico de usuário separa DBU de USD em escalas próprias', async () => {
     vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
-    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01']))
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
     renderPanel()
-    await screen.findByText('Consumo por período')
+    await screen.findByText('Genie · Cota e uso do usuário')
 
-    expect(screen.queryByText(/Cota Workspace/)).toBeNull()
-    expect(screen.queryByText(/Cota Usuário \(USD/)).toBeNull()
+    fireEvent.click(cartao('Usuário', 'ana@vivo.com.br'))
+
+    // as tres series do v56, com DBU Free na escala propria
+    expect(await screen.findByText('DBU Free')).toBeInTheDocument()
+    expect(screen.getByText('Uso de usuário (USD)')).toBeInTheDocument()
+    expect(screen.getByText('Cota do Usuário (USD)')).toBeInTheDocument()
   })
 
   it('o detalhe do workspace não repete a lista de usuários', async () => {

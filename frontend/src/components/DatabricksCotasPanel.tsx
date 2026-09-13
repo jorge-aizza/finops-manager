@@ -223,9 +223,15 @@ export default function DatabricksCotasPanel() {
   const wsSel = fWs.length === 1 ? fWs[0] : null
   const userSel = fUser.length === 1 ? fUser[0] : null
   const serieQuery = useQuery({
-    queryKey: ['databricks-cotas-serie', range.data_inicio || '', range.data_fim || '', wsSel, userSel, 'genie'],
-    // a tela e dedicada ao Genie: as series sempre vem filtradas nele
-    queryFn: () => getDatabricksCotaSerie(range, wsSel, userSel, true),
+    queryKey: ['databricks-cotas-serie', range.data_inicio || '', range.data_fim || '', wsSel, userSel],
+    // Os dois graficos do v56 sao em USD (consumo x cota). Medido: com o
+    // recorte de Genie o consumo em dolar e ZERO -- o Genie e free-tier -- e os
+    // dois graficos ficam em branco (ws-ml-platform: 88 dias/US$ 21.965 sem o
+    // filtro, 10 dias/US$ 0,00 com ele; e o usuario, 0 dias). Por isso a serie
+    // vem sem o recorte; o sinal do Genie fica na serie "DBU Free", que e o
+    // volume free-tier de verdade. O parametro `genie=1` continua existindo na
+    // rota para quando houver Genie pago.
+    queryFn: () => getDatabricksCotaSerie(range, wsSel, userSel, false),
     // sempre: sem workspace escolhido o painel mostra a serie agregada
   })
 
@@ -346,61 +352,75 @@ export default function DatabricksCotasPanel() {
   // parece errado pra quem cadastrou a cota.
   const mesesConsid = d.meses_considerados || 1
 
-  // ---- Graficos do cockpit v51, restritos ao Genie ----
-  // Genie e cobrado como free-tier: nos dados reais sao 1.466 DBU com custo
-  // US$ 0,00. Medir em dolar daria um grafico inteiro em zero, entao as series
-  // do Genie sao em DBU -- e por isso tambem nao ha barra de cota aqui: as
-  // cotas sao configuradas em USD e nao tem como comparar com DBU.
+  // ---- Graficos do cockpit v56, restritos ao Genie ----
+  // Sao os dois paineis do v56: "Cota e consumo do Workspace" (usageChart) e
+  // "Genie - Cota e uso do usuario" (productChart). Cada um so desenha com UM
+  // item selecionado -- somar dias de varios workspaces numa serie so nao diz
+  // nada, e a cota viraria uma soma sem significado.
   const dbu = (v: number) => fmt(v) + ' DBU'
 
-  // O servidor so devolve dias COM registro (Genie: 43 de 88). Desenhar so
-  // esses comprime a linha do tempo e faz dois dias distantes virarem barras
-  // vizinhas -- os vazios entram como zero para o eixo ser um calendario de
-  // verdade e a leitura "quanto por dia" bater.
-  const serieWs = serieQuery.data?.workspace || []
-  const porDiaDbu = new Map(serieWs.map((x) => [x.dia, x.dbus]))
-  const dias = (() => {
-    if (!serieWs.length) return []
+  // O servidor so devolve dias COM registro. Os vazios entram como zero para o
+  // eixo ser um calendario de verdade e a leitura "quanto por dia" bater.
+  const preencher = <T extends { dia: string }>(linhas: T[]) => {
+    if (!linhas.length) return [] as string[]
     const lista: string[] = []
-    const fim = new Date(serieWs[serieWs.length - 1].dia + 'T12:00:00')
-    for (const d = new Date(serieWs[0].dia + 'T12:00:00'); d <= fim; d.setDate(d.getDate() + 1)) {
+    const fim = new Date(linhas[linhas.length - 1].dia + 'T12:00:00')
+    for (const d = new Date(linhas[0].dia + 'T12:00:00'); d <= fim; d.setDate(d.getDate() + 1)) {
       lista.push(ymd(d))
     }
     return lista
-  })()
-  const valoresDia = dias.map((d) => porDiaDbu.get(d) || 0)
-
-  // o maior dia: e a pergunta que o painel responde, entao vai destacado na
-  // barra e escrito na nota
-  const picoIdx = valoresDia.reduce((melhor, v, i) => (v > valoresDia[melhor] ? i : melhor), 0)
-  const temPico = valoresDia.length > 0 && valoresDia[picoIdx] > 0
-  const diaBR = (d: string) => d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4)
-
-  const seriePeriodo: CkSerie[] = [
-    { label: 'Consumo Genie (DBU)', cor: 'var(--ck-teal)', fmt: dbu, valores: valoresDia },
-  ]
-
-  // paleta ciclica categorica do v51, na mesma ordem
-  const PALETA_PRODUTO = [
-    'var(--ck-teal)', 'var(--ck-magenta)', 'var(--ck-green)', 'var(--ck-yellow)',
-    'var(--ck-azul)', 'var(--ck-lilas)', 'var(--ck-vermelho)', 'var(--ck-ciano)',
-  ]
-  const linhasProduto = serieQuery.data?.produto || []
-  const totalPorProduto = new Map<string, number>()
-  for (const r of linhasProduto) totalPorProduto.set(r.produto, (totalPorProduto.get(r.produto) || 0) + r.dbus)
-  // do maior pro menor consumo total: define a ordem da pilha e da legenda
-  const produtos = [...totalPorProduto.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n)
-  const dbuProdutoDia = new Map<string, Map<string, number>>()
-  for (const r of linhasProduto) {
-    if (!dbuProdutoDia.has(r.produto)) dbuProdutoDia.set(r.produto, new Map())
-    dbuProdutoDia.get(r.produto)!.set(r.dia, r.dbus)
   }
-  const serieProduto: CkSerie[] = produtos.map((nome, i) => ({
-    label: nome,
-    cor: PALETA_PRODUTO[i % PALETA_PRODUTO.length],
-    fmt: dbu,
-    valores: dias.map((dia) => dbuProdutoDia.get(nome)?.get(dia) || 0),
-  }))
+  const diaBR = (d: string) => d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4)
+  const picoDe = (v: number[]) => {
+    if (!v.length) return -1
+    const i2 = v.reduce((m, x, k) => (x > v[m] ? k : m), 0)
+    return v[i2] > 0 ? i2 : -1
+  }
+
+  // --- 1) Cota e consumo do Workspace ---
+  const linhasWs = serieQuery.data?.workspace || []
+  const diasWs = preencher(linhasWs)
+  const mapaWs = new Map(linhasWs.map((x) => [x.dia, x]))
+  const custoWsDia = diasWs.map((d) => mapaWs.get(d)?.custo || 0)
+  const cotaWsSel = wsSel ? (d.por_workspace.find((w) => w.workspace_id === wsSel)?.cota ?? null) : null
+  const picoWs = picoDe(custoWsDia)
+  const serieWsChart: CkSerie[] = [
+    { label: 'Consumo do Workspace (USD)', cor: 'var(--ck-teal)', fmt: usd, valores: custoWsDia },
+    // so desenha o teto quando ele existe: uma barra fixa em zero passaria a
+    // falsa impressao de "cota zero" pra quem nao configurou nenhuma
+    ...(cotaWsSel != null ? [{
+      label: 'Cota do Workspace (USD)', cor: 'var(--ck-lilac-hover)', fmt: usd,
+      valores: diasWs.map(() => cotaWsSel),
+    }] : []),
+  ]
+
+  // --- 2) Genie - Cota e uso do usuario ---
+  // O MESMO usuario tem uma linha por workspace (nos dados reais, os 6 usuarios
+  // aparecem nos 4) e o teto e configurado POR workspace. Procurar so pelo nome
+  // pegaria uma linha arbitraria -- podia anunciar "sem cota" tendo cota.
+  const linhasUserCota = userSel != null ? d.por_usuario.filter((u) => u.usuario === userSel) : []
+  const limiteUserSel = !linhasUserCota.length ? null
+    : wsSel
+      ? (linhasUserCota.find((u) => u.workspace_id === wsSel)?.limite ?? null)
+      : (linhasUserCota.some((u) => u.limite != null)
+          ? linhasUserCota.reduce((a, u) => a + (u.limite || 0), 0) : null)
+
+  const linhasUser = serieQuery.data?.usuario || []
+  const diasUser = preencher(linhasUser)
+  const mapaUser = new Map(linhasUser.map((x) => [x.dia, x]))
+  const picoUser = picoDe(diasUser.map((dd) => mapaUser.get(dd)?.dbus_free || 0))
+  const serieUserChart: CkSerie[] = [
+    // DBU e USD em escalas separadas: na mesma, uma das duas viraria uma linha
+    // rente ao chao (o Genie e free-tier, entao o USD dele e zero)
+    { label: 'DBU Free', cor: 'var(--ck-lilac-hover)', eixo: 'b', fmt: dbu,
+      valores: diasUser.map((dd) => mapaUser.get(dd)?.dbus_free || 0) },
+    { label: 'Uso de usuário (USD)', cor: 'var(--ck-teal)', fmt: usd,
+      valores: diasUser.map((dd) => mapaUser.get(dd)?.custo || 0) },
+    ...(limiteUserSel != null ? [{
+      label: 'Cota do Usuário (USD)', cor: 'var(--ck-red)', fmt: usd,
+      valores: diasUser.map(() => limiteUserSel),
+    }] : []),
+  ]
 
   return (
     <>
@@ -439,20 +459,31 @@ export default function DatabricksCotasPanel() {
       <div className="ck-analise" style={{ margin: '0 20px 16px' }}>
         <div className="ck-chart-stack">
         <PainelGrafico
-          titulo="Consumo por período"
-          nota={'Consumo do Genie por dia, em DBU (free-tier, não gera custo em USD)'
-            + (temPico ? ` · maior dia: ${diaBR(dias[picoIdx])} com ${dbu(valoresDia[picoIdx])}` : '')}
-          vazio={dias.length ? null : 'Sem consumo no período escolhido.'}
+          titulo="Cota e consumo do Workspace"
+          nota={wsSel
+            ? `${wsSel} — ${cotaWsSel != null
+                ? 'cota configurada de ' + usd(cotaWsSel)
+                : 'sem cota de workspace configurada'}, dia a dia`
+              + (picoWs >= 0 ? ` · maior dia: ${diaBR(diasWs[picoWs])}` : '')
+            : 'Cota e consumo (USD) do workspace selecionado, dia a dia'}
+          vazio={wsSel ? null : 'Selecione um workspace no filtro para ver a cota e o consumo dele ao longo do tempo.'}
         >
-          <CkBarChart dias={dias} series={seriePeriodo} destaqueIndice={temPico ? picoIdx : undefined} />
+          <CkBarChart dias={diasWs} series={serieWsChart}
+            destaqueIndice={picoWs >= 0 ? picoWs : undefined} />
         </PainelGrafico>
 
         <PainelGrafico
-          titulo="Consumo por produto"
-          nota="Consumo diário do Genie em DBU, por produto de origem"
-          vazio={serieProduto.length ? null : 'Sem consumo no período escolhido.'}
+          titulo="Genie · Cota e uso do usuário"
+          nota={userSel != null
+            ? `${userSel || '(não identificado)'} — ${limiteUserSel != null
+                ? 'cota configurada de ' + usd(limiteUserSel)
+                : 'sem cota por usuário configurada'}, dia a dia`
+              + (picoUser >= 0 ? ` · maior dia de DBU: ${diaBR(diasUser[picoUser])}` : '')
+            : 'Cota, uso (USD) e DBU Free do usuário selecionado, dia a dia'}
+          vazio={userSel != null ? null : 'Selecione um usuário no filtro para ver a cota, o uso e o DBU Free dele ao longo do tempo.'}
         >
-          <CkBarChart dias={dias} series={serieProduto} empilhado destaqueIndice={temPico ? picoIdx : undefined} />
+          <CkBarChart dias={diasUser} series={serieUserChart}
+            destaqueIndice={picoUser >= 0 ? picoUser : undefined} />
         </PainelGrafico>
         </div>
 
