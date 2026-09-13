@@ -36,7 +36,9 @@ const fmt = (v: number) => new Intl.NumberFormat('pt-BR', { maximumFractionDigit
 const usd = (v: number) => 'US$ ' + fmt(v)
 const pctTxt = (v: number | null) => (v == null ? '—' : fmt(v) + '%')
 
-const TOP_N = 25
+// Top 10 (o cockpit corta em 25). Dez cabe numa tela sem rolagem e e o
+// recorte que responde "quem pesa"; o botao abaixo abre a lista inteira.
+const TOP_N = 10
 
 function Cartao({ prefixo, titulo, custo, teto, pct, status, extra, onClick }: {
   prefixo: string; titulo: string; custo: number

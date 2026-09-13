@@ -253,8 +253,8 @@ describe('DatabricksCotasPanel', () => {
     expect(screen.getByText('Consumo do Workspace (USD)')).toBeInTheDocument()
   })
 
-  it('ordena por maior consumo, corta no top 25 e deixa expandir', async () => {
-    // 30 workspaces com consumo crescente: o corte tem que esconder os 5
+  it('ordena por maior consumo, corta no top 10 e deixa expandir', async () => {
+    // 30 workspaces com consumo crescente: o corte tem que esconder os 20
     // MENORES, e o maior tem que aparecer primeiro.
     const muitos: DatabricksCotaWorkspace[] = Array.from({ length: 30 }, (_, i) => ({
       workspace_id: 'ws-' + String(i).padStart(2, '0'),
@@ -265,14 +265,16 @@ describe('DatabricksCotasPanel', () => {
     renderPanel()
     await screen.findByText('Cotas Workspace')
 
-    // ws-29 e o maior consumo -> visivel; ws-00 e o menor -> fora do top 25
+    // ws-29 e o maior consumo -> visivel; ws-00 e o menor -> fora do top 10
     expect(cartao('Workspace', 'ws-29')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Ver detalhes de Workspace ws-00' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Ver todos os 30' }))
 
     expect(cartao('Workspace', 'ws-00')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Mostrar só o top 25' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Mostrar só o top 10' })).toBeInTheDocument()
+    // o 20o mais caro tambem estava fora do corte de 10
+    expect(cartao('Workspace', 'ws-09')).toBeInTheDocument()
   })
 
   it('abre o detalhe ao clicar no cartão, com saldo e % disponível', async () => {
