@@ -6212,17 +6212,6 @@ async function ensureAzureColetaTable() {
   // de recursos que existem mas nunca geraram evento desde a ativação do Inventário, sem
   // "criado por/em" porque o Resource Graph não tem esse histórico).
   await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS origem_deteccao VARCHAR(20) DEFAULT 'activity_log'`);
-  // Coluna GENERATED pra tempo de vida (2026-09-17) — permite rastrear recursos efêmeros vs persistentes
-  // Recursso efêmero (< 7 dias): deletado antes de virar persistente (VMs de cluster Databricks, discos temp)
-  // Recurso persistente (≥ 7 dias): criado há 7+ dias e ainda ativo = crescimento que vai permanecer
-  await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS tempo_vida_dias NUMERIC GENERATED ALWAYS AS (
-    CASE
-      WHEN excluido_em IS NOT NULL THEN
-        EXTRACT(DAY FROM excluido_em - criado_em)
-      ELSE
-        EXTRACT(DAY FROM CURRENT_DATE - criado_em)
-    END
-  ) VIRTUAL`);
   // UNIQUE via índice (não constraint inline) — resource_id é TEXT sem limite, e um índice
   // btree comum já é suficiente pra UPSERT (ON CONFLICT precisa de um índice único, não
   // necessariamente uma constraint declarada no CREATE TABLE).
