@@ -5666,6 +5666,8 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_account     VARCHAR(200)`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_container   VARCHAR(200)`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS storage_prefix      VARCHAR(500)`);
+  await run(`ALTER TABLE azure_coleta_config ALTER COLUMN tenant_id TYPE TEXT`);
+  await run(`ALTER TABLE azure_coleta_config ALTER COLUMN client_id TYPE TEXT`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_account_id  TEXT`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS billing_profile_id  TEXT`);
   await run(`ALTER TABLE azure_coleta_config ALTER COLUMN billing_account_id TYPE TEXT`);
@@ -6218,9 +6220,9 @@ async function ensureAzureColetaTable() {
       WHEN excluido_em IS NOT NULL THEN
         EXTRACT(DAY FROM excluido_em - criado_em)
       ELSE
-        EXTRACT(DAY FROM CURRENT_TIMESTAMP - criado_em)
+        EXTRACT(DAY FROM CURRENT_DATE - criado_em)
     END
-  ) STORED`);
+  ) VIRTUAL`);
   // UNIQUE via índice (não constraint inline) — resource_id é TEXT sem limite, e um índice
   // btree comum já é suficiente pra UPSERT (ON CONFLICT precisa de um índice único, não
   // necessariamente uma constraint declarada no CREATE TABLE).
@@ -9156,6 +9158,72 @@ async function _computeTagsFaltantes(subscription_id) {
     pct_conformes: verificaveis > 0 ? (verificaveis - totalNaoConformes) / verificaveis : null,
     ...meta,
   };
+}
+
+app.get('/api/azure-inventario/conformidade-por-subscription', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const dados = await _computeConformidadePorSubscription();
+    res.json(dados);
+  } catch (e) { _dbErr(res, e); }
+});
+
+async function _computeConformidadePorSubscription() {
+  const cfgRow = await pool.query(`SELECT tags_obrigatorias FROM azure_inventario_config ORDER BY id LIMIT 1`);
+  const chaves = (cfgRow.rows[0]?.tags_obrigatorias || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!chaves.length) return { por_subscription: [], chaves: [] };
+
+  // Recursos persistentes (7+ dias) em RGs não-gerenciados + tags conhecidas
+  const r = await pool.query(`
+    SELECT ri.subscription_id, ri.resource_id, ri.nome, ri.resource_group, ri.resource_type, t.tags
+    FROM azure_recursos_inventario ri
+    LEFT JOIN azure_recurso_tags t ON t.resource_id_upper = UPPER(ri.resource_id)
+    WHERE ri.ativo = true
+      AND COALESCE(ri.tempo_vida_dias, 0) >= 7
+      AND NOT (UPPER(ri.resource_group) LIKE 'DATABRICKS-RG-%' OR UPPER(ri.resource_group) LIKE 'MANAGED-RG-%' OR UPPER(ri.resource_group) LIKE 'MC_%')
+      AND t.tags IS NOT NULL
+  `);
+
+  const porSub = new Map();
+  for (const row of r.rows) {
+    if (!porSub.has(row.subscription_id)) {
+      porSub.set(row.subscription_id, { conformes: 0, nao_conformes: 0, nao_conformes_list: [] });
+    }
+
+    let tagsObj = null;
+    try { tagsObj = JSON.parse(row.tags); } catch { /* malformado */ }
+
+    const faltando = chaves.filter(k => !tagsObj || tagsObj[k] == null || tagsObj[k] === '');
+    const sub = porSub.get(row.subscription_id);
+
+    if (faltando.length) {
+      sub.nao_conformes++;
+      if (sub.nao_conformes_list.length < 10) {
+        sub.nao_conformes_list.push({
+          resource_id: row.resource_id,
+          nome: row.nome,
+          resource_group: row.resource_group,
+          resource_type: row.resource_type,
+          tags_faltando: faltando,
+        });
+      }
+    } else {
+      sub.conformes++;
+    }
+  }
+
+  const resultado = Array.from(porSub.entries()).map(([sub_id, data]) => {
+    const total = data.conformes + data.nao_conformes;
+    return {
+      subscription_id: sub_id,
+      total_verificado: total,
+      conformes: data.conformes,
+      nao_conformes: data.nao_conformes,
+      pct_conformes: total > 0 ? data.conformes / total : null,
+      nao_conformes_amostra: data.nao_conformes_list,
+    };
+  }).sort((a, b) => (a.pct_conformes || 0) - (b.pct_conformes || 0));
+
+  return { por_subscription: resultado, chaves };
 }
 
 // Atualiza SOMENTE `tags_obrigatorias` (2026-09-04, pedido do usuário: poder configurar as tags

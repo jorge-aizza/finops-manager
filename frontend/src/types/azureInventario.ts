@@ -542,3 +542,25 @@ export interface AzureDesperdicioResposta {
   itens: AzureDesperdicioItem[]
   erros: { subscription_id: string; erro: string }[]
 }
+
+// Conformidade de tags obrigatórias — por subscription, apenas recursos persistentes (7+ dias)
+// em RGs não-gerenciados (Databricks/AKS).
+export interface AzureConformidadeRecursoNaoConforme {
+  resource_id: string
+  nome: string | null
+  resource_group: string
+  resource_type: string
+  tags_faltando: string[]
+}
+export interface AzureConformidadePorSubscription {
+  subscription_id: string
+  total_verificado: number
+  conformes: number
+  nao_conformes: number
+  pct_conformes: number | null
+  nao_conformes_amostra: AzureConformidadeRecursoNaoConforme[]
+}
+export interface AzureConformidadeResposta {
+  por_subscription: AzureConformidadePorSubscription[]
+  chaves: string[]
+}

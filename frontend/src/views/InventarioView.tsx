@@ -9,7 +9,7 @@ import {
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
   getAzureCrescimentoLiquido, baixarAzureInventarioExcel, getAzureAdvisor, getAzureRedeTopologia,
   getAzurePropriedadeHistorico, getAzureRelatorioDiario, getAzureCrescimentoDetalhe, getAzureAnomaliasCrescimento,
-  getAzureDesperdicio, getAzureInventarioCrescimentoPersistente,
+  getAzureDesperdicio, getAzureInventarioCrescimentoPersistente, getAzureConformidade,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria, AzureAnomaliaCrescimento, AzureDesperdicioCategoria } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -441,7 +441,7 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
 
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'crescimento' | 'advisor' | 'rede' | 'desperdicio' | 'config'>('recursos')
+  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'crescimento' | 'conformidade' | 'advisor' | 'rede' | 'desperdicio' | 'config'>('recursos')
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
@@ -491,6 +491,13 @@ export default function InventarioView() {
     queryKey: ['azure-inv-crescimento-persistente'],
     queryFn: getAzureInventarioCrescimentoPersistente,
     enabled: tab === 'crescimento',
+  })
+  // Conformidade de tags obrigatórias por subscription (Fase 1.4) — recursos persistentes
+  // em RGs não-gerenciados. Cache 15min no servidor.
+  const conformidadeQuery = useQuery({
+    queryKey: ['azure-inv-conformidade'],
+    queryFn: getAzureConformidade,
+    enabled: tab === 'conformidade',
   })
   // Advisor pode levar bastante tempo na 1ª chamada (backend cacheia por 20min) — só busca
   // quando a aba está de fato aberta.
@@ -665,6 +672,7 @@ export default function InventarioView() {
         <button className={tab === 'auditoria' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('auditoria')}>Auditoria</button>
         <button className={tab === 'comparativo' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('comparativo')}>Comparativo</button>
         <button className={tab === 'crescimento' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('crescimento')}>Crescimento</button>
+        <button className={tab === 'conformidade' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('conformidade')}>Conformidade</button>
         <button className={tab === 'advisor' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('advisor')}>Advisor</button>
         <button className={tab === 'rede' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('rede')}>Rede</button>
         <button className={tab === 'desperdicio' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('desperdicio')}>Desperdício</button>
@@ -703,6 +711,55 @@ export default function InventarioView() {
       <AnomaliasCard data={anomaliasQuery.data} loading={anomaliasQuery.isLoading} />
       <CrescimentoPersistenteCard data={crescimentoPersistenteQuery.data} loading={crescimentoPersistenteQuery.isLoading} />
       </>
+      )}
+
+      {tab === 'conformidade' && (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '16px 20px 0' }}>
+        {conformidadeQuery.isLoading && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Carregando conformidade...</div>}
+        {conformidadeQuery.data && conformidadeQuery.data.por_subscription.length === 0 && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Nenhum dado de conformidade disponível. Certifique-se de que as tags obrigatórias estão configuradas na aba Configuração.</div>
+        )}
+        {conformidadeQuery.data && conformidadeQuery.data.por_subscription.map((sub) => (
+          <div key={sub.subscription_id} className="card">
+            <div className="card-header">
+              <span className="card-title" style={{ wordBreak: 'break-word' }}>
+                {subsQuery.data?.find((s) => s.subscription_id === sub.subscription_id)?.subscription_name || sub.subscription_id}
+              </span>
+              <span className="badge" style={{
+                background: sub.pct_conformes !== null && sub.pct_conformes >= 80 ? 'var(--green,#22c55e)' : 'var(--orange,#ff8c42)',
+                color: '#fff'
+              }}>
+                {sub.pct_conformes !== null ? `${Math.round(sub.pct_conformes)}%` : 'N/A'}
+              </span>
+            </div>
+            <div style={{ padding: '8px 20px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
+              {sub.total_verificado} recurso{sub.total_verificado !== 1 ? 's' : ''} persistente{sub.total_verificado !== 1 ? 's' : ''} verificado{sub.total_verificado !== 1 ? 's' : ''} (≥7 dias) · {sub.conformes} conforme{sub.conformes !== 1 ? 's' : ''} · {sub.nao_conformes} NÃO conforme{sub.nao_conformes !== 1 ? 's' : ''}
+            </div>
+            {sub.nao_conformes > 0 && (
+              <div style={{ borderTop: '1px solid var(--border)', padding: '12px 20px 0' }}>
+                <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 8, color: 'var(--text)' }}>
+                  Top {Math.min(10, sub.nao_conformes_amostra.length)} recursos não-conformes (faltam tags):
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                  {sub.nao_conformes_amostra.map((r, idx) => (
+                    <div key={idx} style={{ fontSize: 11, padding: 8, background: 'rgba(147,51,234,.08)', borderRadius: 6, border: '1px solid var(--border)' }}>
+                      <div style={{ color: 'var(--accent)', marginBottom: 4, fontWeight: 600, wordBreak: 'break-word' }}>
+                        {r.nome || r.resource_id.split('/').pop()}
+                      </div>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>
+                        RG: {r.resource_group} · Tipo: {r.resource_type}
+                      </div>
+                      <div style={{ fontSize: 10, color: 'var(--orange,#ff8c42)' }}>
+                        Faltam: <strong>{r.tags_faltando.join(', ')}</strong>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
       )}
 
       {tab === 'recursos' && (

@@ -9,7 +9,7 @@ import type {
   AzureResumoPorAssinaturaResposta, AzureRecursoArmDetalhe, AzureAdvisorResposta,
   AzureRedeTopologiaResposta, AzurePropriedadeMudanca, AzureRelatorioDiario,
   AzureCrescimentoDetalheResposta, AzureTagChavesResposta, AzureAlocacaoResposta,
-  AzureSerieMensalResposta, AzureCoberturaResposta, AzureDesperdicioResposta,
+  AzureSerieMensalResposta, AzureCoberturaResposta, AzureDesperdicioResposta, AzureConformidadeResposta,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -324,6 +324,11 @@ export const getAzureAdvisor = (subscriptionId?: string, category?: string) => {
 // Topologia de rede (VNets/subnets/peerings) de uma assinatura.
 export const getAzureRedeTopologia = (subscriptionId: string) =>
   apiFetch<AzureRedeTopologiaResposta>('GET', '/azure-inventario/rede-topologia?subscription_id=' + encodeURIComponent(subscriptionId))
+
+// Conformidade de tags obrigatórias por subscription — apenas recursos persistentes (7+ dias)
+// em RGs não-gerenciados.
+export const getAzureConformidade = () =>
+  apiFetch<AzureConformidadeResposta>('GET', '/azure-inventario/conformidade-por-subscription')
 
 // Exportar Inventário pra Excel — download direto (não é JSON), mesmo padrão já usado pelo
 // export de Ações legado (app.js `exportarExcel()`): fetch com Bearer token (apiFetch não
