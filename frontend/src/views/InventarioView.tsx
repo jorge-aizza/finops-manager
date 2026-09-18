@@ -9,7 +9,7 @@ import {
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
   getAzureCrescimentoLiquido, baixarAzureInventarioExcel, getAzureAdvisor, getAzureRedeTopologia,
   getAzurePropriedadeHistorico, getAzureRelatorioDiario, getAzureCrescimentoDetalhe, getAzureAnomaliasCrescimento,
-  getAzureDesperdicio,
+  getAzureDesperdicio, getAzureInventarioCrescimentoPersistente,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria, AzureAnomaliaCrescimento, AzureDesperdicioCategoria } from '../types/azureInventario'
 import CheckboxSearchList from '../components/CheckboxSearchList'
@@ -280,6 +280,44 @@ function AnomaliasCard({ data, loading }: { data: AzureAnomaliaCrescimento[] | u
   )
 }
 
+function CrescimentoPersistenteCard({ data, loading }: { data: any[] | undefined; loading: boolean }) {
+  return (
+    <div className="card" style={{ margin: '16px 20px 0' }}>
+      <div className="card-header">
+        <span className="card-title">Crescimento Persistente</span>
+        {data && <span className="badge">{data.length}</span>}
+      </div>
+      <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+        Recursos criados há 7+ dias e ainda ativos — crescimento real (não churn de infra efêmera).
+      </div>
+      {loading && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>}
+      {data && data.length === 0 && <div style={{ padding: '0 20px 20px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum crescimento persistente detectado.</div>}
+      {data && data.length > 0 && (
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead><tr><th>Subscription</th><th>Dia</th><th style={{ textAlign: 'right' }}>Recursos</th><th style={{ textAlign: 'right' }}>Novos (7-14d)</th><th style={{ textAlign: 'right' }}>Z-Score</th><th>Severidade</th></tr></thead>
+            <tbody>
+              {data.map((a, i) => {
+                const cor = a.severidade === 'critico' ? 'var(--red,#ff4d6a)' : a.severidade === 'atencao' ? 'var(--orange,#ff8c42)' : 'var(--green,#22c55e)'
+                return (
+                  <tr key={i}>
+                    <td style={{ fontSize: 12 }} title={a.subscription_id}>{a.subscription_id.slice(0, 8)}</td>
+                    <td style={{ fontSize: 12 }}>{new Date(a.dia + 'T00:00:00').toLocaleDateString('pt-BR')}</td>
+                    <td style={{ textAlign: 'right', fontSize: 12 }}>{a.recursos_persistentes}</td>
+                    <td style={{ textAlign: 'right', fontSize: 12 }}>{a.novos_persistentes}</td>
+                    <td style={{ textAlign: 'right', fontSize: 12 }}>{a.zscore?.toFixed(2) || '—'}</td>
+                    <td style={{ fontSize: 11, color: cor, fontWeight: 700 }}>{a.severidade || 'normal'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Azure Advisor — categorias e impacto (2026-09-02, inspirado no ARI, que integra com
 // Advisor/Security Center). Valores confirmados na documentação oficial (learn.microsoft.com/
 // rest/api/advisor/recommendations/list): category ∈ {Cost,Security,HighAvailability,
@@ -445,6 +483,13 @@ export default function InventarioView() {
   const anomaliasQuery = useQuery({
     queryKey: ['azure-inv-anomalias'],
     queryFn: getAzureAnomaliasCrescimento,
+    enabled: tab === 'crescimento',
+  })
+  // Crescimento de recursos persistentes (Fase 1.4): recursos que criaram há 7+ dias e ainda
+  // ativos — diferencia crescimento real do churn efêmero de Databricks/AKS.
+  const crescimentoPersistenteQuery = useQuery({
+    queryKey: ['azure-inv-crescimento-persistente'],
+    queryFn: getAzureInventarioCrescimentoPersistente,
     enabled: tab === 'crescimento',
   })
   // Advisor pode levar bastante tempo na 1ª chamada (backend cacheia por 20min) — só busca
@@ -656,6 +701,7 @@ export default function InventarioView() {
 
       <CrescimentoDetalheCard data={crescimentoDetalheQuery.data} loading={crescimentoDetalheQuery.isLoading} />
       <AnomaliasCard data={anomaliasQuery.data} loading={anomaliasQuery.isLoading} />
+      <CrescimentoPersistenteCard data={crescimentoPersistenteQuery.data} loading={crescimentoPersistenteQuery.isLoading} />
       </>
       )}
 

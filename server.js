@@ -6210,6 +6210,17 @@ async function ensureAzureColetaTable() {
   // de recursos que existem mas nunca geraram evento desde a ativação do Inventário, sem
   // "criado por/em" porque o Resource Graph não tem esse histórico).
   await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS origem_deteccao VARCHAR(20) DEFAULT 'activity_log'`);
+  // Coluna GENERATED pra tempo de vida (2026-09-17) — permite rastrear recursos efêmeros vs persistentes
+  // Recursso efêmero (< 7 dias): deletado antes de virar persistente (VMs de cluster Databricks, discos temp)
+  // Recurso persistente (≥ 7 dias): criado há 7+ dias e ainda ativo = crescimento que vai permanecer
+  await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS tempo_vida_dias NUMERIC GENERATED ALWAYS AS (
+    CASE
+      WHEN excluido_em IS NOT NULL THEN
+        EXTRACT(DAY FROM excluido_em - criado_em)
+      ELSE
+        EXTRACT(DAY FROM CURRENT_TIMESTAMP - criado_em)
+    END
+  ) STORED`);
   // UNIQUE via índice (não constraint inline) — resource_id é TEXT sem limite, e um índice
   // btree comum já é suficiente pra UPSERT (ON CONFLICT precisa de um índice único, não
   // necessariamente uma constraint declarada no CREATE TABLE).
@@ -8721,7 +8732,7 @@ async function _computeAnomaliasCrescimentoRaw() {
   //    conjunto já agrupado por dia+RG é pequeno (algumas centenas de RGs × 35 dias), custa
   //    quase nada excluir ali, mesmo raciocínio de "filtrar o resultado pequeno, não a
   //    tabela grande" já usado no resto desta sessão.
-  const [rSub, rRg] = await Promise.all([
+  const [rSub, rRg, rPersistente] = await Promise.all([
     pool.query(`
       WITH criacoes_todas AS (
         SELECT subscription_id, DATE(quando) AS dia, COUNT(*) AS criacoes
@@ -8804,6 +8815,27 @@ async function _computeAnomaliasCrescimentoRaw() {
       FROM combinado co JOIN stats s USING (subscription_id, resource_group)
       ORDER BY co.subscription_id, co.resource_group, co.dia
     `, [inicioStr, fim, rgsGerenciados]),
+    pool.query(`
+      WITH persistentes AS (
+        SELECT subscription_id, DATE_TRUNC('day', CURRENT_TIMESTAMP)::DATE AS dia,
+          COUNT(*) AS recursos_persistentes,
+          SUM(CASE WHEN tempo_vida_dias >= 7 AND tempo_vida_dias < 14 THEN 1 ELSE 0 END) AS novos_persistentes
+        FROM azure_recursos_inventario
+        WHERE ativo = true AND tempo_vida_dias >= 7 AND NOT UPPER(COALESCE(resource_group,'')) = ANY($3::text[])
+        GROUP BY 1, 2
+      ), stats AS (
+        SELECT subscription_id,
+          AVG(recursos_persistentes) AS media, STDDEV_POP(recursos_persistentes) AS desvio,
+          COUNT(*) AS dias
+        FROM persistentes WHERE dia >= $1::date AND dia <= $2::date
+        GROUP BY 1 HAVING COUNT(*) >= 5
+      )
+      SELECT p.subscription_id, to_char(p.dia,'YYYY-MM-DD') AS dia, p.recursos_persistentes, p.novos_persistentes,
+        s.media, s.desvio,
+        CASE WHEN s.desvio > 0 THEN (p.recursos_persistentes - s.media) / s.desvio ELSE 0 END AS zscore
+      FROM persistentes p LEFT JOIN stats s ON p.subscription_id = s.subscription_id
+      ORDER BY p.subscription_id, p.dia
+    `, [inicioStr, fim, rgsGerenciados]),
   ]);
 
   function processar(rows, escopoTipo) {
@@ -8827,8 +8859,30 @@ async function _computeAnomaliasCrescimentoRaw() {
     return out;
   }
 
-  const crescimento = [...processar(rSub.rows, 'subscription'), ...processar(rRg.rows, 'resource_group')];
-  crescimento.sort((a, b) => Math.max(Math.abs(b.zscore_criacoes), Math.abs(b.zscore_custo)) - Math.max(Math.abs(a.zscore_criacoes), Math.abs(a.zscore_custo)));
+  function processarPersistente(rows) {
+    const out = [];
+    for (const r of rows) {
+      const recursos = parseInt(r.recursos_persistentes, 10);
+      const novos = parseInt(r.novos_persistentes, 10);
+      const zscore = parseFloat(r.zscore) || 0;
+      const anomalo = recursos >= 5 && zscore >= 2.5;
+      if (!anomalo) continue;
+      out.push({
+        escopo_tipo: 'persistente', subscription_id: r.subscription_id, resource_group: null, dia: r.dia,
+        recursos_persistentes: recursos, novos_persistentes: novos,
+        media: parseFloat(r.media) || 0, desvio: parseFloat(r.desvio) || 0,
+        zscore: zscore, severidade: zscore >= 2.5 ? 'critico' : 'atencao',
+      });
+    }
+    return out;
+  }
+
+  const crescimento = [...processar(rSub.rows, 'subscription'), ...processar(rRg.rows, 'resource_group'), ...processarPersistente(rPersistente.rows)];
+  crescimento.sort((a, b) => {
+    const scoreA = Math.max(Math.abs(a.zscore_criacoes || 0), Math.abs(a.zscore_custo || 0), Math.abs(a.zscore || 0));
+    const scoreB = Math.max(Math.abs(b.zscore_criacoes || 0), Math.abs(b.zscore_custo || 0), Math.abs(b.zscore || 0));
+    return scoreB - scoreA;
+  });
   return crescimento;
 }
 
@@ -8861,6 +8915,15 @@ async function _computeAnomaliasCrescimento() {
 app.get('/api/azure-inventario/anomalias', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     res.json(await _computeAnomaliasCrescimento());
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Crescimento persistente — recursos criados há 7+ dias e ainda ativos, Z-score anômalo
+app.get('/api/azure-inventario/crescimento-persistente', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const todas = await _computeAnomaliasCrescimento();
+    const persistentes = todas.filter(a => a.escopo_tipo === 'persistente');
+    res.json(persistentes);
   } catch (e) { _dbErr(res, e); }
 });
 

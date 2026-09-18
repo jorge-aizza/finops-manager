@@ -195,6 +195,13 @@ export const getAzureAnomaliasCrescimento = () =>
     rows.map((r) => numFields(r, ['criacoes', 'custo', 'media_criacoes', 'desvio_criacoes', 'media_custo', 'desvio_custo', 'zscore_criacoes', 'zscore_custo']))
   )
 
+// Crescimento de Recursos Persistentes (Phase 1, 2026-09-17)
+// Rastreia apenas recursos criados há 7+ dias que continuam ativos
+export const getAzureInventarioCrescimentoPersistente = () =>
+  apiFetch<any[]>('GET', '/azure-inventario/crescimento-persistente').then((rows) =>
+    rows.map((r) => numFields(r, ['recursos_persistentes', 'novos_persistentes', 'media', 'desvio', 'zscore']))
+  )
+
 export const getAzureOrcamentosInventario = () =>
   apiFetch<AzureOrcamentoInventario[]>('GET', '/azure-inventario/orcamentos').then((rows) =>
     rows.map((r) => numFields(r, ['limite_valor', 'threshold_atencao', 'threshold_critico']))
