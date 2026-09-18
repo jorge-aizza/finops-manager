@@ -1,27 +1,65 @@
 import type { HorarioLivre } from '../types/calculadora'
 
-// Porta fiel de _calcHorasLivres/_calcHorasPeriodo (calculadora.js). Bug
-// conhecido preservado de propósito (CLAUDE.md): conta dias parciais de
-// início/fim como dias completos — pra períodos curtos pode subtrair mais
-// horas do que o total. Não "consertar" — precisa bater com o legado.
+// Calcula horas livres via intersecção com o período real do usuário
 export function calcHorasLivres(vIni: string, vFim: string, horarioLivre: HorarioLivre): number {
   if (!horarioLivre.ativo || !vIni || !vFim) return 0
   if (!horarioLivre.dias.length) return 0
-  const j = (ini: string, f: string) => Math.max(0, parseInt((f || '18:00').split(':')[0]) - parseInt((ini || '09:00').split(':')[0]))
-  const jUtil = j(horarioLivre.inicio, horarioLivre.fim)
-  const jSab = j(horarioLivre.inicio_sab, horarioLivre.fim_sab)
-  const jDom = j(horarioLivre.inicio_dom, horarioLivre.fim_dom)
 
-  let livres = 0
   const inicio = new Date(vIni)
   const fim = new Date(vFim)
+
+  // Helper para converter "HH:MM" para minutos desde meia-noite
+  const timeToMinutes = (time: string): number => {
+    const [h, m] = (time || '00:00').split(':').map(Number)
+    return h * 60 + (m || 0)
+  }
+
+  const hlUtilStart = timeToMinutes(horarioLivre.inicio)
+  const hlUtilEnd = timeToMinutes(horarioLivre.fim)
+  const hlSabStart = timeToMinutes(horarioLivre.inicio_sab)
+  const hlSabEnd = timeToMinutes(horarioLivre.fim_sab)
+  const hlDomStart = timeToMinutes(horarioLivre.inicio_dom)
+  const hlDomEnd = timeToMinutes(horarioLivre.fim_dom)
+
+  let livres = 0
   const d = new Date(inicio.getFullYear(), inicio.getMonth(), inicio.getDate())
-  const fimD = new Date(fim.getFullYear(), fim.getMonth(), fim.getDate())
-  while (d <= fimD) {
+  const fimDate = new Date(fim.getFullYear(), fim.getMonth(), fim.getDate())
+
+  while (d <= fimDate) {
     const dow = d.getDay()
-    if (horarioLivre.dias.includes(dow)) livres += dow === 6 ? jSab : dow === 0 ? jDom : jUtil
+    if (!horarioLivre.dias.includes(dow)) {
+      d.setDate(d.getDate() + 1)
+      continue
+    }
+
+    // Determina horário livre para este dia
+    const hlStart = dow === 6 ? hlSabStart : dow === 0 ? hlDomStart : hlUtilStart
+    const hlEnd = dow === 6 ? hlSabEnd : dow === 0 ? hlDomEnd : hlUtilEnd
+
+    // Calcula intersecção entre horário livre e o período do usuário neste dia
+    const dayStart = new Date(d)
+    const dayEnd = new Date(d)
+    dayEnd.setDate(dayEnd.getDate() + 1)
+
+    const periodStart = Math.max(dayStart.getTime(), inicio.getTime())
+    const periodEnd = Math.min(dayEnd.getTime(), fim.getTime())
+
+    if (periodEnd > periodStart) {
+      const periodStartMinutes = ((periodStart - dayStart.getTime()) / 60000)
+      const periodEndMinutes = ((periodEnd - dayStart.getTime()) / 60000)
+
+      // Intersecção entre [hlStart, hlEnd] e [periodStartMinutes, periodEndMinutes]
+      const intersectStart = Math.max(hlStart, periodStartMinutes)
+      const intersectEnd = Math.min(hlEnd, periodEndMinutes)
+
+      if (intersectEnd > intersectStart) {
+        livres += (intersectEnd - intersectStart) / 60
+      }
+    }
+
     d.setDate(d.getDate() + 1)
   }
+
   return livres
 }
 
