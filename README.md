@@ -1,6 +1,6 @@
-# FinOps Manager — v2.0
+# FinOps Manager — v4.0.0
 
-Sistema web para gestão de ações FinOps com calculadora de custos Azure, Price List integrado, dashboard executivo e exportação Excel.
+Sistema web corporativo para gestão FinOps com inventário de recursos Azure, alocação de custos por tag, dashboard Databricks, e calculadora de custos Azure em tempo real.
 
 **Stack:** Node.js 18+ · Express · PostgreSQL 13+ · Vanilla JS SPA · Vivo Purple UI
 
@@ -26,37 +26,50 @@ Sistema web para gestão de ações FinOps com calculadora de custos Azure, Pric
 
 ---
 
-## O que há de novo na v2.0
+## O que há de novo na v4.0.0
 
-### 💰 Azure Retail Price List integrado
-- Sincronização automática com a [Azure Retail Prices API](https://prices.azure.com/api/retail/prices) (pública, sem credenciais)
-- ~100 mil SKUs em USD sincronizados e convertidos para BRL via taxa de câmbio do próprio export
-- JOIN por `meter_id` (case-insensitive) entre custos reais e preço de tabela
-- Cobertura para todos os tipos: hora, dia, periodo (disco/storage), reserva
+### 🏢 Inventário de Recursos Azure (Novo)
+- **Recurso Graph Change Analysis** — rastreamento de criação, atualização e exclusão de recursos
+- **Reconciliação automática** — backfill de recursos que existiam antes da ativação da coleta
+- **Timeline de mudanças** — histórico completo de alterações de propriedades (SKU de VM, tags, etc.)
+- **Conformidade de tags** — verificação de tags obrigatórias por recurso
+- **Anomalia Detection** — Z-score de crescimento acelerado de recursos
+- **Desperdício** — identificação de discos órfãos, snapshots antigos, IPs públicos sem uso, NICs desacopladas
 
-### 📊 Calculadora aprimorada
-- Coluna **📋 PL/h** — preço on-demand do Price List por hora
-- Badge **▼ X%** — desconto real negociado vs on-demand
-- **Configurar Estimativa** usa Price List como base quando disponível (mais preciso que billing histórico)
-- Barra verde de economia para recursos hora/periodo; barra azul para reservas
-- Legenda interativa com explicação de todos os indicadores
+### 💰 Alocação & Otimização
+- **Showback por tag** — rateio de custos por projeto/squad/centro de custo
+- **Cobertura RI/SP** — medida em horas (não R$), comparação com benchmark de mercado (60-80%)
+- **Orçamentos por scope** — limite global, por workspace Databricks, ou por tag (projeto/squad)
+- **Forecast com tendência linear** — projeção de 3 meses baseada em padrão histórico
 
-### 🔒 Reservas cloud
+### 📊 Coleta Databricks (Novo)
+- **System Tables** — coleta de billing, consumo por job/cluster/usuário, anomalias
+- **Quotas Genie** — controle de limite de uso do Genie (AI Gateway) com bloqueio automático
+- **Detecção de anomalias** — Z-score de custo diário + crescimento por usuário
+- **Dashboard próprio** — drill-down por workspace/SKU/usuário, forecasting
+- **Importação manual** — CSV/Parquet/ZIP para ambientes sem credenciais de API
+
+### 📋 Azure Retail Price List (v2.0+)
+- Sincronização automática com a [Azure Retail Prices API](https://prices.azure.com/api/retail/prices)
+- ~100 mil SKUs sincronizados
+- Cobertura para todos os tipos: hora, dia, período (disco/storage), reserva
+
+### 🔒 Reservas Cloud (v2.0+)
 - Controle de reservas (Azure, AWS, GCP, Oracle, Multicloud)
-- Alertas automáticos no login para reservas expirando em ≤ 90 dias
+- Alertas automáticos para reservas expirando em ≤ 90 dias
 - Badges por severidade: Expirada / Crítico / Atenção / Aviso
 
-### 🛡️ Segurança reforçada (v2.0)
-- `express.static` restrito a arquivos públicos — `server.js`, `.env.key` e `.finops_setup` não são mais acessíveis via HTTP
-- Pool PostgreSQL com parâmetros explícitos e handler de erro
-- Endpoint `/health` para monitoramento e load balancers
-- `uncaughtException` encerra o processo para permitir restart automático via PM2/systemd
+### 🔐 Segurança & Secrets (v4.0.0)
+- **Secrets em `.env`, nunca no banco** — todas as credenciais (Azure, Databricks, SMTP, Entra ID) carregadas em boot
+- `MASTER_KEY` para criptografia AES-256-GCM de dados sensíveis
+- SSO via Microsoft Entra ID + OAuth 2.0 completo
+- Controle de acesso (`adminMiddleware`) em rotas de administração
+- SMTP com timeouts explícitos e log de tentativas
 
-### 🔤 Fontes self-hosted (v2.0)
-- IBM Plex Sans e IBM Plex Mono incluídas no repositório (`fonts/` — 16 arquivos WOFF2, ~308 KB)
-- Zero dependência de Google Fonts — sem chamada externa para `fonts.googleapis.com` ou `fonts.gstatic.com`
-- Funciona em redes corporativas isoladas e ambientes sem acesso à internet
-- Elimina transferência de IP do usuário para o Google a cada acesso (LGPD)
+### 🔤 Fontes e UI (v2.0+)
+- IBM Plex Sans/Mono self-hosted (zero dependência externa)
+- Tema Vivo Purple (roxo corporativo) + tema claro alternativo
+- Responsive design (funciona em mobile)
 
 ---
 
@@ -331,7 +344,7 @@ sem precisar de login), use NSSM em vez de PM2 — ver seção "Windows Service 
 ```bash
 sudo tee /etc/systemd/system/finops.service > /dev/null <<'EOF'
 [Unit]
-Description=FinOps Manager v2.0
+Description=FinOps Manager v4.0.0
 After=network.target postgresql.service
 
 [Service]
@@ -864,7 +877,7 @@ gcloud run deploy finops-manager \
 
 ---
 
-## SaaS
+## Cloud Deployment (v4.0.0)
 
 ### Railway
 
@@ -873,18 +886,26 @@ npm install -g @railway/cli
 railway login && railway init
 railway add --plugin postgresql   # DATABASE_URL injetado automaticamente
 railway up
-# Painel Variables: JWT_SECRET, MASTER_KEY, ALLOWED_ORIGIN
-# DATABASE_URL é parseado automaticamente pelo server.js
 ```
 
-> **Build do frontend:** o Nixpacks do Railway só roda `npm install` por padrão — sem o build do React, todas as telas migradas ficam em branco. No painel: **Settings → Build** → defina o Build Command como `npm install && npm run frontend:build`.
+**Environment Variables** no painel Railway:
+- `JWT_SECRET` — gerado via `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
+- `MASTER_KEY` — gerado via `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
+- `ALLOWED_ORIGIN` — seu domínio de produção (ex: `https://seu-dominio.com`)
+- Opcionais: `AZURE_TENANT_ID`, `AZURE_SP_CLIENT_ID`, `AZURE_SP_CLIENT_SECRET` (para Coleta Azure)
+- Opcionais: `DATABRICKS_ACCOUNT_ID`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` (para Coleta Databricks)
+- Opcionais: `SMTP_*` (para alertas por e-mail)
+
+⚠️ **Build do frontend** — Railway usa Nixpacks e por padrão só roda `npm install`. As telas migradas (Dashboard, Projetos, Estimativas) ficam em branco sem o build React. **No painel Railway:**
+- Settings → Build → Build Command: `npm install && npm run frontend:build`
 
 ### Render
 
 1. **New → Web Service** → conectar repositório Git
-2. Build: `npm install && npm run frontend:build` (o build do React é obrigatório — sem ele as telas migradas ficam em branco) | Start: `node server.js`
-3. **New → PostgreSQL** → `DATABASE_URL` injetado automaticamente
-4. Environment Variables: `JWT_SECRET`, `MASTER_KEY`, `ALLOWED_ORIGIN`
+2. **Build Command**: `npm install && npm run frontend:build`
+3. **Start Command**: `node server.js`
+4. **Environment**: adicionar variáveis (ver lista Railway acima)
+5. **New → PostgreSQL** → `DATABASE_URL` será injetado automaticamente
 
 ### Fly.io
 
@@ -892,14 +913,92 @@ railway up
 fly launch --name finops-manager --region gru
 fly postgres create --name finops-pg --region gru
 fly postgres attach finops-pg
+
+# Gerar secrets criptograficamente seguros
+JWT_SECRET=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
+MASTER_KEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")
+
 fly secrets set \
-  JWT_SECRET=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))") \
-  MASTER_KEY=$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))") \
+  JWT_SECRET="$JWT_SECRET" \
+  MASTER_KEY="$MASTER_KEY" \
   ALLOWED_ORIGIN=https://finops-manager.fly.dev
+
 fly deploy
 ```
 
-> `fly launch`/`fly deploy` usam o Dockerfile do repositório (seção Docker acima) — já builda o frontend React em estágio separado, nenhum passo extra é necessário.
+✅ Fly.io usa o Dockerfile do repositório, que já builda o frontend React no primeiro estágio — nenhum passo extra necessário.
+
+### Azure App Service + PostgreSQL Flexible Server
+
+Deploy em PaaS nativo do Azure:
+
+```bash
+# Criar grupo de recursos
+az group create --name rg-finops --location brazilsouth
+
+# PostgreSQL Flexible Server
+az postgres flexible-server create \
+  --resource-group rg-finops \
+  --name finops-pg \
+  --location brazilsouth \
+  --version 16 \
+  --admin-user pgadmin \
+  --admin-password '<senha-forte>' \
+  --sku-name Standard_B1ms \
+  --tier Burstable
+
+# Database
+az postgres flexible-server db create \
+  --resource-group rg-finops \
+  --server-name finops-pg \
+  --database-name finops_db
+
+# App Service Plan
+az appservice plan create \
+  --resource-group rg-finops \
+  --name finops-plan \
+  --sku B1 \
+  --is-linux
+
+# Web App
+az webapp create \
+  --resource-group rg-finops \
+  --plan finops-plan \
+  --name finops-manager \
+  --runtime 'NODE:18-lts'
+
+# Configurar startup
+az webapp config set \
+  --resource-group rg-finops \
+  --name finops-manager \
+  --startup-file 'node server.js'
+
+# Build command do frontend (obrigatório!)
+az webapp config appsettings set \
+  --resource-group rg-finops \
+  --name finops-manager \
+  --settings \
+  PRE_BUILD_COMMAND='npm install && npm run frontend:build'
+
+# Variáveis de ambiente (secrets)
+az webapp config appsettings set \
+  --resource-group rg-finops \
+  --name finops-manager \
+  --settings \
+  DATABASE_URL='postgresql://pgadmin:<senha>@finops-pg.postgres.database.azure.com:5432/finops_db?sslmode=require' \
+  JWT_SECRET='<gerado-randomicamente>' \
+  MASTER_KEY='<gerado-randomicamente>' \
+  ALLOWED_ORIGIN='https://finops-manager.azurewebsites.net' \
+  NODE_ENV='production' \
+  TZ='America/Sao_Paulo'
+
+# Deploy via Git (configure repositório Git local)
+az webapp deployment user set --user-name <seu-usuario> --password <sua-senha>
+git remote add azure https://<seu-usuario>@finops-manager.scm.azurewebsites.net:443/finops-manager.git
+git push azure main
+```
+
+✅ App Service injeta `DATABASE_URL` automaticamente do PostgreSQL Flexible Server. O frontend é buildado via `PRE_BUILD_COMMAND`.
 
 ---
 
