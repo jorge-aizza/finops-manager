@@ -1095,7 +1095,7 @@ app.get('/api/setup/status', (_req, res) => {
 
 // Test DB connection during setup (no auth required — pre-setup)
 app.post('/api/setup/test-db', async (req, res) => {
-  const { tipo, host, porta, database, usuario, senha, ssl } = req.body;
+  const { tipo = 'postgresql', host, porta, database, usuario, senha, ssl } = req.body;
   const start = Date.now();
   try {
     if (tipo === 'postgresql' || tipo.includes('pg') || tipo.includes('aurora') || tipo.includes('atp') || tipo.includes('adw')) {
