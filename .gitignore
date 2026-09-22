@@ -5,6 +5,7 @@ node_modules/
 .env
 .env.key
 .env.enc
+.env.backup.*
 .finops_setup
 
 # Uploads temporários
