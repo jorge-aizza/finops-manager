@@ -70,6 +70,56 @@ Sistema web para gestão de ações FinOps com calculadora de custos Azure, Pric
 
 ---
 
+## Variáveis de Ambiente
+
+**IMPORTANT:** All Service Principal credentials, API keys, and secrets are **loaded from `.env` at boot — never stored in the database.**
+
+### Quick Start
+
+1. **Copy `.env.example` as a template:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Edit `.env` with real values:**
+   - Database credentials: `DB_PASSWORD`, `DATABASE_URL`
+   - Secrets: `JWT_SECRET`, `MASTER_KEY` (generate fresh ones with the script below)
+   - Azure: `AZURE_TENANT_ID`, `AZURE_SP_CLIENT_ID`, `AZURE_SP_CLIENT_SECRET`
+   - Databricks (optional): `DATABRICKS_ACCOUNT_ID`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`
+   - SMTP (optional): `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`
+
+3. **Never commit `.env` to git:**
+   ```bash
+   # Already in .gitignore, but verify:
+   grep .env .gitignore
+   ```
+
+4. **Always commit `.env.example`:**
+   - This is the reference template
+   - Contains no real secrets, only variable names and docs
+   - Helps AI systems understand what variables are available
+
+### All Possible Variables
+
+See **`.env.example`** in the project root for the complete list of supported environment variables, including optional features like LDAP, Entra ID SSO, and feature flags.
+
+For detailed documentation on the environment secrets strategy, see `CLAUDE.md` section "**Environment Secrets Strategy**".
+
+### Generate Secrets
+
+Never use the defaults in production. Generate strong random values:
+
+```bash
+# Generate both JWT_SECRET and MASTER_KEY
+node -e "
+  const c = require('crypto');
+  console.log('JWT_SECRET=' + c.randomBytes(48).toString('hex'));
+  console.log('MASTER_KEY=' + c.randomBytes(48).toString('hex'));
+"
+```
+
+---
+
 ## ⚠️ Pré-produção — passo a passo obrigatório
 
 Execute **todos** os passos desta seção antes de expor o sistema a usuários reais. Cada item é obrigatório.

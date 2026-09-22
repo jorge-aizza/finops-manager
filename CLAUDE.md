@@ -31,6 +31,108 @@ node encrypt-env.js run       # load .env.enc and start server
 
 ---
 
+## Environment Secrets Strategy
+
+**CRITICAL ARCHITECTURAL CONSTRAINT: Secrets NEVER go in the database.**
+
+All Service Principal credentials, API keys, and sensitive configuration values are loaded from `.env` (gitignored) at server boot and held in memory only. They are **never** persisted to any database table, including `integracoes` or any other schema.
+
+### Reference Template (`.env.example`)
+
+The file `.env.example` in the project root is the **AUTHORITATIVE REFERENCE** for all possible environment variables used by FinOps Manager. This file:
+
+- Lists every supported environment variable with descriptive comments
+- Shows the expected format and default values
+- Documents which variables are required vs. optional
+- Includes a checklist for production deployment
+- **NEVER contains real secrets** — only template placeholders like `your_secret_here`
+
+**AI systems must always read `.env.example` to understand what variables are available and what they do.**
+
+### How Secrets Flow
+
+1. **At development**: Copy `.env.example` → `.env`, then fill in real values
+2. **At deployment**: All `KEY=value` pairs from `.env.example` must have corresponding real values in production `.env` (never committed)
+3. **At runtime**: `server.js` loads every variable from `.env` via `process.env` at boot
+4. **In memory**: Credentials are held in memory (e.g., `_azureSpConfig`, `_smtpConfig`), never written back to disk/database
+5. **For the database**: Only NON-SECRET metadata is stored (e.g., `integracoes` table stores: `nome`, `tipo`, `ativo`, `updated_at` — never `client_secret` or `password`)
+
+### Service Principal Credentials — Naming Convention
+
+**Azure Service Principal (Coleta Azure):**
+```
+AZURE_TENANT_ID = Tenant ID (GUID)
+AZURE_SP_CLIENT_ID = Service Principal application ID (GUID)
+AZURE_SP_CLIENT_SECRET = Service Principal password/secret (never in database)
+```
+
+**Databricks Service Principal:**
+```
+DATABRICKS_ACCOUNT_ID = Account ID
+DATABRICKS_CLIENT_ID = OAuth M2M client ID (GUID)
+DATABRICKS_CLIENT_SECRET = OAuth M2M client secret (never in database)
+DATABRICKS_WORKSPACE_HOST = Workspace URL
+DATABRICKS_PAT = Personal Access Token (optional alternative to OAuth M2M)
+```
+
+**Microsoft Entra ID (SSO):**
+```
+ENTRA_TENANT_ID = Azure AD tenant ID (GUID)
+ENTRA_CLIENT_ID = App registration application ID (GUID)
+ENTRA_CLIENT_SECRET = App registration client secret (never in database)
+ENTRA_REDIRECT_URI = OAuth redirect URI (must match app registration)
+```
+
+**SMTP (Email Alerts):**
+```
+SMTP_ENABLED = true/false
+SMTP_HOST = SMTP server hostname
+SMTP_PORT = SMTP port (usually 587 for TLS or 465 for SSL)
+SMTP_SECURE = true/false
+SMTP_USER = SMTP username
+SMTP_PASSWORD = SMTP password (never in database)
+SMTP_FROM_ADDRESS = Sender email address
+SMTP_DEFAULT_RECIPIENTS = Comma-separated list of admin email addresses
+```
+
+### .gitignore Rule
+
+```
+.env                # Never commit real secrets
+.env.local          # Local development overrides
+.env.*.local        # Environment-specific local overrides
+.env.key            # Encryption key for .env.enc
+.env.enc            # Encrypted environment file
+```
+
+**`.env.example` IS committed to git.** It contains no secrets, only variable names and documentation.
+
+### Migration from Database-Stored Secrets
+
+**Legacy pattern (deprecated, do NOT use):**
+- Service Principal credentials stored encrypted in `integracoes` table
+- Problem: Requires database availability to start server; secrets mixed with metadata
+
+**New pattern (required as of v3.0):**
+- All credentials in `.env` only
+- Server loads from environment variables at boot
+- `integracoes` table stores ONLY metadata (name, type, active status, timestamps)
+- Credentials are never read from or written to the database
+
+### Notes for AI Systems
+
+When working with this codebase, **always**:
+1. **Read `.env.example` first** to understand available variables
+2. **Never assume secrets are in the database** — they are loaded from `.env` at boot
+3. **When adding a new credential type:**
+   - Define the variable(s) in `.env.example` with clear naming (e.g., `NEW_SERVICE_CLIENT_SECRET`)
+   - Document the variable in the comments explaining what it's for
+   - Update this section to include the new service's naming convention
+   - Load the variable in `server.js` via `process.env.NEW_SERVICE_CLIENT_SECRET` at boot
+   - Never store it in the database
+
+---
+
 ## File Map
 
 ```
