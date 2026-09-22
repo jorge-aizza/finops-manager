@@ -216,6 +216,10 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
 }) {
   const detalheQuery = useQuery({ queryKey: ['estimativa', id], queryFn: () => getEstimativa(id) })
   const e = detalheQuery.data
+  // `recursos` é JSONB no banco — estimativas antigas/malformadas podem ter
+  // vindo com null em vez de []; sem isso, e.recursos.slice() quebra o render
+  // inteiro (sem ErrorBoundary local, derrubava a árvore React toda).
+  const recursosSeguro = Array.isArray(e?.recursos) ? e!.recursos : []
   const [preview, setPreview] = useState<{ html: string; title: string } | null>(null)
 
   // Porta de gerarPDFSalvo(e) (calculadora.js) — mesmo buildPdfHtml() usado
@@ -289,8 +293,8 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
                     <tr><th>Recurso</th><th>Categoria</th><th style={{ textAlign: 'right' }}>Horas</th><th style={{ textAlign: 'right' }}>Custo/h</th><th style={{ textAlign: 'right' }}>Estimativa BRL</th></tr>
                   </thead>
                   <tbody>
-                    {e.recursos.length === 0 && <tr><td colSpan={5} className="empty-state">Sem recursos registrados</td></tr>}
-                    {e.recursos.slice(0, MAX_ROWS).map((r, i) => (
+                    {recursosSeguro.length === 0 && <tr><td colSpan={5} className="empty-state">Sem recursos registrados</td></tr>}
+                    {recursosSeguro.slice(0, MAX_ROWS).map((r, i) => (
                       <tr key={i}>
                         <td>
                           {r.nome || '—'}
@@ -303,9 +307,9 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
                         <td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono',monospace", color: 'var(--accent)' }}>{formatBRL(r.estimado_brl)}</td>
                       </tr>
                     ))}
-                    {e.recursos.length > MAX_ROWS && (
+                    {recursosSeguro.length > MAX_ROWS && (
                       <tr><td colSpan={5} style={{ textAlign: 'center', padding: 8, fontSize: 11, color: 'var(--text-muted)' }}>
-                        + {e.recursos.length - MAX_ROWS} recurso(s) adicionais — ver PDF para lista completa
+                        + {recursosSeguro.length - MAX_ROWS} recurso(s) adicionais — ver PDF para lista completa
                       </td></tr>
                     )}
                   </tbody>

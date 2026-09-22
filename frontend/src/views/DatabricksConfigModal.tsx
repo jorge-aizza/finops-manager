@@ -114,7 +114,11 @@ export default function DatabricksConfigModal({ config, onClose }: DatabricksCon
             {isPat ? (
               <div className="form-group">
                 <label htmlFor="dbx-token">Personal Access Token * {config && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(deixe em branco pra manter o atual)</span>}</label>
-                <input id="dbx-token" type="password" placeholder="dapiXXXXXXXXXXXXXXXXXXXXXXXXXXXX" value={form.token} onChange={(e) => setForm({ ...form, token: e.target.value })} />
+                <input
+                  id="dbx-token" type="password" value={form.token}
+                  placeholder={config ? '••••••••  (já cadastrado)' : 'dapiXXXXXXXXXXXXXXXXXXXXXXXXXXXX'}
+                  onChange={(e) => setForm({ ...form, token: e.target.value })}
+                />
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Gerado em User Settings → Developer → Access tokens (seu usuário ou um Service Principal de workspace).</span>
               </div>
             ) : (
@@ -129,7 +133,11 @@ export default function DatabricksConfigModal({ config, onClose }: DatabricksCon
                 </div>
                 <div className="form-group">
                   <label htmlFor="dbx-client-secret">Client Secret {config && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(deixe em branco pra manter o atual)</span>}</label>
-                  <input id="dbx-client-secret" type="password" value={form.client_secret} onChange={(e) => setForm({ ...form, client_secret: e.target.value })} />
+                  <input
+                    id="dbx-client-secret" type="password" value={form.client_secret}
+                    placeholder={config ? '••••••••  (já cadastrado)' : ''}
+                    onChange={(e) => setForm({ ...form, client_secret: e.target.value })}
+                  />
                 </div>
               </>
             )}

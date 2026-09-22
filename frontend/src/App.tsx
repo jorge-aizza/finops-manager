@@ -12,6 +12,7 @@ import DatabricksDashboardView from './views/DatabricksDashboardView'
 import InventarioView from './views/InventarioView'
 import AlocacaoView from './views/AlocacaoView'
 import DatabricksBudgetAlertModal from './components/DatabricksBudgetAlertModal'
+import ErrorBoundary from './components/ErrorBoundary'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } },
@@ -55,8 +56,18 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {ViewComponent ? <ViewComponent /> : null}
-      {autenticado && <DatabricksBudgetAlertModal />}
+      {ViewComponent ? (
+        // `key={view}` reseta o ErrorBoundary ao trocar de tela — sem isso,
+        // um erro numa view ficaria "preso" mesmo navegando pra outra.
+        <ErrorBoundary key={view}>
+          <ViewComponent />
+        </ErrorBoundary>
+      ) : null}
+      {autenticado && (
+        <ErrorBoundary>
+          <DatabricksBudgetAlertModal />
+        </ErrorBoundary>
+      )}
     </QueryClientProvider>
   )
 }

@@ -60,7 +60,7 @@ export default function DatabricksBudgetAlertModal() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {alertas.map((a) => {
               const info = SEVERIDADE_INFO[a.severidade]
-              const pctFmt = (a.pct * 100).toLocaleString('pt-BR', { maximumFractionDigits: 0 })
+              const pctFmt = ((a.pct ?? 0) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 0 })
               return (
                 <div
                   key={a.budget.id}
@@ -77,8 +77,8 @@ export default function DatabricksBudgetAlertModal() {
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {escopoLabel(a.budget)} — R$ {a.custo_atual.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
-                    {' de R$ '}{a.budget.valor_mensal.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
+                    {escopoLabel(a.budget)} — R$ {(a.custo_atual ?? 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
+                    {' de R$ '}{(a.budget.valor_mensal ?? 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
                   </div>
                 </div>
               )

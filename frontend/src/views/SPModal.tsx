@@ -164,7 +164,11 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
             </div>
             <div className="form-group">
               <label htmlFor="sp-client-secret">Client Secret {sp && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(deixe em branco pra manter o atual)</span>}</label>
-              <input id="sp-client-secret" type="password" value={form.client_secret} onChange={(e) => setForm({ ...form, client_secret: e.target.value })} />
+              <input
+                id="sp-client-secret" type="password" value={form.client_secret}
+                placeholder={sp ? '••••••••  (já cadastrado)' : ''}
+                onChange={(e) => setForm({ ...form, client_secret: e.target.value })}
+              />
             </div>
             <div className="form-group">
               <label htmlFor="sp-expiracao">Expiração do Secret</label>
