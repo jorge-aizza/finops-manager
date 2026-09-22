@@ -1149,6 +1149,37 @@ git commit -m "chore: atualizar xlsx.js para versao X.X.X"
 
 ---
 
+## Production Checklist
+
+Antes de implantar em produção:
+
+- [ ] `JWT_SECRET` definido com string aleatória (≥ 32 chars)
+  - Gerar com: `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
+  - Máxima segurança: qualquer um com este valor pode forjar tokens de login
+- [ ] `MASTER_KEY` definido com string aleatória (≥ 32 chars)
+  - Gerar com: `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
+  - Aviso: se mudar após setup, arquivo `.finops_setup` torna-se ilegível — guardar em cofre seguro
+- [ ] `DB_PASSWORD` configurado e diferente do padrão
+- [ ] `ALLOWED_ORIGIN` ajustado para o domínio exato de produção
+- [ ] `.env` criptografado (`node encrypt-env.js encrypt`) — `.env.key` armazenado seguramente fora do servidor
+- [ ] `uploads_tmp/` com permissões de escrita para o processo Node
+- [ ] PostgreSQL 13+ instalado, banco e usuário criados com permissões mínimas
+- [ ] PostgreSQL acessível desde o host do Node no `DB_HOST:DB_PORT` configurado
+- [ ] `mascote.png` presente no diretório da aplicação (não rastreado pelo git — copiar manualmente)
+- [ ] Reverse proxy (Nginx/Caddy) configurado com HTTPS (Let's Encrypt Certbot) e headers de segurança (HSTS, CSP)
+- [ ] PM2 ou systemd configurado para auto-restart em crash/reboot
+- [ ] Frontend React buildado: `npm install && npm run frontend:build` concluído com sucesso
+- [ ] Node rodando com `NODE_ENV=production` (desabilita verbose logging)
+- [ ] Firewall corporativo liberado para outbound: Azure APIs, SMTP (se alertas habilitados), LDAP/Entra ID (se auth externa)
+- [ ] Se **Portal Público** ativado: `PORTAL_SUBSCRIPTION_IDS` configurado — sem isso, nenhum dado é exposto
+- [ ] Se **Portal Público** ativado: `PORTAL_SOLICITAR_IDENTIFICACAO=true` ou `PORTAL_DOMINIOS_ACEITOS` configurado para restringir acesso
+- [ ] Se **Coleta Azure** ativada: Azure Service Principal credenciado em `AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET`
+- [ ] Se **Coleta Databricks** ativada: OAuth M2M ou PAT configurado em `DATABRICKS_*` variables
+- [ ] Se **Alertas SMTP** ativados: servidor SMTP testado (`POST /api/integrations/smtp/testar`)
+- [ ] Se **SSO Entra ID** ativado: aplicação registrada no Azure AD e `ENTRA_*` configurado
+
+---
+
 ## APIs Externas — Liberação de Firewall
 
 O sistema realiza chamadas externas tanto a partir do **servidor Node.js** quanto a partir do **navegador do usuário**. Ambas as direções precisam ser liberadas na infraestrutura de rede.
