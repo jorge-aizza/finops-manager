@@ -218,6 +218,21 @@ body {
   display: block;
 }
 
+.brand-icon-img {
+  display: none !important;
+}
+
+/* Tema escuro: mostrar imagem, ocultar SVG */
+[data-theme="dark"] .brand-icon-svg,
+:root:not([data-theme="light"]) .brand-icon-svg {
+  display: none !important;
+}
+
+[data-theme="dark"] .brand-icon-img,
+:root:not([data-theme="light"]) .brand-icon-img {
+  display: block !important;
+}
+
 .brand-text {
   display: flex;
   flex-direction: column;
