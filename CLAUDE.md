@@ -66,6 +66,7 @@ node encrypt-env.js run       # Load .env.enc and start server
 | `portal.html` | Public calculator (React, no auth) | < 1 KB |
 | `styles.css` | Vivo purple theme, dark/light modes | 1.7 KB |
 | `frontend/` | React (Vite) — separate project with its own `package.json` | — |
+| `finops-logo.png` / `finops-logo-dark.png` | Logo FinOps — claro / escuro (force-add: `*.png` é gitignored) | — |
 | `libs/xlsx.full.min.js` | SheetJS (client-side Excel export) | — |
 | `.env.example` | Environment variable template (authoritative) | 6.5 KB |
 | `docs-*.html` | User manuals, implementation guide, FAQs | ~150 KB |
@@ -134,6 +135,17 @@ See **Module 08-FRONTEND-REACT** for bridge details, migration checklist, and co
 
 ---
 
+## 🎨 Branding / Logo por tema
+
+- **Escuro é o padrão** e NÃO seta `data-theme`; só o claro seta `data-theme="light"`. Seletor correto para escuro: `:root:not([data-theme="light"])` (nunca `[data-theme="dark"]`).
+- Par de imagens por tema: `finops-logo.png` (claro) + `finops-logo-dark.png` (escuro), alternadas por CSS `display`.
+- Aplicado em: top-bar e login (`index.html`, classes `.topbar-logo-light/.topbar-logo-dark` em `styles.css`), portal público (`frontend/src/PortalApp.tsx`), `docs-faq.html` e `docs-portal-faq.html` (CSS local, não carregam `styles.css`).
+- `.finops-logo` no escuro recebe `brightness(1.9) saturate(1.15)`; as FAQs replicam o filtro para ficar igual ao menu.
+- Sidebar (`.brand-icon`) mantém o SVG original de 4 quadrados nos dois temas.
+- Pendente: `docs-implementacao.html` e `docs-usuario.html` ainda usam o texto "vivo".
+
+---
+
 ## 📮 Email Alerts
 
 **SMTP integration** (new in v4.0):
@@ -195,7 +207,7 @@ Key items:
 
 ## 📝 Last Updated
 
-- **Version**: v4.0.0 (2026-09-22)
+- **Version**: v4.0.0 (2026-09-23)
 - **Modules**: 10 specialized docs in `MODULES/`
 - **Migration**: ~90% React (8 views live)
 - **Status**: Production-ready

@@ -70,6 +70,8 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - IBM Plex Sans/Mono self-hosted (zero dependência externa)
 - Tema Vivo Purple (roxo corporativo) + tema claro alternativo
 - Responsive design (funciona em mobile)
+- Logo FinOps por tema: claro usa `finops-logo.png`, escuro usa `finops-logo-dark.png` (top-bar, login, portal público e telas de FAQ)
+- Tela de FAQ com logo centralizado e título "FinOps Manager · FAQ" abaixo
 
 ---
 
