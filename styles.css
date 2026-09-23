@@ -218,6 +218,17 @@ body {
   display: block;
 }
 
+/* Tema escuro: troca o logo do top-bar (.topbar-vivo-brand). Escuro e o
+   padrao deste projeto e nao seta data-theme -- so o claro seta
+   data-theme="light". Por isso o alvo e "nao-claro". Tema claro nao e
+   tocado, segue como estava (display:block via style inline). */
+:root:not([data-theme="light"]) .topbar-logo-light {
+  display: none !important;
+}
+:root:not([data-theme="light"]) .topbar-logo-dark {
+  display: block !important;
+}
+
 .brand-text {
   display: flex;
   flex-direction: column;
