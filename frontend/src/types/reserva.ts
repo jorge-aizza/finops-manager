@@ -19,6 +19,9 @@ export interface Reserva {
   observacoes: string | null
   criado_por: number | null
   criado_por_nome?: string | null
+  origem?: string | null // 'manual' | 'azure'
+  azure_id?: string | null
+  sincronizado_em?: string | null
   criado_em: string
   atualizado_em: string
 }

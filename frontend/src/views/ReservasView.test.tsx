@@ -5,10 +5,12 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import ReservasView from './ReservasView'
 import * as reservasApi from '../api/reservas'
 import * as azureApi from '../api/azure'
+import * as coletaApi from '../api/coleta'
 import type { Reserva } from '../types/reserva'
 
 vi.mock('../api/reservas')
 vi.mock('../api/azure')
+vi.mock('../api/coleta')
 
 const mockReservas: Reserva[] = [
   {
@@ -47,6 +49,7 @@ function renderWithClient() {
 beforeEach(() => {
   vi.mocked(reservasApi.listReservas).mockResolvedValue(mockReservas)
   vi.mocked(azureApi.listSubscriptions).mockResolvedValue([])
+  vi.mocked(coletaApi.listSPs).mockResolvedValue([{ id: 7, nome: 'SP Principal', ativo: true, is_padrao: true } as never])
 })
 
 describe('ReservasView', () => {
@@ -92,6 +95,32 @@ describe('ReservasView', () => {
         }),
       )
     });
+  });
+
+  it('sincroniza com a Azure usando a SP configurada e recarrega a lista', async () => {
+    const user = userEvent.setup()
+    vi.mocked(reservasApi.sincronizarReservasAzure).mockResolvedValue({
+      ok: true, sp: 'SP Principal', total: 3, inseridas: 2, atualizadas: 1, avisos: ['Savings Plans não lidos: sem permissão.'],
+    })
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+
+    const botao = await screen.findByRole('button', { name: 'Sincronizar com Azure' })
+    await waitFor(() => expect(botao).toBeEnabled())
+    const chamadasAntes = vi.mocked(reservasApi.listReservas).mock.calls.length
+    await user.click(botao)
+
+    await waitFor(() => expect(reservasApi.sincronizarReservasAzure).toHaveBeenCalledWith(undefined))
+    expect(await screen.findByText(/3 encontrada\(s\) — 2 nova\(s\), 1 atualizada\(s\)/)).toBeInTheDocument()
+    expect(screen.getByText(/Savings Plans não lidos/)).toBeInTheDocument()
+    await waitFor(() => expect(reservasApi.listReservas).toHaveBeenCalledTimes(chamadasAntes + 1))
+  });
+
+  it('desabilita a sincronização quando não há SP ativa', async () => {
+    vi.mocked(coletaApi.listSPs).mockResolvedValue([])
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+    expect(screen.getByRole('button', { name: 'Sincronizar com Azure' })).toBeDisabled()
   });
 
   it('filtra por texto de busca', async () => {

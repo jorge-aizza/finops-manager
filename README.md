@@ -66,6 +66,11 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - Controle de acesso (`adminMiddleware`) em rotas de administração
 - SMTP com timeouts explícitos e log de tentativas
 
+### 🔁 Reservas Cloud — sincronização com a Azure
+- Botão **Sincronizar com Azure** na tela de Reservas importa reservas e Savings Plans usando a Service Principal configurada (Coleta Azure); o cadastro manual continua disponível
+- Permissões da SP: **Reservations Reader** (escopo `/providers/Microsoft.Capacity`) e **Savings plan Reader**
+- Custos digitados manualmente são preservados nas próximas sincronizações
+
 ### 🔤 Fontes e UI (v2.0+)
 - IBM Plex Sans/Mono self-hosted (zero dependência externa)
 - Tema Vivo Purple (roxo corporativo) + tema claro alternativo

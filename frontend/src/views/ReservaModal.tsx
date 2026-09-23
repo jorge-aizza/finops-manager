@@ -101,7 +101,9 @@ export default function ReservaModal({ reserva, subscriptions, onClose }: Reserv
   const cloud = (form.cloud || null) as Cloud | null
   const scopeCfg = cloud ? (SCOPE_CONFIG[cloud]?.[form.tipo_escopo] ?? {}) : {}
   const escopoOptions = cloud ? Object.keys(SCOPE_CONFIG[cloud]) : []
-  const tiposRecurso = cloud ? TIPOS_RECURSO[cloud] : []
+  const tiposBase = cloud ? TIPOS_RECURSO[cloud] : []
+  // Reservas importadas da Azure podem trazer um tipo fora da lista fixa — mantém o valor visível.
+  const tiposRecurso = form.tipo_recurso && !tiposBase.includes(form.tipo_recurso) ? [...tiposBase, form.tipo_recurso] : tiposBase
 
   const rgQuery = useQuery({
     queryKey: ['azure-resource-groups', form.subValue],

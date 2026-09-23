@@ -27,3 +27,15 @@ export const updateReserva = (id: number, input: ReservaInput) =>
 
 export const deleteReserva = (id: number) =>
   apiFetch<{ ok: boolean }>('DELETE', '/reservas/' + id)
+
+export interface SincronizarAzureResult {
+  ok: boolean
+  sp: string
+  total: number
+  inseridas: number
+  atualizadas: number
+  avisos: string[]
+}
+
+export const sincronizarReservasAzure = (spId?: number) =>
+  apiFetch<SincronizarAzureResult>('POST', '/reservas/sincronizar-azure', spId ? { sp_id: spId } : {})

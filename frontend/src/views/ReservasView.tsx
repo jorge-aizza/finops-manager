@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { listReservas } from '../api/reservas'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { listReservas, sincronizarReservasAzure, type SincronizarAzureResult } from '../api/reservas'
+import { listSPs } from '../api/coleta'
 import { listSubscriptions } from '../api/azure'
 import { CLOUD_COLORS, CLOUDS, SCOPE_CONFIG, STATUS_COLORS, type Cloud } from '../config/reservaScopes'
 import type { Reserva } from '../types/reserva'
@@ -50,6 +51,24 @@ export default function ReservasView() {
   const reservasQuery = useQuery({ queryKey: ['reservas'], queryFn: () => listReservas() })
   const subsQuery = useQuery({ queryKey: ['azure-subscriptions'], queryFn: listSubscriptions })
   const subscriptions = subsQuery.data || []
+  const queryClient = useQueryClient()
+  const spsQuery = useQuery({ queryKey: ['azure-sps'], queryFn: listSPs })
+  const spsAtivas = (spsQuery.data || []).filter((sp) => sp.ativo)
+  const [spId, setSpId] = useState('')
+  const [syncResult, setSyncResult] = useState<SincronizarAzureResult | null>(null)
+
+  const syncMutation = useMutation({
+    mutationFn: () => sincronizarReservasAzure(spId ? Number(spId) : undefined),
+    onSuccess: (r) => {
+      setSyncResult(r)
+      queryClient.invalidateQueries({ queryKey: ['reservas'] })
+      window.showToast?.(`Azure sincronizada: ${r.inseridas} nova(s), ${r.atualizadas} atualizada(s).`, 'success')
+    },
+    onError: (e: Error) => {
+      setSyncResult(null)
+      window.showToast?.(e.message, 'error')
+    },
+  })
 
   const [search, setSearch] = useState('')
   const [filterCloud, setFilterCloud] = useState('')
@@ -148,10 +167,57 @@ export default function ReservasView() {
           <option>Expirada</option>
           <option>Cancelada</option>
         </select>
-        <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={openNew}>
+        {spsAtivas.length > 1 && (
+          <select
+            className="filter-select"
+            style={{ marginLeft: 'auto' }}
+            aria-label="Service Principal"
+            value={spId}
+            onChange={(e) => setSpId(e.target.value)}
+          >
+            <option value="">SP padrão</option>
+            {spsAtivas.map((sp) => (
+              <option key={sp.id} value={sp.id}>
+                {sp.nome}
+              </option>
+            ))}
+          </select>
+        )}
+        <button
+          className="btn-ghost"
+          style={spsAtivas.length > 1 ? undefined : { marginLeft: 'auto' }}
+          disabled={syncMutation.isPending || spsAtivas.length === 0}
+          title={spsAtivas.length === 0 ? 'Cadastre uma Service Principal ativa na Coleta Azure' : 'Importar reservas e savings plans direto da Azure'}
+          onClick={() => syncMutation.mutate()}
+        >
+          {syncMutation.isPending ? 'Sincronizando...' : 'Sincronizar com Azure'}
+        </button>
+        <button className="btn-primary" onClick={openNew}>
           Nova Reserva
         </button>
       </div>
+
+      {syncResult && (
+        <div className="integration-card" style={{ marginBottom: 12 }} role="status">
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <div>
+              <strong>Sincronização com Azure ({syncResult.sp})</strong>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                {syncResult.total} encontrada(s) — {syncResult.inseridas} nova(s), {syncResult.atualizadas} atualizada(s).
+                Custos não informados pela Azure podem ser preenchidos manualmente na edição.
+              </div>
+              {syncResult.avisos.map((a) => (
+                <div key={a} style={{ fontSize: 12, color: '#ff8c42', marginTop: 4 }}>
+                  ⚠ {a}
+                </div>
+              ))}
+            </div>
+            <button className="btn-icon" title="Fechar" onClick={() => setSyncResult(null)}>
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="table-container">
         <table className="data-table">
@@ -165,6 +231,7 @@ export default function ReservasView() {
               <th>Prazo</th>
               <th>Vencimento</th>
               <th>Status</th>
+              <th>Origem</th>
               <th style={{ textAlign: 'right' }}>Custo/Mês</th>
               <th>Ações</th>
             </tr>
@@ -172,21 +239,21 @@ export default function ReservasView() {
           <tbody>
             {reservasQuery.isLoading && (
               <tr>
-                <td colSpan={10} style={{ textAlign: 'center', padding: 32, color: 'var(--text-muted)' }}>
+                <td colSpan={11} style={{ textAlign: 'center', padding: 32, color: 'var(--text-muted)' }}>
                   Carregando...
                 </td>
               </tr>
             )}
             {reservasQuery.isError && (
               <tr>
-                <td colSpan={10} style={{ textAlign: 'center', padding: 32, color: 'var(--text-muted)' }}>
+                <td colSpan={11} style={{ textAlign: 'center', padding: 32, color: 'var(--text-muted)' }}>
                   Erro ao carregar reservas: {(reservasQuery.error as Error).message}
                 </td>
               </tr>
             )}
             {!reservasQuery.isLoading && !reservasQuery.isError && filtered.length === 0 && (
               <tr>
-                <td colSpan={10} style={{ textAlign: 'center', padding: 32, color: 'var(--text-muted)' }}>
+                <td colSpan={11} style={{ textAlign: 'center', padding: 32, color: 'var(--text-muted)' }}>
                   Nenhuma reserva encontrada
                 </td>
               </tr>
@@ -211,6 +278,9 @@ export default function ReservasView() {
                 </td>
                 <td>
                   <StatusBadge status={r.status} />
+                </td>
+                <td style={{ fontSize: 12 }} title={r.sincronizado_em ? 'Sincronizada em ' + new Date(r.sincronizado_em).toLocaleString('pt-BR') : undefined}>
+                  {r.origem === 'azure' ? 'Azure' : 'Manual'}
                 </td>
                 <td style={{ textAlign: 'right' }}>{formatBRL(r.custo_mensal)}</td>
                 <td>

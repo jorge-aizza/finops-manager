@@ -441,6 +441,16 @@ async function initDB() {
       );
     `);
 
+    // Sincronização com a Azure: 'manual' = cadastro pela tela, 'azure' = importada via SP.
+    // azure_id (resource id em minúsculas) é a chave do upsert — reservas manuais ficam NULL.
+    await c.query(`
+      ALTER TABLE reservas_cloud ADD COLUMN IF NOT EXISTS origem          VARCHAR(20) DEFAULT 'manual';
+      ALTER TABLE reservas_cloud ADD COLUMN IF NOT EXISTS azure_id        TEXT;
+      ALTER TABLE reservas_cloud ADD COLUMN IF NOT EXISTS sp_id           INTEGER;
+      ALTER TABLE reservas_cloud ADD COLUMN IF NOT EXISTS sincronizado_em TIMESTAMPTZ;
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_reservas_azure_id ON reservas_cloud (azure_id) WHERE azure_id IS NOT NULL;
+    `);
+
     // ── PERFORMANCE INDEXES v2.0 — tabelas core ──────────────────────────────
     // Reversão: ver rollback_performance_indexes.sql
     await c.query(`
@@ -5503,6 +5513,115 @@ app.delete('/api/reservas/:id', authMiddleware, dbMiddleware, async (req, res) =
     await pool.query('DELETE FROM reservas_cloud WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
   } catch (err) { _dbErr(res, err); }
+});
+
+// ── Sincronização de Reservas / Savings Plans direto da Azure (SP configurado) ─────────
+// GET paginado (segue nextLink) no ARM. Erro HTTP vira exceção com o status anexado.
+async function _armListAll(token, url) {
+  const out = [];
+  let next = url;
+  while (next) {
+    const resp = await _cbFetch(next, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 60_000 });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      const e = new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
+      e.status = resp.status;
+      throw e;
+    }
+    const data = await _safeRespJson(resp);
+    out.push(...(data.value || []));
+    next = data.nextLink || null;
+  }
+  return out;
+}
+
+const _RSV_ROLE_HINT = 'Conceda à Service Principal o papel "Reservations Reader" (escopo /providers/Microsoft.Capacity) '
+  + 'e, para Savings Plans, "Savings plan Reader" — a concessão exige um administrador com acesso elevado.';
+
+app.post('/api/reservas/sincronizar-azure', authMiddleware, dbMiddleware, async (req, res) => {
+  if (req.user?.perfil === 'reader') return res.status(403).json({ error: 'Perfil somente leitura não pode sincronizar reservas.' });
+  try {
+    await ensureAzureColetaTable();
+    const spId = req.body && req.body.sp_id ? parseInt(req.body.sp_id, 10) : null;
+    const r = spId
+      ? await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [spId])
+      : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo = true ORDER BY is_padrao DESC, id ASC LIMIT 1`);
+    if (!r.rows.length) return res.status(404).json({ error: 'Nenhuma Service Principal ativa configurada. Cadastre uma na Coleta Azure.' });
+    const cfg = r.rows[0];
+    if (!cfg.ativo) return res.status(400).json({ error: `A Service Principal "${cfg.nome}" está inativa.` });
+
+    const { token } = await _managementGetToken(
+      _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
+    );
+
+    const { mapReservation, mapSavingsPlan } = require('./azureReservas');
+    const avisos = [];
+    const itens = [];
+
+    // 1) Reservas: lista as ordens e, para cada uma, as reservas.
+    let ordens;
+    try {
+      ordens = await _armListAll(token, 'https://management.azure.com/providers/Microsoft.Capacity/reservationOrders?api-version=2022-11-01');
+    } catch (e) {
+      if (e.status === 403 || e.status === 401) {
+        return res.status(403).json({ error: `A Service Principal "${cfg.nome}" não tem permissão para ler reservas. ${_RSV_ROLE_HINT}` });
+      }
+      throw e;
+    }
+    for (let i = 0; i < ordens.length; i += 5) {
+      await Promise.all(ordens.slice(i, i + 5).map(async (ordem) => {
+        try {
+          const rs = await _armListAll(token,
+            `https://management.azure.com${ordem.id}/reservations?api-version=2022-11-01`);
+          for (const rv of rs) { const m = mapReservation(rv, ordem); if (m) itens.push(m); }
+        } catch (e) {
+          avisos.push(`Ordem ${ordem.name}: ${e.message}`);
+        }
+      }));
+    }
+
+    // 2) Savings Plans (falha aqui não invalida as reservas já lidas).
+    try {
+      const sps = await _armListAll(token, 'https://management.azure.com/providers/Microsoft.BillingBenefits/savingsPlans?api-version=2022-11-01');
+      for (const sp of sps) { const m = mapSavingsPlan(sp); if (m) itens.push(m); }
+    } catch (e) {
+      avisos.push(e.status === 403 || e.status === 401
+        ? `Savings Plans não lidos: sem permissão. ${_RSV_ROLE_HINT}`
+        : `Savings Plans não lidos: ${e.message}`);
+    }
+
+    // 3) Upsert por azure_id. Custos e observações preenchidos manualmente são preservados
+    //    quando a Azure não os informa (a API de reservas não retorna preço).
+    let inseridas = 0, atualizadas = 0;
+    for (const m of itens) {
+      const up = await pool.query(
+        `INSERT INTO reservas_cloud
+           (cloud, nome_reserva, tipo_escopo, subscription_id, resource_group_name, tipo_recurso,
+            instancia, quantidade, prazo, opcao_pagamento, custo_total, custo_mensal,
+            data_inicio, data_vencimento, status, origem, azure_id, sp_id, sincronizado_em, criado_por)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'azure',$16,$17,NOW(),$18)
+         ON CONFLICT (azure_id) WHERE azure_id IS NOT NULL DO UPDATE SET
+           nome_reserva=EXCLUDED.nome_reserva, tipo_escopo=EXCLUDED.tipo_escopo,
+           subscription_id=EXCLUDED.subscription_id, resource_group_name=EXCLUDED.resource_group_name,
+           tipo_recurso=EXCLUDED.tipo_recurso, instancia=EXCLUDED.instancia, quantidade=EXCLUDED.quantidade,
+           prazo=EXCLUDED.prazo, opcao_pagamento=EXCLUDED.opcao_pagamento,
+           custo_total=COALESCE(EXCLUDED.custo_total, reservas_cloud.custo_total),
+           custo_mensal=COALESCE(EXCLUDED.custo_mensal, reservas_cloud.custo_mensal),
+           data_inicio=EXCLUDED.data_inicio, data_vencimento=EXCLUDED.data_vencimento,
+           status=EXCLUDED.status, sp_id=EXCLUDED.sp_id, sincronizado_em=NOW(), atualizado_em=NOW()
+         RETURNING (xmax = 0) AS inserida`,
+        [m.cloud, m.nome_reserva, m.tipo_escopo, m.subscription_id, m.resource_group_name, m.tipo_recurso,
+         m.instancia, m.quantidade, m.prazo, m.opcao_pagamento, m.custo_total, m.custo_mensal,
+         m.data_inicio, m.data_vencimento, m.status, m.azure_id, cfg.id, req.user.id]
+      );
+      if (up.rows[0].inserida) inseridas++; else atualizadas++;
+    }
+
+    res.json({ ok: true, sp: cfg.nome, total: itens.length, inseridas, atualizadas, avisos });
+  } catch (err) {
+    console.error('[reservas] sincronizar-azure:', err);
+    res.status(502).json({ error: 'Falha ao sincronizar com a Azure: ' + err.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

@@ -135,6 +135,16 @@ See **Module 08-FRONTEND-REACT** for bridge details, migration checklist, and co
 
 ---
 
+## 🔁 Reservas: cadastro manual + sincronização Azure
+
+- `reservas_cloud` tem `origem` (`manual`|`azure`), `azure_id` (resource id em minúsculas, chave do upsert — índice único parcial), `sp_id`, `sincronizado_em`.
+- `POST /api/reservas/sincronizar-azure` (body opcional `{sp_id}`; senão a SP ativa padrão): lista `Microsoft.Capacity/reservationOrders` + reservas de cada ordem e `Microsoft.BillingBenefits/savingsPlans`. Mapeamento puro em `azureReservas.js` (testes: `node --test tests/azureReservas.test.js`).
+- **Permissões da SP**: "Reservations Reader" em `/providers/Microsoft.Capacity` e "Savings plan Reader" (concessão exige admin com acesso elevado). Sem permissão de reservas → 403 com instrução; Savings Plans sem permissão → só aviso.
+- A API não retorna preço de reserva: `custo_*` ficam vazios (exceto Savings Plan em BRL) e o valor digitado à mão é **preservado** nas re-sincronizações. Demais campos vêm da Azure e são sobrescritos. Reservas removidas na Azure não são apagadas.
+- Cadastro manual (`POST/PUT/DELETE /api/reservas`) segue igual; perfil `reader` não sincroniza.
+
+---
+
 ## 🎨 Branding / Logo por tema
 
 - **Escuro é o padrão** e NÃO seta `data-theme`; só o claro seta `data-theme="light"`. Seletor correto para escuro: `:root:not([data-theme="light"])` (nunca `[data-theme="dark"]`).
