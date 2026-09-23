@@ -1935,17 +1935,8 @@ input[type="time"]::-webkit-calendar-picker-indicator {
    Por isso o realce e por contexto, nao global: no claro a arte vai como e.
    --------------------------------------------------------------------------- */
 .finops-logo {
-  /* escuro e o padrao em :root neste projeto */
-  filter: brightness(1.9) saturate(1.15);
-}
-[data-theme="light"] .finops-logo {
+  /* Mantem cores originais Vivo (roxo, rosa, teal, azul) em ambos os temas */
   filter: none;
-}
-/* O cabecalho do portal e roxo solido nos DOIS temas, entao o realce ali nao
-   depende do tema -- sem isso o roxo do logo se perde no roxo da barra. */
-.portal-header .finops-logo,
-[data-theme="light"] .portal-header .finops-logo {
-  filter: brightness(0) invert(1);
 }
 
 
