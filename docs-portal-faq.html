@@ -5,13 +5,18 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Calculadora de Custos Azure — Ajuda</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<script>(function(){if(localStorage.getItem('finops-theme')!=='dark')document.documentElement.setAttribute('data-theme','light');})()</script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;color:#e8eaf0;background:radial-gradient(ellipse at 25% 45%,rgba(90,0,160,.55) 0%,transparent 60%),radial-gradient(ellipse at 75% 80%,rgba(60,0,100,.3) 0%,transparent 55%),linear-gradient(160deg,#1a0030 0%,#0c0014 50%,#04000c 100%);min-height:100vh;padding:20px}
 
 /* HEADER */
 .header{max-width:700px;margin:0 auto 24px;text-align:center}
-.header-brand{font-size:28pt;font-weight:900;font-family:'Arial Black',Arial,sans-serif;color:#9333ea;text-shadow:0 0 18px rgba(147,51,234,.5);letter-spacing:-.02em;margin-bottom:4px}
+.header-brand{display:flex;justify-content:center;margin-bottom:4px}
+.header-brand img{height:44px;width:auto;display:block}
+.header-brand .logo-dark{display:none}
+:root:not([data-theme="light"]) .header-brand .logo-light{display:none}
+:root:not([data-theme="light"]) .header-brand .logo-dark{display:block}
 .header-sub{font-size:10pt;color:#a990cc;margin-bottom:16px}
 .header-title{font-size:16pt;font-weight:700;color:#e9d5ff}
 .header-desc{font-size:9.5pt;color:#7b6a9e;margin-top:8px;line-height:1.7}
@@ -79,7 +84,10 @@ body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;col
 <body>
 
 <div class="header">
-  <div class="header-brand">vivo</div>
+  <div class="header-brand">
+    <img src="/finops-logo.png" alt="FinOps" class="logo-light">
+    <img src="/finops-logo-dark.png" alt="FinOps" class="logo-dark">
+  </div>
   <div class="header-sub">Calculadora de Custos Azure</div>
   <div class="header-title">Central de Ajuda</div>
   <div class="header-desc">Encontre respostas sobre como usar a calculadora de custos.</div>
