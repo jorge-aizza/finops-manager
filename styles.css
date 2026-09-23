@@ -218,17 +218,6 @@ body {
   display: block;
 }
 
-/* Tema escuro: troca o SVG pelo logo FinOps na sidebar. Escuro e o padrao
-   deste projeto -- nao seta data-theme, so o claro seta data-theme="light".
-   Por isso o alvo e "nao-claro", nao "[data-theme=dark]" (nunca existe).
-   Tema claro nao e tocado -- o SVG segue display:block (regra acima). */
-:root:not([data-theme="light"]) .brand-icon-svg {
-  display: none;
-}
-:root:not([data-theme="light"]) .brand-icon-dark-img {
-  display: block !important;
-}
-
 .brand-text {
   display: flex;
   flex-direction: column;
