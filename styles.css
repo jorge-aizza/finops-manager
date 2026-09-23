@@ -218,14 +218,6 @@ body {
   display: block;
 }
 
-.brand-icon img {
-  height: 36px;
-  width: auto;
-  display: block;
-  border-radius: 4px;
-  object-fit: contain;
-}
-
 .brand-text {
   display: flex;
   flex-direction: column;
