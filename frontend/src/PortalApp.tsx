@@ -74,8 +74,12 @@ export default function PortalApp() {
     <>
       <header className="portal-header">
         <div className="portal-brand">
-          <img src="/finops-logo.png" alt="FinOps" className="finops-logo"
+          {/* Tema claro (padrao): logo original, inalterado */}
+          <img src="/finops-logo.png" alt="FinOps" className="finops-logo topbar-logo-light"
                style={{ height: 30, width: 'auto', display: 'block', flexShrink: 0 }} />
+          {/* Tema escuro: mesmo logo novo usado no top-bar e login */}
+          <img src="/finops-logo-dark.png" alt="FinOps" className="finops-logo topbar-logo-dark"
+               style={{ height: 30, width: 'auto', display: 'none', flexShrink: 0 }} />
           <div>
             <div className="portal-brand-name">{titulo}</div>
             <div className="portal-brand-sub">Calculadora Azure</div>
