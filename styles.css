@@ -218,15 +218,6 @@ body {
   display: block;
 }
 
-.brand-icon-svg {
-  display: block;
-}
-
-.brand-icon-img {
-  display: none !important;
-}
-
-
 .brand-text {
   display: flex;
   flex-direction: column;
@@ -1936,58 +1927,17 @@ input[type="time"]::-webkit-calendar-picker-indicator {
    Por isso o realce e por contexto, nao global: no claro a arte vai como e.
    --------------------------------------------------------------------------- */
 .finops-logo {
-  /* Mantem cores originais Vivo (roxo, rosa, teal, azul) em ambos os temas */
+  /* escuro e o padrao em :root neste projeto */
+  filter: brightness(1.9) saturate(1.15);
+}
+[data-theme="light"] .finops-logo {
   filter: none;
 }
-
-/* Portal: imagem claro em tema claro, escuro em tema escuro */
-.portal-brand-light {
-  display: block;
-}
-
-.portal-brand-dark {
-  display: none !important;
-}
-
-[data-theme="light"] .portal-brand-light {
-  display: block !important;
-}
-
-[data-theme="light"] .portal-brand-dark {
-  display: none !important;
-}
-
-[data-theme="dark"] .portal-brand-light {
-  display: none !important;
-}
-
-[data-theme="dark"] .portal-brand-dark {
-  display: block !important;
-}
-
-/* Login: imagem claro em tema claro, escuro em tema escuro */
-.login-logo-light {
-  display: block;
-}
-
-.login-logo-dark {
-  display: none !important;
-}
-
-[data-theme="light"] .login-logo-light {
-  display: block !important;
-}
-
-[data-theme="light"] .login-logo-dark {
-  display: none !important;
-}
-
-[data-theme="dark"] .login-logo-light {
-  display: none !important;
-}
-
-[data-theme="dark"] .login-logo-dark {
-  display: block !important;
+/* O cabecalho do portal e roxo solido nos DOIS temas, entao o realce ali nao
+   depende do tema -- sem isso o roxo do logo se perde no roxo da barra. */
+.portal-header .finops-logo,
+[data-theme="light"] .portal-header .finops-logo {
+  filter: brightness(0) invert(1);
 }
 
 
