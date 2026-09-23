@@ -74,8 +74,14 @@ export default function PortalApp() {
     <>
       <header className="portal-header">
         <div className="portal-brand">
-          <img src="/finops-logo.png" alt="FinOps" className="finops-logo"
-               style={{ height: 30, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <svg className="portal-brand-svg" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ height: 30, width: 'auto', flexShrink: 0, display: 'block' }}>
+            <rect x="2" y="2" width="12" height="12" rx="2" fill="currentColor"/>
+            <rect x="18" y="2" width="12" height="12" rx="2" fill="currentColor" opacity="0.6"/>
+            <rect x="2" y="18" width="12" height="12" rx="2" fill="currentColor" opacity="0.6"/>
+            <rect x="18" y="18" width="12" height="12" rx="2" fill="currentColor" opacity="0.3"/>
+          </svg>
+          <img src="/finops-logo.png" alt="FinOps" className="portal-brand-img finops-logo"
+               style={{ height: 30, width: 'auto', display: 'none', flexShrink: 0 }} />
           <div>
             <div className="portal-brand-name">{titulo}</div>
             <div className="portal-brand-sub">Calculadora Azure</div>

@@ -1957,6 +1957,56 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   filter: none;
 }
 
+/* Portal: SVG em tema claro, imagem em tema escuro */
+.portal-brand-svg {
+  display: block;
+}
+
+.portal-brand-img {
+  display: none !important;
+}
+
+[data-theme="light"] .portal-brand-svg {
+  display: block !important;
+}
+
+[data-theme="light"] .portal-brand-img {
+  display: none !important;
+}
+
+[data-theme="dark"] .portal-brand-svg {
+  display: none !important;
+}
+
+[data-theme="dark"] .portal-brand-img {
+  display: block !important;
+}
+
+/* Login: SVG em tema claro, imagem em tema escuro */
+.login-logo-svg {
+  display: block;
+}
+
+.login-logo-img {
+  display: none !important;
+}
+
+[data-theme="light"] .login-logo-svg {
+  display: block !important;
+}
+
+[data-theme="light"] .login-logo-img {
+  display: none !important;
+}
+
+[data-theme="dark"] .login-logo-svg {
+  display: none !important;
+}
+
+[data-theme="dark"] .login-logo-img {
+  display: block !important;
+}
+
 
 /* ---------------------------------------------------------------------------
    Barra de abas na pagina (.view-tabs)
