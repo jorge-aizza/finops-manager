@@ -218,18 +218,29 @@ body {
   display: block;
 }
 
+.brand-icon-svg {
+  display: block;
+}
+
 .brand-icon-img {
   display: none !important;
 }
 
-/* Tema escuro: mostrar imagem, ocultar SVG */
-[data-theme="dark"] .brand-icon-svg,
-:root:not([data-theme="light"]) .brand-icon-svg {
+/* Tema claro: mostrar SVG, ocultar imagem */
+[data-theme="light"] .brand-icon-svg {
+  display: block !important;
+}
+
+[data-theme="light"] .brand-icon-img {
   display: none !important;
 }
 
-[data-theme="dark"] .brand-icon-img,
-:root:not([data-theme="light"]) .brand-icon-img {
+/* Tema escuro: ocultar SVG, mostrar imagem */
+[data-theme="dark"] .brand-icon-svg {
+  display: none !important;
+}
+
+[data-theme="dark"] .brand-icon-img {
   display: block !important;
 }
 
