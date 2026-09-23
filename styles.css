@@ -226,21 +226,28 @@ body {
   display: none !important;
 }
 
-/* Tema claro: mostrar SVG, ocultar imagem */
-[data-theme="light"] .brand-icon-svg {
+/* Sidebar: imagem claro em tema claro, escuro em tema escuro */
+.brand-icon-light {
+  display: block;
+}
+
+.brand-icon-dark {
+  display: none !important;
+}
+
+[data-theme="light"] .brand-icon-light {
   display: block !important;
 }
 
-[data-theme="light"] .brand-icon-img {
+[data-theme="light"] .brand-icon-dark {
   display: none !important;
 }
 
-/* Tema escuro: ocultar SVG, mostrar imagem */
-[data-theme="dark"] .brand-icon-svg {
+[data-theme="dark"] .brand-icon-light {
   display: none !important;
 }
 
-[data-theme="dark"] .brand-icon-img {
+[data-theme="dark"] .brand-icon-dark {
   display: block !important;
 }
 
@@ -1957,53 +1964,53 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   filter: none;
 }
 
-/* Portal: SVG em tema claro, imagem em tema escuro */
-.portal-brand-svg {
+/* Portal: imagem claro em tema claro, escuro em tema escuro */
+.portal-brand-light {
   display: block;
 }
 
-.portal-brand-img {
+.portal-brand-dark {
   display: none !important;
 }
 
-[data-theme="light"] .portal-brand-svg {
+[data-theme="light"] .portal-brand-light {
   display: block !important;
 }
 
-[data-theme="light"] .portal-brand-img {
+[data-theme="light"] .portal-brand-dark {
   display: none !important;
 }
 
-[data-theme="dark"] .portal-brand-svg {
+[data-theme="dark"] .portal-brand-light {
   display: none !important;
 }
 
-[data-theme="dark"] .portal-brand-img {
+[data-theme="dark"] .portal-brand-dark {
   display: block !important;
 }
 
-/* Login: SVG em tema claro, imagem em tema escuro */
-.login-logo-svg {
+/* Login: imagem claro em tema claro, escuro em tema escuro */
+.login-logo-light {
   display: block;
 }
 
-.login-logo-img {
+.login-logo-dark {
   display: none !important;
 }
 
-[data-theme="light"] .login-logo-svg {
+[data-theme="light"] .login-logo-light {
   display: block !important;
 }
 
-[data-theme="light"] .login-logo-img {
+[data-theme="light"] .login-logo-dark {
   display: none !important;
 }
 
-[data-theme="dark"] .login-logo-svg {
+[data-theme="dark"] .login-logo-light {
   display: none !important;
 }
 
-[data-theme="dark"] .login-logo-img {
+[data-theme="dark"] .login-logo-dark {
   display: block !important;
 }
 
