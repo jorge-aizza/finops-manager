@@ -226,30 +226,6 @@ body {
   display: none !important;
 }
 
-/* Sidebar: imagem claro em tema claro, escuro em tema escuro */
-.brand-icon-light {
-  display: block;
-}
-
-.brand-icon-dark {
-  display: none !important;
-}
-
-[data-theme="light"] .brand-icon-light {
-  display: block !important;
-}
-
-[data-theme="light"] .brand-icon-dark {
-  display: none !important;
-}
-
-[data-theme="dark"] .brand-icon-light {
-  display: none !important;
-}
-
-[data-theme="dark"] .brand-icon-dark {
-  display: block !important;
-}
 
 .brand-text {
   display: flex;
