@@ -449,6 +449,9 @@ export default function InventarioView() {
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroDesperdicioDias, setFiltroDesperdicioDias] = useState(0)
+  const [filtroDespTipo, setFiltroDespTipo] = useState<AzureDesperdicioCategoria | ''>('')
+  const [filtroDespRg, setFiltroDespRg] = useState('')
+  const [filtroDespBusca, setFiltroDespBusca] = useState('')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
   const [filtroAcao, setFiltroAcao] = useState('')
   const [filtroTipo, setFiltroTipo] = useState('')
@@ -519,6 +522,16 @@ export default function InventarioView() {
     enabled: tab === 'desperdicio',
     staleTime: 5 * 60 * 1000,
   })
+  const despItens = desperdicioQuery.data?.itens ?? []
+  const despRgs = Array.from(new Set(despItens.map((i) => i.resource_group).filter((x): x is string => !!x))).sort((a, b) => a.localeCompare(b))
+  const despBuscaNorm = filtroDespBusca.trim().toLowerCase()
+  const despFiltrados = despItens.filter((i) =>
+    (!filtroDespTipo || i.categoria === filtroDespTipo)
+    && (!filtroDespRg || i.resource_group === filtroDespRg)
+    && (filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias)
+    && (!despBuscaNorm || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)))
+  const despTemFiltro = !!(filtroDespTipo || filtroDespRg || filtroDesperdicioDias || despBuscaNorm)
+  const limparFiltrosDesp = () => { setFiltroDespTipo(''); setFiltroDespRg(''); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
   const redeQuery = useQuery({
     queryKey: ['azure-inv-rede-topologia', redeSub],
     queryFn: () => getAzureRedeTopologia(redeSub as string),
@@ -1365,28 +1378,57 @@ export default function InventarioView() {
 
           {desperdicioQuery.data && desperdicioQuery.data.itens.length > 0 && (
             <div className="card" style={{ margin: '16px 20px' }}>
-              <div className="card-header"><span className="card-title">Recursos ociosos</span></div>
-              <div style={{ padding: '0 20px 8px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  Órfão há
-                  <select
-                    aria-label="Órfão há"
-                    value={filtroDesperdicioDias}
-                    onChange={(e) => setFiltroDesperdicioDias(Number(e.target.value))}
-                    style={{ width: 'auto' }}
-                  >
-                    <option value={0}>qualquer tempo</option>
-                    <option value={7}>7+ dias</option>
-                    <option value={30}>30+ dias</option>
-                    <option value={90}>90+ dias</option>
-                  </select>
-                </label>
-                {desperdicioQuery.data.total_itens > desperdicioQuery.data.itens.length && (
-                  <span style={{ color: 'var(--text-muted)' }}>
-                    Mostrando os {desperdicioQuery.data.itens.length} de maior custo, de {desperdicioQuery.data.total_itens}.
-                  </span>
+              <div className="card-header">
+                <span className="card-title">Recursos ociosos</span>
+                <span className="badge">{despTemFiltro ? `${despFiltrados.length} de ${despItens.length}` : despItens.length}</span>
+                {despTemFiltro && (
+                  <button className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 11 }} onClick={limparFiltrosDesp}>Limpar filtros</button>
                 )}
               </div>
+              {desperdicioQuery.data.total_itens > desperdicioQuery.data.itens.length && (
+                <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+                  Mostrando os {desperdicioQuery.data.itens.length} de maior custo, de {desperdicioQuery.data.total_itens}.
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 8, padding: '0 20px 12px', flexWrap: 'wrap' }}>
+                <select aria-label="Resource Group" value={filtroDespRg} onChange={(e) => setFiltroDespRg(e.target.value)}>
+                  <option value="">Todos os Resource Groups</option>
+                  {despRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
+                </select>
+                <select aria-label="Órfão há" value={filtroDesperdicioDias} onChange={(e) => setFiltroDesperdicioDias(Number(e.target.value))}>
+                  <option value={0}>Órfão há qualquer tempo</option>
+                  <option value={7}>Órfão há 7+ dias</option>
+                  <option value={30}>Órfão há 30+ dias</option>
+                  <option value={90}>Órfão há 90+ dias</option>
+                </select>
+                <input placeholder="Buscar por nome do recurso" value={filtroDespBusca} onChange={(e) => setFiltroDespBusca(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
+              </div>
+              {desperdicioQuery.data.por_categoria.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, padding: '0 20px 16px', flexWrap: 'wrap' }}>
+                  {desperdicioQuery.data.por_categoria.map((c) => {
+                    const ativo = filtroDespTipo === c.categoria
+                    return (
+                      <button
+                        key={c.categoria}
+                        onClick={() => setFiltroDespTipo(ativo ? '' : c.categoria)}
+                        title="Clique para filtrar por este tipo"
+                        style={{
+                          display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, minWidth: 110,
+                          padding: '8px 14px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
+                          border: `1px solid ${ativo ? 'var(--accent)' : 'var(--border)'}`,
+                          background: ativo ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'transparent',
+                        }}
+                      >
+                        <span style={{ fontSize: 18, fontWeight: 700, color: ativo ? 'var(--accent)' : 'var(--text)' }}>{c.itens}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{DESPERDICIO_LABEL[c.categoria] || c.categoria}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+              {despFiltrados.length === 0 && (
+                <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum recurso bate com os filtros selecionados.</div>
+              )}
               <div className="table-wrapper">
                 <table className="data-table">
                   <thead>
@@ -1398,7 +1440,7 @@ export default function InventarioView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {desperdicioQuery.data.itens.filter(it => filtroDesperdicioDias === 0 || (it.dias_orfao ?? 0) >= filtroDesperdicioDias).map((it) => (
+                    {despFiltrados.map((it) => (
                       <tr key={it.resource_id}>
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
                           {it.nome || it.resource_id}

@@ -87,6 +87,39 @@ describe('InventarioView', () => {
     expect(screen.queryByText('nic-media')).not.toBeInTheDocument()
   })
 
+  it('aba Desperdício filtra por tipo de recurso, Resource Group e nome', async () => {
+    const base = { subscription_id: 's', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 1 }
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [],
+      por_categoria: [
+        { categoria: 'disco_orfao', itens: 2, custo_mensal_estimado: 0, sem_custo_conhecido: 2 },
+        { categoria: 'nic_orfa', itens: 1, custo_mensal_estimado: 0, sem_custo_conhecido: 1 },
+      ],
+      itens: [
+        { ...base, categoria: 'disco_orfao', resource_id: '/d1', nome: 'disco-a', resource_group: 'rg-um' },
+        { ...base, categoria: 'disco_orfao', resource_id: '/d2', nome: 'disco-b', resource_group: 'rg-dois' },
+        { ...base, categoria: 'nic_orfa', resource_id: '/n1', nome: 'nic-a', resource_group: 'rg-um' },
+      ],
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('button', { name: 'Desperdício' }))
+    expect(await screen.findByText('disco-a')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /NIC/ }))
+    expect(screen.getByText('nic-a')).toBeInTheDocument()
+    expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
+    await userEvent.selectOptions(screen.getByLabelText('Resource Group'), 'rg-dois')
+    expect(screen.getByText('disco-b')).toBeInTheDocument()
+    expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
+    await userEvent.type(screen.getByPlaceholderText('Buscar por nome do recurso'), 'nic')
+    expect(screen.getByText('nic-a')).toBeInTheDocument()
+    expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
+  })
+
   it('mostra a aba Recursos por padrão', async () => {
     renderWithClient()
     expect(await screen.findByText('Recursos (Inventário)')).toBeInTheDocument()
