@@ -6254,15 +6254,14 @@ async function ensureAzureColetaTable() {
   // de recursos que existem mas nunca geraram evento desde a ativação do Inventário, sem
   // "criado por/em" porque o Resource Graph não tem esse histórico).
   await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS origem_deteccao VARCHAR(20) DEFAULT 'activity_log'`);
-  // UNIQUE via índice (não constraint inline) — resource_id é TEXT sem limite, e um índice
-  // btree comum já é suficiente pra UPSERT (ON CONFLICT precisa de um índice único, não
-  // necessariamente uma constraint declarada no CREATE TABLE).
-  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_recursos_inv_uniq ON azure_recursos_inventario (subscription_id, resource_id)`);
+  // NOTA: índice case-sensitive foi removido — usar apenas o case-insensitive criado pela migration
+  // (migrations/inventarioResourceIdCase.js). Se houver conflito, dropar o antigo.
+  await pool.query(`DROP INDEX IF EXISTS idx_azure_recursos_inv_uniq`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
-  // Unicidade case-insensitive de resource_id (migrations/inventarioResourceIdCase.js): as
-  // gravações usam ON CONFLICT (subscription_id, (LOWER(resource_id))), que exige o índice
-  // criado por ela. Idempotente — sem custo quando o índice já existe.
+  // Unicidade case-insensitive de resource_id (migrations/inventarioResourceIdCase.js): o índice
+  // funcional é criado por ela (LOWER(resource_id)). Reconciliação usa busca + insert/update
+  // explícita para evitar sintaxe ON CONFLICT com funções. Idempotente — sem custo quando já existe.
   try {
     await require('./migrations/inventarioResourceIdCase').run(pool, console.log);
   } catch (e) {
@@ -12751,18 +12750,30 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
       for (const item of recursos) {
         if (!item.id) continue;
         const nome = item.name || String(item.id).split('/').pop();
-        const r = await pool.query(
-          `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,ativo,origem_deteccao)
-           VALUES ($1,$2,$3,$4,$5,true,'resource_graph')
-           ON CONFLICT (subscription_id, (LOWER(resource_id))) DO UPDATE SET
-             ativo=true,
-             resource_type=COALESCE(azure_recursos_inventario.resource_type, EXCLUDED.resource_type),
-             resource_group=COALESCE(azure_recursos_inventario.resource_group, EXCLUDED.resource_group),
-             nome=COALESCE(azure_recursos_inventario.nome, EXCLUDED.nome)
-           RETURNING (xmax = 0) AS inserted`,
-          [subId, item.id, item.type || null, item.resourceGroup || null, nome]
+        const resourceId = item.id.toLowerCase();
+        const existing = await pool.query(
+          `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2`,
+          [subId, resourceId]
         );
-        if (r.rows[0]?.inserted) totalNovos++;
+        if (existing.rows.length) {
+          await pool.query(
+            `UPDATE azure_recursos_inventario SET
+               ativo=true,
+               resource_type=COALESCE(resource_type, $1),
+               resource_group=COALESCE(resource_group, $2),
+               nome=COALESCE(nome, $3),
+               atualizado_em=NOW()
+             WHERE id = $4`,
+            [item.type || null, item.resourceGroup || null, nome, existing.rows[0].id]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,ativo,origem_deteccao)
+             VALUES ($1,$2,$3,$4,$5,true,'resource_graph')`,
+            [subId, item.id, item.type || null, item.resourceGroup || null, nome]
+          );
+          totalNovos++;
+        }
         _invColetaProgresso.eventos = totalEncontrados;
         _invColetaProgresso.novos = totalNovos;
       }
