@@ -517,6 +517,7 @@ export default function InventarioView() {
     queryKey: ['azure-inv-desperdicio'],
     queryFn: () => getAzureDesperdicio(),
     enabled: tab === 'desperdicio',
+    staleTime: 5 * 60 * 1000,
   })
   const redeQuery = useQuery({
     queryKey: ['azure-inv-rede-topologia', redeSub],
