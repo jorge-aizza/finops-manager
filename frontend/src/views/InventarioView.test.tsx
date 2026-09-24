@@ -87,7 +87,7 @@ describe('InventarioView', () => {
     expect(screen.queryByText('nic-media')).not.toBeInTheDocument()
   })
 
-  it('aba Desperdício filtra por tipo de recurso, Resource Group e nome', async () => {
+  it('aba Desperdício filtra por tipo de recurso (cartões e seletor) e Resource Group', async () => {
     const base = { subscription_id: 's', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 1 }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [],
@@ -125,9 +125,16 @@ describe('InventarioView', () => {
     expect(screen.getByRole('button', { name: /Disco/ })).toHaveTextContent('1')
 
     await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
-    await userEvent.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'nic')
+    // Seletor "Tipo de recurso" (com contagem) — mesmo filtro dos cartões
+    const seletorTipo = screen.getByLabelText('Tipo de recurso')
+    expect(screen.getByRole('option', { name: /NIC.*\(1\)/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /Disco.*\(2\)/ })).toBeInTheDocument()
+    await userEvent.selectOptions(seletorTipo, 'nic_orfa')
     expect(screen.getByText('nic-a')).toBeInTheDocument()
     expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
+    expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
+    await userEvent.selectOptions(seletorTipo, '')
+    expect(screen.getByText('disco-b')).toBeInTheDocument()
   })
 
   it('mostra a aba Recursos por padrão', async () => {

@@ -462,7 +462,6 @@ export default function InventarioView() {
   const [filtroDesperdicioDias, setFiltroDesperdicioDias] = useState(0)
   const [filtroDespTipo, setFiltroDespTipo] = useState<AzureDesperdicioCategoria | ''>('')
   const [filtroDespRg, setFiltroDespRg] = useState('')
-  const [filtroDespBusca, setFiltroDespBusca] = useState('')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
   const [filtroAcao, setFiltroAcao] = useState('')
   const [filtroTipo, setFiltroTipo] = useState('')
@@ -535,12 +534,10 @@ export default function InventarioView() {
   })
   const despItens = desperdicioQuery.data?.itens ?? []
   const despRgs = Array.from(new Set(despItens.map((i) => i.resource_group).filter((x): x is string => !!x))).sort((a, b) => a.localeCompare(b))
-  const despBuscaNorm = filtroDespBusca.trim().toLowerCase()
   // Base = todos os filtros menos o de tipo: os cartões por tipo mostram o que sobraria ao clicar em cada um.
   const despBase = despItens.filter((i) =>
     (!filtroDespRg || i.resource_group === filtroDespRg)
-    && (filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias)
-    && (!despBuscaNorm || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)))
+    && (filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias))
   const despFiltrados = filtroDespTipo ? despBase.filter((i) => i.categoria === filtroDespTipo) : despBase
   const despCustoMensal = despFiltrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
   const despSemCusto = despFiltrados.filter((i) => i.custo_mensal_estimado === null).length
@@ -550,8 +547,8 @@ export default function InventarioView() {
       return { categoria: c.categoria, itens: doTipo.length, custo: doTipo.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0) }
     })
     .filter((c) => c.itens > 0 || c.categoria === filtroDespTipo)
-  const despTemFiltro = !!(filtroDespTipo || filtroDespRg || filtroDesperdicioDias || despBuscaNorm)
-  const limparFiltrosDesp = () => { setFiltroDespTipo(''); setFiltroDespRg(''); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
+  const despTemFiltro = !!(filtroDespTipo || filtroDespRg || filtroDesperdicioDias)
+  const limparFiltrosDesp = () => { setFiltroDespTipo(''); setFiltroDespRg(''); setFiltroDesperdicioDias(0) }
   const redeQuery = useQuery({
     queryKey: ['azure-inv-rede-topologia', redeSub],
     queryFn: () => getAzureRedeTopologia(redeSub as string),
@@ -1350,11 +1347,15 @@ export default function InventarioView() {
             {desperdicioQuery.data && (
               <div style={{ padding: '0 20px 16px' }}>
                 <div className="filters-bar" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
-                  <input
-                    type="text" className="filter-input" style={{ minWidth: 220 }}
-                    placeholder="Buscar por nome do recurso..."
-                    value={filtroDespBusca} onChange={(e) => setFiltroDespBusca(e.target.value)}
-                  />
+                  <select
+                    className="filter-select" style={{ minWidth: 240 }} aria-label="Tipo de recurso"
+                    value={filtroDespTipo} onChange={(e) => setFiltroDespTipo(e.target.value as AzureDesperdicioCategoria | '')}
+                  >
+                    <option value="">Todos os tipos de recurso</option>
+                    {despPorTipo.map((c) => (
+                      <option key={c.categoria} value={c.categoria}>{DESPERDICIO_LABEL[c.categoria] || c.categoria} ({c.itens})</option>
+                    ))}
+                  </select>
                   <select className="filter-select" aria-label="Resource Group" value={filtroDespRg} onChange={(e) => setFiltroDespRg(e.target.value)}>
                     <option value="">Todos os Resource Groups</option>
                     {despRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
