@@ -125,16 +125,30 @@ describe('InventarioView', () => {
     expect(screen.getByRole('button', { name: /Disco/ })).toHaveTextContent('1')
 
     await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
-    // Seletor "Tipo de recurso" (com contagem) — mesmo filtro dos cartões
-    const seletorTipo = screen.getByLabelText('Tipo de recurso')
-    expect(screen.getByRole('option', { name: /NIC.*\(1\)/ })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: /Disco.*\(2\)/ })).toBeInTheDocument()
-    await userEvent.selectOptions(seletorTipo, 'nic_orfa')
+    // Seletor múltiplo "Tipo de recurso" (com contagem) — mesmo filtro dos cartões
+    await userEvent.click(screen.getByText('Todos os tipos de recurso'))
+    expect(screen.getByRole('checkbox', { name: /NIC.*1/ })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: /Disco.*2/ })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('checkbox', { name: /NIC/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: /Disco/ }))
+    await userEvent.click(screen.getByRole('button', { name: /OK/ }))
+    expect(screen.getByText('2 tipos selecionados')).toBeInTheDocument()
     expect(screen.getByText('nic-a')).toBeInTheDocument()
+    expect(screen.getByText('disco-b')).toBeInTheDocument()
+    expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('3')
+
+    // Tirar Disco deixa só NIC
+    await userEvent.click(screen.getByText('2 tipos selecionados'))
+    await userEvent.click(screen.getByRole('checkbox', { name: /Disco/ }))
+    await userEvent.click(screen.getByRole('button', { name: /OK/ }))
     expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
-    await userEvent.selectOptions(seletorTipo, '')
+
+    // Cartões por tipo também somam (clicar em Disco inclui ao NIC já selecionado)
+    await userEvent.click(screen.getAllByRole('button', { name: /Disco/ })[0])
+    expect(screen.getByText('2 tipos selecionados')).toBeInTheDocument()
     expect(screen.getByText('disco-b')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
 
     // Busca por nome continua disponível, combinada com os demais filtros
     await userEvent.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'disco-a')

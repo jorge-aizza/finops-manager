@@ -15,6 +15,7 @@ import {
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria, AzureAnomaliaCrescimento, AzureDesperdicioCategoria } from '../types/azureInventario'
 import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMonitor'
 import RecursoDetalheModal from '../components/RecursoDetalheModal'
+import CmsMultiSelect from '../components/CmsMultiSelect'
 
 // Inventário + Auditoria de Recursos Azure (2026-08-30, pedido do usuário: "ontem tinha X
 // recursos, hoje tenho X+1 — quem criou, quando, quanto custa"). Fonte: Azure Resource Graph
@@ -460,7 +461,7 @@ export default function InventarioView() {
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroDesperdicioDias, setFiltroDesperdicioDias] = useState(0)
-  const [filtroDespTipo, setFiltroDespTipo] = useState<AzureDesperdicioCategoria | ''>('')
+  const [filtroDespTipos, setFiltroDespTipos] = useState<AzureDesperdicioCategoria[]>([])
   const [filtroDespRg, setFiltroDespRg] = useState('')
   const [filtroDespBusca, setFiltroDespBusca] = useState('')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
@@ -541,7 +542,7 @@ export default function InventarioView() {
     (!filtroDespRg || i.resource_group === filtroDespRg)
     && (filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias)
     && (!despBuscaNorm || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)))
-  const despFiltrados = filtroDespTipo ? despBase.filter((i) => i.categoria === filtroDespTipo) : despBase
+  const despFiltrados = filtroDespTipos.length ? despBase.filter((i) => filtroDespTipos.includes(i.categoria)) : despBase
   const despCustoMensal = despFiltrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
   const despSemCusto = despFiltrados.filter((i) => i.custo_mensal_estimado === null).length
   const despPorTipo = (desperdicioQuery.data?.por_categoria ?? [])
@@ -549,9 +550,12 @@ export default function InventarioView() {
       const doTipo = despBase.filter((i) => i.categoria === c.categoria)
       return { categoria: c.categoria, itens: doTipo.length, custo: doTipo.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0) }
     })
-    .filter((c) => c.itens > 0 || c.categoria === filtroDespTipo)
-  const despTemFiltro = !!(filtroDespTipo || filtroDespRg || filtroDesperdicioDias || despBuscaNorm)
-  const limparFiltrosDesp = () => { setFiltroDespTipo(''); setFiltroDespRg(''); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
+    .filter((c) => c.itens > 0 || filtroDespTipos.includes(c.categoria))
+  const despTemFiltro = !!(filtroDespTipos.length || filtroDespRg || filtroDesperdicioDias || despBuscaNorm)
+  const limparFiltrosDesp = () => { setFiltroDespTipos([]); setFiltroDespRg(''); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
+  const despTipoLabel = filtroDespTipos.length === 0 ? 'Todos os tipos de recurso'
+    : filtroDespTipos.length === 1 ? (DESPERDICIO_LABEL[filtroDespTipos[0]] || filtroDespTipos[0])
+    : `${filtroDespTipos.length} tipos selecionados`
   const redeQuery = useQuery({
     queryKey: ['azure-inv-rede-topologia', redeSub],
     queryFn: () => getAzureRedeTopologia(redeSub as string),
@@ -1350,15 +1354,15 @@ export default function InventarioView() {
             {desperdicioQuery.data && (
               <div style={{ padding: '0 20px 16px' }}>
                 <div className="filters-bar" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
-                  <select
-                    className="filter-select" style={{ minWidth: 240 }} aria-label="Tipo de recurso"
-                    value={filtroDespTipo} onChange={(e) => setFiltroDespTipo(e.target.value as AzureDesperdicioCategoria | '')}
-                  >
-                    <option value="">Todos os tipos de recurso</option>
-                    {despPorTipo.map((c) => (
-                      <option key={c.categoria} value={c.categoria}>{DESPERDICIO_LABEL[c.categoria] || c.categoria} ({c.itens})</option>
-                    ))}
-                  </select>
+                  <div style={{ minWidth: 260 }} aria-label="Tipo de recurso">
+                    <CmsMultiSelect
+                      values={filtroDespTipos}
+                      options={despPorTipo.map((c) => ({ value: c.categoria, label: DESPERDICIO_LABEL[c.categoria] || c.categoria, sublabel: String(c.itens) }))}
+                      searchPlaceholder="Buscar tipo..."
+                      triggerLabel={despTipoLabel}
+                      onChange={(v) => setFiltroDespTipos(v as AzureDesperdicioCategoria[])}
+                    />
+                  </div>
                   <select className="filter-select" aria-label="Resource Group" value={filtroDespRg} onChange={(e) => setFiltroDespRg(e.target.value)}>
                     <option value="">Todos os Resource Groups</option>
                     {despRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
@@ -1396,12 +1400,12 @@ export default function InventarioView() {
 
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {despPorTipo.map((c) => {
-                    const ativo = filtroDespTipo === c.categoria
+                    const ativo = filtroDespTipos.includes(c.categoria)
                     return (
                       <button
                         key={c.categoria}
-                        onClick={() => setFiltroDespTipo(ativo ? '' : c.categoria)}
-                        title="Clique para filtrar por este tipo"
+                        onClick={() => setFiltroDespTipos((prev) => ativo ? prev.filter((t) => t !== c.categoria) : [...prev, c.categoria])}
+                        title="Clique para incluir/remover este tipo do filtro"
                         style={{
                           display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, minWidth: 130,
                           padding: '8px 14px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
