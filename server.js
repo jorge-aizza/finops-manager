@@ -9702,7 +9702,12 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
   // Exclui RG gerenciado por Databricks/AKS item a item — o `resourceGroup` já vem do ARG, então
   // não precisa de `_getRgsGerenciados()` (que leria de azure_recursos_inventario). Um disco
   // efêmero de nó de cluster não é desperdício, é o ciclo de vida normal do cluster.
-  const itens = brutos.filter((x) => !_detectManagedRg(x.resourceGroup || '').managed_type);
+  // Exceção: disco solto em RG de AKS (`MC_*`) é volume persistente (PVC) abandonado — disco de nó
+  // fica anexado ao VMSS, então nunca aparece aqui. Databricks continua excluído (disco solto é transitório).
+  const itens = brutos.filter((x) => {
+    const tipo = _detectManagedRg(x.resourceGroup || '').managed_type;
+    return !tipo || (tipo === 'aks' && x.categoria === 'disco_orfao');
+  });
 
   const desde = new Date();
   desde.setDate(desde.getDate() - 30);
