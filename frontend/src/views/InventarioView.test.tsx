@@ -135,6 +135,12 @@ describe('InventarioView', () => {
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
     await userEvent.selectOptions(seletorTipo, '')
     expect(screen.getByText('disco-b')).toBeInTheDocument()
+
+    // Busca por nome continua disponível, combinada com os demais filtros
+    await userEvent.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'disco-a')
+    expect(screen.getByText('disco-a')).toBeInTheDocument()
+    expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
+    expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
   })
 
   it('mostra a aba Recursos por padrão', async () => {
