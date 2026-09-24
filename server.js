@@ -12321,14 +12321,26 @@ async function _coletarInventarioAzure(origem = 'manual') {
 
         if (ch.changeType === 'Delete') {
           const nomeDel = resourceId.split('/').pop();
-          await pool.query(
-            `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,excluido_por,excluido_em,ativo)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,false)
-             ON CONFLICT (subscription_id, (LOWER(resource_id))) DO UPDATE SET
-               nome=COALESCE(azure_recursos_inventario.nome, EXCLUDED.nome),
-               excluido_por=EXCLUDED.excluido_por, excluido_em=EXCLUDED.excluido_em, ativo=false`,
-            [subId, resourceId, resourceType, resourceGroup, nomeDel, autor, quando]
+          const lowerResourceId = resourceId.toLowerCase();
+          const existing = await pool.query(
+            `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2 LIMIT 1`,
+            [subId, lowerResourceId]
           );
+          if (existing.rows.length > 0) {
+            await pool.query(
+              `UPDATE azure_recursos_inventario SET
+                 nome=COALESCE(nome, $1),
+                 excluido_por=$2, excluido_em=$3, ativo=false
+               WHERE id = $4`,
+              [nomeDel, autor, quando, existing.rows[0].id]
+            );
+          } else {
+            await pool.query(
+              `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,excluido_por,excluido_em,ativo)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,false)`,
+              [subId, resourceId, resourceType, resourceGroup, nomeDel, autor, quando]
+            );
+          }
           totalExcluidos++;
           await pool.query(
             `INSERT INTO azure_recursos_auditoria_eventos (subscription_id,resource_id,resource_type,resource_group,acao,autor,quando,operation_name,correlation_id)
@@ -12337,19 +12349,36 @@ async function _coletarInventarioAzure(origem = 'manual') {
           );
         } else {
           const nome = resourceId.split('/').pop();
-          await pool.query(
-            `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,criado_por,criado_em,atualizado_por,atualizado_em,ativo)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,true)
-             ON CONFLICT (subscription_id, (LOWER(resource_id))) DO UPDATE SET
-               atualizado_por=EXCLUDED.atualizado_por, atualizado_em=EXCLUDED.atualizado_em,
-               resource_type=EXCLUDED.resource_type, resource_group=EXCLUDED.resource_group, ativo=true`,
-            [subId, resourceId, resourceType, resourceGroup, nome, autor, quando]
+          const lowerResourceId = resourceId.toLowerCase();
+          const existing = await pool.query(
+            `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2 LIMIT 1`,
+            [subId, lowerResourceId]
           );
+          let acao;
+          if (existing.rows.length > 0) {
+            await pool.query(
+              `UPDATE azure_recursos_inventario SET
+                 atualizado_por=$1, atualizado_em=$2,
+                 resource_type=COALESCE(resource_type, $3),
+                 resource_group=COALESCE(resource_group, $4),
+                 ativo=true
+               WHERE id = $5`,
+              [autor, quando, resourceType, resourceGroup, existing.rows[0].id]
+            );
+            acao = 'ATUALIZACAO';
+            totalAtualizados++;
+          } else {
+            await pool.query(
+              `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,criado_por,criado_em,atualizado_por,atualizado_em,ativo)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,true)`,
+              [subId, resourceId, resourceType, resourceGroup, nome, autor, quando]
+            );
+            acao = 'CRIACAO';
+            totalNovos++;
+          }
           // `changeType` já diferencia Create de Update nativamente — não precisa mais do
           // truque `RETURNING (xmax=0)` que o Activity Log exigia (lá o mesmo evento `/write`
           // servia pros dois casos, sem como saber qual sem olhar o estado anterior da linha).
-          const acao = ch.changeType === 'Create' ? 'CRIACAO' : 'ATUALIZACAO';
-          if (acao === 'CRIACAO') totalNovos++; else totalAtualizados++;
           await pool.query(
             `INSERT INTO azure_recursos_auditoria_eventos (subscription_id,resource_id,resource_type,resource_group,acao,autor,quando,operation_name,correlation_id)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
