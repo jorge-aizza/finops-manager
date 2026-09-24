@@ -9717,7 +9717,8 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
     const c = custos.get(String(x.id || '').toUpperCase());
     // Data real quando o Azure informa: disco = último desanexo; snapshot = criação. NIC/IP
     // não têm esse dado — o endpoint completa pela primeira detecção registrada.
-    const desdeReal = x.categoria === 'disco_orfao' ? (x.orfaoDesde || null)
+    // Disco nunca anexado não tem LastOwnershipUpdateTime: órfão desde a criação.
+    const desdeReal = x.categoria === 'disco_orfao' ? (x.orfaoDesde || x.criadoEm || null)
       : x.categoria === 'snapshot_antigo' ? (x.criadoEm || null) : null;
     // Extrapolação honesta NESTAS categorias: disco managed e IP Standard estático faturam a
     // mesma taxa anexados ou não, então o custo observado É o desperdício. Sem billing conhecido
