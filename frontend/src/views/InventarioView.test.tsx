@@ -105,17 +105,27 @@ describe('InventarioView', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Desperdício' }))
     expect(await screen.findByText('disco-a')).toBeInTheDocument()
 
+    // Sem filtro: cartão mostra o total (3)
+    expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('3')
+
     await userEvent.click(screen.getByRole('button', { name: /NIC/ }))
     expect(screen.getByText('nic-a')).toBeInTheDocument()
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+    // Com filtro: os cartões acompanham
+    expect(screen.getByText('Recursos ociosos (de 3)')).toBeInTheDocument()
+    expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
 
     await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
+    expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('3')
     await userEvent.selectOptions(screen.getByLabelText('Resource Group'), 'rg-dois')
     expect(screen.getByText('disco-b')).toBeInTheDocument()
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+    // Contagem por tipo respeita o Resource Group escolhido (só 1 disco em rg-dois, 0 NIC)
+    expect(screen.queryByRole('button', { name: /NIC/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Disco/ })).toHaveTextContent('1')
 
     await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
-    await userEvent.type(screen.getByPlaceholderText('Buscar por nome do recurso'), 'nic')
+    await userEvent.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'nic')
     expect(screen.getByText('nic-a')).toBeInTheDocument()
     expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
   })

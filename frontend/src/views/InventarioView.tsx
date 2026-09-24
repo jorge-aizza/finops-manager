@@ -529,11 +529,20 @@ export default function InventarioView() {
   const despItens = desperdicioQuery.data?.itens ?? []
   const despRgs = Array.from(new Set(despItens.map((i) => i.resource_group).filter((x): x is string => !!x))).sort((a, b) => a.localeCompare(b))
   const despBuscaNorm = filtroDespBusca.trim().toLowerCase()
-  const despFiltrados = despItens.filter((i) =>
-    (!filtroDespTipo || i.categoria === filtroDespTipo)
-    && (!filtroDespRg || i.resource_group === filtroDespRg)
+  // Base = todos os filtros menos o de tipo: os cartões por tipo mostram o que sobraria ao clicar em cada um.
+  const despBase = despItens.filter((i) =>
+    (!filtroDespRg || i.resource_group === filtroDespRg)
     && (filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias)
     && (!despBuscaNorm || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)))
+  const despFiltrados = filtroDespTipo ? despBase.filter((i) => i.categoria === filtroDespTipo) : despBase
+  const despCustoMensal = despFiltrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
+  const despSemCusto = despFiltrados.filter((i) => i.custo_mensal_estimado === null).length
+  const despPorTipo = (desperdicioQuery.data?.por_categoria ?? [])
+    .map((c) => {
+      const doTipo = despBase.filter((i) => i.categoria === c.categoria)
+      return { categoria: c.categoria, itens: doTipo.length, custo: doTipo.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0) }
+    })
+    .filter((c) => c.itens > 0 || c.categoria === filtroDespTipo)
   const despTemFiltro = !!(filtroDespTipo || filtroDespRg || filtroDesperdicioDias || despBuscaNorm)
   const limparFiltrosDesp = () => { setFiltroDespTipo(''); setFiltroDespRg(''); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
   const redeQuery = useQuery({
@@ -1328,44 +1337,68 @@ export default function InventarioView() {
 
             {desperdicioQuery.data && (
               <div style={{ padding: '0 20px 16px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginBottom: 12 }}>
-                  <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--orange,#ff8c42)' }}>
-                      {fmtBRLCurto(desperdicioQuery.data.custo_mensal_estimado_total)}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Desperdício estimado por mês</div>
+                <div className="filters-bar" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+                  <input
+                    type="text" className="filter-input" style={{ minWidth: 220 }}
+                    placeholder="Buscar por nome do recurso..."
+                    value={filtroDespBusca} onChange={(e) => setFiltroDespBusca(e.target.value)}
+                  />
+                  <select className="filter-select" aria-label="Resource Group" value={filtroDespRg} onChange={(e) => setFiltroDespRg(e.target.value)}>
+                    <option value="">Todos os Resource Groups</option>
+                    {despRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
+                  </select>
+                  <select className="filter-select" aria-label="Órfão há" value={filtroDesperdicioDias} onChange={(e) => setFiltroDesperdicioDias(Number(e.target.value))}>
+                    <option value={0}>Órfão há qualquer tempo</option>
+                    <option value={7}>Órfão há 7+ dias</option>
+                    <option value={30}>Órfão há 30+ dias</option>
+                    <option value={90}>Órfão há 90+ dias</option>
+                  </select>
+                  {despTemFiltro && (
+                    <button className="btn-ghost" style={{ fontSize: 12 }} onClick={limparFiltrosDesp}>Limpar filtros</button>
+                  )}
+                </div>
+
+                <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', marginBottom: 12 }}>
+                  <div className="stat-card yellow-card">
+                    <div className="stat-label">Desperdício estimado por mês</div>
+                    <div className="stat-value" style={{ color: 'var(--orange,#ff8c42)' }}>{fmtBRLCurto(despCustoMensal)}</div>
                   </div>
-                  <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
-                    <div style={{ fontSize: 20, fontWeight: 700 }}>
-                      {fmtBRLCurto(desperdicioQuery.data.custo_mensal_estimado_total * 12)}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Projeção anual</div>
+                  <div className="stat-card danger">
+                    <div className="stat-label">Projeção anual</div>
+                    <div className="stat-value">{fmtBRLCurto(despCustoMensal * 12)}</div>
                   </div>
-                  <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
-                    <div style={{ fontSize: 20, fontWeight: 700 }}>{desperdicioQuery.data.total_itens}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Recursos ociosos</div>
+                  <div className="stat-card accent">
+                    <div className="stat-label">Recursos ociosos{despTemFiltro ? ` (de ${despItens.length})` : ''}</div>
+                    <div className="stat-value">{despFiltrados.length}</div>
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gap: 6 }}>
-                  {desperdicioQuery.data.por_categoria.map((c) => (
-                    <div key={c.categoria} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12, padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
-                      <span>{DESPERDICIO_LABEL[c.categoria] || c.categoria} <span style={{ color: 'var(--text-muted)' }}>({c.itens})</span></span>
-                      <span style={{ fontWeight: 700 }}>
-                        {fmtBRLCurto(c.custo_mensal_estimado)}
-                        {c.sem_custo_conhecido > 0 && (
-                          <span style={{ fontWeight: 400, color: 'var(--text-muted)', fontSize: 11 }}>
-                            {' '}· {c.sem_custo_conhecido} sem custo conhecido
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                  ))}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {despPorTipo.map((c) => {
+                    const ativo = filtroDespTipo === c.categoria
+                    return (
+                      <button
+                        key={c.categoria}
+                        onClick={() => setFiltroDespTipo(ativo ? '' : c.categoria)}
+                        title="Clique para filtrar por este tipo"
+                        style={{
+                          display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, minWidth: 130,
+                          padding: '8px 14px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
+                          border: `1px solid ${ativo ? 'var(--accent)' : 'var(--border)'}`,
+                          background: ativo ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'transparent',
+                        }}
+                      >
+                        <span style={{ fontSize: 18, fontWeight: 700, color: ativo ? 'var(--accent)' : 'var(--text)' }}>{c.itens}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{DESPERDICIO_LABEL[c.categoria] || c.categoria}</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--orange,#ff8c42)' }}>{fmtBRLCurto(c.custo)}/mês</span>
+                      </button>
+                    )
+                  })}
                 </div>
 
-                {desperdicioQuery.data.sem_custo_conhecido > 0 && (
+                {despSemCusto > 0 && (
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
-                    {desperdicioQuery.data.sem_custo_conhecido} recurso(s) sem nenhuma linha de billing conhecida —
+                    {despSemCusto} recurso(s) sem nenhuma linha de billing conhecida —
                     aparecem como &ldquo;—&rdquo;, nunca como R$ 0,00: não saber o custo não é o mesmo que ser de graça.
                     (NICs, por exemplo, não são cobradas na Azure — continuam sendo entulho, mas não gasto.)
                   </div>
@@ -1387,51 +1420,7 @@ export default function InventarioView() {
               <div className="card-header">
                 <span className="card-title">Recursos ociosos</span>
                 <span className="badge">{despTemFiltro ? `${despFiltrados.length} de ${despItens.length}` : despItens.length}</span>
-                {despTemFiltro && (
-                  <button className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 11 }} onClick={limparFiltrosDesp}>Limpar filtros</button>
-                )}
               </div>
-              {desperdicioQuery.data.total_itens > desperdicioQuery.data.itens.length && (
-                <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  Mostrando os {desperdicioQuery.data.itens.length} de maior custo, de {desperdicioQuery.data.total_itens}.
-                </div>
-              )}
-              <div style={{ display: 'flex', gap: 8, padding: '0 20px 12px', flexWrap: 'wrap' }}>
-                <select aria-label="Resource Group" value={filtroDespRg} onChange={(e) => setFiltroDespRg(e.target.value)}>
-                  <option value="">Todos os Resource Groups</option>
-                  {despRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
-                </select>
-                <select aria-label="Órfão há" value={filtroDesperdicioDias} onChange={(e) => setFiltroDesperdicioDias(Number(e.target.value))}>
-                  <option value={0}>Órfão há qualquer tempo</option>
-                  <option value={7}>Órfão há 7+ dias</option>
-                  <option value={30}>Órfão há 30+ dias</option>
-                  <option value={90}>Órfão há 90+ dias</option>
-                </select>
-                <input placeholder="Buscar por nome do recurso" value={filtroDespBusca} onChange={(e) => setFiltroDespBusca(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
-              </div>
-              {desperdicioQuery.data.por_categoria.length > 0 && (
-                <div style={{ display: 'flex', gap: 8, padding: '0 20px 16px', flexWrap: 'wrap' }}>
-                  {desperdicioQuery.data.por_categoria.map((c) => {
-                    const ativo = filtroDespTipo === c.categoria
-                    return (
-                      <button
-                        key={c.categoria}
-                        onClick={() => setFiltroDespTipo(ativo ? '' : c.categoria)}
-                        title="Clique para filtrar por este tipo"
-                        style={{
-                          display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, minWidth: 110,
-                          padding: '8px 14px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
-                          border: `1px solid ${ativo ? 'var(--accent)' : 'var(--border)'}`,
-                          background: ativo ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'transparent',
-                        }}
-                      >
-                        <span style={{ fontSize: 18, fontWeight: 700, color: ativo ? 'var(--accent)' : 'var(--text)' }}>{c.itens}</span>
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{DESPERDICIO_LABEL[c.categoria] || c.categoria}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
               {despFiltrados.length === 0 && (
                 <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum recurso bate com os filtros selecionados.</div>
               )}
