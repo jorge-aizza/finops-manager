@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -344,6 +344,14 @@ describe('InventarioView', () => {
     await waitFor(() => expect(azureInventarioApi.salvarAzureInventarioConfig).toHaveBeenCalledWith(
       expect.objectContaining({ subscription_ids: null }),
     ))
+  })
+
+  it('clique numa notificação do sino abre a aba pedida pela ponte (ex: Crescimento)', async () => {
+    renderWithClient()
+    const botao = await screen.findByRole('button', { name: 'Crescimento' })
+    expect(botao).toHaveClass('btn-ghost')
+    act(() => window.__reactBridge.setInventarioTab('crescimento'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Crescimento' })).toHaveClass('btn-primary'))
   })
 
   it('botão "Coletar Agora" dispara a coleta manual', async () => {

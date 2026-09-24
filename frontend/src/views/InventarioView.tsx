@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { listSPs } from '../api/coleta'
 import { listSubscriptions } from '../api/calculadora'
+import { setInventarioTabListener } from '../bridge'
 import {
   getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
@@ -440,7 +441,11 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
 
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'crescimento' | 'conformidade' | 'advisor' | 'rede' | 'desperdicio' | 'config'>('recursos')
+  type InventarioTab = 'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'crescimento' | 'conformidade' | 'advisor' | 'rede' | 'desperdicio' | 'config'
+  const [tab, setTab] = useState<InventarioTab>('recursos')
+  useEffect(() => setInventarioTabListener((t) => {
+    if (['recursos', 'porAssinatura', 'auditoria', 'comparativo', 'crescimento', 'conformidade', 'advisor', 'rede', 'desperdicio', 'config'].includes(t)) setTab(t as InventarioTab)
+  }), [])
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')

@@ -1673,7 +1673,7 @@ app.get('/api/notificacoes', authMiddleware, dbMiddleware, async (req, res) => {
     // Notificações de coletas recentes (48h)
     try {
       const rSis = await pool.query(
-        `SELECT id, tipo, titulo, mensagem, criado_em FROM notificacoes_sistema WHERE expira_em > NOW() ORDER BY criado_em DESC LIMIT 20`
+        `SELECT id, tipo, titulo, mensagem, destino, criado_em FROM notificacoes_sistema WHERE expira_em > NOW() ORDER BY criado_em DESC LIMIT 20`
       );
       rSis.rows.forEach(n => {
         notifs.push({
@@ -1682,6 +1682,7 @@ app.get('/api/notificacoes', authMiddleware, dbMiddleware, async (req, res) => {
           tipo:        n.tipo,
           acao:        n.titulo,
           mensagem:    n.mensagem || '',
+          destino:     n.destino || null,
           id_finops:   '',
           projeto_nome: null,
           diffDias:    -9999,
@@ -5779,6 +5780,10 @@ async function ensureAzureColetaTable() {
       expira_em  TIMESTAMP NOT NULL
     )
   `);
+  // destino = "view:aba" para onde o clique no sino leva (ex.: 'inventario:crescimento'). NULL = sem link.
+  await pool.query(`ALTER TABLE notificacoes_sistema ADD COLUMN IF NOT EXISTS destino VARCHAR(100)`);
+  await pool.query(`UPDATE notificacoes_sistema SET destino = 'inventario:crescimento' WHERE tipo = 'inventario_crescimento' AND destino IS NULL`);
+  await pool.query(`UPDATE notificacoes_sistema SET destino = 'inventario:auditoria' WHERE tipo = 'inventario_alteracao' AND destino IS NULL`);
   // ── azure_coleta_pendentes — reprocessamentos agendados para próxima execução ──
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_coleta_pendentes (
@@ -6746,12 +6751,12 @@ async function _rebuildAlocacaoTags(origem = 'agendado', forcar = false) {
   }
 }
 
-async function _registrarNotificacaoColeta(titulo, mensagem, tipo = 'coleta_concluida') {
+async function _registrarNotificacaoColeta(titulo, mensagem, tipo = 'coleta_concluida', destino = null) {
   if (!pool) return;
   try {
     await pool.query(
-      `INSERT INTO notificacoes_sistema (tipo, titulo, mensagem, expira_em) VALUES ($1,$2,$3, NOW() + INTERVAL '48 hours')`,
-      [tipo, titulo, mensagem]
+      `INSERT INTO notificacoes_sistema (tipo, titulo, mensagem, destino, expira_em) VALUES ($1,$2,$3,$4, NOW() + INTERVAL '48 hours')`,
+      [tipo, titulo, mensagem, destino]
     );
   } catch (_) {}
 }
@@ -7066,7 +7071,8 @@ async function _checkAnomaliasCrescimentoInventario() {
     await _registrarNotificacaoColeta(
       `📈 Crescimento anômalo — ${escopoTxt}`,
       `${partesTexto.join(' e ')} em ${new Date(a.dia).toLocaleDateString('pt-BR')}.`,
-      'inventario_crescimento'
+      'inventario_crescimento',
+      'inventario:crescimento'
     );
     if (destinatarios.length) {
       await _sendEmail({
@@ -7304,7 +7310,8 @@ async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, 
   await _registrarNotificacaoColeta(
     `🔧 ${p.propriedade_label} — ${nomeRecurso}`,
     `${p.valor_anterior} → ${p.valor_novo} (${resourceGroup || '—'}) · por ${autor || 'desconhecido'}`,
-    'inventario_alteracao'
+    'inventario_alteracao',
+    'inventario:auditoria'
   );
   const cfg = await _getSmtpConfig();
   if (!cfg) return;

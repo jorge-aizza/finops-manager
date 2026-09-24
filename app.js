@@ -424,7 +424,10 @@ async function loadNotificacoes() {
       if (n._kind === 'sistema') {
         const s = iconMap[n.tipo] || iconMap.coleta_concluida;
         const quando = n.criado_em ? new Date(n.criado_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
-        return `<div data-notif-key="${key}" style="position:relative;display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg}">
+        const linkAttrs = n.destino
+          ? ` onclick="abrirDestinoNotif('${escHtml(n.destino)}');closeNotifPanel()" title="Abrir no sistema" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''"`
+          : '';
+        return `<div data-notif-key="${key}"${linkAttrs} style="position:relative;display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg};${n.destino ? 'cursor:pointer;' : ''}">
           <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:${s.color};margin-bottom:2px">${escHtml(n.acao)}</div>
@@ -1850,6 +1853,14 @@ function showDbxTab(tab) {
 
 function switchDbxTab(tab) {
   window.__reactBridge?.setDatabricksTab?.(tab);
+}
+
+// Clique numa notificação do sino com `destino` "view:aba" (ex: 'inventario:crescimento').
+function abrirDestinoNotif(destino) {
+  const [view, aba] = String(destino || '').split(':');
+  if (view !== 'inventario') return;
+  showView('inventario');
+  if (aba) window.__reactBridge?.setInventarioTab?.(aba);
 }
 
 // ── HELPERS ───────────────────────────────────

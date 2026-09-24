@@ -23,6 +23,12 @@ let dashboardTabListener: DashboardTabListener | null = null
 let currentDatabricksTab = 'dashboard'
 let databricksTabListener: DashboardTabListener | null = null
 
+// Inventário: aba pedida de fora (clique numa notificação do sino). Fica pendente até a view
+// montar e registrar o listener; é consumida uma vez, para não sobrescrever a aba que o
+// usuário escolher depois.
+let pendingInventarioTab: string | null = null
+let inventarioTabListener: DashboardTabListener | null = null
+
 // manualRefresh() (app.js, botão "Atualizar" + countdown de auto-refresh)
 // chama isso pra telas migradas em vez de reimplementar refetch por tela —
 // App.tsx registra um handler único (queryClient.invalidateQueries()) que
@@ -43,6 +49,15 @@ export function setDashboardTabListener(fn: DashboardTabListener): void {
 export function setDatabricksTabListener(fn: DashboardTabListener): void {
   databricksTabListener = fn
   fn(currentDatabricksTab)
+}
+
+export function setInventarioTabListener(fn: DashboardTabListener): void {
+  inventarioTabListener = fn
+  if (pendingInventarioTab) {
+    const tab = pendingInventarioTab
+    pendingInventarioTab = null
+    fn(tab)
+  }
 }
 
 export function setRefreshHandler(fn: RefreshHandler): void {
@@ -69,13 +84,18 @@ function setDatabricksTab(tab: string): void {
   databricksTabListener?.(tab)
 }
 
+function setInventarioTab(tab: string): void {
+  if (inventarioTabListener) inventarioTabListener(tab)
+  else pendingInventarioTab = tab
+}
+
 async function refresh(): Promise<void> {
   await refreshHandler?.()
 }
 
 declare global {
   interface Window {
-    __reactBridge: { mount: typeof mount; unmount: typeof unmount; setDashboardTab: typeof setDashboardTab; setDatabricksTab: typeof setDatabricksTab; refresh: typeof refresh }
+    __reactBridge: { mount: typeof mount; unmount: typeof unmount; setDashboardTab: typeof setDashboardTab; setDatabricksTab: typeof setDatabricksTab; setInventarioTab: typeof setInventarioTab; refresh: typeof refresh }
     __reactBridgeQueuedView?: string
     currentUser?: { nome?: string; email?: string; perfil?: string } | null
     logout?: (pedirConfirmacao?: boolean) => void
@@ -91,7 +111,7 @@ declare global {
   }
 }
 
-window.__reactBridge = { mount, unmount, setDashboardTab, setDatabricksTab, refresh }
+window.__reactBridge = { mount, unmount, setDashboardTab, setDatabricksTab, setInventarioTab, refresh }
 
 // Bug real: `react-app.js` (<script type="module">) só executa depois que o
 // parsing do documento termina — mais tarde que o <script src="app.js">
