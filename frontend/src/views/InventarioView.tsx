@@ -462,7 +462,7 @@ export default function InventarioView() {
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroDesperdicioDias, setFiltroDesperdicioDias] = useState(0)
   const [filtroDespTipos, setFiltroDespTipos] = useState<AzureDesperdicioCategoria[]>([])
-  const [filtroDespRg, setFiltroDespRg] = useState('')
+  const [filtroDespRgs, setFiltroDespRgs] = useState<string[]>([])
   const [filtroDespBusca, setFiltroDespBusca] = useState('')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
   const [filtroAcao, setFiltroAcao] = useState('')
@@ -535,13 +535,21 @@ export default function InventarioView() {
     staleTime: 5 * 60 * 1000,
   })
   const despItens = desperdicioQuery.data?.itens ?? []
-  const despRgs = Array.from(new Set(despItens.map((i) => i.resource_group).filter((x): x is string => !!x))).sort((a, b) => a.localeCompare(b))
-  // Base = todos os filtros menos o de tipo: os cartões por tipo mostram o que sobraria ao clicar em cada um.
   const despBuscaNorm = filtroDespBusca.trim().toLowerCase()
-  const despBase = despItens.filter((i) =>
-    (!filtroDespRg || i.resource_group === filtroDespRg)
-    && (filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias)
-    && (!despBuscaNorm || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)))
+  const passaDias = (i: typeof despItens[number]) => filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias
+  const passaBusca = (i: typeof despItens[number]) => !despBuscaNorm || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)
+  const passaRg = (i: typeof despItens[number]) => !filtroDespRgs.length || (!!i.resource_group && filtroDespRgs.includes(i.resource_group))
+  // Base = todos os filtros menos o de tipo: os cartões por tipo mostram o que sobraria ao clicar em cada um.
+  const despBase = despItens.filter((i) => passaRg(i) && passaDias(i) && passaBusca(i))
+  // Opções de Resource Group com a contagem que sobra nos demais filtros (inclusive tipo); RG já marcado nunca some.
+  const despRgContagem = new Map<string, number>()
+  for (const i of despItens) {
+    if (!i.resource_group || !passaDias(i) || !passaBusca(i)) continue
+    if (filtroDespTipos.length && !filtroDespTipos.includes(i.categoria)) continue
+    despRgContagem.set(i.resource_group, (despRgContagem.get(i.resource_group) ?? 0) + 1)
+  }
+  for (const rg of filtroDespRgs) if (!despRgContagem.has(rg)) despRgContagem.set(rg, 0)
+  const despRgs = Array.from(despRgContagem.keys()).sort((a, b) => a.localeCompare(b))
   const despFiltrados = filtroDespTipos.length ? despBase.filter((i) => filtroDespTipos.includes(i.categoria)) : despBase
   const despCustoMensal = despFiltrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
   const despSemCusto = despFiltrados.filter((i) => i.custo_mensal_estimado === null).length
@@ -551,8 +559,11 @@ export default function InventarioView() {
       return { categoria: c.categoria, itens: doTipo.length, custo: doTipo.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0) }
     })
     .filter((c) => c.itens > 0 || filtroDespTipos.includes(c.categoria))
-  const despTemFiltro = !!(filtroDespTipos.length || filtroDespRg || filtroDesperdicioDias || despBuscaNorm)
-  const limparFiltrosDesp = () => { setFiltroDespTipos([]); setFiltroDespRg(''); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
+  const despTemFiltro = !!(filtroDespTipos.length || filtroDespRgs.length || filtroDesperdicioDias || despBuscaNorm)
+  const limparFiltrosDesp = () => { setFiltroDespTipos([]); setFiltroDespRgs([]); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
+  const despRgLabel = filtroDespRgs.length === 0 ? 'Todos os Resource Groups'
+    : filtroDespRgs.length === 1 ? filtroDespRgs[0]
+    : `${filtroDespRgs.length} Resource Groups`
   const despTipoLabel = filtroDespTipos.length === 0 ? 'Todos os tipos de recurso'
     : filtroDespTipos.length === 1 ? (DESPERDICIO_LABEL[filtroDespTipos[0]] || filtroDespTipos[0])
     : `${filtroDespTipos.length} tipos selecionados`
@@ -1363,10 +1374,15 @@ export default function InventarioView() {
                       onChange={(v) => setFiltroDespTipos(v as AzureDesperdicioCategoria[])}
                     />
                   </div>
-                  <select className="filter-select" aria-label="Resource Group" value={filtroDespRg} onChange={(e) => setFiltroDespRg(e.target.value)}>
-                    <option value="">Todos os Resource Groups</option>
-                    {despRgs.map((rg) => <option key={rg} value={rg}>{rg}</option>)}
-                  </select>
+                  <div style={{ minWidth: 260 }}>
+                    <CmsMultiSelect
+                      values={filtroDespRgs}
+                      options={despRgs.map((rg) => ({ value: rg, label: rg, sublabel: String(despRgContagem.get(rg) ?? 0) }))}
+                      searchPlaceholder="Buscar Resource Group..."
+                      triggerLabel={despRgLabel}
+                      onChange={setFiltroDespRgs}
+                    />
+                  </div>
                   <select className="filter-select" aria-label="Órfão há" value={filtroDesperdicioDias} onChange={(e) => setFiltroDesperdicioDias(Number(e.target.value))}>
                     <option value={0}>Órfão há qualquer tempo</option>
                     <option value={7}>Órfão há 7+ dias</option>

@@ -117,8 +117,24 @@ describe('InventarioView', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('3')
-    await userEvent.selectOptions(screen.getByLabelText('Resource Group'), 'rg-dois')
+    // Resource Group agora é multi-seleção (caixas de marcar + OK), com contagem por RG
+    await userEvent.click(screen.getByText('Todos os Resource Groups'))
+    expect(screen.getByRole('checkbox', { name: /rg-um.*2/ })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('checkbox', { name: /rg-dois/ }))
+    await userEvent.click(screen.getByRole('button', { name: /OK/ }))
     expect(screen.getByText('disco-b')).toBeInTheDocument()
+    expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+    // Somando um segundo RG
+    await userEvent.click(screen.getAllByText('rg-dois')[0])
+    await userEvent.click(screen.getByRole('checkbox', { name: /rg-um/ }))
+    await userEvent.click(screen.getByRole('button', { name: /OK/ }))
+    expect(screen.getByText('2 Resource Groups')).toBeInTheDocument()
+    expect(screen.getByText('disco-a')).toBeInTheDocument()
+    expect(screen.getByText('disco-b')).toBeInTheDocument()
+    // Volta para só rg-dois
+    await userEvent.click(screen.getByText('2 Resource Groups'))
+    await userEvent.click(screen.getByRole('checkbox', { name: /rg-um/ }))
+    await userEvent.click(screen.getByRole('button', { name: /OK/ }))
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
     // Contagem por tipo respeita o Resource Group escolhido (só 1 disco em rg-dois, 0 NIC)
     expect(screen.queryByRole('button', { name: /NIC/ })).not.toBeInTheDocument()
