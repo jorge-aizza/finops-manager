@@ -6259,14 +6259,11 @@ async function ensureAzureColetaTable() {
   // de recursos que existem mas nunca geraram evento desde a ativação do Inventário, sem
   // "criado por/em" porque o Resource Graph não tem esse histórico).
   await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS origem_deteccao VARCHAR(20) DEFAULT 'activity_log'`);
-  // Marcar recursos órfãos (sem mudanças em 90+ dias) — para auditoria e limpeza manual
-  await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS marcado_orfao_em TIMESTAMPTZ`);
   // NOTA: índice case-sensitive foi removido — usar apenas o case-insensitive criado pela migration
   // (migrations/inventarioResourceIdCase.js). Se houver conflito, dropar o antigo.
   await pool.query(`DROP INDEX IF EXISTS idx_azure_recursos_inv_uniq`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_orfao ON azure_recursos_inventario (marcado_orfao_em)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_desperdicio_deteccao (
       resource_id_upper    TEXT PRIMARY KEY,
@@ -12954,8 +12951,6 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
       `UPDATE azure_inventario_coleta_historico SET status='concluido',concluido_em=NOW(),eventos_processados=$1,recursos_novos=$2,mensagem=$3 WHERE id=$4`,
       [totalEncontrados, totalNovos, msg, histId]
     );
-    // Marca recursos órfãos (sem mudanças em 90+ dias)
-    await _marcarRecursosOrfaos();
   } catch (err) {
     _logColetaInv(`ERRO (reconciliação): ${err.message}`);
     if (histId) await pool.query(
@@ -12965,36 +12960,6 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
   } finally {
     _invColetaEmExecucao = false;
     _invColetaIniciadaEm = null;
-  }
-}
-
-// Marca recursos que não foram atualizados em >90 dias como órfãos.
-// Roda ao final de uma reconciliação bem-sucedida (quando temos certeza de que
-// buscamos todos os recursos via Resource Graph).
-async function _marcarRecursosOrfaos() {
-  if (!pool) return;
-  try {
-    const diasOrfao = 90;
-    const r = await pool.query(`
-      UPDATE azure_recursos_inventario
-      SET marcado_orfao_em = NOW()
-      WHERE marcado_orfao_em IS NULL
-        AND atualizado_em < NOW() - INTERVAL '${diasOrfao} days'
-        AND ativo = true
-      RETURNING id
-    `);
-    const qtd = r.rowCount || 0;
-    if (qtd > 0) {
-      _logColetaInv(`✓ ${qtd} recurso(s) marcado(s) como órfão(s) (sem atualização em ${diasOrfao}+ dias)`);
-      await _registrarNotificacaoColeta(
-        `🗑️ Recursos órfãos marcados`,
-        `${qtd} recurso(s) sem atualização em ${diasOrfao}+ dias foi/foram marcado(s) para revisão.`,
-        'coleta_orfaos',
-        'inventario:auditoria'
-      );
-    }
-  } catch (e) {
-    _logColetaInv(`⚠️ Erro ao marcar órfãos: ${e.message}`);
   }
 }
 
