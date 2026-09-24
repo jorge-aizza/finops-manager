@@ -274,7 +274,8 @@ export const getAzureDesperdicio = (subscriptionId?: string, diasSnapshot?: numb
   if (subscriptionId) q.set('subscription_id', subscriptionId)
   if (diasSnapshot) q.set('dias_snapshot', String(diasSnapshot))
   const qs = q.toString()
-  return apiFetch<AzureDesperdicioResposta>('GET', '/azure-inventario/desperdicio' + (qs ? '?' + qs : ''))
+  // Cache frio = ~5 consultas ao Resource Graph por assinatura (com 429): passa fácil de 30s.
+  return apiFetch<AzureDesperdicioResposta>('GET', '/azure-inventario/desperdicio' + (qs ? '?' + qs : ''), undefined, 180000)
 }
 
 export const rebuildAzureAlocacaoTags = () =>
