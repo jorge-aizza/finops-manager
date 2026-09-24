@@ -12322,17 +12322,6 @@ async function _coletarInventarioAzure(origem = 'manual') {
         if (ch.changeType === 'Delete') {
           const nomeDel = resourceId.split('/').pop();
           const lowerResourceId = resourceId.toLowerCase();
-          // Cleanup: delete duplicates keeping only the most recent
-          await pool.query(
-            `DELETE FROM azure_recursos_inventario
-             WHERE subscription_id = $1 AND LOWER(resource_id) = $2 AND id NOT IN (
-               SELECT id FROM azure_recursos_inventario
-               WHERE subscription_id = $1 AND LOWER(resource_id) = $2
-               ORDER BY GREATEST(criado_em, atualizado_em, detectado_em::timestamptz) DESC NULLS LAST, id DESC
-               LIMIT 1
-             )`,
-            [subId, lowerResourceId]
-          );
           const existing = await pool.query(
             `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2 LIMIT 1`,
             [subId, lowerResourceId]
@@ -12361,17 +12350,6 @@ async function _coletarInventarioAzure(origem = 'manual') {
         } else {
           const nome = resourceId.split('/').pop();
           const lowerResourceId = resourceId.toLowerCase();
-          // Cleanup: delete duplicates keeping only the most recent
-          await pool.query(
-            `DELETE FROM azure_recursos_inventario
-             WHERE subscription_id = $1 AND LOWER(resource_id) = $2 AND id NOT IN (
-               SELECT id FROM azure_recursos_inventario
-               WHERE subscription_id = $1 AND LOWER(resource_id) = $2
-               ORDER BY GREATEST(criado_em, atualizado_em, detectado_em::timestamptz) DESC NULLS LAST, id DESC
-               LIMIT 1
-             )`,
-            [subId, lowerResourceId]
-          );
           const existing = await pool.query(
             `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2 LIMIT 1`,
             [subId, lowerResourceId]
@@ -12823,17 +12801,6 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
         if (!item.id) continue;
         const nome = item.name || String(item.id).split('/').pop();
         const resourceId = item.id.toLowerCase();
-        // Cleanup: delete duplicates keeping only the most recent
-        await pool.query(
-          `DELETE FROM azure_recursos_inventario
-           WHERE subscription_id = $1 AND LOWER(resource_id) = $2 AND id NOT IN (
-             SELECT id FROM azure_recursos_inventario
-             WHERE subscription_id = $1 AND LOWER(resource_id) = $2
-             ORDER BY GREATEST(criado_em, atualizado_em, detectado_em::timestamptz) DESC NULLS LAST, id DESC
-             LIMIT 1
-           )`,
-          [subId, resourceId]
-        );
         const existing = await pool.query(
           `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2 LIMIT 1`,
           [subId, resourceId]
