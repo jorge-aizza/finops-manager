@@ -6267,6 +6267,14 @@ async function ensureAzureColetaTable() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_orfao ON azure_recursos_inventario (marcado_orfao_em)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_desperdicio_deteccao (
+      resource_id_upper    TEXT PRIMARY KEY,
+      categoria            VARCHAR(30),
+      primeira_deteccao_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ultima_deteccao_em   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
   // Unicidade case-insensitive de resource_id (migrations/inventarioResourceIdCase.js): o índice
   // funcional é criado por ela (LOWER(resource_id)). Reconciliação usa busca + insert/update
   // explícita para evitar sintaxe ON CONFLICT com funções. Idempotente — sem custo quando já existe.
@@ -9572,7 +9580,8 @@ const _KQL_DISCOS_ORFAOS = `
   | extend diskState = tostring(properties.diskState)
   | where isempty(managedBy) or diskState =~ 'Unattached'
   | project id, name, resourceGroup, location, sku = tostring(sku.name),
-            sizeGB = toint(properties.diskSizeGB), criadoEm = tostring(properties.timeCreated), diskState`;
+            sizeGB = toint(properties.diskSizeGB), criadoEm = tostring(properties.timeCreated), diskState,
+            orfaoDesde = tostring(properties.LastOwnershipUpdateTime)`;
 
 const _KQL_NICS_ORFAS = `
   Resources | where type =~ 'microsoft.network/networkinterfaces'
@@ -9633,7 +9642,7 @@ async function _custoObservadoPorResourceId(ids, desdeISO) {
   return out;
 }
 
-async function _coletarDesperdicio(subscriptionId, diasSnapshot, orfaosMap) {
+async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
   const { getToken } = await _getInventarioSpConfig();
   const token = await getToken();
 
@@ -9666,8 +9675,10 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot, orfaosMap) {
 
   return itens.map((x) => {
     const c = custos.get(String(x.id || '').toUpperCase());
-    const marcadoOm = orfaosMap?.get(String(x.id || '').toUpperCase());
-    const diasOrfao = marcadoOm ? Math.floor((Date.now() - new Date(marcadoOm).getTime()) / (1000 * 60 * 60 * 24)) : null;
+    // Data real quando o Azure informa: disco = último desanexo; snapshot = criação. NIC/IP
+    // não têm esse dado — o endpoint completa pela primeira detecção registrada.
+    const desdeReal = x.categoria === 'disco_orfao' ? (x.orfaoDesde || null)
+      : x.categoria === 'snapshot_antigo' ? (x.criadoEm || null) : null;
     // Extrapolação honesta NESTAS categorias: disco managed e IP Standard estático faturam a
     // mesma taxa anexados ou não, então o custo observado É o desperdício. Sem billing conhecido
     // → null, NUNCA zero (mesma convenção de `nao_verificaveis` no compliance de tags): zero
@@ -9686,20 +9697,20 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot, orfaosMap) {
       custo_periodo: c ? c.custo : null,
       dias_observados: c ? c.dias : 0,
       custo_mensal_estimado: custoMensal,
-      marcado_orfao_em: marcadoOm || null,
-      dias_orfao: diasOrfao,
+      marcado_orfao_em: desdeReal,
+      dias_orfao: null,
     };
   });
 }
 
-async function _getDesperdicioCached(subscriptionId, diasSnapshot, orfaosMap) {
+async function _getDesperdicioCached(subscriptionId, diasSnapshot) {
   const chave = `${subscriptionId}:${diasSnapshot}`;
   const cached = _desperdicioCache.get(chave);
   if (cached && (Date.now() - cached.ts) < _DESPERDICIO_TTL) return cached.itens;
   if (_desperdicioPromises.has(chave)) return _desperdicioPromises.get(chave);
   const p = (async () => {
     try {
-      const itens = await _coletarDesperdicio(subscriptionId, diasSnapshot, orfaosMap);
+      const itens = await _coletarDesperdicio(subscriptionId, diasSnapshot);
       _desperdicioCache.set(chave, { itens, ts: Date.now() });
       return itens;
     } finally {
@@ -9721,16 +9732,32 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
 
     // Resiliência por subscription — uma sem permissão não derruba as outras (mesmo padrão do
     // /advisor).
-    const orfaosDb = await pool.query(
-      `SELECT resource_id, MIN(marcado_orfao_em) AS marcado_orfao_em FROM azure_recursos_inventario WHERE marcado_orfao_em IS NOT NULL GROUP BY resource_id`
-    );
-    const orfaosMap = new Map(orfaosDb.rows.map(x => [String(x.resource_id).toUpperCase(), x.marcado_orfao_em]));
     const erros = [];
     const listas = await _mapLimit(alvos, 4, async (sid) => {
-      try { return await _getDesperdicioCached(sid, dias, orfaosMap); }
+      try { return await _getDesperdicioCached(sid, dias); }
       catch (e) { erros.push({ subscription_id: sid, erro: e.message }); return []; }
     });
-    const itens = listas.flat();
+    const itens = listas.flat().map((x) => ({ ...x }));
+
+    // Primeira detecção (1 query para todos). Se ficou >3 dias sem ser visto como órfão, o
+    // recurso foi reaproveitado e depois abandonado de novo — reinicia a contagem.
+    if (itens.length) {
+      const up = await pool.query(
+        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria)
+         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat FROM unnest($1::text[], $2::text[]) AS u(id, cat)
+         ON CONFLICT (resource_id_upper) DO UPDATE SET
+           primeira_deteccao_em = CASE WHEN azure_desperdicio_deteccao.ultima_deteccao_em < NOW() - INTERVAL '3 days' THEN NOW() ELSE azure_desperdicio_deteccao.primeira_deteccao_em END,
+           ultima_deteccao_em = NOW(), categoria = EXCLUDED.categoria
+         RETURNING resource_id_upper, primeira_deteccao_em`,
+        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria)]
+      );
+      const primeira = new Map(up.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
+      for (const it of itens) {
+        const desde = it.marcado_orfao_em || primeira.get(String(it.resource_id).toUpperCase());
+        it.marcado_orfao_em = desde ? new Date(desde).toISOString() : null;
+        it.dias_orfao = desde ? Math.max(0, Math.floor((Date.now() - new Date(desde).getTime()) / 86400000)) : null;
+      }
+    }
 
     const porCategoria = {};
     for (const it of itens) {

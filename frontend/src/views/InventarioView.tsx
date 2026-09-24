@@ -448,7 +448,7 @@ export default function InventarioView() {
   }), [])
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
-  const [filtroDesperdicioOrfao, setFiltroDesperdicioOrfao] = useState<'todos' | 'orfaos'>('todos')
+  const [filtroDesperdicioDias, setFiltroDesperdicioDias] = useState(0)
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
   const [filtroAcao, setFiltroAcao] = useState('')
   const [filtroTipo, setFiltroTipo] = useState('')
@@ -1367,13 +1367,18 @@ export default function InventarioView() {
               <div className="card-header"><span className="card-title">Recursos ociosos</span></div>
               <div style={{ padding: '0 20px 8px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={filtroDesperdicioOrfao === 'orfaos'}
-                    onChange={(e) => setFiltroDesperdicioOrfao(e.target.checked ? 'orfaos' : 'todos')}
+                  Órfão há
+                  <select
+                    aria-label="Órfão há"
+                    value={filtroDesperdicioDias}
+                    onChange={(e) => setFiltroDesperdicioDias(Number(e.target.value))}
                     style={{ width: 'auto' }}
-                  />
-                  Apenas órfãos
+                  >
+                    <option value={0}>qualquer tempo</option>
+                    <option value={7}>7+ dias</option>
+                    <option value={30}>30+ dias</option>
+                    <option value={90}>90+ dias</option>
+                  </select>
                 </label>
                 {desperdicioQuery.data.total_itens > desperdicioQuery.data.itens.length && (
                   <span style={{ color: 'var(--text-muted)' }}>
@@ -1392,7 +1397,7 @@ export default function InventarioView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {desperdicioQuery.data.itens.filter(it => filtroDesperdicioOrfao === 'todos' || it.dias_orfao !== null).map((it) => (
+                    {desperdicioQuery.data.itens.filter(it => filtroDesperdicioDias === 0 || (it.dias_orfao ?? 0) >= filtroDesperdicioDias).map((it) => (
                       <tr key={it.resource_id}>
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
                           {it.nome || it.resource_id}
@@ -1407,7 +1412,10 @@ export default function InventarioView() {
                         >
                           {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
                         </td>
-                        <td style={{ textAlign: 'right', fontSize: 12, color: it.dias_orfao !== null ? 'var(--red,#ff4d6a)' : 'var(--text-muted)' }}>
+                        <td
+                          style={{ textAlign: 'right', fontSize: 12, color: it.dias_orfao !== null ? 'var(--red,#ff4d6a)' : 'var(--text-muted)' }}
+                          title={it.marcado_orfao_em ? `Órfão desde ${new Date(it.marcado_orfao_em).toLocaleDateString('pt-BR')}` : ''}
+                        >
                           {it.dias_orfao !== null ? `${it.dias_orfao}d` : '—'}
                         </td>
                       </tr>

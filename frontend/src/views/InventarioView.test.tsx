@@ -60,6 +60,33 @@ beforeEach(() => {
 })
 
 describe('InventarioView', () => {
+  it('aba Desperdício mostra dias órfão e filtra por tempo mínimo', async () => {
+    const base = { subscription_id: 's', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [],
+      por_categoria: [],
+      itens: [
+        { ...base, categoria: 'disco_orfao', resource_id: '/d1', nome: 'disco-velho', marcado_orfao_em: '2026-06-01T00:00:00Z', dias_orfao: 120 },
+        { ...base, categoria: 'nic_orfa', resource_id: '/n1', nome: 'nic-media', marcado_orfao_em: '2026-08-20T00:00:00Z', dias_orfao: 35 },
+        { ...base, categoria: 'ip_solto', resource_id: '/i1', nome: 'ip-novo', marcado_orfao_em: '2026-09-22T00:00:00Z', dias_orfao: 2 },
+      ],
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('button', { name: 'Desperdício' }))
+    expect(await screen.findByText('120d')).toBeInTheDocument()
+    expect(screen.getByText('35d')).toBeInTheDocument()
+    expect(screen.getByText('2d')).toBeInTheDocument()
+
+    await userEvent.selectOptions(screen.getByLabelText('Órfão há'), '30')
+    expect(screen.getByText('disco-velho')).toBeInTheDocument()
+    expect(screen.getByText('nic-media')).toBeInTheDocument()
+    expect(screen.queryByText('ip-novo')).not.toBeInTheDocument()
+
+    await userEvent.selectOptions(screen.getByLabelText('Órfão há'), '90')
+    expect(screen.getByText('disco-velho')).toBeInTheDocument()
+    expect(screen.queryByText('nic-media')).not.toBeInTheDocument()
+  })
+
   it('mostra a aba Recursos por padrão', async () => {
     renderWithClient()
     expect(await screen.findByText('Recursos (Inventário)')).toBeInTheDocument()
