@@ -12730,6 +12730,27 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
     _logColetaInv(`Reconciliação (Resource Graph) — ${subs.length} subscription(s)`);
     _invColetaProgresso.sub_total = subs.length;
 
+    // Limpar duplicatas (recursos com mesmo (subscription_id, LOWER(resource_id)))
+    // antes de começar a reconciliação — mantém o mais recente
+    try {
+      const duplicatasDel = await pool.query(`
+        DELETE FROM azure_recursos_inventario
+        WHERE id IN (
+          SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (PARTITION BY subscription_id, LOWER(resource_id)
+              ORDER BY GREATEST(criado_em, atualizado_em, detectado_em::timestamptz) DESC NULLS LAST, id DESC
+            ) AS rn
+            FROM azure_recursos_inventario
+          ) t WHERE rn > 1
+        )
+      `);
+      if (duplicatasDel.rowCount > 0) {
+        _logColetaInv(`  Limpeza preventiva: ${duplicatasDel.rowCount} linha(s) duplicada(s) removida(s)`);
+      }
+    } catch (eLimpeza) {
+      _logColetaInv(`  ⚠ Não conseguiu limpar duplicatas (não é crítico): ${eLimpeza.message}`);
+    }
+
     let totalEncontrados = 0, totalNovos = 0;
     for (let i = 0; i < subs.length; i++) {
       const subId = subs[i];
@@ -12752,10 +12773,10 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
         const nome = item.name || String(item.id).split('/').pop();
         const resourceId = item.id.toLowerCase();
         const existing = await pool.query(
-          `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2`,
+          `SELECT id FROM azure_recursos_inventario WHERE subscription_id = $1 AND LOWER(resource_id) = $2 LIMIT 1`,
           [subId, resourceId]
         );
-        if (existing.rows.length) {
+        if (existing.rows.length > 0) {
           await pool.query(
             `UPDATE azure_recursos_inventario SET
                ativo=true,
