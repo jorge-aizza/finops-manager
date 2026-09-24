@@ -9669,20 +9669,22 @@ async function _custoObservadoPorResourceId(ids, desdeISO) {
   return out;
 }
 
-async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
+// Recebe a LISTA de assinaturas: 9 chamadas ao Resource Graph no total (uma por tipo de consulta)
+// em vez de 9 por assinatura — com 51 assinaturas eram 459 chamadas, ~45s+ e várias pausas por 429.
+async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
   const { getToken } = await _getInventarioSpConfig();
   const token = await getToken();
 
   const [discos, nics, ipsBrutos, ipsRefs, snapshots, asps, lbs, appgws, vms] = await Promise.all([
-    _resourceGraphQuery(token, subscriptionId, _KQL_DISCOS_ORFAOS),
-    _resourceGraphQuery(token, subscriptionId, _KQL_NICS_ORFAS),
-    _resourceGraphQuery(token, subscriptionId, _KQL_IPS_SOLTOS),
-    _resourceGraphQuery(token, subscriptionId, _KQL_IPS_REFERENCIADOS),
-    _resourceGraphQuery(token, subscriptionId, _kqlSnapshotsAntigos(diasSnapshot)),
-    _resourceGraphQuery(token, subscriptionId, _KQL_ASP_VAZIOS),
-    _resourceGraphQuery(token, subscriptionId, _KQL_LBS_SEM_BACKEND),
-    _resourceGraphQuery(token, subscriptionId, _KQL_APPGWS_SEM_BACKEND),
-    _resourceGraphQuery(token, subscriptionId, _KQL_VMS_PARADAS),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_DISCOS_ORFAOS),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_NICS_ORFAS),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_IPS_SOLTOS),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_IPS_REFERENCIADOS),
+    _resourceGraphQuery(token, subscriptionIds, _kqlSnapshotsAntigos(diasSnapshot)),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_ASP_VAZIOS),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_LBS_SEM_BACKEND),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_APPGWS_SEM_BACKEND),
+    _resourceGraphQuery(token, subscriptionIds, _KQL_VMS_PARADAS),
   ]);
 
   const referenciados = new Set(ipsRefs.map((x) => String(x.id || '').toUpperCase()).filter(Boolean));
@@ -9727,7 +9729,7 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
     const custoMensal = c && c.dias > 0 ? (c.custo / c.dias) * 30 : null;
     return {
       categoria: x.categoria,
-      subscription_id: subscriptionId,
+      subscription_id: String(x.id || '').split('/')[2] || null,
       resource_id: x.id,
       nome: x.name,
       resource_group: x.resourceGroup,
@@ -9744,14 +9746,14 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
   });
 }
 
-async function _getDesperdicioCached(subscriptionId, diasSnapshot) {
-  const chave = `${subscriptionId}:${diasSnapshot}`;
+async function _getDesperdicioCached(subscriptionIds, diasSnapshot) {
+  const chave = `${[...subscriptionIds].sort().join(',')}:${diasSnapshot}`;
   const cached = _desperdicioCache.get(chave);
   if (cached && (Date.now() - cached.ts) < _DESPERDICIO_TTL) return cached.itens;
   if (_desperdicioPromises.has(chave)) return _desperdicioPromises.get(chave);
   const p = (async () => {
     try {
-      const itens = await _coletarDesperdicio(subscriptionId, diasSnapshot);
+      const itens = await _coletarDesperdicio(subscriptionIds, diasSnapshot);
       _desperdicioCache.set(chave, { itens, ts: Date.now() });
       return itens;
     } finally {
@@ -9764,6 +9766,7 @@ async function _getDesperdicioCached(subscriptionId, diasSnapshot) {
 
 app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async (req, res) => {
   try {
+    const t0Desp = Date.now();
     await ensureAzureColetaTable();
     const dias = Math.max(1, Math.min(3650, parseInt(req.query.dias_snapshot, 10) || 90));
     const { subscription_id } = req.query;
@@ -9771,13 +9774,20 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     const alvos = subscription_id ? [String(subscription_id)] : subs;
     if (!alvos.length) return res.status(400).json({ error: 'Nenhuma subscription configurada no Inventário' });
 
-    // Resiliência por subscription — uma sem permissão não derruba as outras (mesmo padrão do
-    // /advisor).
+    // Caminho rápido: todas as assinaturas numa chamada por tipo de consulta. Plano B, se a chamada
+    // conjunta falhar (ex: uma assinatura com problema): assinatura por assinatura, e uma sem
+    // permissão não derruba as outras (mesmo padrão do /advisor).
     const erros = [];
-    const listas = await _mapLimit(alvos, 4, async (sid) => {
-      try { return await _getDesperdicioCached(sid, dias); }
-      catch (e) { erros.push({ subscription_id: sid, erro: e.message }); return []; }
-    });
+    let listas;
+    try {
+      listas = [await _getDesperdicioCached(alvos, dias)];
+    } catch (e) {
+      console.warn('[Desperdicio] Consulta conjunta falhou, usando modo por assinatura:', e.message);
+      listas = await _mapLimit(alvos, 4, async (sid) => {
+        try { return await _getDesperdicioCached([sid], dias); }
+        catch (e2) { erros.push({ subscription_id: sid, erro: e2.message }); return []; }
+      });
+    }
     const itens = listas.flat().map((x) => ({ ...x }));
 
     // Primeira detecção (1 query para todos). Se ficou >3 dias sem ser visto como órfão, o
@@ -9809,6 +9819,7 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     }
 
     itens.sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
+    console.log(`[Desperdicio] ${itens.length} itens de ${alvos.length} assinatura(s) em ${Date.now() - t0Desp} ms`);
     res.json({
       gerado_em: new Date().toISOString(),
       dias_snapshot: dias,
@@ -12626,13 +12637,14 @@ async function _getInventarioSpConfig() {
 // generalizar `_resourceGraphFetchRecursos` (logo abaixo): aquela tem query FIXA e é usada pela
 // reconciliação, que já está em produção — mesma justificativa que levou `_getInventarioSpConfig`
 // a não ser retrofitado nas funções de coleta.
+// `subscriptionId` aceita 1 id ou uma lista (o Resource Graph aceita até 1000 assinaturas por chamada).
 async function _resourceGraphQuery(token, subscriptionId, kql) {
   const itens = [];
   let skipToken = null;
   let paginas = 0;
   do {
     const body = {
-      subscriptions: [subscriptionId],
+      subscriptions: Array.isArray(subscriptionId) ? subscriptionId : [subscriptionId],
       query: kql,
       options: { $top: 1000, ...(skipToken ? { $skipToken: skipToken } : {}) },
     };
