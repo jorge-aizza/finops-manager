@@ -510,7 +510,10 @@ export interface AzureCoberturaResposta {
 // Desperdício Azure (capability "Usage Optimization") — detecção via Resource Graph, sem Azure
 // Monitor. Rightsizing de VM fica de fora de propósito: exigiria métricas de CPU/memória (outra
 // API, outra permissão). Estas categorias são determináveis pelo estado do próprio recurso.
-export type AzureDesperdicioCategoria = 'disco_orfao' | 'nic_orfa' | 'ip_solto' | 'snapshot_antigo'
+export type AzureDesperdicioCategoria =
+  | 'disco_orfao' | 'nic_orfa' | 'ip_solto' | 'snapshot_antigo'
+  // "Revisar": geram custo, mas o estado do recurso não prova abandono (podem estar reservados de propósito).
+  | 'app_service_plan_vazio' | 'lb_sem_backend' | 'appgw_sem_backend' | 'vm_parada'
 export interface AzureDesperdicioItem {
   categoria: AzureDesperdicioCategoria
   subscription_id: string

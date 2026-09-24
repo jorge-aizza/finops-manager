@@ -9607,6 +9607,36 @@ const _KQL_IPS_REFERENCIADOS = `
   | mv-expand ids to typeof(string)
   | project id = ids`;
 
+// Categorias "revisar" (validadas contra o Azure real, 2026-09-24): geram custo, mas o estado do
+// recurso não prova sozinho que é abandono — podem estar reservados de propósito.
+// Plano sem nenhum app: tiers sem cobrança fixa (Free/Shared/Dynamic/FlexConsumption) ficam de fora.
+const _KQL_ASP_VAZIOS = `
+  Resources | where type =~ 'microsoft.web/serverfarms'
+  | where toint(properties.numberOfSites) == 0
+  | where tostring(sku.tier) !in~ ('Free','Shared','Dynamic','FlexConsumption','')
+  | project id, name, resourceGroup, location, sku = tostring(sku.name)`;
+
+// Só Standard cobra (Basic é grátis). Membro real = NIC/IP no pool; a chave
+// "loadBalancerBackendAddresses" sozinha não conta (aparece mesmo vazia).
+const _KQL_LBS_SEM_BACKEND = `
+  Resources | where type =~ 'microsoft.network/loadbalancers'
+  | where tostring(sku.name) =~ 'Standard'
+  | extend pj = tostring(properties.backendAddressPools)
+  | where not(pj contains 'networkInterfaceIPConfiguration' or pj contains 'backendIPConfigurations' or pj contains 'ipAddress')
+  | project id, name, resourceGroup, location, sku = tostring(sku.name)`;
+
+const _KQL_APPGWS_SEM_BACKEND = `
+  Resources | where type =~ 'microsoft.network/applicationgateways'
+  | extend pj = tostring(properties.backendAddressPools)
+  | where not(pj contains 'ipAddress' or pj contains 'fqdn' or pj contains 'backendIPConfigurations')
+  | project id, name, resourceGroup, location, sku = tostring(properties.sku.name)`;
+
+// "stopped" (parada pelo SO, sem desalocar) ainda fatura computação; "deallocated" não.
+const _KQL_VMS_PARADAS = `
+  Resources | where type =~ 'microsoft.compute/virtualmachines'
+  | where tostring(properties.extended.instanceView.powerState.code) =~ 'PowerState/stopped'
+  | project id, name, resourceGroup, location, sku = tostring(properties.hardwareProfile.vmSize)`;
+
 function _kqlSnapshotsAntigos(dias) {
   return `
     Resources | where type =~ 'microsoft.compute/snapshots'
@@ -9643,12 +9673,16 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
   const { getToken } = await _getInventarioSpConfig();
   const token = await getToken();
 
-  const [discos, nics, ipsBrutos, ipsRefs, snapshots] = await Promise.all([
+  const [discos, nics, ipsBrutos, ipsRefs, snapshots, asps, lbs, appgws, vms] = await Promise.all([
     _resourceGraphQuery(token, subscriptionId, _KQL_DISCOS_ORFAOS),
     _resourceGraphQuery(token, subscriptionId, _KQL_NICS_ORFAS),
     _resourceGraphQuery(token, subscriptionId, _KQL_IPS_SOLTOS),
     _resourceGraphQuery(token, subscriptionId, _KQL_IPS_REFERENCIADOS),
     _resourceGraphQuery(token, subscriptionId, _kqlSnapshotsAntigos(diasSnapshot)),
+    _resourceGraphQuery(token, subscriptionId, _KQL_ASP_VAZIOS),
+    _resourceGraphQuery(token, subscriptionId, _KQL_LBS_SEM_BACKEND),
+    _resourceGraphQuery(token, subscriptionId, _KQL_APPGWS_SEM_BACKEND),
+    _resourceGraphQuery(token, subscriptionId, _KQL_VMS_PARADAS),
   ]);
 
   const referenciados = new Set(ipsRefs.map((x) => String(x.id || '').toUpperCase()).filter(Boolean));
@@ -9659,6 +9693,10 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
     ...nics.map((x) => ({ ...x, categoria: 'nic_orfa' })),
     ...ips.map((x) => ({ ...x, categoria: 'ip_solto' })),
     ...snapshots.map((x) => ({ ...x, categoria: 'snapshot_antigo' })),
+    ...asps.map((x) => ({ ...x, categoria: 'app_service_plan_vazio' })),
+    ...lbs.map((x) => ({ ...x, categoria: 'lb_sem_backend' })),
+    ...appgws.map((x) => ({ ...x, categoria: 'appgw_sem_backend' })),
+    ...vms.map((x) => ({ ...x, categoria: 'vm_parada' })),
   ];
 
   // Exclui RG gerenciado por Databricks/AKS item a item — o `resourceGroup` já vem do ARG, então
@@ -9772,7 +9810,7 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
       sem_custo_conhecido: itens.filter((x) => x.custo_mensal_estimado === null).length,
       por_categoria: Object.values(porCategoria).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
-      itens: itens.slice(0, 500),
+      itens,
       erros,
     });
   } catch (e) { res.status(400).json({ error: e.message }); }

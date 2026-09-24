@@ -43,6 +43,10 @@ const DESPERDICIO_LABEL: Record<AzureDesperdicioCategoria, string> = {
   snapshot_antigo: '📸 Snapshot antigo',
   ip_solto: '🌐 IP público sem uso',
   nic_orfa: '🔌 NIC não anexada',
+  app_service_plan_vazio: '🗂️ App Service Plan sem apps',
+  lb_sem_backend: '⚖️ Load Balancer sem backend',
+  appgw_sem_backend: '🚪 App Gateway sem backend',
+  vm_parada: '⏸️ VM parada (sem desalocar)',
 }
 function fmtBRLCurto(v: number): string {
   return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -1306,7 +1310,9 @@ export default function InventarioView() {
               Recursos provisionados que ninguém está usando, detectados via Azure Resource Graph (mesma credencial do
               Inventário, sem permissão nova). Custo estimado pelo billing <strong>observado</strong> dos últimos 30
               dias — disco managed e IP estático faturam a mesma taxa anexados ou não, então o que se vê é o que se
-              gasta. <strong>Não inclui rightsizing de VM</strong>: isso exigiria métricas do Azure Monitor.
+              gasta. App Service Plan sem apps, Load Balancer/App Gateway sem backend e VM parada (sem desalocar) são
+              itens a <strong>revisar</strong>: geram custo, mas podem estar reservados de propósito — e o custo de VM parada
+              pode incluir dias em que ela ainda estava ligada. <strong>Não inclui rightsizing de VM</strong>: isso exigiria métricas do Azure Monitor.
             </div>
 
             {desperdicioQuery.isLoading && (
