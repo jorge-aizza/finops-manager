@@ -448,6 +448,7 @@ export default function InventarioView() {
   }), [])
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
+  const [filtroDesperdicioOrfao, setFiltroDesperdicioOrfao] = useState<'todos' | 'orfaos'>('todos')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
   const [filtroAcao, setFiltroAcao] = useState('')
   const [filtroTipo, setFiltroTipo] = useState('')
@@ -1364,11 +1365,22 @@ export default function InventarioView() {
           {desperdicioQuery.data && desperdicioQuery.data.itens.length > 0 && (
             <div className="card" style={{ margin: '16px 20px' }}>
               <div className="card-header"><span className="card-title">Recursos ociosos</span></div>
-              {desperdicioQuery.data.total_itens > desperdicioQuery.data.itens.length && (
-                <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  Mostrando os {desperdicioQuery.data.itens.length} de maior custo, de {desperdicioQuery.data.total_itens}.
-                </div>
-              )}
+              <div style={{ padding: '0 20px 8px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={filtroDesperdicioOrfao === 'orfaos'}
+                    onChange={(e) => setFiltroDesperdicioOrfao(e.target.checked ? 'orfaos' : 'todos')}
+                    style={{ width: 'auto' }}
+                  />
+                  Apenas órfãos
+                </label>
+                {desperdicioQuery.data.total_itens > desperdicioQuery.data.itens.length && (
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    Mostrando os {desperdicioQuery.data.itens.length} de maior custo, de {desperdicioQuery.data.total_itens}.
+                  </span>
+                )}
+              </div>
               <div className="table-wrapper">
                 <table className="data-table">
                   <thead>
@@ -1376,10 +1388,11 @@ export default function InventarioView() {
                       <th>Recurso</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
                       <th style={{ textAlign: 'right' }}>Tam.</th>
                       <th style={{ textAlign: 'right' }}>Custo/mês</th>
+                      <th style={{ textAlign: 'right' }}>Dias Órfão</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {desperdicioQuery.data.itens.map((it) => (
+                    {desperdicioQuery.data.itens.filter(it => filtroDesperdicioOrfao === 'todos' || it.dias_orfao !== null).map((it) => (
                       <tr key={it.resource_id}>
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
                           {it.nome || it.resource_id}
@@ -1393,6 +1406,9 @@ export default function InventarioView() {
                           title={it.custo_mensal_estimado === null ? 'Sem billing conhecido para este recurso — não dá pra afirmar o custo' : ''}
                         >
                           {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
+                        </td>
+                        <td style={{ textAlign: 'right', fontSize: 12, color: it.dias_orfao !== null ? 'var(--red,#ff4d6a)' : 'var(--text-muted)' }}>
+                          {it.dias_orfao !== null ? `${it.dias_orfao}d` : '—'}
                         </td>
                       </tr>
                     ))}

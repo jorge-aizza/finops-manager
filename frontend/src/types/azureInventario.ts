@@ -525,6 +525,10 @@ export interface AzureDesperdicioItem {
   dias_observados: number
   /** null (nunca 0) quando o recurso não tem billing conhecido — "não sabemos", não "é grátis". */
   custo_mensal_estimado: number | null
+  /** Timestamp quando foi marcado como órfão (sem mudanças em 90+ dias) — null se não marcado. */
+  marcado_orfao_em: string | null
+  /** Quantos dias desde que foi marcado como órfão — null se não marcado. */
+  dias_orfao: number | null
 }
 export interface AzureDesperdicioResposta {
   gerado_em: string

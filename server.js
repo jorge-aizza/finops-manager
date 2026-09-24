@@ -9664,8 +9664,17 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
   desde.setDate(desde.getDate() - 30);
   const custos = await _custoObservadoPorResourceId(itens.map((x) => x.id), desde.toISOString().slice(0, 10));
 
+  // Busca status de órfãos da tabela azure_recursos_inventario
+  const orfaosDb = pool ? (await pool.query(
+    `SELECT resource_id, marcado_orfao_em FROM azure_recursos_inventario WHERE subscription_id=$1 AND marcado_orfao_em IS NOT NULL`,
+    [subscriptionId]
+  )).rows : [];
+  const orfaosMap = new Map(orfaosDb.map(x => [String(x.resource_id).toUpperCase(), x.marcado_orfao_em]));
+
   return itens.map((x) => {
     const c = custos.get(String(x.id || '').toUpperCase());
+    const marcadoOm = orfaosMap.get(String(x.id || '').toUpperCase());
+    const diasOrfao = marcadoOm ? Math.floor((Date.now() - new Date(marcadoOm).getTime()) / (1000 * 60 * 60 * 24)) : null;
     // Extrapolação honesta NESTAS categorias: disco managed e IP Standard estático faturam a
     // mesma taxa anexados ou não, então o custo observado É o desperdício. Sem billing conhecido
     // → null, NUNCA zero (mesma convenção de `nao_verificaveis` no compliance de tags): zero
@@ -9684,6 +9693,8 @@ async function _coletarDesperdicio(subscriptionId, diasSnapshot) {
       custo_periodo: c ? c.custo : null,
       dias_observados: c ? c.dias : 0,
       custo_mensal_estimado: custoMensal,
+      marcado_orfao_em: marcadoOm || null,
+      dias_orfao: diasOrfao,
     };
   });
 }
