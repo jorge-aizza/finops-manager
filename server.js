@@ -5661,97 +5661,20 @@ function _logColetaInv(msg) {
   console.log('[ColetaInv] ' + msg);
 }
 
-// ── Circuit Breaker — Azure Cost Management API ────────────────────────────────
-const _CB_STATES       = Object.freeze({ CLOSED: 'CLOSED', OPEN: 'OPEN', HALF_OPEN: 'HALF_OPEN' });
-const _CB_MAX_FAILURES = 3;
-const _CB_OPEN_MS      = 5 * 60 * 1000; // 5 min
-let _cbAPI = { state: _CB_STATES.CLOSED, failures: 0, openUntil: null, lastOpened: null };
+// ── Circuit Breaker / pausa de 429 / concorrência — ver azureThrottle.js ──────────────────
+// Breaker POR FAMÍLIA de API (custo, resourcegraph, advisor, reservas, arm, graph, identidade,
+// blob). 429 = limitação de ritmo: pausa a família inteira pelo Retry-After e nunca abre o
+// breaker; só 5xx/timeout/rede contam falha. Storage (blob) é independente das demais.
+const _azThrottle = require('./azureThrottle');
+const _cbCore = _azThrottle.createCbFetch({ fetch: (...a) => fetch(...a), log: (m) => _logColeta(m) });
+const _mapLimit = _azThrottle.mapLimit;
+const _mapLimitSettled = _azThrottle.mapLimitSettled;
 
-function _cbCanAttempt() {
-  if (_cbAPI.state === _CB_STATES.CLOSED)    return true;
-  if (_cbAPI.state === _CB_STATES.HALF_OPEN) return true;
-  // OPEN — verificar se janela expirou
-  if (_cbAPI.openUntil && Date.now() >= _cbAPI.openUntil.getTime()) {
-    _cbAPI.state = _CB_STATES.HALF_OPEN;
-    _logColeta('[CB] Estado → HALF_OPEN (janela expirou, testando)');
-    return true;
-  }
-  return false;
-}
-
-function _cbRecordSuccess() {
-  if (_cbAPI.state === _CB_STATES.HALF_OPEN) {
-    _cbAPI.state    = _CB_STATES.CLOSED;
-    _cbAPI.failures = 0;
-    _cbAPI.openUntil = null;
-    _logColeta('[CB] Estado → CLOSED (HALF_OPEN bem-sucedido)');
-  } else if (_cbAPI.state === _CB_STATES.CLOSED) {
-    _cbAPI.failures = 0;
-  }
-}
-
-function _cbRecordFailure() {
-  if (_cbAPI.state === _CB_STATES.HALF_OPEN) {
-    // Falhou na sondagem — reabrir imediatamente
-    _cbAPI.state      = _CB_STATES.OPEN;
-    _cbAPI.openUntil  = new Date(Date.now() + _CB_OPEN_MS);
-    _cbAPI.lastOpened = new Date();
-    _logColeta(`[CB] Estado → OPEN (HALF_OPEN falhou, bloqueando até ${_cbAPI.openUntil.toISOString()})`);
-    return;
-  }
-  _cbAPI.failures++;
-  if (_cbAPI.failures >= _CB_MAX_FAILURES) {
-    _cbAPI.state      = _CB_STATES.OPEN;
-    _cbAPI.openUntil  = new Date(Date.now() + _CB_OPEN_MS);
-    _cbAPI.lastOpened = new Date();
-    _logColeta(`[CB] Estado → OPEN (${_cbAPI.failures} falhas consecutivas, bloqueando até ${_cbAPI.openUntil.toISOString()})`);
-  }
-}
-
-// _cbFetch — fetch com AbortController, retry 429 e integração ao Circuit Breaker
-// SAS URLs (blobs) devem usar countCbFailure:false para não abrir CB por problemas de download
-async function _cbFetch(url, options = {}, { timeoutMs = 30000, maxRetries = 3, countCbFailure = true } = {}) {
-  if (!_cbCanAttempt()) {
-    const until = _cbAPI.openUntil ? _cbAPI.openUntil.toISOString() : '?';
-    throw new Error(`Circuit Breaker OPEN — Azure API bloqueada até ${until}`);
-  }
-
-  let attempt = 0;
-  while (true) {
-    const ctrl    = new AbortController();
-    const timer   = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const resp = await fetch(url, { ...options, signal: ctrl.signal });
-      clearTimeout(timer);
-
-      if (resp.status === 429) {
-        if (attempt >= maxRetries) {
-          if (countCbFailure) _cbRecordFailure();
-          throw new Error(`HTTP 429 esgotado após ${maxRetries} tentativas`);
-        }
-        const retryAfter = parseInt(resp.headers.get('Retry-After') || '60', 10);
-        _logColeta(`[CB] HTTP 429 — aguardando ${retryAfter}s antes de retentar (tentativa ${attempt + 1}/${maxRetries})`);
-        await new Promise(r => setTimeout(r, retryAfter * 1000));
-        attempt++;
-        continue;
-      }
-
-      if (resp.status >= 500 && countCbFailure) _cbRecordFailure();
-      else if (resp.status < 400)               _cbRecordSuccess();
-      return resp;
-
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === 'AbortError') {
-        if (countCbFailure) _cbRecordFailure();
-        throw new Error(`Timeout (${timeoutMs / 1000}s) na chamada Azure: ${url.split('?')[0]}`);
-      }
-      // Erro de rede
-      if (countCbFailure) _cbRecordFailure();
-      throw err;
-    }
-  }
-}
+// _cbFetch — fetch com timeout, retry/pausa de 429 e breaker da família da URL.
+// SAS URLs (blobs) devem usar countCbFailure:false para não abrir CB por problemas de download.
+function _cbFetch(url, options = {}, cfg = {}) { return _cbCore.cbFetch(url, options, cfg); }
+// Falha lógica da coleta de custos (relatório falhou/5xx no polling) — família 'custo'.
+function _cbRecordFailure() { _cbCore.recordFailure('custo'); }
 
 let _coletaTableReady = false;
 async function ensureAzureColetaTable() {
@@ -6337,6 +6260,14 @@ async function ensureAzureColetaTable() {
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_recursos_inv_uniq ON azure_recursos_inventario (subscription_id, resource_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
+  // Unicidade case-insensitive de resource_id (migrations/inventarioResourceIdCase.js): as
+  // gravações usam ON CONFLICT (subscription_id, (LOWER(resource_id))), que exige o índice
+  // criado por ela. Idempotente — sem custo quando o índice já existe.
+  try {
+    await require('./migrations/inventarioResourceIdCase').run(pool, console.log);
+  } catch (e) {
+    console.error('[Inventário] FALHA na unificação de resource_id — a ingestão do Inventário vai falhar até corrigir:', e.message);
+  }
   // Migração pra TIMESTAMPTZ (2026-08-31, reportado pelo usuário como "o horário parece estar
   // errado") — `criado_em`/`atualizado_em`/`excluido_em` SEMPRE foram gravados a partir de
   // `ev.eventTimestamp` (string ISO UTC do Activity Log, ex: "...T12:00:00Z"), nunca de um
@@ -7448,9 +7379,7 @@ function _iniciarAgendador() {
         _logColeta('[CB] Safety valve: coleta travada ' + Math.round(elapsedMs / 60000) + 'min (>6h) — resetando flags');
         _coletaEmExecucao = false;
         _coletaIniciadaEm = null;
-        _cbAPI.state      = _CB_STATES.CLOSED;
-        _cbAPI.failures   = 0;
-        _cbAPI.openUntil  = null;
+        _cbCore.reset();
       }
     }
     if (_coletaEmExecucao || !pool) return;
@@ -7720,11 +7649,7 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
       ultimo_api:      rApi.rows[0] || null,
       ultimo_storage:  rStg.rows[0] || null,
       agendador_ativo: !!_agendadorTimer,
-      circuit_breaker: {
-        state:      _cbAPI.state,
-        failures:   _cbAPI.failures,
-        open_until: _cbAPI.openUntil ? _cbAPI.openUntil.toISOString() : null,
-      },
+      circuit_breaker: { ..._cbCore.resumo(), familias: _cbCore.estado() },
     });
   } catch (e) { _dbErr(res, e); }
 });
@@ -7951,13 +7876,13 @@ app.get('/api/azure-inventario/advisor', authMiddleware, dbMiddleware, async (re
     const alvo = subscription_id ? [subscription_id] : subs;
     if (!alvo.length) return res.status(400).json({ error: 'Nenhuma subscription configurada' });
 
-    const porSub = await Promise.all(alvo.map(async (sub) => {
+    const porSub = await _mapLimit(alvo, 4, async (sub) => {
       try {
         return { subscription_id: sub, recomendacoes: await _getAdvisorCached(token, sub), erro: null };
       } catch (e) {
         return { subscription_id: sub, recomendacoes: [], erro: e.message };
       }
-    }));
+    });
 
     let itens = [];
     for (const p of porSub) {
@@ -8446,7 +8371,7 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
     }
     let where = `e.quando >= $1 AND e.quando < $2::date + INTERVAL '1 day'`;
     const params = [data_inicio, data_fim];
-    if (resource_id) { params.push(resource_id); where += ` AND e.resource_id = $${params.length}`; }
+    if (resource_id) { params.push(resource_id); where += ` AND LOWER(e.resource_id) = LOWER($${params.length})`; }
     if (acao) { params.push(acao); where += ` AND e.acao = $${params.length}`; }
     if (subscription_id) { params.push(subscription_id); where += ` AND e.subscription_id = $${params.length}`; }
 
@@ -8482,7 +8407,7 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
     const r = await pool.query(
       `SELECT e.*, ri.nome, cac.nome AS autor_nome
        FROM azure_recursos_auditoria_eventos e
-       LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = e.subscription_id AND ri.resource_id = e.resource_id
+       LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = e.subscription_id AND LOWER(ri.resource_id) = LOWER(e.resource_id)
        LEFT JOIN azure_autores_cache cac ON cac.guid = e.autor
        WHERE ${whereEventos} ORDER BY e.quando DESC LIMIT 300`,
       paramsEventos
@@ -8515,12 +8440,12 @@ app.get('/api/azure-inventario/mudancas-propriedade', authMiddleware, dbMiddlewa
     }
     let where = `h.detectado_em >= $1 AND h.detectado_em < $2::date + INTERVAL '1 day'`;
     const params = [data_inicio, data_fim];
-    if (resource_id) { params.push(resource_id); where += ` AND h.resource_id = $${params.length}`; }
+    if (resource_id) { params.push(resource_id); where += ` AND LOWER(h.resource_id) = LOWER($${params.length})`; }
     if (subscription_id) { params.push(subscription_id); where += ` AND h.subscription_id = $${params.length}`; }
     const r = await pool.query(
       `SELECT h.*, ri.nome, cac.nome AS evento_autor_nome
        FROM azure_recursos_mudancas_propriedade h
-       LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = h.subscription_id AND ri.resource_id = h.resource_id
+       LEFT JOIN azure_recursos_inventario ri ON ri.subscription_id = h.subscription_id AND LOWER(ri.resource_id) = LOWER(h.resource_id)
        LEFT JOIN azure_autores_cache cac ON cac.guid = h.evento_autor
        WHERE ${where} ORDER BY h.detectado_em DESC LIMIT 300`,
       params
@@ -8660,7 +8585,7 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
        LEFT JOIN azure_autores_cache cac1 ON cac1.guid = ri.criado_por
        LEFT JOIN azure_autores_cache cac2 ON cac2.guid = ri.atualizado_por
        LEFT JOIN azure_autores_cache cac3 ON cac3.guid = ri.excluido_por
-       WHERE ri.subscription_id=$1 AND ri.resource_id=$2`,
+       WHERE ri.subscription_id=$1 AND LOWER(ri.resource_id)=LOWER($2)`,
       [subscription_id, resource_id]
     );
     if (!recursoR.rows.length) return res.status(404).json({ error: 'Recurso não encontrado no inventário' });
@@ -8679,7 +8604,7 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
       pool.query(
         `SELECT e.*, cac.nome AS autor_nome FROM azure_recursos_auditoria_eventos e
          LEFT JOIN azure_autores_cache cac ON cac.guid = e.autor
-         WHERE e.subscription_id=$1 AND e.resource_id=$2 ORDER BY e.quando ASC LIMIT 200`,
+         WHERE e.subscription_id=$1 AND LOWER(e.resource_id)=LOWER($2) ORDER BY e.quando ASC LIMIT 200`,
         [subscription_id, resource_id]
       ),
       pool.query(
@@ -8929,9 +8854,9 @@ async function _computeAnomaliasCrescimentoRaw() {
       WITH persistentes AS (
         SELECT subscription_id, DATE_TRUNC('day', CURRENT_TIMESTAMP)::DATE AS dia,
           COUNT(*) AS recursos_persistentes,
-          SUM(CASE WHEN tempo_vida_dias >= 7 AND tempo_vida_dias < 14 THEN 1 ELSE 0 END) AS novos_persistentes
+          SUM(CASE WHEN EXTRACT(EPOCH FROM (NOW() - criado_em)) / 86400 >= 7 AND EXTRACT(EPOCH FROM (NOW() - criado_em)) / 86400 < 14 THEN 1 ELSE 0 END) AS novos_persistentes
         FROM azure_recursos_inventario
-        WHERE ativo = true AND tempo_vida_dias >= 7 AND NOT UPPER(COALESCE(resource_group,'')) = ANY($3::text[])
+        WHERE ativo = true AND EXTRACT(EPOCH FROM (NOW() - criado_em)) / 86400 >= 7 AND NOT UPPER(COALESCE(resource_group,'')) = ANY($3::text[])
         GROUP BY 1, 2
       ), stats AS (
         SELECT subscription_id,
@@ -9286,7 +9211,7 @@ async function _computeConformidadePorSubscription() {
     FROM azure_recursos_inventario ri
     LEFT JOIN azure_recurso_tags t ON t.resource_id_upper = UPPER(ri.resource_id)
     WHERE ri.ativo = true
-      AND COALESCE(ri.tempo_vida_dias, 0) >= 7
+      AND COALESCE(EXTRACT(EPOCH FROM (NOW() - ri.criado_em)) / 86400, 0) >= 7
       AND NOT (UPPER(ri.resource_group) LIKE 'DATABRICKS-RG-%' OR UPPER(ri.resource_group) LIKE 'MANAGED-RG-%' OR UPPER(ri.resource_group) LIKE 'MC_%')
       AND t.tags IS NOT NULL
   `);
@@ -9738,10 +9663,10 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     // Resiliência por subscription — uma sem permissão não derruba as outras (mesmo padrão do
     // /advisor).
     const erros = [];
-    const listas = await Promise.all(alvos.map(async (sid) => {
+    const listas = await _mapLimit(alvos, 4, async (sid) => {
       try { return await _getDesperdicioCached(sid, dias); }
       catch (e) { erros.push({ subscription_id: sid, erro: e.message }); return []; }
-    }));
+    });
     const itens = listas.flat();
 
     const porCategoria = {};
@@ -10013,7 +9938,7 @@ app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, a
         _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
       );
       // Paralelo: busca RGs de todas as subs simultaneamente
-      const results = await Promise.allSettled(subscription_ids.map(async subId => {
+      const results = await _mapLimitSettled(subscription_ids, 6, async subId => {
         const subRgs = [];
         let url = `https://management.azure.com/subscriptions/${subId}/resourcegroups?api-version=2021-04-01&$top=1000`;
         while (url) {
@@ -10024,7 +9949,7 @@ app.post('/api/azure-coleta/sps/:id/listar-rgs', authMiddleware, dbMiddleware, a
           url = data.nextLink || null;
         }
         return subRgs;
-      }));
+      });
       const rgs = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
       if (rgs.length > 0) return res.json({ rgs, fonte: 'arm' });
     } catch (_) {}
@@ -12400,7 +12325,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
           await pool.query(
             `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,excluido_por,excluido_em,ativo)
              VALUES ($1,$2,$3,$4,$5,$6,$7,false)
-             ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
+             ON CONFLICT (subscription_id, (LOWER(resource_id))) DO UPDATE SET
                nome=COALESCE(azure_recursos_inventario.nome, EXCLUDED.nome),
                excluido_por=EXCLUDED.excluido_por, excluido_em=EXCLUDED.excluido_em, ativo=false`,
             [subId, resourceId, resourceType, resourceGroup, nomeDel, autor, quando]
@@ -12416,7 +12341,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
           await pool.query(
             `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,criado_por,criado_em,atualizado_por,atualizado_em,ativo)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,true)
-             ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
+             ON CONFLICT (subscription_id, (LOWER(resource_id))) DO UPDATE SET
                atualizado_por=EXCLUDED.atualizado_por, atualizado_em=EXCLUDED.atualizado_em,
                resource_type=EXCLUDED.resource_type, resource_group=EXCLUDED.resource_group, ativo=true`,
             [subId, resourceId, resourceType, resourceGroup, nome, autor, quando]
@@ -12813,6 +12738,7 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
       _invColetaProgresso.sub_atual = subId;
       _invColetaProgresso.fase = `[${i + 1}/${subs.length}] Consultando Resource Graph — ${subId}`;
       let recursos;
+      const inicioSnapshot = new Date();
       try {
         recursos = await _resourceGraphFetchRecursos(token, subId);
       } catch (eSub) {
@@ -12828,7 +12754,7 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
         const r = await pool.query(
           `INSERT INTO azure_recursos_inventario (subscription_id,resource_id,resource_type,resource_group,nome,ativo,origem_deteccao)
            VALUES ($1,$2,$3,$4,$5,true,'resource_graph')
-           ON CONFLICT (subscription_id,resource_id) DO UPDATE SET
+           ON CONFLICT (subscription_id, (LOWER(resource_id))) DO UPDATE SET
              ativo=true,
              resource_type=COALESCE(azure_recursos_inventario.resource_type, EXCLUDED.resource_type),
              resource_group=COALESCE(azure_recursos_inventario.resource_group, EXCLUDED.resource_group),
@@ -12839,6 +12765,34 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
         if (r.rows[0]?.inserted) totalNovos++;
         _invColetaProgresso.eventos = totalEncontrados;
         _invColetaProgresso.novos = totalNovos;
+      }
+
+      // Reconciliação nos DOIS sentidos: o que está ativo no Inventário mas não existe mais no
+      // Resource Graph foi excluído sem o evento de exclusão ter sido capturado. Só roda quando a
+      // consulta desta subscription veio completa (falha de página cai no catch acima).
+      try {
+        const { planejarDesativacao } = require('./inventarioReconcile');
+        const ativos = await pool.query(
+          `SELECT id, resource_id, resource_type,
+                  GREATEST(criado_em, atualizado_em, detectado_em::timestamptz) AS ref_em
+           FROM azure_recursos_inventario WHERE subscription_id = $1 AND ativo = true`, [subId]);
+        const plano = planejarDesativacao({
+          ativosNoBanco: ativos.rows,
+          idsNoAzure: new Set(recursos.filter(x => x.id).map(x => String(x.id).toLowerCase())),
+          tiposNoAzure: new Set(recursos.filter(x => x.type).map(x => String(x.type).toLowerCase())),
+          inicioSnapshot,
+        });
+        if (plano.bloqueado) {
+          _logColetaInv(`  ⚠ ${subId}: desativação de inexistentes bloqueada — ${plano.motivo}`);
+        } else if (plano.desativar.length) {
+          await pool.query(
+            `UPDATE azure_recursos_inventario SET ativo = false, excluido_em = NOW(), excluido_por = 'Reconciliação (Resource Graph)'
+             WHERE id = ANY($1::int[])`, [plano.desativar]);
+          _invColetaProgresso.excluidos = (_invColetaProgresso.excluidos || 0) + plano.desativar.length;
+          _logColetaInv(`  ${subId}: ${plano.desativar.length} recurso(s) inexistente(s) no Azure marcados como excluídos (${plano.protegidosRecentes} recentes preservados)`);
+        }
+      } catch (eDes) {
+        _logColetaInv(`  ✗ ${subId}: falha ao desativar inexistentes — ${eDes.message}`);
       }
     }
 
