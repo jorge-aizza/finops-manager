@@ -72,7 +72,7 @@ describe('InventarioView', () => {
       ],
     })
     renderWithClient()
-    await userEvent.click(await screen.findByRole('button', { name: 'Desperdício' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
     expect(await screen.findByText('120d')).toBeInTheDocument()
     expect(screen.getByText('35d')).toBeInTheDocument()
     expect(screen.getByText('2d')).toBeInTheDocument()
@@ -102,7 +102,7 @@ describe('InventarioView', () => {
       ],
     })
     renderWithClient()
-    await userEvent.click(await screen.findByRole('button', { name: 'Desperdício' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
     expect(await screen.findByText('disco-a')).toBeInTheDocument()
 
     // Sem filtro: cartão mostra o total (3)
@@ -148,7 +148,7 @@ describe('InventarioView', () => {
     // Os cards de crescimento saíram de "sempre visível" e passaram a viver na
     // aba Crescimento (2026-09-10) — antes empurravam o conteúdo das outras
     // abas para baixo da dobra.
-    await userEvent.click(await screen.findByRole('button', { name: 'Crescimento' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Crescimento' }))
     expect(await screen.findByText('Crescimento Líquido de Recursos')).toBeInTheDocument()
     expect(await screen.findByText(/100 → 112 recursos no período/)).toBeInTheDocument()
     expect(screen.getByText('+12')).toBeInTheDocument()
@@ -185,7 +185,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Por Assinatura' }))
+    await user.click(await screen.findByRole('tab', { name: 'Por Assinatura' }))
 
     expect(await screen.findByText('Development')).toBeInTheDocument()
     expect(screen.getByText('3 recursos ativos')).toBeInTheDocument()
@@ -229,7 +229,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Por Assinatura' }))
+    await user.click(await screen.findByRole('tab', { name: 'Por Assinatura' }))
 
     expect(await screen.findByText('Development')).toBeInTheDocument()
     expect(screen.getByTitle('VM')).toHaveTextContent('🖥️ 3')
@@ -281,7 +281,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
+    await user.click(await screen.findByRole('tab', { name: 'Auditoria' }))
     expect(await screen.findByText('✚ Criação')).toBeInTheDocument()
     expect(screen.getByText('joao@vivo.com.br')).toBeInTheDocument()
     expect(screen.getByText('vm-teste')).toBeInTheDocument()
@@ -311,7 +311,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
+    await user.click(await screen.findByRole('tab', { name: 'Auditoria' }))
 
     expect(await screen.findByText('VM')).toBeInTheDocument()
     expect(screen.getByText('5')).toBeInTheDocument()
@@ -338,7 +338,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
+    await user.click(await screen.findByRole('tab', { name: 'Auditoria' }))
 
     expect(await screen.findByText('Comparativo Diário')).toBeInTheDocument()
     expect(screen.getByText('12')).toBeInTheDocument()
@@ -371,7 +371,7 @@ describe('InventarioView', () => {
     } as never)
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Auditoria' }))
+    await user.click(await screen.findByRole('tab', { name: 'Auditoria' }))
 
     expect(await screen.findByText('Alterações de Propriedade')).toBeInTheDocument()
     expect(screen.getByText('Standard_E4s_v3')).toBeInTheDocument()
@@ -392,7 +392,7 @@ describe('InventarioView', () => {
     vi.mocked(azureInventarioApi.salvarAzureInventarioConfig).mockResolvedValue({ ok: true })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
 
     await waitFor(() => expect(screen.getByRole('checkbox')).toBeChecked())
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
@@ -405,7 +405,7 @@ describe('InventarioView', () => {
     vi.mocked(azureInventarioApi.salvarAzureInventarioConfig).mockResolvedValue({ ok: true })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
 
     expect(await screen.findByText(/assinaturas coletadas são as selecionadas no Service Principal/)).toBeInTheDocument()
     expect(screen.queryByPlaceholderText('Buscar assinatura...')).not.toBeInTheDocument()
@@ -418,17 +418,17 @@ describe('InventarioView', () => {
 
   it('clique numa notificação do sino abre a aba pedida pela ponte (ex: Crescimento)', async () => {
     renderWithClient()
-    const botao = await screen.findByRole('button', { name: 'Crescimento' })
-    expect(botao).toHaveClass('btn-ghost')
+    const botao = await screen.findByRole('tab', { name: 'Crescimento' })
+    expect(botao).not.toHaveAttribute('aria-current')
     act(() => window.__reactBridge.setInventarioTab('crescimento'))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Crescimento' })).toHaveClass('btn-primary'))
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Crescimento' })).toHaveAttribute('aria-current', 'page'))
   })
 
   it('botão "Coletar Agora" dispara a coleta manual', async () => {
     vi.mocked(azureInventarioApi.coletarAzureInventario).mockResolvedValue({ ok: true, message: 'Coleta de Inventário iniciada' })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
     await user.click(await screen.findByRole('button', { name: '▶ Coletar Agora' }))
     await waitFor(() => expect(azureInventarioApi.coletarAzureInventario).toHaveBeenCalled())
   })
@@ -437,7 +437,7 @@ describe('InventarioView', () => {
     vi.mocked(azureInventarioApi.reconciliarAzureInventario).mockResolvedValue({ ok: true, message: 'Reconciliação via Resource Graph iniciada' })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
     await user.click(await screen.findByRole('button', { name: '🔎 Reconciliar (Resource Graph)' }))
     await waitFor(() => expect(azureInventarioApi.reconciliarAzureInventario).toHaveBeenCalled())
   })
@@ -462,7 +462,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Advisor' }))
+    await user.click(await screen.findByRole('tab', { name: 'Advisor' }))
 
     expect(await screen.findByText('VM subutilizada')).toBeInTheDocument()
     expect(screen.getByText('Habilitar criptografia')).toBeInTheDocument()
@@ -487,7 +487,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Rede' }))
+    await user.click(await screen.findByRole('tab', { name: 'Rede' }))
     await user.selectOptions(await screen.findByRole('combobox'), 'sub-1')
 
     expect(await screen.findByText(/vnet-teste/)).toBeInTheDocument()
@@ -515,7 +515,7 @@ describe('InventarioView', () => {
     vi.mocked(azureInventarioApi.resolverAutoresInventario).mockResolvedValue({ resolvidos: 3, pendentes: 0 })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
     await user.click(await screen.findByRole('button', { name: '🪪 Resolver Nomes' }))
     await waitFor(() => expect(azureInventarioApi.resolverAutoresInventario).toHaveBeenCalled())
   })
@@ -545,7 +545,7 @@ describe('InventarioView', () => {
     ])
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Configuração' }))
+    await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
     expect(await screen.findByText('⏰ Agendada')).toBeInTheDocument()
     expect(screen.getByText('concluido')).toBeInTheDocument()
     expect(screen.getByText('8 evento(s) | 3 novo(s), 4 atualizado(s), 1 excluído(s)')).toBeInTheDocument()
@@ -558,7 +558,7 @@ describe('InventarioView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await user.click(await screen.findByRole('button', { name: 'Comparativo' }))
+    await user.click(await screen.findByRole('tab', { name: 'Comparativo' }))
 
     expect(await screen.findByText('Recursos ativos (no fim do período)')).toBeInTheDocument()
     // delta de recursos ativos: 45 - 40 = 5, crescimento (verde/▲)
@@ -762,7 +762,7 @@ describe('InventarioView', () => {
     // Os cards de crescimento saíram de "sempre visível" e passaram a viver na
     // aba Crescimento (2026-09-10) — antes empurravam o conteúdo das outras
     // abas para baixo da dobra.
-    await userEvent.click(await screen.findByRole('button', { name: 'Crescimento' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Crescimento' }))
 
     expect(await screen.findByText('joao@vivo.com.br')).toBeInTheDocument()
     expect(screen.getByText('Detalhe do Crescimento')).toBeInTheDocument()
@@ -784,7 +784,7 @@ describe('InventarioView', () => {
     // Os cards de crescimento saíram de "sempre visível" e passaram a viver na
     // aba Crescimento (2026-09-10) — antes empurravam o conteúdo das outras
     // abas para baixo da dobra.
-    await userEvent.click(await screen.findByRole('button', { name: 'Crescimento' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Crescimento' }))
 
     expect(await screen.findByText('rg-teste')).toBeInTheDocument()
     expect(screen.getByText('Anomalias de Crescimento')).toBeInTheDocument()

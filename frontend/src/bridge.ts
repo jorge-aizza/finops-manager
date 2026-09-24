@@ -106,6 +106,8 @@ declare global {
     // A barra de abas na pagina chama esta, nao setDbxTab direto, para os dois
     // ficarem em sincronia.
     showDbxTab?: (tab: string) => void
+    // app.js: idem para o Inventário (troca a aba E o realce do submenu lateral).
+    showInvTab?: (tab: string) => void
     suspendInactivityTimer?: () => void
     resumeInactivityTimer?: () => void
   }

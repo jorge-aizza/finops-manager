@@ -1825,6 +1825,7 @@ function openNavGroup(id) {
   document.getElementById('nav-group-' + id)?.classList.add('open');
   if (id === 'dashboard') showDashTab('acoes');
   if (id === 'databricks') showDbxTab('dashboard');
+  if (id === 'inventario') showInvTab('recursos');
 }
 
 function showDashTab(tab) {
@@ -1855,12 +1856,20 @@ function switchDbxTab(tab) {
   window.__reactBridge?.setDatabricksTab?.(tab);
 }
 
+// Inventário: mesmas sub-abas no menu lateral e na barra da página (InventarioView), trocadas sem
+// remontar a view (canal próprio setInventarioTab). Atualiza o realce do submenu junto.
+function showInvTab(tab) {
+  showView('inventario');
+  window.__reactBridge?.setInventarioTab?.(tab);
+  document.querySelectorAll('.nav-sub').forEach(el => el.classList.remove('active'));
+  document.getElementById('nav-sub-inv-' + tab)?.classList.add('active');
+}
+
 // Clique numa notificação do sino com `destino` "view:aba" (ex: 'inventario:crescimento').
 function abrirDestinoNotif(destino) {
   const [view, aba] = String(destino || '').split(':');
   if (view !== 'inventario') return;
-  showView('inventario');
-  if (aba) window.__reactBridge?.setInventarioTab?.(aba);
+  showInvTab(aba || 'recursos');
 }
 
 // ── HELPERS ───────────────────────────────────

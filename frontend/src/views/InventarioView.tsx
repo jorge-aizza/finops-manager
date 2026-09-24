@@ -443,12 +443,19 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
   )
 }
 
+type InventarioTab = 'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'crescimento' | 'conformidade' | 'advisor' | 'rede' | 'desperdicio' | 'config'
+// Mesma ordem/rótulos do submenu lateral (index.html, #nav-group-inventario).
+const INV_TABS: [InventarioTab, string][] = [
+  ['recursos', 'Recursos'], ['porAssinatura', 'Por Assinatura'], ['auditoria', 'Auditoria'],
+  ['comparativo', 'Comparativo'], ['crescimento', 'Crescimento'], ['conformidade', 'Conformidade'],
+  ['advisor', 'Advisor'], ['rede', 'Rede'], ['desperdicio', 'Desperdício'], ['config', 'Configuração'],
+]
+
 export default function InventarioView() {
   const queryClient = useQueryClient()
-  type InventarioTab = 'recursos' | 'porAssinatura' | 'auditoria' | 'comparativo' | 'crescimento' | 'conformidade' | 'advisor' | 'rede' | 'desperdicio' | 'config'
   const [tab, setTab] = useState<InventarioTab>('recursos')
   useEffect(() => setInventarioTabListener((t) => {
-    if (['recursos', 'porAssinatura', 'auditoria', 'comparativo', 'crescimento', 'conformidade', 'advisor', 'rede', 'desperdicio', 'config'].includes(t)) setTab(t as InventarioTab)
+    if (INV_TABS.some(([id]) => id === t)) setTab(t as InventarioTab)
   }), [])
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
@@ -685,17 +692,20 @@ export default function InventarioView() {
         <div className="view-hero-sub">Inventário e auditoria de recursos Azure — quem criou, quando, e quanto custa</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, margin: '16px 20px 0' }}>
-        <button className={tab === 'recursos' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('recursos')}>Recursos</button>
-        <button className={tab === 'porAssinatura' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('porAssinatura')}>Por Assinatura</button>
-        <button className={tab === 'auditoria' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('auditoria')}>Auditoria</button>
-        <button className={tab === 'comparativo' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('comparativo')}>Comparativo</button>
-        <button className={tab === 'crescimento' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('crescimento')}>Crescimento</button>
-        <button className={tab === 'conformidade' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('conformidade')}>Conformidade</button>
-        <button className={tab === 'advisor' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('advisor')}>Advisor</button>
-        <button className={tab === 'rede' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('rede')}>Rede</button>
-        <button className={tab === 'desperdicio' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('desperdicio')}>Desperdício</button>
-        <button className={tab === 'config' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('config')}>Configuração</button>
+      {/* Barra de abas no padrão do sistema (.view-tabs, igual ao Databricks). Chama
+          window.showInvTab para o realce do submenu lateral acompanhar; sem o app.js
+          (testes) cai direto no estado local. */}
+      <div className="view-tabs" role="tablist" aria-label="Seções do Inventário" style={{ marginTop: 16 }}>
+        {INV_TABS.map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-current={tab === id ? 'page' : undefined}
+            onClick={() => (window.showInvTab ? window.showInvTab(id) : setTab(id))}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* O monitor continua ACIMA das abas de proposito: e progresso ao vivo de
