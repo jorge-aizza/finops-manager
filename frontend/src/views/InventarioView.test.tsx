@@ -331,23 +331,18 @@ describe('InventarioView', () => {
     ))
   })
 
-  it('lista as assinaturas por nome pra seleção, e inclui a marcada no salvar', async () => {
-    vi.mocked(calculadoraApi.listSubscriptions).mockResolvedValue([
-      { subscription_id: 'sub-1', subscription_name: 'Development', periodo_inicio: null, periodo_fim: null, moeda: null },
-      { subscription_id: 'sub-2', subscription_name: 'Production', periodo_inicio: null, periodo_fim: null, moeda: null },
-    ])
+  it('as assinaturas vêm do Service Principal: não há seletor e o salvar envia subscription_ids nulo', async () => {
     vi.mocked(azureInventarioApi.salvarAzureInventarioConfig).mockResolvedValue({ ok: true })
     const user = userEvent.setup()
     renderWithClient()
     await user.click(await screen.findByRole('button', { name: 'Configuração' }))
 
-    expect(await screen.findByText('Development')).toBeInTheDocument()
-    expect(screen.getByText('Production')).toBeInTheDocument()
+    expect(await screen.findByText(/assinaturas coletadas são as selecionadas no Service Principal/)).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('Buscar assinatura...')).not.toBeInTheDocument()
 
-    await user.click(screen.getByText('Production'))
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
     await waitFor(() => expect(azureInventarioApi.salvarAzureInventarioConfig).toHaveBeenCalledWith(
-      expect.objectContaining({ subscription_ids: 'sub-2' }),
+      expect.objectContaining({ subscription_ids: null }),
     ))
   })
 

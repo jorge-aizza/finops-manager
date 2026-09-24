@@ -12265,7 +12265,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
     const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
     const token = await getToken();
 
-    const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const subs = (spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
     if (!subs.length) throw new Error('Nenhuma subscription configurada (nem no Inventário, nem no Service Principal escolhido)');
 
     // Retenção nativa da Change Analysis é 14 dias (vs. 90 do Activity Log antigo) — janela
@@ -12508,7 +12508,7 @@ async function _getInventarioSpConfig() {
   if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
   const spCfg = spRow.rows[0];
   const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
-  const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  const subs = (spCfg.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   return { cfg, spCfg, getToken, subs };
 }
 
@@ -12770,7 +12770,7 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
     const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
     const token = await getToken();
 
-    const subs = (cfg.subscription_ids || spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const subs = (spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
     if (!subs.length) throw new Error('Nenhuma subscription configurada (nem no Inventário, nem no Service Principal escolhido)');
 
     const hist = await pool.query(

@@ -12,7 +12,6 @@ import {
   getAzureDesperdicio, getAzureInventarioCrescimentoPersistente, getAzureConformidade,
 } from '../api/azureInventario'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria, AzureAnomaliaCrescimento, AzureDesperdicioCategoria } from '../types/azureInventario'
-import CheckboxSearchList from '../components/CheckboxSearchList'
 import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMonitor'
 import RecursoDetalheModal from '../components/RecursoDetalheModal'
 
@@ -579,32 +578,19 @@ export default function InventarioView() {
   const [retencaoDias, setRetencaoDias] = useState(180)
   const [tagsObrigatorias, setTagsObrigatorias] = useState('')
   const [spId, setSpId] = useState<number | null>(null)
-  const [subsSelecionadas, setSubsSelecionadas] = useState<Set<string>>(new Set())
   const [formInicializado, setFormInicializado] = useState(false)
   if (configQuery.data && !formInicializado) {
     setAtivo(configQuery.data.ativo)
     setRetencaoDias(configQuery.data.retencao_dias)
     setTagsObrigatorias(configQuery.data.tags_obrigatorias || '')
     setSpId(configQuery.data.sp_id)
-    setSubsSelecionadas(new Set((configQuery.data.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)))
     setFormInicializado(true)
-  }
-
-  function toggleSub(id: string, checked: boolean) {
-    setSubsSelecionadas((prev) => {
-      const next = new Set(prev)
-      if (checked) next.add(id); else next.delete(id)
-      return next
-    })
-  }
-  function toggleTodasSubs(checked: boolean) {
-    setSubsSelecionadas(checked ? new Set((subsQuery.data || []).map((s) => s.subscription_id)) : new Set())
   }
 
   const salvarMutation = useMutation({
     mutationFn: () => salvarAzureInventarioConfig({
       ativo, retencao_dias: retencaoDias, sp_id: spId,
-      subscription_ids: subsSelecionadas.size ? Array.from(subsSelecionadas).join(',') : null,
+      subscription_ids: null,
       tags_obrigatorias: tagsObrigatorias.trim() || null,
     }),
     onSuccess: () => {
@@ -1445,17 +1431,8 @@ export default function InventarioView() {
                   {(spsQuery.data || []).map((sp) => <option key={sp.id} value={sp.id}>{sp.nome}</option>)}
                 </select>
               </div>
-              <div className="form-group" style={{ margin: 0 }}>
-                <label>Subscriptions (vazio = usa as mesmas do Service Principal)</label>
-                <CheckboxSearchList
-                  items={(subsQuery.data || []).map((s) => ({ id: s.subscription_id, label: s.subscription_name || s.subscription_id, sublabel: s.subscription_name ? s.subscription_id : undefined }))}
-                  selected={subsSelecionadas}
-                  onToggle={toggleSub}
-                  onSelectAll={toggleTodasSubs}
-                  loading={subsQuery.isLoading}
-                  emptyText="Nenhuma assinatura encontrada — importe/colete custos Azure primeiro."
-                  searchPlaceholder="Buscar assinatura..."
-                />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                As assinaturas coletadas são as selecionadas no Service Principal (Coleta Azure). Para incluir ou remover assinaturas, edite o Service Principal.
               </div>
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Retenção do log de Auditoria (dias)</label>
