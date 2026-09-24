@@ -6259,11 +6259,14 @@ async function ensureAzureColetaTable() {
   // de recursos que existem mas nunca geraram evento desde a ativação do Inventário, sem
   // "criado por/em" porque o Resource Graph não tem esse histórico).
   await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS origem_deteccao VARCHAR(20) DEFAULT 'activity_log'`);
+  // Marcar recursos órfãos (sem mudanças em 90+ dias) — para auditoria e limpeza manual
+  await pool.query(`ALTER TABLE azure_recursos_inventario ADD COLUMN IF NOT EXISTS marcado_orfao_em TIMESTAMPTZ`);
   // NOTA: índice case-sensitive foi removido — usar apenas o case-insensitive criado pela migration
   // (migrations/inventarioResourceIdCase.js). Se houver conflito, dropar o antigo.
   await pool.query(`DROP INDEX IF EXISTS idx_azure_recursos_inv_uniq`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_ativo ON azure_recursos_inventario (ativo)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_criado ON azure_recursos_inventario (criado_em)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_azure_recursos_inv_orfao ON azure_recursos_inventario (marcado_orfao_em)`);
   // Unicidade case-insensitive de resource_id (migrations/inventarioResourceIdCase.js): o índice
   // funcional é criado por ela (LOWER(resource_id)). Reconciliação usa busca + insert/update
   // explícita para evitar sintaxe ON CONFLICT com funções. Idempotente — sem custo quando já existe.
@@ -7043,6 +7046,47 @@ let _alertasEmailTimer = null;
 // GET .../anomalias e .../orcamentos/alertas que também as usam) — hoisting de function
 // declaration já é o padrão deste arquivo (ex: _checkAnomaliasDatabricks chama
 // _computeAnomaliasDatabricks, definida centenas de linhas depois).
+// Gap de coleta: alerta se Inventário não rodou em >7 dias.
+// Usa dedup com 24h de cooldown (evita spam, mas re-alerta diariamente se o problema persiste).
+async function _checkGapColetaInventario() {
+  if (!pool) return;
+  const cfg = await _getSmtpConfig();
+  const destinatarios = cfg ? _parseDestinatarios(cfg.destinatarios_padrao) : [];
+
+  const r = await pool.query(`
+    SELECT MAX(concluido_em) as ultima_coleta
+    FROM azure_coleta_historico
+    WHERE tipo = 'Inventário' AND status = 'concluido'
+  `);
+  const ultimaColeta = r.rows[0]?.ultima_coleta ? new Date(r.rows[0].ultima_coleta) : null;
+  const agora = new Date();
+  const diasDesdeUltima = ultimaColeta ? Math.floor((agora - ultimaColeta) / (1000 * 60 * 60 * 24)) : null;
+
+  if (!ultimaColeta || diasDesdeUltima > 7) {
+    const chave = ultimaColeta ? `gap:${ultimaColeta.toISOString().slice(0, 10)}` : `gap:nunca`;
+    if (!(await _tentarClaimAlerta('coleta_gap_inventario', chave))) return;
+
+    const msg = ultimaColeta
+      ? `Inventário não foi coletado há ${diasDesdeUltima} dias (última coleta: ${ultimaColeta.toLocaleDateString('pt-BR')})`
+      : `Inventário nunca foi coletado`;
+
+    await _registrarNotificacaoColeta(
+      `⚠️ Gap de coleta — Inventário pausado`,
+      msg,
+      'coleta_gap',
+      'inventario:auditoria'
+    );
+
+    if (destinatarios.length) {
+      await _sendEmail({
+        to: destinatarios,
+        subject: `⚠️ Gap de coleta — Inventário pausado por ${diasDesdeUltima || '?'} dias`,
+        html: _emailTemplate('Gap de coleta detectado', `<p>${_escHtmlServer(msg)}</p>`)
+      });
+    }
+  }
+}
+
 // Alerta no sino (2026-09-04, pedido do usuário: "controlar e acompanhar no detalhe... pra
 // agir mais rápido") — antes só existia por e-mail, então num ambiente sem SMTP configurado
 // (o caso deste ambiente) a anomalia nunca era vista por ninguém. Reaproveita
@@ -7278,6 +7322,7 @@ function _iniciarAlertasEmail() {
     try { await _checkAnomaliasDatabricks(); } catch (e) { console.warn('[Email] Checagem de anomalias Databricks falhou:', e.message); }
     try { await _checkAnomaliasCrescimentoInventario(); } catch (e) { console.warn('[Email] Checagem de anomalias de crescimento falhou:', e.message); }
     try { await _checkOrcamentosInventario(); } catch (e) { console.warn('[Email] Checagem de orçamentos de Inventário falhou:', e.message); }
+    try { await _checkGapColetaInventario(); } catch (e) { console.warn('[Email] Checagem de gap de coleta falhou:', e.message); }
     try { await _checkRelatorioSemanalInventario(); } catch (e) { console.warn('[Email] Relatório semanal de Inventário falhou:', e.message); }
     try { await _checkRelatorioDiarioInventario(); } catch (e) { console.warn('[Email] Relatório diário de Inventário falhou:', e.message); }
   };
@@ -7639,6 +7684,7 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
   if (!_agendadorTimer && pool) _iniciarAgendador();
   if (!_alertasEmailTimer && pool) _iniciarAlertasEmail();
   if (!_invAgendadorTimer && pool) _iniciarInventarioAgendador();
+  if (!_reconciliacaoAgendadorTimer && pool) _iniciarReconciliacaoAgendador();
   try {
     await ensureAzureColetaTable();
     const cols = `id,tipo,origem,iniciado_em,concluido_em,status,linhas_inseridas,linhas_atualizadas,linhas_erro,mensagem`;
@@ -7840,7 +7886,10 @@ app.post('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (re
       [!!ativo, Number(retencao_dias) > 0 ? Number(retencao_dias) : 180, sp_id || null, subscription_ids || null,
        (tags_obrigatorias || '').trim() || null, id]
     );
-    if (ativo) _iniciarInventarioAgendador();
+    if (ativo) {
+      _iniciarInventarioAgendador();
+      _iniciarReconciliacaoAgendador();
+    }
     // Invalida o cache do relatório de compliance — sem isso, mudar `tags_obrigatorias` não
     // teria efeito visível por até 15 min (o TTL), e o admin acharia que o save não funcionou.
     // Bug real pego no teste ponta a ponta desta própria rodada.
@@ -12870,6 +12919,8 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
       `UPDATE azure_inventario_coleta_historico SET status='concluido',concluido_em=NOW(),eventos_processados=$1,recursos_novos=$2,mensagem=$3 WHERE id=$4`,
       [totalEncontrados, totalNovos, msg, histId]
     );
+    // Marca recursos órfãos (sem mudanças em 90+ dias)
+    await _marcarRecursosOrfaos();
   } catch (err) {
     _logColetaInv(`ERRO (reconciliação): ${err.message}`);
     if (histId) await pool.query(
@@ -12879,6 +12930,36 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
   } finally {
     _invColetaEmExecucao = false;
     _invColetaIniciadaEm = null;
+  }
+}
+
+// Marca recursos que não foram atualizados em >90 dias como órfãos.
+// Roda ao final de uma reconciliação bem-sucedida (quando temos certeza de que
+// buscamos todos os recursos via Resource Graph).
+async function _marcarRecursosOrfaos() {
+  if (!pool) return;
+  try {
+    const diasOrfao = 90;
+    const r = await pool.query(`
+      UPDATE azure_recursos_inventario
+      SET marcado_orfao_em = NOW()
+      WHERE marcado_orfao_em IS NULL
+        AND atualizado_em < NOW() - INTERVAL '${diasOrfao} days'
+        AND ativo = true
+      RETURNING id
+    `);
+    const qtd = r.rowCount || 0;
+    if (qtd > 0) {
+      _logColetaInv(`✓ ${qtd} recurso(s) marcado(s) como órfão(s) (sem atualização em ${diasOrfao}+ dias)`);
+      await _registrarNotificacaoColeta(
+        `🗑️ Recursos órfãos marcados`,
+        `${qtd} recurso(s) sem atualização em ${diasOrfao}+ dias foi/foram marcado(s) para revisão.`,
+        'coleta_orfaos',
+        'inventario:auditoria'
+      );
+    }
+  } catch (e) {
+    _logColetaInv(`⚠️ Erro ao marcar órfãos: ${e.message}`);
   }
 }
 
@@ -12898,6 +12979,30 @@ function _iniciarInventarioAgendador() {
   };
   setTimeout(tick, 150 * 1000);
   _invAgendadorTimer = setInterval(tick, 60 * 60 * 1000); // a cada hora
+}
+
+// Reconciliação automática semanal (segunda-feira 01:00 UTC, ~1 vez por semana)
+let _reconciliacaoAgendadorTimer = null;
+function _iniciarReconciliacaoAgendador() {
+  if (_reconciliacaoAgendadorTimer || !pool) return;
+  const tick = async () => {
+    if (_invColetaEmExecucao) return;
+    try {
+      const cfgRow = await pool.query(`SELECT ativo FROM azure_inventario_config ORDER BY id LIMIT 1`);
+      if (!cfgRow.rows.length || !cfgRow.rows[0].ativo) return;
+      _logColetaInv('[Agendador Reconciliação] Iniciando reconciliação semanal');
+      await _reconciliarInventarioResourceGraph('agendado');
+    } catch (e) { _logColetaInv(`[Agendador Reconciliação] Falha: ${e.message}`); }
+  };
+  // Próxima segunda 01:00 UTC (7 dias = 7 * 24 * 60 * 60 * 1000)
+  const agora = new Date();
+  const proximaExecucao = new Date(agora);
+  proximaExecucao.setUTCDate(proximaExecucao.getUTCDate() + (1 - proximaExecucao.getUTCDay() + 7) % 7 || 7);
+  proximaExecucao.setUTCHours(1, 0, 0, 0);
+  const msAteProxima = Math.max(1000, proximaExecucao.getTime() - agora.getTime());
+  _logColetaInv(`[Agendador Reconciliação] Próxima execução em ${Math.round(msAteProxima / 1000 / 60)} minutos`);
+  setTimeout(tick, msAteProxima);
+  _reconciliacaoAgendadorTimer = setInterval(tick, 7 * 24 * 60 * 60 * 1000); // a cada 7 dias
 }
 
 // ── Helpers de Coleta via API ─────────────────────────────────────────────────
@@ -14038,6 +14143,7 @@ app.get('/health', (_req, res) => {
       _iniciarAgendador();
       _iniciarAlertasEmail();
       _iniciarInventarioAgendador();
+      _iniciarReconciliacaoAgendador();
       _iniciarRecursoTagsCache();
       // Carrega caches persistentes imediatamente do banco (sem query pesada)
       pool.query(`SELECT ws_name, parent_rg FROM azure_ws_cache`).then(r => {
@@ -14169,6 +14275,7 @@ app.get('/health', (_req, res) => {
       _iniciarAgendador();
       _iniciarAlertasEmail();
       _iniciarInventarioAgendador();
+      _iniciarReconciliacaoAgendador();
       _iniciarRecursoTagsCache();
     } catch (e2) {
       pool = null;
