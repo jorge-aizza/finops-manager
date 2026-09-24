@@ -424,6 +424,21 @@ describe('InventarioView', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: 'Crescimento' })).toHaveAttribute('aria-current', 'page'))
   })
 
+  it('pedido de aba feito com o Inventário fechado (sino) vale na próxima abertura', async () => {
+    const primeira = renderWithClient()
+    await screen.findByRole('tab', { name: 'Crescimento' })
+    primeira.unmount()
+    act(() => window.__reactBridge.setInventarioTab('crescimento'))
+    renderWithClient()
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Crescimento' })).toHaveAttribute('aria-current', 'page'))
+  })
+
+  it('a raiz da tela não usa a classe "view active" (showView() a removia e a tela ficava branca)', async () => {
+    const { container } = renderWithClient()
+    await screen.findByRole('tab', { name: 'Recursos' })
+    expect(container.querySelector('.view')).toBeNull()
+  })
+
   it('botão "Coletar Agora" dispara a coleta manual', async () => {
     vi.mocked(azureInventarioApi.coletarAzureInventario).mockResolvedValue({ ok: true, message: 'Coleta de Inventário iniciada' })
     const user = userEvent.setup()

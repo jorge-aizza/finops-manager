@@ -51,13 +51,16 @@ export function setDatabricksTabListener(fn: DashboardTabListener): void {
   fn(currentDatabricksTab)
 }
 
-export function setInventarioTabListener(fn: DashboardTabListener): void {
+// Devolve o "cancelar registro": sem ele o listener de uma view já desmontada engolia o pedido de
+// aba (ex: clique no sino com o Inventário fechado) em vez de deixá-lo pendente para a próxima montagem.
+export function setInventarioTabListener(fn: DashboardTabListener): () => void {
   inventarioTabListener = fn
   if (pendingInventarioTab) {
     const tab = pendingInventarioTab
     pendingInventarioTab = null
     fn(tab)
   }
+  return () => { if (inventarioTabListener === fn) inventarioTabListener = null }
 }
 
 export function setRefreshHandler(fn: RefreshHandler): void {

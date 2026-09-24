@@ -686,7 +686,9 @@ export default function InventarioView() {
   })
 
   return (
-    <div className="view active">
+    // Sem a classe `view active`: showView() (app.js) remove `active` de todo `.view` a cada troca
+    // de aba pelo menu e o React não a recoloca — a tela ficava em branco. #react-root já controla a exibição.
+    <div>
       <div className="view-hero">
         <div className="page-title">Inventário</div>
         <div className="view-hero-sub">Inventário e auditoria de recursos Azure — quem criou, quando, e quanto custa</div>
