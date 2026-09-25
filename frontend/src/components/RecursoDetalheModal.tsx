@@ -94,7 +94,21 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
         </div>
         <div className="modal-body">
           {q.isLoading && <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>Carregando...</div>}
-          {q.isError && <div style={{ padding: 20, textAlign: 'center', color: 'var(--red,#ff4d6a)' }}>Recurso não encontrado no inventário.</div>}
+          {q.isError && (() => {
+            // Só é "não encontrado" quando o servidor respondeu 404; timeout/erro de rede/500 têm outra causa.
+            const msg = q.error instanceof Error ? q.error.message : ''
+            const naoEncontrado = /não encontrado/i.test(msg)
+            return (
+              <div style={{ padding: 20, textAlign: 'center', color: 'var(--red,#ff4d6a)' }}>
+                {naoEncontrado ? 'Recurso não encontrado no inventário.' : `Não foi possível carregar o detalhe do recurso${msg ? ': ' + msg : '.'}`}
+                {!naoEncontrado && (
+                  <div style={{ marginTop: 10 }}>
+                    <button className="btn-ghost" onClick={() => q.refetch()}>Tentar novamente</button>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
 
           {data && (
             <>

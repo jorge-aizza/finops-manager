@@ -2045,27 +2045,96 @@ let _rgStatsCacheTs = 0;
 // build EM ANDAMENTO — qualquer chamada concorrente espera essa mesma promise em vez de
 // iniciar outro scan.
 let _rgStatsCachePromise = null;
-async function _getRgStatsCache() {
-  if (_rgStatsCache && (Date.now() - _rgStatsCacheTs) < _RESUMO_TTL) return _rgStatsCache;
+// 2026-09-25: com `azure_costs` em ~7,8M linhas, essa agregação leva 75s a +300s (medido) — bem além
+// dos 30s da tela, que mostrava "Recurso não encontrado" no detalhe e travava a lista de Recursos.
+// Agora NUNCA roda no caminho da requisição: o resultado fica numa tabela pequena (`azure_rg_stats`) e em
+// memória; quando envelhece, é recalculado em SEGUNDO PLANO enquanto a tela usa o último valor.
+// Só a primeiríssima vez (tabela vazia) devolve mapa vazio até o cálculo terminar.
+const _RG_STATS_TTL = 6 * 60 * 60 * 1000;
+const _RG_STATS_MIN_INTERVALO = 30 * 60 * 1000; // nunca reconstrói mais de 1x a cada 30 min
+let _rgStatsUltimoInicio = 0;
+
+async function _carregarRgStatsDaTabela() {
+  try {
+    const r = await pool.query(`SELECT subscription_id, rg, custo, recursos, atualizado_em FROM azure_rg_stats`);
+    const map = new Map();
+    let ts = 0;
+    for (const row of r.rows) {
+      map.set(row.subscription_id + '::' + row.rg, { custo: parseFloat(row.custo), recursos: parseInt(row.recursos, 10) });
+      ts = Math.max(ts, new Date(row.atualizado_em).getTime());
+    }
+    return { map, ts };
+  } catch (_) { return { map: new Map(), ts: 0 }; } // tabela ainda não existe
+}
+
+function _reconstruirRgStats() {
   if (_rgStatsCachePromise) return _rgStatsCachePromise;
+  _rgStatsUltimoInicio = Date.now();
   _rgStatsCachePromise = (async () => {
     try {
-      const r = await pool.query(`
-        SELECT subscription_id, UPPER(resource_group_name) AS rg,
-               SUM(cost_in_billing_currency) AS custo, COUNT(DISTINCT resource_id) AS recursos
-        FROM azure_costs WHERE resource_group_name IS NOT NULL
-        GROUP BY 1, 2
-      `);
+      const t0 = Date.now();
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS azure_rg_stats (
+          subscription_id VARCHAR(200) NOT NULL, rg TEXT NOT NULL,
+          custo NUMERIC NOT NULL DEFAULT 0, recursos INTEGER NOT NULL DEFAULT 0,
+          atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (subscription_id, rg)
+        )`);
+      // Só SUM no billing (a parte pesada). A contagem de "recursos diferentes" vem do Inventário
+      // (todos os IDs já vistos no RG, ativos ou não) — COUNT(DISTINCT resource_id) em azure_costs passa de 300s.
+      const custos = await pool.query(`
+        SELECT subscription_id, UPPER(resource_group_name) AS rg, SUM(cost_in_billing_currency) AS custo
+        FROM azure_costs WHERE resource_group_name IS NOT NULL GROUP BY 1, 2`);
+      const contagem = await pool.query(`
+        SELECT subscription_id, UPPER(resource_group) AS rg, COUNT(*) AS recursos
+        FROM azure_recursos_inventario WHERE resource_group IS NOT NULL GROUP BY 1, 2`);
+      const nRec = new Map(contagem.rows.map((x) => [x.subscription_id + '::' + x.rg, parseInt(x.recursos, 10)]));
       const map = new Map();
-      for (const row of r.rows) map.set(row.subscription_id + '::' + row.rg, { custo: parseFloat(row.custo), recursos: parseInt(row.recursos, 10) });
+      for (const row of custos.rows) {
+        const chave = row.subscription_id + '::' + row.rg;
+        map.set(chave, { custo: parseFloat(row.custo) || 0, recursos: nRec.get(chave) || 0 });
+      }
+      // Grava substituindo tudo, numa transação (a tela nunca lê uma tabela pela metade).
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query('DELETE FROM azure_rg_stats');
+        const subs = [], rgs = [], cs = [], rc = [];
+        for (const [k, v] of map) { const i = k.indexOf('::'); subs.push(k.slice(0, i)); rgs.push(k.slice(i + 2)); cs.push(v.custo); rc.push(v.recursos); }
+        for (let i = 0; i < subs.length; i += 5000) {
+          await c.query(
+            `INSERT INTO azure_rg_stats (subscription_id, rg, custo, recursos) SELECT * FROM unnest($1::text[], $2::text[], $3::numeric[], $4::int[])`,
+            [subs.slice(i, i + 5000), rgs.slice(i, i + 5000), cs.slice(i, i + 5000), rc.slice(i, i + 5000)]
+          );
+        }
+        await c.query('COMMIT');
+      } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
       _rgStatsCache = map;
       _rgStatsCacheTs = Date.now();
+      console.log(`[Inventario] Custo por RG recalculado em ${Math.round((Date.now() - t0) / 1000)}s (${map.size} RGs)`);
       return map;
+    } catch (e) {
+      console.warn('[Inventario] Falha ao recalcular custo por RG:', e.message);
+      return _rgStatsCache || new Map();
     } finally {
       _rgStatsCachePromise = null;
     }
   })();
   return _rgStatsCachePromise;
+}
+
+// Nunca espera o cálculo pesado: devolve o último valor conhecido (memória → tabela → vazio) e, se
+// estiver velho, dispara a reconstrução em segundo plano.
+async function _getRgStatsCache() {
+  if (!_rgStatsCache) {
+    const { map, ts } = await _carregarRgStatsDaTabela();
+    if (map.size) { _rgStatsCache = map; _rgStatsCacheTs = ts; }
+  }
+  const velho = !_rgStatsCache || (Date.now() - _rgStatsCacheTs) > _RG_STATS_TTL;
+  if (velho && !_rgStatsCachePromise && (!_rgStatsCache || Date.now() - _rgStatsUltimoInicio > _RG_STATS_MIN_INTERVALO)) {
+    _reconstruirRgStats().catch(() => {});
+  }
+  return _rgStatsCache || new Map();
 }
 async function _refreshAzureCache() {
   if (!pool || _cacheRefreshing) return;
@@ -5411,7 +5480,8 @@ app.delete('/api/azure-costs/purge', authMiddleware, dbMiddleware, async (req, r
         msg = `Todos os ${removidos} registros foram removidos.`;
       }
       _coberturaCache = null;
-      _rgStatsCache = null;
+      _rgStatsCache = null; _rgStatsCacheTs = 0;
+      pool.query('TRUNCATE TABLE azure_rg_stats').catch(() => {}); // os dados de billing foram apagados
       _resumoCache = null;
       _importsCache = null;
       console.log(`[Azure Purge] ${msg}`);
@@ -13527,7 +13597,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     // Marca registros desta coleta como fonte='api' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='api' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
-    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null; _rgStatsCache = null;
+    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null; _rgStatsCacheTs = 0; // marca como velho: recalcula em segundo plano, sem apagar o último valor
     _refreshAzureCache().catch(() => {});
     const msgFinal = modo === 'subscription'
       ? `API Subscription — ${subCount} sub(s) | ${startDate}→${endDate}`
@@ -13740,7 +13810,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     // Marca registros desta coleta como fonte='storage' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='storage' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
-    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null; _rgStatsCache = null;
+    _coberturaCache = null; _resumoCache = null; _importsCache = null; _dbWsCache = null; _rgStatsCacheTs = 0; // marca como velho: recalcula em segundo plano, sem apagar o último valor
     _refreshAzureCache().catch(() => {});
 
     // ── Price List via Storage (opcional) ──────────────────────────────────────
