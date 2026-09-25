@@ -1,6 +1,6 @@
 # CLAUDE.md — FinOps Manager v4.0
 
-**Quick reference for Claude Code.** Deployment: `README.md`. Detailed context: `~/.claude/projects/.../memory/MEMORY.md`.
+**Quick reference.** Full docs: `MODULES/` | Memory: `~/.claude/projects/.../memory/MEMORY.md`
 
 ## 🚀 Quick Start
 
@@ -16,56 +16,64 @@ npm start                # Prod: node server.js
 
 ---
 
-## 📚 Modules
+## 📁 Project Structure
 
-| Module | Focus |
-|--------|-------|
-| **01-STARTUP** | Boot, 12 bg tasks |
-| **02-ARCHITECTURE** | Design, layers, flows |
-| **03-AUTHENTICATION** | JWT, LDAP, Entra ID, SSO |
-| **04-AZURE-API** | Resource Manager, Cost, Graph |
-| **05-DATABRICKS-API** | OAuth M2M, System Tables |
-| **06-DATABASE** | PostgreSQL, schema, indexes |
-| **07-EMAIL-ALERTS** | SMTP, dedup, triggers |
-| **08-FRONTEND-REACT** | Strangler fig, migration |
-| **09-CALCULADORA** | Financial rules (RN-*) |
-| **10-DEPLOYMENT** | Docker, cloud platforms |
-
-See `MODULES/` for full docs.
-
----
-
-## 🗂️ Key Files
-
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `server.js` | API, auth, DB, Excel |
-| `app.js` | Wizard, login, views |
-| `calculadora.js` | Cost calculator |
-| `index.html` | SPA shell |
-| `portal.html` | Public calc (React) |
-| `styles.css` | Theme (Vivo purple) |
-| `frontend/` | React app (Vite) |
+| `server.js` | Express API, auth, database, Excel exports |
+| `app.js` | Legacy wizard & login views (being replaced by React) |
+| `calculadora.js` | Cost calculator logic & formulas |
+| `encrypt-env.js` | Environment variable encryption utility |
+| `frontend/` | React app (Vite) — main UI, replaces legacy |
+| `MODULES/` | Detailed architecture docs (01–10) |
+| `tests/` | Jest/Playwright test suite |
+| `fonts/`, `libs/` | Static assets & libraries |
 
 ---
 
-## 💡 Detailed Guides (in Memory)
+## 🏗️ System Layers
 
-- **[[auth-and-secrets]]** — 3 auth methods, env vars, encryption
-- **[[business-rules]]** — RN-* cost rules, Databricks billing
-- **[[database-schema]]** — Tables, indexes, resource_id case handling
-- **[[frontend-react-migration]]** — Strangler fig pattern
-- **[[branding-logos]]** — Theme-aware logos, CSS filters
+| Component | Tech | Module |
+|-----------|------|--------|
+| **Backend API** | Node.js + Express | 01-STARTUP, 02-ARCHITECTURE |
+| **Authentication** | JWT, LDAP, Entra ID | 03-AUTHENTICATION |
+| **Azure Integration** | Resource Manager, Cost API, Graph | 04-AZURE-API |
+| **Databricks** | OAuth M2M, System Tables | 05-DATABRICKS-API |
+| **Database** | PostgreSQL, partitioned tables | 06-DATABASE |
+| **Alerts** | SMTP, dedup, smart triggers | 07-EMAIL-ALERTS |
+| **Frontend** | React (Vite), Strangler fig pattern | 08-FRONTEND-REACT |
+| **Cost Rules** | RN-* financial formulas | 09-CALCULADORA |
+| **Deployment** | Docker, PM2, systemd | 10-DEPLOYMENT |
 
 ---
 
-## ✅ Prod Checklist
+## 💡 Memory Topics
 
+- **[[auth-and-secrets]]** — JWT/LDAP/env-vars/encryption
+- **[[business-rules]]** — RN-* rules, Databricks billing, Azure reservations
+- **[[database-schema]]** — PostgreSQL tables, indexes, resource_id case
+- **[[frontend-react-migration]]** — Strangler fig, bridge, checklist
+- **[[branding-logos]]** — Theme-aware assets, CSS filters
+
+---
+
+## ✅ Prod Deployment
+
+Before shipping:
 - `JWT_SECRET`, `MASTER_KEY` (≥32 chars)
 - `ALLOWED_ORIGIN` set for HTTPS
 - `.env` encrypted
-- `frontend/dist/` built
-- PostgreSQL migrations run
-- PM2/systemd auto-restart
+- `npm run frontend:build` executed
+- PostgreSQL migrations completed
+- PM2/systemd auto-restart configured
 
-See **DEPLOYMENT_CHECKLIST.md** for full list.
+See `MODULES/10-DEPLOYMENT` for full checklist.
+
+---
+
+## 🧪 Testing
+
+```bash
+npm run frontend:test    # Jest + Playwright
+npm test                 # Backend tests (if configured)
+```
