@@ -45,9 +45,12 @@ export interface AzureRecursosFiltros {
   criado_por?: string
   data_inicio?: string
   data_fim?: string
+  /** Ignora RG gerenciado (Databricks/AKS) — igual à contagem da anomalia de crescimento por assinatura. */
+  excluir_gerenciados?: boolean
 }
 export const getAzureRecursosInventario = (filtros?: AzureRecursosFiltros) => {
   const q = new URLSearchParams()
+  if (filtros?.excluir_gerenciados) q.set('excluir_gerenciados', 'true')
   if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
   if (filtros?.resource_group) q.set('resource_group', filtros.resource_group)
   if (filtros?.ativo != null) q.set('ativo', String(filtros.ativo))

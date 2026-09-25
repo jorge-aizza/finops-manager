@@ -5,6 +5,9 @@
 
 export type ViewChangeListener = (view: string | null) => void
 export type DashboardTabListener = (tab: string) => void
+// Parâmetros do "onde exatamente" (ex: recurso ou escopo de uma notificação do sino) — opcionais.
+export type InventarioTabParams = Record<string, unknown> | null
+export type InventarioTabListener = (tab: string, params?: InventarioTabParams) => void
 export type RefreshHandler = () => void | Promise<unknown>
 
 let currentView: string | null = null
@@ -27,7 +30,8 @@ let databricksTabListener: DashboardTabListener | null = null
 // montar e registrar o listener; é consumida uma vez, para não sobrescrever a aba que o
 // usuário escolher depois.
 let pendingInventarioTab: string | null = null
-let inventarioTabListener: DashboardTabListener | null = null
+let pendingInventarioParams: InventarioTabParams = null
+let inventarioTabListener: InventarioTabListener | null = null
 
 // manualRefresh() (app.js, botão "Atualizar" + countdown de auto-refresh)
 // chama isso pra telas migradas em vez de reimplementar refetch por tela —
@@ -53,12 +57,14 @@ export function setDatabricksTabListener(fn: DashboardTabListener): void {
 
 // Devolve o "cancelar registro": sem ele o listener de uma view já desmontada engolia o pedido de
 // aba (ex: clique no sino com o Inventário fechado) em vez de deixá-lo pendente para a próxima montagem.
-export function setInventarioTabListener(fn: DashboardTabListener): () => void {
+export function setInventarioTabListener(fn: InventarioTabListener): () => void {
   inventarioTabListener = fn
   if (pendingInventarioTab) {
     const tab = pendingInventarioTab
+    const params = pendingInventarioParams
     pendingInventarioTab = null
-    fn(tab)
+    pendingInventarioParams = null
+    fn(tab, params)
   }
   return () => { if (inventarioTabListener === fn) inventarioTabListener = null }
 }
@@ -87,9 +93,9 @@ function setDatabricksTab(tab: string): void {
   databricksTabListener?.(tab)
 }
 
-function setInventarioTab(tab: string): void {
-  if (inventarioTabListener) inventarioTabListener(tab)
-  else pendingInventarioTab = tab
+function setInventarioTab(tab: string, params: InventarioTabParams = null): void {
+  if (inventarioTabListener) inventarioTabListener(tab, params)
+  else { pendingInventarioTab = tab; pendingInventarioParams = params }
 }
 
 async function refresh(): Promise<void> {
@@ -110,7 +116,7 @@ declare global {
     // ficarem em sincronia.
     showDbxTab?: (tab: string) => void
     // app.js: idem para o Inventário (troca a aba E o realce do submenu lateral).
-    showInvTab?: (tab: string) => void
+    showInvTab?: (tab: string, params?: InventarioTabParams) => void
     suspendInactivityTimer?: () => void
     resumeInactivityTimer?: () => void
   }

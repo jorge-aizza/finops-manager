@@ -1673,7 +1673,7 @@ app.get('/api/notificacoes', authMiddleware, dbMiddleware, async (req, res) => {
     // Notificações de coletas recentes (48h)
     try {
       const rSis = await pool.query(
-        `SELECT id, tipo, titulo, mensagem, destino, criado_em FROM notificacoes_sistema WHERE expira_em > NOW() ORDER BY criado_em DESC LIMIT 20`
+        `SELECT id, tipo, titulo, mensagem, destino, destino_params, criado_em FROM notificacoes_sistema WHERE expira_em > NOW() ORDER BY criado_em DESC LIMIT 20`
       );
       rSis.rows.forEach(n => {
         notifs.push({
@@ -1683,6 +1683,7 @@ app.get('/api/notificacoes', authMiddleware, dbMiddleware, async (req, res) => {
           acao:        n.titulo,
           mensagem:    n.mensagem || '',
           destino:     n.destino || null,
+          destino_params: n.destino_params || null,
           id_finops:   '',
           projeto_nome: null,
           diffDias:    -9999,
@@ -5782,6 +5783,9 @@ async function ensureAzureColetaTable() {
   `);
   // destino = "view:aba" para onde o clique no sino leva (ex.: 'inventario:crescimento'). NULL = sem link.
   await pool.query(`ALTER TABLE notificacoes_sistema ADD COLUMN IF NOT EXISTS destino VARCHAR(100)`);
+  // destino_params = o "onde exatamente" (ex: {subscription_id, resource_group, dia} ou {resource_id, subscription_id}) — o clique
+  // no sino leva ao recurso/escopo que gerou o alerta, não só à aba.
+  await pool.query(`ALTER TABLE notificacoes_sistema ADD COLUMN IF NOT EXISTS destino_params JSONB`);
   await pool.query(`UPDATE notificacoes_sistema SET destino = 'inventario:crescimento' WHERE tipo = 'inventario_crescimento' AND destino IS NULL`);
   await pool.query(`UPDATE notificacoes_sistema SET destino = 'inventario:auditoria' WHERE tipo = 'inventario_alteracao' AND destino IS NULL`);
   // ── azure_coleta_pendentes — reprocessamentos agendados para próxima execução ──
@@ -6759,12 +6763,12 @@ async function _rebuildAlocacaoTags(origem = 'agendado', forcar = false) {
   }
 }
 
-async function _registrarNotificacaoColeta(titulo, mensagem, tipo = 'coleta_concluida', destino = null) {
+async function _registrarNotificacaoColeta(titulo, mensagem, tipo = 'coleta_concluida', destino = null, destinoParams = null) {
   if (!pool) return;
   try {
     await pool.query(
-      `INSERT INTO notificacoes_sistema (tipo, titulo, mensagem, destino, expira_em) VALUES ($1,$2,$3,$4, NOW() + INTERVAL '48 hours')`,
-      [tipo, titulo, mensagem, destino]
+      `INSERT INTO notificacoes_sistema (tipo, titulo, mensagem, destino, destino_params, expira_em) VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '48 hours')`,
+      [tipo, titulo, mensagem, destino, destinoParams ? JSON.stringify(destinoParams) : null]
     );
   } catch (_) {}
 }
@@ -7117,11 +7121,21 @@ async function _checkAnomaliasCrescimentoInventario() {
       partesHtml.push(`custo de <strong>R$ ${a.custo.toFixed(2)}</strong> (média: R$ ${a.media_custo.toFixed(2)}/dia, Z-score ${a.zscore_custo.toFixed(2)})`);
       partesTexto.push(`custo de R$ ${a.custo.toFixed(2)} (média R$ ${a.media_custo.toFixed(2)}/dia)`);
     }
+    // O clique leva à lista de recursos do escopo que gerou o alerta (assinatura ou RG). Só filtra pelo dia
+    // quando o gatilho inclui criações (a lista mostra o que foi criado naquele dia); anomalia só de
+    // custo lista o escopo inteiro. Escopo de assinatura ignora RG gerenciado, como a contagem da anomalia.
+    const destinoParams = {
+      subscription_id: a.subscription_id,
+      resource_group: a.resource_group || null,
+      dia: (a.gatilho === 'criacoes' || a.gatilho === 'ambos') ? String(a.dia).slice(0, 10) : null,
+      excluir_gerenciados: !a.resource_group,
+    };
     await _registrarNotificacaoColeta(
       `📈 Crescimento anômalo — ${escopoTxt}`,
       `${partesTexto.join(' e ')} em ${new Date(a.dia).toLocaleDateString('pt-BR')}.`,
       'inventario_crescimento',
-      'inventario:crescimento'
+      'inventario:recursos',
+      destinoParams
     );
     if (destinatarios.length) {
       await _sendEmail({
@@ -7354,14 +7368,16 @@ async function _alertarColetaComErro(titulo, mensagem) {
 // dispararia dezenas de e-mails de uma vez, mesmo raciocínio já usado pra excluir e-mail de
 // "coleta com sucesso" ("viraria spam sem valor"). Chamado pelo próprio `_coletarInventarioAzure`
 // logo após o INSERT bem-sucedido — nunca lança pro chamador (mesma garantia de `_sendEmail`).
-async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, quando) {
+async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, quando, ids = null) {
   // Sino primeiro (2026-09-04) — sempre, independente de SMTP configurado (mesmo raciocínio
   // de _checkAnomaliasCrescimentoInventario). E-mail continua condicionado à config existente.
+  // Com `ids`, o clique abre o detalhe do próprio recurso; sem, cai na aba Auditoria.
   await _registrarNotificacaoColeta(
     `🔧 ${p.propriedade_label} — ${nomeRecurso}`,
     `${p.valor_anterior} → ${p.valor_novo} (${resourceGroup || '—'}) · por ${autor || 'desconhecido'}`,
     'inventario_alteracao',
-    'inventario:auditoria'
+    ids ? 'inventario:recursos' : 'inventario:auditoria',
+    ids ? { resource_id: ids.resource_id, subscription_id: ids.subscription_id } : null
   );
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
@@ -8037,9 +8053,14 @@ app.delete('/api/azure-inventario/coleta-historico', authMiddleware, dbMiddlewar
 app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureAzureColetaTable();
-    const { subscription_id, resource_group, ativo, criado_por, data_inicio, data_fim } = req.query;
+    const { subscription_id, resource_group, ativo, criado_por, data_inicio, data_fim, excluir_gerenciados } = req.query;
     let where = '1=1';
     const params = [];
+    // Vindo do sino: a contagem da anomalia de assinatura já desconta RG gerenciado (Databricks/AKS).
+    if (excluir_gerenciados === 'true') {
+      params.push(await _getRgsGerenciados());
+      where += ` AND UPPER(COALESCE(ri.resource_group,'')) <> ALL($${params.length}::text[])`;
+    }
     if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
     if (resource_group) { params.push(resource_group); where += ` AND UPPER(ri.resource_group) = UPPER($${params.length})`; }
     if (ativo === 'true') where += ` AND ri.ativo = true`;
@@ -12556,7 +12577,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
               // Alerta por e-mail (2026-09-03, item 1) — só propriedades de infra, nunca tags
               // (ver `_alertarMudancaPropriedade`). Best-effort, nunca derruba a coleta.
               if (!p.propriedade.startsWith('tag:')) {
-                _alertarMudancaPropriedade(nome, resourceGroup, p, autor, quando).catch((eMail) => {
+                _alertarMudancaPropriedade(nome, resourceGroup, p, autor, quando, { subscription_id: subId, resource_id: resourceId }).catch((eMail) => {
                   _logColetaInv(`  ✗ ${subId}: alerta por e-mail falhou — ${eMail.message}`);
                 });
               }

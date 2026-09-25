@@ -452,11 +452,30 @@ const INV_TABS: [InventarioTab, string][] = [
   ['advisor', 'Advisor'], ['rede', 'Rede'], ['desperdicio', 'Desperdício'], ['config', 'Configuração'],
 ]
 
+interface EscopoRecursos { subscription_id: string; resource_group: string | null; dia: string | null; excluir_gerenciados: boolean }
+
 export default function InventarioView() {
   const queryClient = useQueryClient()
   const [tab, setTab] = useState<InventarioTab>('recursos')
-  useEffect(() => setInventarioTabListener((t) => {
-    if (INV_TABS.some(([id]) => id === t)) setTab(t as InventarioTab)
+  // Escopo vindo de uma notificação do sino (anomalia de crescimento): filtra Recursos por assinatura,
+  // RG e (se houver) dia de criação — a lista do que gerou o alerta.
+  const [escopoRecursos, setEscopoRecursos] = useState<EscopoRecursos | null>(null)
+  useEffect(() => setInventarioTabListener((t, p) => {
+    if (!INV_TABS.some(([id]) => id === t)) return
+    setTab(t as InventarioTab)
+    const str = (v: unknown) => (typeof v === 'string' && v ? v : null)
+    const sub = str(p?.subscription_id)
+    if (str(p?.resource_id) && sub) {
+      // Alteração de propriedade: abre o detalhe do próprio recurso.
+      setRecursoDetalhe({ resourceId: str(p?.resource_id)!, subscriptionId: sub })
+    } else if (sub) {
+      const dia = str(p?.dia)
+      setEscopoRecursos({ subscription_id: sub, resource_group: str(p?.resource_group), dia, excluir_gerenciados: p?.excluir_gerenciados === true })
+      setFiltroAtivo(dia ? 'todos' : 'ativos') // recurso criado no dia pode já ter sido excluído
+      setFiltroCriadoPor('')
+    } else if (t === 'recursos') {
+      setEscopoRecursos(null)
+    }
   }), [])
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
@@ -583,10 +602,17 @@ export default function InventarioView() {
   const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
   const historicoQuery = useQuery({ queryKey: ['azure-inv-historico'], queryFn: getAzureInventarioColetaHistorico })
   const recursosQuery = useQuery({
-    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor],
+    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor, escopoRecursos],
     queryFn: () => getAzureRecursosInventario({
       ativo: filtroAtivo === 'todos' ? undefined : filtroAtivo === 'ativos',
       criado_por: filtroCriadoPor || undefined,
+      ...(escopoRecursos ? {
+        subscription_id: escopoRecursos.subscription_id,
+        resource_group: escopoRecursos.resource_group || undefined,
+        data_inicio: escopoRecursos.dia || undefined,
+        data_fim: escopoRecursos.dia || undefined,
+        excluir_gerenciados: escopoRecursos.excluir_gerenciados || undefined,
+      } : {}),
     }),
     placeholderData: keepPreviousData,
     enabled: tab === 'recursos',
@@ -833,7 +859,24 @@ export default function InventarioView() {
             </select>
             <input placeholder="Filtrar por quem criou" value={filtroCriadoPor} onChange={(e) => setFiltroCriadoPor(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
           </div>
-          {recursosQuery.data && recursosQuery.data.total === 0 && (
+          {escopoRecursos && (
+            <div style={{ padding: '0 20px 12px' }}>
+              <span
+                onClick={() => setEscopoRecursos(null)}
+                title="Limpar o filtro vindo da notificação"
+                style={{ cursor: 'pointer', fontSize: 12, color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 20, padding: '4px 10px' }}
+              >
+                🔔 Da notificação: {escopoRecursos.resource_group ? `RG ${escopoRecursos.resource_group}` : `assinatura ${escopoRecursos.subscription_id}`}
+                {escopoRecursos.dia ? ` · criados em ${new Date(escopoRecursos.dia + 'T00:00:00Z').toLocaleDateString('pt-BR', { timeZone: 'UTC' })}` : ''} ✕
+              </span>
+            </div>
+          )}
+          {recursosQuery.data && recursosQuery.data.total === 0 && escopoRecursos && (
+            <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>
+              Nenhum recurso encontrado para o escopo desta notificação.
+            </div>
+          )}
+          {recursosQuery.data && recursosQuery.data.total === 0 && !escopoRecursos && (
             <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>
               Nenhum recurso encontrado. Configure e ative a coleta na aba <strong>Configuração</strong> — sem isso, o inventário nunca é populado.
             </div>

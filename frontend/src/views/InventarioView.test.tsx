@@ -171,7 +171,7 @@ describe('InventarioView', () => {
     expect(screen.getByText('disco-a')).toBeInTheDocument()
     expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
-  })
+  }, 30000) // muitos cliques simulados: passa de 5s com a máquina ocupada
 
   it('mostra a aba Recursos por padrão', async () => {
     renderWithClient()
@@ -474,6 +474,46 @@ describe('InventarioView', () => {
     act(() => window.__reactBridge.setInventarioTab('crescimento'))
     renderWithClient()
     await waitFor(() => expect(screen.getByRole('tab', { name: 'Crescimento' })).toHaveAttribute('aria-current', 'page'))
+  })
+
+  it('notificação de anomalia leva à lista de recursos do escopo (assinatura, RG e dia) e o chip limpa o filtro', async () => {
+    renderWithClient()
+    await screen.findByRole('tab', { name: 'Recursos' })
+    act(() => window.__reactBridge.setInventarioTab('recursos', { subscription_id: 'sub-1', resource_group: 'rg-x', dia: '2026-09-20', excluir_gerenciados: false }))
+    await waitFor(() => expect(azureInventarioApi.getAzureRecursosInventario).toHaveBeenLastCalledWith(
+      expect.objectContaining({ subscription_id: 'sub-1', resource_group: 'rg-x', data_inicio: '2026-09-20', data_fim: '2026-09-20', ativo: undefined }),
+    ))
+    expect(screen.getByText(/Da notificação: RG rg-x · criados em 20\/09\/2026/)).toBeInTheDocument()
+    await userEvent.click(screen.getByText(/Da notificação/))
+    await waitFor(() => expect(vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.lastCall?.[0]).not.toHaveProperty('subscription_id'))
+    expect(screen.queryByText(/Da notificação/)).not.toBeInTheDocument()
+  })
+
+  it('anomalia de assinatura sem dia (só custo) filtra a assinatura e ignora RG gerenciado', async () => {
+    renderWithClient()
+    await screen.findByRole('tab', { name: 'Recursos' })
+    act(() => window.__reactBridge.setInventarioTab('recursos', { subscription_id: 'sub-9', resource_group: null, dia: null, excluir_gerenciados: true }))
+    await waitFor(() => expect(azureInventarioApi.getAzureRecursosInventario).toHaveBeenLastCalledWith(
+      expect.objectContaining({ subscription_id: 'sub-9', excluir_gerenciados: true, ativo: true }),
+    ))
+    expect(screen.getByText(/Da notificação: assinatura sub-9/)).toBeInTheDocument()
+  })
+
+  it('notificação de alteração de propriedade abre o detalhe do próprio recurso', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockReturnValue(new Promise(() => {}))
+    renderWithClient()
+    await screen.findByRole('tab', { name: 'Recursos' })
+    act(() => window.__reactBridge.setInventarioTab('recursos', { resource_id: '/subscriptions/s1/vm1', subscription_id: 's1' }))
+    await waitFor(() => expect(azureInventarioApi.getAzureRecursoDetalhe).toHaveBeenCalledWith('/subscriptions/s1/vm1', 's1'))
+  })
+
+  it('pedido com parâmetros feito com o Inventário fechado vale na próxima abertura', async () => {
+    const primeira = renderWithClient()
+    await screen.findByRole('tab', { name: 'Recursos' })
+    primeira.unmount()
+    act(() => window.__reactBridge.setInventarioTab('recursos', { subscription_id: 'sub-2', resource_group: 'rg-y', dia: null, excluir_gerenciados: false }))
+    renderWithClient()
+    expect(await screen.findByText(/Da notificação: RG rg-y/)).toBeInTheDocument()
   })
 
   it('a raiz da tela não usa a classe "view active" (showView() a removia e a tela ficava branca)', async () => {

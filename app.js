@@ -424,8 +424,10 @@ async function loadNotificacoes() {
       if (n._kind === 'sistema') {
         const s = iconMap[n.tipo] || iconMap.coleta_concluida;
         const quando = n.criado_em ? new Date(n.criado_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+        // Parâmetros (recurso/escopo que gerou o alerta) vão em data-* — evita JSON dentro do onclick.
+        const paramsAttr = n.destino_params ? ` data-destino-params="${escHtml(JSON.stringify(n.destino_params))}"` : '';
         const linkAttrs = n.destino
-          ? ` onclick="abrirDestinoNotif('${escHtml(n.destino)}');closeNotifPanel()" title="Abrir no sistema" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''"`
+          ? ` data-destino="${escHtml(n.destino)}"${paramsAttr} onclick="abrirDestinoNotif(this);closeNotifPanel()" title="Abrir no sistema" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter=''"`
           : '';
         return `<div data-notif-key="${key}"${linkAttrs} style="position:relative;display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--border);background:${s.bg};${n.destino ? 'cursor:pointer;' : ''}">
           <div style="width:34px;height:34px;border-radius:8px;border:1px solid ${s.border};display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${s.icon}</div>
@@ -1858,18 +1860,23 @@ function switchDbxTab(tab) {
 
 // Inventário: mesmas sub-abas no menu lateral e na barra da página (InventarioView), trocadas sem
 // remontar a view (canal próprio setInventarioTab). Atualiza o realce do submenu junto.
-function showInvTab(tab) {
+function showInvTab(tab, params) {
   showView('inventario');
-  window.__reactBridge?.setInventarioTab?.(tab);
+  window.__reactBridge?.setInventarioTab?.(tab, params || null);
   document.querySelectorAll('.nav-sub').forEach(el => el.classList.remove('active'));
   document.getElementById('nav-sub-inv-' + tab)?.classList.add('active');
 }
 
-// Clique numa notificação do sino com `destino` "view:aba" (ex: 'inventario:crescimento').
-function abrirDestinoNotif(destino) {
+// Clique numa notificação do sino com `destino` "view:aba" (ex: 'inventario:crescimento') e, opcionalmente,
+// `destino_params` (o recurso ou escopo exato que gerou o alerta). Aceita o elemento clicado ou a string.
+function abrirDestinoNotif(alvo) {
+  const el = alvo && alvo.dataset ? alvo : null;
+  const destino = el ? el.dataset.destino : alvo;
+  let params = null;
+  try { params = el && el.dataset.destinoParams ? JSON.parse(el.dataset.destinoParams) : null; } catch (_) { params = null; }
   const [view, aba] = String(destino || '').split(':');
   if (view !== 'inventario') return;
-  showInvTab(aba || 'recursos');
+  showInvTab(aba || 'recursos', params);
 }
 
 // ── HELPERS ───────────────────────────────────
