@@ -7998,6 +7998,28 @@ app.post('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (re
   } catch (e) { _dbErr(res, e); }
 });
 
+// Prévia (somente leitura) do que a retenção de recursos excluídos apagaria com N dias.
+app.get('/api/azure-inventario/retencao-excluidos/previa', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const dias = Number(req.query.dias) > 0 ? Math.floor(Number(req.query.dias)) : 180;
+    const r = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE ativo = false AND excluido_em < NOW() - ($1 || ' days')::interval) AS seriam_removidos,
+         COUNT(*) FILTER (WHERE ativo = false) AS total_excluidos,
+         COUNT(*) FILTER (WHERE ativo = true) AS total_ativos
+       FROM azure_recursos_inventario`,
+      [dias]
+    );
+    const row = r.rows[0];
+    res.json({
+      dias,
+      seriam_removidos: Number(row.seriam_removidos),
+      total_excluidos: Number(row.total_excluidos),
+      total_ativos: Number(row.total_ativos),
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
 app.post('/api/azure-inventario/coletar', authMiddleware, dbMiddleware, async (_req, res) => {
   if (_invColetaEmExecucao) return res.status(409).json({ error: 'Coleta de Inventário já em execução' });
   res.json({ ok: true, message: 'Coleta de Inventário iniciada' });
@@ -9931,6 +9953,153 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       erros,
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Exportar Desperdício pra Excel — mesmo layout do Excel de Ações FinOps (GET /api/export/excel):
+// banner roxo, aba "Sumário Executivo" e aba de detalhes. Recebe os itens já filtrados na tela
+// (o que o usuário vê é o que sai no arquivo).
+const _DESP_LABEL_XLSX = {
+  disco_orfao: 'Disco não anexado', snapshot_antigo: 'Snapshot antigo', ip_solto: 'IP público sem uso',
+  nic_orfa: 'NIC não anexada', app_service_plan_vazio: 'App Service Plan sem apps',
+  lb_sem_backend: 'Load Balancer sem backend', appgw_sem_backend: 'App Gateway sem backend',
+  vm_parada: 'VM parada (sem desalocar)',
+};
+app.post('/api/azure-inventario/desperdicio/export/excel', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const ExcelJS = require('exceljs');
+    const body = req.body || {};
+    if (!Array.isArray(body.itens)) return res.status(400).json({ error: 'Lista de itens inválida' });
+    const txt = (v) => (v == null ? '' : String(v).slice(0, 2000));
+    const num = (v) => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+    const itens = body.itens.slice(0, 50000).map((x) => ({
+      categoria: txt(x.categoria), subscription_id: txt(x.subscription_id), resource_id: txt(x.resource_id),
+      nome: txt(x.nome), resource_group: txt(x.resource_group), location: txt(x.location), sku: txt(x.sku),
+      tamanho_gb: num(x.tamanho_gb), custo_mensal_estimado: x.custo_mensal_estimado === null ? null : num(x.custo_mensal_estimado),
+      dias_orfao: num(x.dias_orfao), marcado_orfao_em: x.marcado_orfao_em ? new Date(x.marcado_orfao_em) : null,
+    }));
+    const filtrosTxt = txt(body.filtros_descricao) || 'Sem filtros';
+
+    const subsRow = await pool.query(`SELECT subscription_id, subscription_name FROM azure_subs_cache`);
+    const subsMap = new Map(subsRow.rows.map((s) => [s.subscription_id, s.subscription_name]));
+
+    const GREEN_DARK = '4A0080', GREEN_MAIN = '7B2FBE', GREEN_LIGHT = 'F3E8FF', GREEN_TOTAL = '9333EA';
+    const NAVY = 'FF1B2A4A', GRAY_BDR = 'FFE0D4F5';
+    const BRL_FMT = '"R$ "#,##0.00', PCT_FMT = '0.0%';
+    const hoje = new Date();
+    const hojeStr = hoje.toLocaleDateString('pt-BR') + ' às ' + hoje.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const periodo = String(hoje.getFullYear());
+    const hFill = (hex) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + hex } });
+    const hFont = (bold, color, size, italic) => ({ bold: !!bold, color: { argb: color || NAVY }, size: size || 9, italic: !!italic, name: 'Arial' });
+    const hAlign = (h, v, wrap) => ({ horizontal: h || 'left', vertical: v || 'middle', wrapText: !!wrap });
+    const hBorder = (color) => { const s = { style: 'thin', color: { argb: color || GRAY_BDR } }; return { left: s, right: s, top: s, bottom: s }; };
+    const styleCell = (cell, { fill, font, alignment, border, numFmt } = {}) => {
+      if (fill) cell.fill = fill; if (font) cell.font = font; if (alignment) cell.alignment = alignment;
+      if (border) cell.border = border; if (numFmt) cell.numFmt = numFmt;
+    };
+    const headerRow = (ws, rowNum, headers, bg) => {
+      const row = ws.getRow(rowNum); row.height = 18;
+      headers.forEach((h, i) => {
+        const cell = row.getCell(i + 1); cell.value = h;
+        styleCell(cell, { fill: hFill(bg || GREEN_MAIN), font: hFont(true, 'FFFFFFFF', 9), alignment: hAlign('center'), border: hBorder('FF' + GREEN_DARK) });
+      });
+    };
+    const dataStyle = (ws, rowNum, ncols, shade) => {
+      const row = ws.getRow(rowNum); row.height = 16;
+      for (let i = 1; i <= ncols; i++) styleCell(row.getCell(i), { fill: hFill(shade ? GREEN_LIGHT : 'FFFFFF'), font: hFont(false, NAVY, 9), alignment: hAlign('left'), border: hBorder() });
+    };
+    const writeHeaderBlock = (ws, title, subtitle, ncols) => {
+      ws.mergeCells(1, 1, 2, ncols);
+      const c1 = ws.getCell(1, 1); c1.value = '  FinOps Manager   |   ' + title;
+      styleCell(c1, { fill: hFill(GREEN_DARK), font: hFont(true, 'FFFFFFFF', 13), alignment: hAlign('left', 'middle') });
+      ws.getRow(1).height = 28; ws.getRow(2).height = 6;
+      ws.mergeCells(3, 1, 3, ncols); ws.getCell(3, 1).fill = hFill(GREEN_MAIN); ws.getRow(3).height = 4;
+      ws.mergeCells(4, 1, 4, ncols);
+      const c4 = ws.getCell(4, 1); c4.value = '  ' + subtitle;
+      styleCell(c4, { fill: hFill('FFFFFF'), font: hFont(false, 'FF5B2080', 9, true), alignment: hAlign('left', 'middle') });
+      ws.getRow(4).height = 16;
+      ws.mergeCells(5, 1, 5, ncols); ws.getRow(5).height = 6;
+      return 6;
+    };
+    const sectionTitle = (ws, r, ncols, t) => {
+      ws.mergeCells(r, 1, r, ncols);
+      const c = ws.getCell(r, 1); c.value = t;
+      styleCell(c, { fill: hFill(GREEN_DARK), font: hFont(true, 'FFFFFFFF', 10), alignment: hAlign('left', 'middle') });
+      ws.getRow(r).height = 20;
+    };
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'FinOps Manager'; wb.created = hoje;
+
+    const custoTotal = itens.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0);
+    const semCusto = itens.filter((i) => i.custo_mensal_estimado === null).length;
+
+    // ── ABA 1: SUMÁRIO EXECUTIVO ──
+    const ws1 = wb.addWorksheet('Sumário Executivo');
+    ws1.views = [{ showGridLines: false }];
+    const N1 = 4;
+    let r = writeHeaderBlock(ws1, `Desperdício de Recursos — ${periodo}`, `Gerado em: ${hojeStr}   |   Recursos ociosos: ${itens.length}   |   Filtros: ${filtrosTxt}`, N1);
+    sectionTitle(ws1, r, N1, 'VISÃO GERAL DO DESPERDÍCIO'); r++;
+    headerRow(ws1, r, ['Indicador', 'Valor', '', '']); r++;
+    [['Recursos ociosos', itens.length, null], ['Desperdício estimado por mês (R$)', custoTotal, BRL_FMT],
+     ['Projeção anual (R$)', custoTotal * 12, BRL_FMT], ['Recursos sem billing conhecido', semCusto, null]].forEach(([k, v, fmt], idx) => {
+      dataStyle(ws1, r, N1, idx % 2 === 1);
+      ws1.getRow(r).getCell(1).value = k;
+      ws1.getRow(r).getCell(2).value = v;
+      styleCell(ws1.getRow(r).getCell(2), { alignment: hAlign('right'), numFmt: fmt || '0' });
+      r++;
+    });
+    r++;
+    sectionTitle(ws1, r, N1, 'DESPERDÍCIO POR TIPO DE RECURSO'); r++;
+    headerRow(ws1, r, ['Tipo de recurso', 'Qtd', '% do custo', 'Custo/mês (R$)'], GREEN_TOTAL); r++;
+    const porTipo = {};
+    for (const i of itens) { const t = (porTipo[i.categoria] ||= { qtd: 0, custo: 0 }); t.qtd++; t.custo += i.custo_mensal_estimado || 0; }
+    Object.entries(porTipo).sort((a, b) => b[1].custo - a[1].custo).forEach(([cat, v], idx) => {
+      dataStyle(ws1, r, N1, idx % 2 === 1);
+      const row = ws1.getRow(r);
+      row.getCell(1).value = _DESP_LABEL_XLSX[cat] || cat;
+      row.getCell(2).value = v.qtd; styleCell(row.getCell(2), { alignment: hAlign('center') });
+      row.getCell(3).value = custoTotal > 0 ? v.custo / custoTotal : 0; styleCell(row.getCell(3), { alignment: hAlign('center'), numFmt: PCT_FMT });
+      row.getCell(4).value = v.custo; styleCell(row.getCell(4), { alignment: hAlign('right'), numFmt: BRL_FMT });
+      r++;
+    });
+    ws1.getRow(r).height = 18;
+    for (let i = 1; i <= N1; i++) styleCell(ws1.getRow(r).getCell(i), { fill: hFill(GREEN_TOTAL), font: hFont(true, 'FFFFFFFF', 9), alignment: hAlign('center'), border: hBorder('FF' + GREEN_DARK) });
+    ws1.getRow(r).getCell(1).value = 'TOTAL'; ws1.getRow(r).getCell(1).alignment = hAlign('left', 'middle');
+    ws1.getRow(r).getCell(2).value = itens.length;
+    ws1.getRow(r).getCell(3).value = 1; styleCell(ws1.getRow(r).getCell(3), { numFmt: PCT_FMT });
+    ws1.getRow(r).getCell(4).value = custoTotal; styleCell(ws1.getRow(r).getCell(4), { numFmt: BRL_FMT, alignment: hAlign('right') });
+    [38, 16, 14, 22].forEach((w, i) => { ws1.getColumn(i + 1).width = w; });
+
+    // ── ABA 2: RECURSOS DETALHADOS ──
+    const ws2 = wb.addWorksheet('Recursos Detalhados');
+    const hdrs2 = ['Assinatura', 'Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Localização', 'Custo/mês (R$)', 'Dias órfão', 'Órfão desde', 'Resource ID'];
+    const N2 = hdrs2.length;
+    let r2 = writeHeaderBlock(ws2, `Recursos Ociosos — ${periodo}`, `Gerado em: ${hojeStr}`, N2);
+    headerRow(ws2, r2, hdrs2); r2++;
+    itens.forEach((it, idx) => {
+      dataStyle(ws2, r2, N2, idx % 2 === 1);
+      const row = ws2.getRow(r2);
+      [subsMap.get(it.subscription_id) || it.subscription_id, it.resource_group || '—', it.nome || it.resource_id,
+       _DESP_LABEL_XLSX[it.categoria] || it.categoria, it.sku || '—', it.tamanho_gb, it.location || '—',
+       it.custo_mensal_estimado, it.dias_orfao, it.marcado_orfao_em, it.resource_id].forEach((v, i) => { row.getCell(i + 1).value = v === null ? '—' : v; });
+      styleCell(row.getCell(6), { alignment: hAlign('right') });
+      styleCell(row.getCell(8), { alignment: hAlign('right'), numFmt: BRL_FMT });
+      styleCell(row.getCell(9), { alignment: hAlign('center') });
+      styleCell(row.getCell(10), { alignment: hAlign('center'), numFmt: 'dd/mm/yyyy' });
+      r2++;
+    });
+    ws2.autoFilter = { from: { row: 6, column: 1 }, to: { row: Math.max(r2 - 1, 6), column: N2 } };
+    ws2.views = [{ showGridLines: false, state: 'frozen', ySplit: 6, xSplit: 0, activeCell: 'A7' }];
+    [26, 34, 38, 28, 16, 13, 16, 18, 11, 13, 60].forEach((w, i) => { ws2.getColumn(i + 1).width = w; });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="FinOps_Desperdicio_${hoje.toISOString().split('T')[0]}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    console.error('[Excel Desperdício] erro:', e.message);
+    if (!res.headersSent) res.status(500).json({ error: 'Erro ao gerar Excel: ' + e.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

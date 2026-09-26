@@ -9,7 +9,7 @@ import type {
   AzureResumoPorAssinaturaResposta, AzureRecursoArmDetalhe, AzureAdvisorResposta,
   AzureRedeTopologiaResposta, AzurePropriedadeMudanca, AzureRelatorioDiario,
   AzureCrescimentoDetalheResposta, AzureTagChavesResposta, AzureAlocacaoResposta,
-  AzureSerieMensalResposta, AzureCoberturaResposta, AzureDesperdicioResposta, AzureConformidadeResposta,
+  AzureSerieMensalResposta, AzureCoberturaResposta, AzureDesperdicioResposta, AzureDesperdicioItem, AzureConformidadeResposta,
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
@@ -17,6 +17,16 @@ export const getAzureInventarioConfig = () =>
 
 export const salvarAzureInventarioConfig = (input: AzureInventarioConfigInput) =>
   apiFetch<{ ok: boolean }>('POST', '/azure-inventario/config', input)
+
+export interface RetencaoExcluidosPrevia {
+  dias: number
+  seriam_removidos: number
+  total_excluidos: number
+  total_ativos: number
+}
+
+export const getRetencaoExcluidosPrevia = (dias: number) =>
+  apiFetch<RetencaoExcluidosPrevia>('GET', `/azure-inventario/retencao-excluidos/previa?dias=${dias}`)
 
 export const coletarAzureInventario = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-inventario/coletar')
@@ -337,6 +347,27 @@ export const getAzureConformidade = () =>
 // Exportar Inventário pra Excel — download direto (não é JSON), mesmo padrão já usado pelo
 // export de Ações legado (app.js `exportarExcel()`): fetch com Bearer token (apiFetch não
 // serve aqui, ele sempre espera JSON) → blob → link temporário → clique → revoke.
+// Excel de Desperdício no layout do Excel de Ações FinOps — envia os itens já filtrados na tela.
+export async function baixarAzureDesperdicioExcel(itens: AzureDesperdicioItem[], filtrosDescricao: string) {
+  const token = getToken()
+  const resp = await fetch(API_BASE + '/azure-inventario/desperdicio/export/excel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    body: JSON.stringify({ itens, filtros_descricao: filtrosDescricao }),
+  })
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: 'Erro desconhecido' }))
+    throw new Error(err.error || 'Erro ao exportar')
+  }
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'FinOps_Desperdicio_' + new Date().toISOString().slice(0, 10) + '.xlsx'
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+
 export async function baixarAzureInventarioExcel(filtros?: { subscription_id?: string; ativo?: boolean }) {
   const q = new URLSearchParams()
   if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)

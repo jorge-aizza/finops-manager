@@ -12,9 +12,10 @@ interface InvoicePreviewModalProps {
   title: string
   onClose: () => void
   onVoltar?: () => void
+  label?: string
 }
 
-export default function InvoicePreviewModal({ html, title, onClose, onVoltar }: InvoicePreviewModalProps) {
+export default function InvoicePreviewModal({ html, title, onClose, onVoltar, label = 'Prévia da Estimativa' }: InvoicePreviewModalProps) {
   const frameRef = useRef<HTMLIFrameElement>(null)
 
   useEffect(() => {
@@ -48,7 +49,7 @@ export default function InvoicePreviewModal({ html, title, onClose, onVoltar }: 
           </button>
         )}
         <div style={{ flex: 1, minWidth: 0, textAlign: 'center' }}>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.14em', color: '#6b7280', marginBottom: 1 }}>Prévia da Estimativa</div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.14em', color: '#6b7280', marginBottom: 1 }}>{label}</div>
           <div style={{ fontSize: 13, fontWeight: 600, color: '#7c3aed', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</div>
         </div>
         <button className="cbtn-go" style={{ gap: 6, flexShrink: 0 }} onClick={imprimir}>

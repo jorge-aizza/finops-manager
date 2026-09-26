@@ -438,7 +438,8 @@ describe('InventarioView', () => {
     renderWithClient()
     await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
 
-    await waitFor(() => expect(screen.getByRole('checkbox')).toBeChecked())
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /Ativar coleta automática/ })).toBeChecked())
+    expect(screen.getByRole('checkbox', { name: /Excluir definitivamente recursos removidos/ })).not.toBeChecked()
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
     await waitFor(() => expect(azureInventarioApi.salvarAzureInventarioConfig).toHaveBeenCalledWith(
       expect.objectContaining({ ativo: true, retencao_dias: 180, sp_id: 5 }),

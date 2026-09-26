@@ -4,14 +4,16 @@ import { listSPs } from '../api/coleta'
 import { listSubscriptions } from '../api/calculadora'
 import { setInventarioTabListener } from '../bridge'
 import {
-  getAzureInventarioConfig, salvarAzureInventarioConfig, coletarAzureInventario, getAzureInventarioStatus,
+  getAzureInventarioConfig, salvarAzureInventarioConfig, getRetencaoExcluidosPrevia, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
   getAzureCrescimentoLiquido, baixarAzureInventarioExcel, getAzureAdvisor, getAzureRedeTopologia,
   getAzurePropriedadeHistorico, getAzureRelatorioDiario, getAzureCrescimentoDetalhe, getAzureAnomaliasCrescimento,
-  getAzureDesperdicio, getAzureInventarioCrescimentoPersistente, getAzureConformidade,
+  getAzureDesperdicio, getAzureInventarioCrescimentoPersistente, getAzureConformidade, baixarAzureDesperdicioExcel,
 } from '../api/azureInventario'
+import { buildDesperdicioPdfHtml } from '../lib/buildDesperdicioPdfHtml'
+import InvoicePreviewModal from '../components/InvoicePreviewModal'
 import type { AzureAuditoriaAcao, AzureComparativoPeriodo, AzureRedeVNet, AzureAdvisorCategoria, AzureAnomaliaCrescimento, AzureDesperdicioCategoria } from '../types/azureInventario'
 import AzureInventarioColetaMonitor from '../components/AzureInventarioColetaMonitor'
 import RecursoDetalheModal from '../components/RecursoDetalheModal'
@@ -586,6 +588,17 @@ export default function InventarioView() {
   const despTipoLabel = filtroDespTipos.length === 0 ? 'Todos os tipos de recurso'
     : filtroDespTipos.length === 1 ? (DESPERDICIO_LABEL[filtroDespTipos[0]] || filtroDespTipos[0])
     : `${filtroDespTipos.length} tipos selecionados`
+  const despFiltrosDescricao = [
+    filtroDespTipos.length ? `Tipos: ${filtroDespTipos.map((t) => DESPERDICIO_LABEL[t]?.replace(/^\S+\s/, '') || t).join(', ')}` : '',
+    filtroDespRgs.length ? `Resource Groups: ${filtroDespRgs.join(', ')}` : '',
+    filtroDesperdicioDias ? `Órfão há ${filtroDesperdicioDias}+ dias` : '',
+    despBuscaNorm ? `Busca: "${filtroDespBusca.trim()}"` : '',
+  ].filter(Boolean).join(' | ') || 'Sem filtros'
+  const [despPdfHtml, setDespPdfHtml] = useState<string | null>(null)
+  const exportarDespExcelMutation = useMutation({
+    mutationFn: () => baixarAzureDesperdicioExcel(despFiltrados, despFiltrosDescricao),
+    onError: (e: Error) => window.showToast?.('Erro ao exportar: ' + e.message, 'error'),
+  })
   const redeQuery = useQuery({
     queryKey: ['azure-inv-rede-topologia', redeSub],
     queryFn: () => getAzureRedeTopologia(redeSub as string),
@@ -671,6 +684,12 @@ export default function InventarioView() {
     setSpId(configQuery.data.sp_id)
     setFormInicializado(true)
   }
+
+  const previaExcluidosQuery = useQuery({
+    queryKey: ['azure-inv-retencao-excluidos-previa', retencaoExcluidosDias],
+    queryFn: () => getRetencaoExcluidosPrevia(retencaoExcluidosDias),
+    enabled: tab === 'config' && retencaoExcluidosDias > 0,
+  })
 
   const salvarMutation = useMutation({
     mutationFn: () => salvarAzureInventarioConfig({
@@ -1390,7 +1409,30 @@ export default function InventarioView() {
             <div className="card-header">
               <span className="card-title">Desperdício de Recursos</span>
               {desperdicioQuery.data && <span className="badge">{desperdicioQuery.data.total_itens}</span>}
+              {desperdicioQuery.data && (
+                <>
+                  <button
+                    className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 12 }}
+                    disabled={exportarDespExcelMutation.isPending || despFiltrados.length === 0}
+                    onClick={() => exportarDespExcelMutation.mutate()}
+                    title="Exporta os recursos filtrados na tela, no mesmo layout do Excel de Ações FinOps"
+                  >
+                    {exportarDespExcelMutation.isPending ? 'Exportando...' : '📊 Exportar Excel'}
+                  </button>
+                  <button
+                    className="btn-ghost" style={{ fontSize: 12 }}
+                    disabled={despFiltrados.length === 0}
+                    onClick={() => setDespPdfHtml(buildDesperdicioPdfHtml(despFiltrados, despFiltrosDescricao))}
+                    title="Abre a prévia com o logo FinOps para imprimir ou salvar como PDF"
+                  >
+                    📄 Exportar PDF
+                  </button>
+                </>
+              )}
             </div>
+            {despPdfHtml && (
+              <InvoicePreviewModal html={despPdfHtml} title="Desperdício de Recursos" label="Prévia do Relatório" onClose={() => setDespPdfHtml(null)} />
+            )}
             <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
               Recursos provisionados que ninguém está usando, detectados via Azure Resource Graph (mesma credencial do
               Inventário, sem permissão nova). Custo estimado pelo billing <strong>observado</strong> dos últimos 30
@@ -1616,8 +1658,18 @@ export default function InventarioView() {
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
                   Só afeta recursos já excluídos da nuvem Azure (ativo=false). Nunca toca em recursos ativos. A auditoria de eventos mantém sua própria retenção, separada (padrão 180 dias).
                 </div>
+                {previaExcluidosQuery.data && (
+                  <div style={{ fontSize: 12, marginTop: 6, color: previaExcluidosQuery.data.seriam_removidos > 0 ? 'var(--danger, #d32f2f)' : 'var(--text-muted)' }}>
+                    Com {previaExcluidosQuery.data.dias} dias: <strong>{previaExcluidosQuery.data.seriam_removidos.toLocaleString('pt-BR')}</strong> de {previaExcluidosQuery.data.total_excluidos.toLocaleString('pt-BR')} recursos excluídos seriam removidos na próxima coleta. Ativos ({previaExcluidosQuery.data.total_ativos.toLocaleString('pt-BR')}) não são afetados.
+                  </div>
+                )}
               </div>
-              <button className="btn-primary" style={{ alignSelf: 'flex-start' }} disabled={salvarMutation.isPending} onClick={() => salvarMutation.mutate()}>
+              <button className="btn-primary" style={{ alignSelf: 'flex-start' }} disabled={salvarMutation.isPending} onClick={() => {
+                const qtd = previaExcluidosQuery.data?.seriam_removidos ?? 0
+                if (retencaoExcluidosAtiva && !configQuery.data?.retencao_excluidos_ativa && qtd > 0
+                    && !confirm(`Ao ativar, ${qtd.toLocaleString('pt-BR')} recursos excluídos há mais de ${retencaoExcluidosDias} dias serão apagados definitivamente na próxima coleta. Continuar?`)) return
+                salvarMutation.mutate()
+              }}>
                 {salvarMutation.isPending ? 'Salvando...' : 'Salvar'}
               </button>
             </div>
