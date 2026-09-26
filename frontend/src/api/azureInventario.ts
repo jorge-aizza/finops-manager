@@ -13,7 +13,7 @@ import type {
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
-  apiFetch<AzureInventarioConfig>('GET', '/azure-inventario/config').then((c) => numFields(c, ['retencao_dias']))
+  apiFetch<AzureInventarioConfig>('GET', '/azure-inventario/config').then((c) => numFields(c, ['retencao_dias', 'retencao_excluidos_dias']))
 
 export const salvarAzureInventarioConfig = (input: AzureInventarioConfigInput) =>
   apiFetch<{ ok: boolean }>('POST', '/azure-inventario/config', input)

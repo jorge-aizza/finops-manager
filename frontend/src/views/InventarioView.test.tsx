@@ -24,6 +24,7 @@ function renderWithClient() {
 const mockConfig: AzureInventarioConfig = {
   id: 1, ativo: true, retencao_dias: 180, sp_id: 5, subscription_ids: null,
   ultimo_evento_em: '2026-08-29T10:00:00Z', tags_obrigatorias: null, criado_em: '', atualizado_em: '',
+  retencao_excluidos_ativa: false, retencao_excluidos_dias: 180,
 }
 const mockStatus: AzureInventarioStatus = {
   em_execucao: false, iniciada_em: null,

@@ -658,12 +658,16 @@ export default function InventarioView() {
   const [ativo, setAtivo] = useState(false)
   const [retencaoDias, setRetencaoDias] = useState(180)
   const [tagsObrigatorias, setTagsObrigatorias] = useState('')
+  const [retencaoExcluidosAtiva, setRetencaoExcluidosAtiva] = useState(false)
+  const [retencaoExcluidosDias, setRetencaoExcluidosDias] = useState(180)
   const [spId, setSpId] = useState<number | null>(null)
   const [formInicializado, setFormInicializado] = useState(false)
   if (configQuery.data && !formInicializado) {
     setAtivo(configQuery.data.ativo)
     setRetencaoDias(configQuery.data.retencao_dias)
     setTagsObrigatorias(configQuery.data.tags_obrigatorias || '')
+    setRetencaoExcluidosAtiva(configQuery.data.retencao_excluidos_ativa)
+    setRetencaoExcluidosDias(configQuery.data.retencao_excluidos_dias)
     setSpId(configQuery.data.sp_id)
     setFormInicializado(true)
   }
@@ -673,6 +677,8 @@ export default function InventarioView() {
       ativo, retencao_dias: retencaoDias, sp_id: spId,
       subscription_ids: null,
       tags_obrigatorias: tagsObrigatorias.trim() || null,
+      retencao_excluidos_ativa: retencaoExcluidosAtiva,
+      retencao_excluidos_dias: retencaoExcluidosDias,
     }),
     onSuccess: () => {
       window.showToast?.('Configuração salva.', 'success')
@@ -1598,6 +1604,17 @@ export default function InventarioView() {
                 />
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
                   Chaves de tag exigidas em todo recurso. Alimenta o relatório de conformidade — deixe vazio para desativar a checagem.
+                </div>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={retencaoExcluidosAtiva} onChange={(e) => setRetencaoExcluidosAtiva(e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
+                Excluir definitivamente recursos removidos há mais de N dias
+              </label>
+              <div className="form-group" style={{ margin: 0, opacity: retencaoExcluidosAtiva ? 1 : 0.5, pointerEvents: retencaoExcluidosAtiva ? 'auto' : 'none' }}>
+                <label>Dias (para manter recursos em auditoria)</label>
+                <input type="number" min={1} value={retencaoExcluidosDias} onChange={(e) => setRetencaoExcluidosDias(Number(e.target.value) || 180)} style={{ maxWidth: 120 }} disabled={!retencaoExcluidosAtiva} />
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Só afeta recursos já excluídos da nuvem Azure (ativo=false). Nunca toca em recursos ativos. A auditoria de eventos mantém sua própria retenção, separada (padrão 180 dias).
                 </div>
               </div>
               <button className="btn-primary" style={{ alignSelf: 'flex-start' }} disabled={salvarMutation.isPending} onClick={() => salvarMutation.mutate()}>

@@ -6258,8 +6258,10 @@ async function ensureAzureColetaTable() {
   //
   // Duas tabelas com propósitos deliberadamente diferentes (pedido do usuário — "inventário
   // + auditoria"):
-  // - azure_recursos_inventario: 1 linha PERMANENTE por recurso (quem criou/quando nunca é
-  //   apagado por retenção — só o log de eventos abaixo é). Serve de "o que existe hoje".
+  // - azure_recursos_inventario: 1 linha por recurso, marcada ativo=false quando excluída
+  //   (default PERMANENTE — nunca é apagada). Retenção opcional `retencao_excluidos_dias`
+  //   (desativada por default, via `retencao_excluidos_ativa`) — quando ativa, apaga só os
+  //   recursos `ativo=false` mais antigos. Ver `_purgarRecursosExcluidos` (12410+).
   // - azure_recursos_auditoria_eventos: log bruto, 1 linha por evento detectado
   //   (CRIAÇÃO/ATUALIZAÇÃO/EXCLUSÃO), sujeito ao período de retenção configurável — é o que
   //   cresce sem limite ao longo do tempo, então precisa de limpeza periódica.
@@ -6482,6 +6484,12 @@ async function ensureAzureColetaTable() {
   await run(`UPDATE azure_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
   await run(`UPDATE databricks_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
   await run(`UPDATE azure_inventario_coleta_historico SET status='erro', concluido_em=NOW(), mensagem='Interrompida por reinício do servidor' WHERE status='executando'`);
+
+  // ── Retenção de recursos excluídos (2026-09-25, pedido do usuário) ─────────────────────
+  // Opcionalmente apagar recursos já excluídos há mais de N dias (não toca em ativos nem em
+  // auditoria — permanência é o padrão, desligado por default). Ver `_purgarRecursosExcluidos`.
+  await run(`ALTER TABLE azure_inventario_config ADD COLUMN IF NOT EXISTS retencao_excluidos_ativa BOOLEAN DEFAULT false`);
+  await run(`ALTER TABLE azure_inventario_config ADD COLUMN IF NOT EXISTS retencao_excluidos_dias INTEGER DEFAULT 180`);
 
   // ── Governança de crescimento (2026-08-31, pedido do usuário) ────────────────────────────
   // `tags_obrigatorias` — chaves separadas por vírgula (ex: "projeto,centro_custo") checadas
@@ -7967,15 +7975,16 @@ app.post('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (re
     // silêncio. Consequência: a coluna ficava sempre NULL, `/tags-faltantes` sempre caía no
     // early-return vazio, e o corpo real daquele endpoint nunca executou em nenhum ambiente.
     // Cadeia morta ponta a ponta, não só "órfão de UI".
-    const { ativo, retencao_dias, sp_id, subscription_ids, tags_obrigatorias } = req.body;
+    // `retencao_excluidos_*` (2026-09-25): nova retenção opcional de recursos excluídos.
+    const { ativo, retencao_dias, sp_id, subscription_ids, tags_obrigatorias, retencao_excluidos_ativa, retencao_excluidos_dias } = req.body;
     await ensureAzureColetaTable();
     let r = await pool.query(`SELECT id FROM azure_inventario_config ORDER BY id LIMIT 1`);
     if (!r.rows.length) r = await pool.query(`INSERT INTO azure_inventario_config DEFAULT VALUES RETURNING id`);
     const id = r.rows[0].id;
     await pool.query(
-      `UPDATE azure_inventario_config SET ativo=$1, retencao_dias=$2, sp_id=$3, subscription_ids=$4, tags_obrigatorias=$5, atualizado_em=NOW() WHERE id=$6`,
+      `UPDATE azure_inventario_config SET ativo=$1, retencao_dias=$2, sp_id=$3, subscription_ids=$4, tags_obrigatorias=$5, retencao_excluidos_ativa=$7, retencao_excluidos_dias=$8, atualizado_em=NOW() WHERE id=$6`,
       [!!ativo, Number(retencao_dias) > 0 ? Number(retencao_dias) : 180, sp_id || null, subscription_ids || null,
-       (tags_obrigatorias || '').trim() || null, id]
+       (tags_obrigatorias || '').trim() || null, id, !!retencao_excluidos_ativa, Number(retencao_excluidos_dias) > 0 ? Number(retencao_excluidos_dias) : 180]
     );
     if (ativo) {
       _iniciarInventarioAgendador();
@@ -12413,6 +12422,20 @@ async function _purgarAuditoriaInventario(retencaoDias) {
   if (r.rowCount > 0) _logColetaInv(`Retenção: ${r.rowCount} evento(s) de auditoria removido(s) (> ${dias} dias)`);
 }
 
+// Opcionalmente apaga recursos já excluídos (ativo=false) há mais de N dias — desativado por
+// default (comportamento de permanência). Quando ativado, só afeta recursos `ativo=false`
+// (nunca toca em ativos). Não toca em `azure_recursos_auditoria_eventos` — aquela tem sua
+// própria retenção, independente.
+async function _purgarRecursosExcluidos(ativa, dias) {
+  if (!ativa) return;
+  const d = Number(dias) > 0 ? Number(dias) : 180;
+  const r = await pool.query(
+    `DELETE FROM azure_recursos_inventario WHERE ativo = false AND excluido_em < NOW() - ($1 || ' days')::interval`,
+    [d]
+  );
+  if (r.rowCount > 0) _logColetaInv(`Retenção: ${r.rowCount} recurso(s) excluído(s) removido(s) do inventário (> ${d} dias)`);
+}
+
 // Resolve GUID→nome via Microsoft Graph (`directoryObjects/getByIds`, batch — até 1000 IDs
 // por chamada, resolve usuário/Service Principal/grupo numa única requisição, sem precisar
 // saber de antemão o tipo de cada um). Best-effort — chamado automaticamente ao final de
@@ -12671,6 +12694,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
       [totalEventos, totalNovos, totalAtualizados, totalExcluidos, msg, histId]
     );
     await _purgarAuditoriaInventario(cfg.retencao_dias);
+    await _purgarRecursosExcluidos(cfg.retencao_excluidos_ativa, cfg.retencao_excluidos_dias);
     // Best-effort — nunca derruba a coleta principal (já concluída e persistida acima).
     // Falha esperada até o admin conceder Directory.Read.All no Entra ID (ver
     // _graphResolveAutores); só loga, não vira status='erro' no histórico desta coleta.

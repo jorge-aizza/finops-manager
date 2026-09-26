@@ -13,6 +13,9 @@ export interface AzureInventarioConfig {
   // Chaves de tag obrigatórias, separadas por vírgula (ex: "projeto,centro_custo") — checadas
   // contra azure_costs.tags (ver GET /azure-inventario/tags-faltantes). null/vazio = checagem desativada.
   tags_obrigatorias: string | null
+  // Retenção de recursos excluídos (2026-09-25): opcionalmente apagar recursos ativo=false há mais de N dias.
+  retencao_excluidos_ativa: boolean
+  retencao_excluidos_dias: number
   criado_em: string
   atualizado_em: string
 }
@@ -23,6 +26,8 @@ export interface AzureInventarioConfigInput {
   sp_id: number | null
   subscription_ids: string | null
   tags_obrigatorias: string | null
+  retencao_excluidos_ativa: boolean
+  retencao_excluidos_dias: number
 }
 
 // Governança de crescimento (2026-08-31, pedido do usuário: "quais melhorias vc me sugere
