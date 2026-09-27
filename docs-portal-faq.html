@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Calculadora de Custos Azure — Ajuda</title>
+<title>Portal de Serviços FinOps — Ajuda</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <script>(function(){if(localStorage.getItem('finops-theme')!=='dark')document.documentElement.setAttribute('data-theme','light');})()</script>
 <style>
@@ -88,13 +88,13 @@ body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;col
     <img src="/finops-logo.png" alt="FinOps" class="logo-light">
     <img src="/finops-logo-dark.png" alt="FinOps" class="logo-dark">
   </div>
-  <div class="header-sub">Calculadora de Custos Azure</div>
+  <div class="header-sub">Portal de Serviços FinOps</div>
   <div class="header-title">Central de Ajuda</div>
-  <div class="header-desc">Encontre respostas sobre como usar a calculadora de custos.</div>
+  <div class="header-desc">Encontre respostas sobre a Calculadora de Custos e a visão de Recursos Órfãos.</div>
 </div>
 
 <div class="back-wrap">
-  <a href="/portal.html" class="back-btn" onclick="if(window.history.length<=1||window.opener){window.close();return false;}">← Voltar à calculadora</a>
+  <a href="/portal.html" class="back-btn" onclick="if(window.history.length<=1||window.opener){window.close();return false;}">← Voltar ao portal</a>
 </div>
 
 <div class="search-wrap">
@@ -104,7 +104,50 @@ body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;col
 
 <div class="faq-wrap" id="faq-wrap">
 
-  <div class="faq-section-title">Primeiros Passos</div>
+  <div class="faq-section-title">Portal de Serviços</div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">🧭</span>
+      <span class="faq-q-text">O que é o Portal de Serviços e o que posso fazer nele?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O Portal de Serviços reúne, num único lugar, ferramentas públicas de FinOps disponibilizadas pela sua organização. Hoje ele pode conter:</p>
+      <ul>
+        <li><strong>Calculadora de Custos</strong> — estima o custo de recursos Azure por horas de uso</li>
+        <li><strong>Recursos Órfãos</strong> — lista recursos provisionados sem uso que continuam gerando custo</li>
+      </ul>
+      <p>Se apenas um serviço estiver disponível, o portal abre direto nele. Com dois ou mais serviços ativos, você vê uma página inicial com um card para cada um.</p>
+      <div class="tip"><p>O administrador decide quais serviços ficam disponíveis — se você não vê um deles, ele pode estar temporariamente desativado.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">🔀</span>
+      <span class="faq-q-text">Como alterno entre a Calculadora e Recursos Órfãos?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Quando os dois serviços estão ativos, aparece um menu no cabeçalho com os ícones de cada um, ao lado do ícone de <strong>Início</strong>. Clique no ícone do serviço desejado para trocar, ou clique no logo/nome do portal para voltar à página inicial com os cards.</p>
+      <p>Cada serviço tem seu próprio endereço (ex: <code>portal.html#/calculadora</code>), então o botão <strong>Voltar</strong> do navegador e o compartilhamento de link direto funcionam normalmente.</p>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">🪪</span>
+      <span class="faq-q-text">Por que preciso informar nome e e-mail antes de acessar?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Alguns portais exigem uma identificação rápida (nome e e-mail corporativo) antes de liberar o acesso aos serviços — é uma configuração do administrador, que pode inclusive restringir o acesso a domínios de e-mail específicos.</p>
+      <p>A identificação fica salva no seu navegador durante a sessão. Para trocar de usuário, clique no <strong>✕</strong> ao lado do seu nome, no cabeçalho.</p>
+    </div>
+  </div>
+
+  <div class="faq-section-title">Primeiros Passos — Calculadora</div>
 
   <div class="faq-item">
     <div class="faq-q" onclick="toggle(this)">
@@ -345,6 +388,117 @@ body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;col
     </div>
   </div>
 
+  <div class="faq-section-title">Recursos Órfãos</div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">🧟</span>
+      <span class="faq-q-text">O que é a visão de Recursos Órfãos?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>É uma lista de <strong>recursos Azure provisionados que ninguém está usando</strong>, mas que continuam gerando custo — por exemplo, um disco que ficou para trás depois que a VM dele foi apagada.</p>
+      <p>O custo mostrado é estimado pelo <strong>billing observado nos últimos 30 dias</strong> — não é uma estimativa genérica, é o que o recurso realmente gastou.</p>
+      <div class="tip"><p>Disco gerenciado e IP estático cobram a mesma taxa estejam anexados a algo ou não — então o que você vê aqui é dinheiro sendo gasto de verdade, não uma suposição.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">📋</span>
+      <span class="faq-q-text">Quais tipos de recursos órfãos são detectados?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <div class="gloss-grid">
+        <div class="gloss-item">
+          <div class="gloss-term">💾 Disco não anexado</div>
+          <div class="gloss-def">Disco managed sem nenhuma VM associada.</div>
+        </div>
+        <div class="gloss-item">
+          <div class="gloss-term">📸 Snapshot antigo</div>
+          <div class="gloss-def">Cópia pontual de disco mais antiga que o período configurado.</div>
+        </div>
+        <div class="gloss-item">
+          <div class="gloss-term">🌐 IP público sem uso</div>
+          <div class="gloss-def">Endereço IP público reservado, mas não vinculado a nenhum recurso ativo.</div>
+        </div>
+        <div class="gloss-item">
+          <div class="gloss-term">🔌 NIC não anexada</div>
+          <div class="gloss-def">Placa de rede virtual sem VM associada.</div>
+        </div>
+        <div class="gloss-item">
+          <div class="gloss-term">🗂️ App Service Plan sem apps</div>
+          <div class="gloss-def">Plano de hospedagem sem nenhum Web App publicado nele.</div>
+        </div>
+        <div class="gloss-item">
+          <div class="gloss-term">⚖️ Load Balancer sem backend</div>
+          <div class="gloss-def">Balanceador de carga sem nenhum recurso de destino configurado.</div>
+        </div>
+        <div class="gloss-item">
+          <div class="gloss-term">🚪 App Gateway sem backend</div>
+          <div class="gloss-def">Gateway de aplicação sem nenhum recurso de destino configurado.</div>
+        </div>
+        <div class="gloss-item">
+          <div class="gloss-term">⏸️ VM parada (sem desalocar)</div>
+          <div class="gloss-def">Máquina virtual desligada, mas não desalocada — continua sendo cobrada.</div>
+        </div>
+      </div>
+      <div class="note"><p>Esta visão não inclui rightsizing de VM (recomendação de redimensionar uma VM superdimensionada) — isso exigiria métricas do Azure Monitor.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">📅</span>
+      <span class="faq-q-text">O que significa "Dias Órfão"?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>É há quantos dias o recurso é detectado continuamente como órfão. Use o filtro <strong>"Órfão há"</strong> para focar nos casos mais antigos — geralmente os que têm menor chance de ainda serem necessários.</p>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">➖</span>
+      <span class="faq-q-text">Por que alguns recursos aparecem com custo "—" em vez de R$ 0,00?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>O traço <strong>"—"</strong> aparece quando não há nenhuma linha de billing conhecida para aquele recurso — ou seja, <strong>não sabemos o custo</strong>, o que é diferente de o recurso ser gratuito. Um NIC, por exemplo, realmente não é cobrado pela Azure; outros recursos sem "—" simplesmente ainda não tiveram o custo importado para o sistema.</p>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">⚠️</span>
+      <span class="faq-q-text">Um recurso aparecer aqui significa que devo excluí-lo?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>Não necessariamente. Itens como <strong>App Service Plan sem apps</strong>, <strong>Load Balancer/App Gateway sem backend</strong> e <strong>VM parada</strong> geram custo, mas podem estar reservados de propósito (ex: ambiente em pausa temporária). Trate-os como itens a <strong>revisar com o responsável</strong>, não para apagar diretamente.</p>
+      <div class="tip"><p>O custo de uma VM parada pode incluir dias em que ela ainda estava ligada antes de ser desligada — confira a data antes de decidir.</p></div>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggle(this)">
+      <span class="faq-icon">🔎</span>
+      <span class="faq-q-text">Como filtro os recursos órfãos por tipo, Resource Group ou nome?</span>
+      <span class="faq-chevron">⌄</span>
+    </div>
+    <div class="faq-a">
+      <p>No topo da lista você encontra três filtros, combináveis entre si:</p>
+      <ul>
+        <li><strong>Tipo de recurso</strong> — mostra só uma das categorias (ex: só discos)</li>
+        <li><strong>Resource Group</strong> — mostra só os recursos de um grupo específico</li>
+        <li><strong>Buscar por nome</strong> — filtra pelo nome do recurso</li>
+      </ul>
+      <p>Os indicadores de custo no topo da tela (desperdício estimado por mês e projeção anual) são recalculados de acordo com os filtros aplicados.</p>
+    </div>
+  </div>
+
 </div>
 
 <div class="no-results" id="no-results">
@@ -353,7 +507,7 @@ body{font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:10pt;col
 
 <div class="faq-footer">
   <p>
-    Calculadora de Custos Azure · Vivo<br>
+    Portal de Serviços FinOps · Vivo<br>
     Dúvidas não respondidas aqui? Entre em contato com a equipe de FinOps.
   </p>
 </div>

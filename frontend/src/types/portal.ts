@@ -21,6 +21,11 @@ export interface PortalConfig {
   solicitar_identificacao: boolean
   permitir_selecao_periodo: boolean
   permitir_selecao_recursos: boolean
+  // Visão de recursos órfãos (interruptor do admin). As listas de assinaturas/RGs/tipos
+  // permitidos ficam só no servidor — o cliente nunca as recebe.
+  orfaos_ativo?: boolean
+  // Interruptor da calculadora (ausente = ativa, como em servidores/configs anteriores).
+  calculadora_ativa?: boolean
 }
 
 export interface PortalIdentSessao {

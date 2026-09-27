@@ -234,6 +234,7 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
     const fixoMes = recursos.filter((r) => r.tipo_custo === 'mes').reduce((s, r) => s + (r.estimado_brl || r.custo_mes || 0), 0)
     const html = buildPdfHtml({
       invoiceNum: estimativa.numero || 'EST-000000',
+      origem: 'app',
       dataFmt, dataValid,
       nomeProjeto: estimativa.projeto_nome || '',
       titulo: estimativa.titulo || 'Estimativa de Custos Azure',

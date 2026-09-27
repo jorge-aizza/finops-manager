@@ -7,6 +7,10 @@ import type { Periodo, ResultadoEstimativa } from './calculadora'
 // chamam a MESMA função pura, pra nunca divergir visualmente entre si.
 export interface PdfInvoiceInput {
   invoiceNum: string
+  // Define o rótulo institucional usado no nome sugerido ao salvar o PDF (ex:
+  // "Portal de Serviço — EST-123456 — ..." vs "FinOps Manager — EST-123456 — ...").
+  // Ausente = 'app' (autenticado).
+  origem?: 'app' | 'portal'
   dataFmt: string
   dataValid: string
   nomeProjeto: string

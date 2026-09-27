@@ -255,6 +255,7 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
           estimativa={invoiceData.estimativa}
           periodos={invoiceData.periodos}
           api={INVOICE_API}
+          origem="portal"
           defaultResp={ident?.nome || ''}
           defaultEmail={ident?.email || ''}
           onClose={() => setInvoiceData(null)}

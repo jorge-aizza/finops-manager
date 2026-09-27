@@ -2,7 +2,38 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getPortalConfig, identificar } from './api/portal'
 import PublicCalculadoraView from './views/PublicCalculadoraView'
-import type { PortalIdentSessao } from './types/portal'
+import PublicOrfaosView from './views/PublicOrfaosView'
+import PortalHome from './components/PortalHome'
+import FinopsLogo from './components/FinopsLogo'
+import { IconCalculadora, IconInicio, IconOrfaos } from './components/portalIcons'
+import { hrefDe, usePortalRoute, type ServicoId } from './lib/portalRoute'
+import type { PortalConfig, PortalIdentSessao } from './types/portal'
+
+// Registro de serviços do portal: cada item vira um card na página inicial e um ícone no
+// menu. Um novo serviço entra aqui (e ganha rota em portalRoute.ts).
+interface ServicoDef {
+  id: ServicoId
+  titulo: string
+  descricao: string
+  subtitulo: string
+  etiqueta: string
+  ativo: (cfg: PortalConfig) => boolean
+  icone: (size: number) => React.ReactNode
+}
+const SERVICOS: ServicoDef[] = [
+  {
+    id: 'calculadora', titulo: 'Calculadora de Custos', subtitulo: 'Calculadora Azure', etiqueta: 'Estimativa',
+    descricao: 'Estime o custo dos seus recursos Azure por horas de uso, com impostos e relatório exportável.',
+    ativo: (cfg) => cfg.calculadora_ativa !== false,
+    icone: (size) => <IconCalculadora size={size} />,
+  },
+  {
+    id: 'orfaos', titulo: 'Recursos Órfãos', subtitulo: 'Recursos Órfãos', etiqueta: 'Governança',
+    descricao: 'Veja discos, IPs, NICs e outros recursos sem uso que continuam gerando custo.',
+    ativo: (cfg) => !!cfg.orfaos_ativo,
+    icone: (size) => <IconOrfaos size={size} />,
+  },
+]
 
 const LS_THEME = 'finops-theme'
 const SS_IDENT = 'portal_ident'
@@ -50,6 +81,15 @@ export default function PortalApp() {
   const dominios = cfg?.dominios_aceitos || []
   const pedirIdent = !!cfg && (cfg.solicitar_identificacao || dominios.length > 0)
   const podeAbrirCalculadora = !!cfg && (!pedirIdent || !!ident)
+  // Início + menu só depois da identificação (quando exigida) e só com mais de um serviço ativo.
+  // Com um único serviço ativo o portal abre direto nele (como antes, quando só havia a calculadora).
+  const rota = usePortalRoute()
+  const ativos = cfg ? SERVICOS.filter((s) => s.ativo(cfg)) : []
+  const temMenu = podeAbrirCalculadora && ativos.length > 1
+  const viewAtual: ServicoId | 'home' | 'nenhum' | null = !podeAbrirCalculadora ? null
+    : ativos.length === 0 ? 'nenhum'
+    : ativos.length === 1 ? ativos[0].id
+    : ativos.some((s) => s.id === rota) ? (rota as ServicoId) : 'home'
 
   function handleIdentificado(s: PortalIdentSessao) {
     sessionStorage.setItem(SS_IDENT, JSON.stringify(s))
@@ -66,26 +106,40 @@ export default function PortalApp() {
   const heroDesc = cfg?.descricao
     || 'Estime o custo dos seus recursos Azure de forma rápida e transparente. Selecione os recursos, defina as horas e visualize o custo estimado com impostos.'
 
+  const servicoAtual = SERVICOS.find((s) => s.id === viewAtual)
   useEffect(() => {
-    document.title = (cfg?.titulo ? cfg.titulo + ' — ' : '') + 'Portal de Serviço'
-  }, [cfg?.titulo])
+    document.title = (cfg?.titulo ? cfg.titulo + ' — ' : '') + (servicoAtual ? servicoAtual.titulo + ' — ' : '') + 'Portal de Serviço'
+  }, [cfg?.titulo, servicoAtual])
+
+  const irParaInicio = () => { window.location.hash = hrefDe('home') }
+  const subtitulo = viewAtual === 'home' ? 'Portal de Serviços' : servicoAtual?.subtitulo ?? 'Calculadora Azure'
 
   return (
     <>
       <header className="portal-header">
-        <div className="portal-brand">
-          {/* Tema claro (padrao): logo original, inalterado */}
-          <img src="/finops-logo.png" alt="FinOps" className="finops-logo topbar-logo-light"
-               style={{ height: 30, width: 'auto', display: 'block', flexShrink: 0 }} />
-          {/* Tema escuro: mesmo logo novo usado no top-bar e login */}
-          <img src="/finops-logo-dark.png" alt="FinOps" className="finops-logo topbar-logo-dark"
-               style={{ height: 30, width: 'auto', display: 'none', flexShrink: 0 }} />
+        <div className={'portal-brand' + (temMenu ? ' clicavel' : '')} onClick={temMenu ? irParaInicio : undefined}
+             title={temMenu ? 'Voltar ao início' : undefined}>
+          <FinopsLogo height={30} />
           <div>
             <div className="portal-brand-name">{titulo}</div>
-            <div className="portal-brand-sub">Calculadora Azure</div>
+            <div className="portal-brand-sub">{subtitulo}</div>
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="portal-header-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {temMenu && (
+            <nav className="portal-nav" aria-label="Menu do portal">
+              <a className={'portal-nav-btn' + (viewAtual === 'home' ? ' active' : '')} href={hrefDe('home')}
+                title="Início" aria-label="Início" aria-current={viewAtual === 'home' ? 'page' : undefined}>
+                <IconInicio size={16} />
+              </a>
+              {ativos.map((s) => (
+                <a key={s.id} className={'portal-nav-btn' + (viewAtual === s.id ? ' active' : '')} href={hrefDe(s.id)}
+                  title={s.titulo} aria-label={s.titulo} aria-current={viewAtual === s.id ? 'page' : undefined}>
+                  {s.icone(16)}
+                </a>
+              ))}
+            </nav>
+          )}
           {ident && (
             <div className="portal-user-badge" style={{ display: 'flex' }}>
               👤 <span className="pub-nome">{ident.nome}</span>
@@ -113,19 +167,30 @@ export default function PortalApp() {
         <IdentModal dominios={dominios} onIdentificado={handleIdentificado} />
       )}
 
+      {/* Trilha estrutural: só nas páginas de serviço e só com mais de um serviço (há para onde voltar). */}
+      {temMenu && servicoAtual && (
+        <nav className="portal-crumbs" aria-label="Você está em">
+          <a href={hrefDe('home')}>← Portal de Serviços</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">{servicoAtual.titulo}</span>
+        </nav>
+      )}
+
       {/* Hero sempre visível, mesmo em erro/carregando — igual ao portal.html
           legado, que nunca escondia essa seção (só injetava #portal-inactive
           abaixo dela). Preservado por fidelidade, não é um bug corrigido aqui. */}
-      <section className="portal-hero">
-        <h1>{heroTitulo}</h1>
-        <p>{heroDesc}</p>
-        <div className="portal-hero-chips">
-          <span className="portal-chip">🔍 Busca por Subscription</span>
-          <span className="portal-chip">⏱ Estimativa por horas</span>
-          <span className="portal-chip">📊 Pico de custo do período</span>
-          <span className="portal-chip">📄 Relatório exportável</span>
-        </div>
-      </section>
+      {(viewAtual === null || viewAtual === 'calculadora') && (
+        <section className="portal-hero">
+          <h1>{heroTitulo}</h1>
+          <p>{heroDesc}</p>
+          <div className="portal-hero-chips">
+            <span className="portal-chip">🔍 Busca por Subscription</span>
+            <span className="portal-chip">⏱ Estimativa por horas</span>
+            <span className="portal-chip">📊 Pico de custo do período</span>
+            <span className="portal-chip">📄 Relatório exportável</span>
+          </div>
+        </section>
+      )}
 
       {configQuery.isLoading && (
         <div id="portal-loading">
@@ -142,7 +207,28 @@ export default function PortalApp() {
         </div>
       )}
 
-      {podeAbrirCalculadora && cfg && <PublicCalculadoraView cfg={cfg} ident={ident} />}
+      {cfg && viewAtual === 'home' && (
+        <PortalHome
+          titulo={cfg.titulo || 'Portal de Serviços'}
+          descricao={cfg.descricao || 'Escolha um serviço para começar.'}
+          nome={ident?.nome}
+          servicos={ativos.map((s) => ({ id: s.id, titulo: s.titulo, descricao: s.descricao, etiqueta: s.etiqueta, href: hrefDe(s.id), icone: s.icone(32) }))}
+        />
+      )}
+      {cfg && viewAtual === 'calculadora' && <PublicCalculadoraView cfg={cfg} ident={ident} />}
+      {viewAtual === 'orfaos' && <PublicOrfaosView />}
+      {viewAtual === 'nenhum' && (
+        <div id="portal-inactive" style={{ display: 'block' }}>
+          <div className="pi-icon">🔒</div>
+          <h2>Nenhum serviço disponível</h2>
+          <p>Este portal não tem serviços ativos no momento. Entre em contato com o administrador.</p>
+        </div>
+      )}
+
+      <footer className="portal-footer">
+        <span>FinOps Manager · {new Date().getFullYear()}</span>
+        <a href="/docs-portal-faq.html" target="_blank" rel="noreferrer">Dúvidas frequentes</a>
+      </footer>
 
       {toast && <div id="toast" className={'toast show ' + toast.type}>{toast.msg}</div>}
     </>
@@ -177,7 +263,7 @@ function IdentModal({ dominios, onIdentificado }: { dominios: string[]; onIdenti
       <div className="ident-glow" />
       <div className="ident-card">
         <div className="ident-logo">
-          <MascoteLogo />
+          <FinopsLogo height={44} />
         </div>
         <h2>Identificação</h2>
         <p>
@@ -202,68 +288,6 @@ function IdentModal({ dominios, onIdentificado }: { dominios: string[]; onIdenti
           {enviando ? 'Aguarde...' : 'Confirmar e acessar'}
         </button>
       </div>
-    </div>
-  )
-}
-
-// Porta verbatim do efeito de tingimento roxo do mascote (portal.html legado)
-// — remove o fundo por diferença de cor nos cantos + aplica tint roxo Vivo
-// (#9333ea, 65%) sobre o resto. Só decorativo, sem dependência de estado.
-function MascoteLogo() {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [visible, setVisible] = useState(false)
-
-  useEffect(() => {
-    const cvs = canvasRef.current
-    if (!cvs) return
-    const off = new Image()
-    off.onload = () => {
-      try {
-        const W = off.naturalWidth, H = off.naturalHeight
-        const scale = 50 / H
-        cvs.width = Math.round(W * scale)
-        cvs.height = 50
-        const tmp = document.createElement('canvas')
-        tmp.width = W; tmp.height = H
-        const tc = tmp.getContext('2d')!
-        tc.drawImage(off, 0, 0)
-        const d = tc.getImageData(0, 0, W, H)
-        const px = d.data
-        const cs = [[0, 0], [W - 1, 0], [0, H - 1], [W - 1, H - 1], [Math.floor(W / 2), 0], [0, Math.floor(H / 2)], [W - 1, Math.floor(H / 2)], [Math.floor(W / 2), H - 1]]
-        let bgR = 0, bgG = 0, bgB = 0
-        for (const [cx, cy] of cs) { const p4 = (cy * W + cx) * 4; bgR += px[p4]; bgG += px[p4 + 1]; bgB += px[p4 + 2] }
-        bgR /= cs.length; bgG /= cs.length; bgB /= cs.length
-        const HARD = 90, SOFT = 130
-        for (let i = 0; i < px.length; i += 4) {
-          const r = px[i], g = px[i + 1], b = px[i + 2]
-          const dr = r - bgR, dg = g - bgG, db = b - bgB, dSq = dr * dr + dg * dg + db * db
-          if (dSq < HARD * HARD) { px[i + 3] = 0 }
-          else if (dSq < SOFT * SOFT) { px[i + 3] = Math.round(255 * (Math.sqrt(dSq) - HARD) / (SOFT - HARD)) }
-          else {
-            px[i] = Math.round(r * 0.35 + 147 * 0.65)
-            px[i + 1] = Math.round(g * 0.35 + 51 * 0.65)
-            px[i + 2] = Math.round(b * 0.35 + 234 * 0.65)
-          }
-        }
-        tc.putImageData(d, 0, 0)
-        cvs.getContext('2d')!.drawImage(tmp, 0, 0, cvs.width, cvs.height)
-        setVisible(true)
-      } catch {
-        setVisible(true)
-      }
-    }
-    off.onerror = () => { if (cvs) cvs.style.display = 'none' }
-    off.src = '/mascote.png?' + Date.now()
-  }, [])
-
-  return (
-    <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 0 }}>
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 54" width={90} height={44}
-        className="ident-vivo-text" style={{ opacity: visible ? 1 : 0, transition: 'opacity .3s ease' }}>
-        <text x={2} y={44} fontFamily="'Arial Black','Arial Bold',Arial" fontWeight={900} fontSize={46} fill="#9333ea" letterSpacing={-1}>vivo</text>
-      </svg>
-      <canvas ref={canvasRef} height={50} className="ident-vivo-mascote"
-        style={{ display: 'block', marginBottom: 2, marginLeft: -6, opacity: visible ? 1 : 0, transition: 'opacity .3s ease', flexShrink: 0 }} />
     </div>
   )
 }

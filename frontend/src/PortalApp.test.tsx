@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -12,6 +12,10 @@ vi.mock('./api/portal')
 // próprios testes — aqui só interessa SE ela monta, não o que tem dentro.
 vi.mock('./views/PublicCalculadoraView', () => ({
   default: ({ cfg }: { cfg: PortalConfig }) => <div data-testid="public-calc">calculadora — {cfg.titulo}</div>,
+}))
+
+vi.mock('./views/PublicOrfaosView', () => ({
+  default: () => <div data-testid="public-orfaos">órfãos</div>,
 }))
 
 function makeConfig(overrides: Partial<PortalConfig> = {}): PortalConfig {
@@ -38,6 +42,7 @@ beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
   document.documentElement.removeAttribute('data-theme')
+  window.location.hash = ''
 })
 
 describe('PortalApp', () => {
@@ -116,5 +121,120 @@ describe('PortalApp', () => {
     await screen.findByTestId('public-calc')
     expect(screen.queryByText('Identificação')).not.toBeInTheDocument()
     expect(screen.getByText('Carlos')).toBeInTheDocument()
+  });
+
+  describe('página inicial Portal de Serviços', () => {
+    it('sem órfãos: abre direto na calculadora, sem início nem menu (como antes)', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: false }))
+      renderWithClient()
+      await screen.findByTestId('public-calc')
+      expect(screen.queryByTestId('portal-home')).not.toBeInTheDocument()
+      expect(screen.queryByRole('navigation', { name: 'Menu do portal' })).not.toBeInTheDocument()
+    });
+
+    it('com 2 serviços ativos: mostra a página inicial com os 2 cards e o menu', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true }))
+      renderWithClient()
+      expect(await screen.findByTestId('portal-home')).toBeInTheDocument()
+      expect(screen.getByTestId('portal-card-calculadora')).toHaveAttribute('href', '#/calculadora')
+      expect(screen.getByTestId('portal-card-orfaos')).toHaveAttribute('href', '#/orfaos')
+      expect(screen.queryByTestId('public-calc')).not.toBeInTheDocument()
+      expect(screen.getByRole('navigation', { name: 'Menu do portal' })).toBeInTheDocument()
+    });
+
+    it('clicar no card abre o serviço e o Voltar (hash) retorna ao início', async () => {
+      const user = userEvent.setup()
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true }))
+      renderWithClient()
+      await screen.findByTestId('portal-home')
+
+      await act(async () => { window.location.hash = '#/orfaos' })
+      expect(await screen.findByTestId('public-orfaos')).toBeInTheDocument()
+      expect(screen.queryByTestId('portal-home')).not.toBeInTheDocument()
+      expect(screen.queryByText('Busca por Subscription', { exact: false })).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('link', { name: 'Calculadora de Custos' }))
+      expect(await screen.findByTestId('public-calc')).toBeInTheDocument()
+
+      await user.click(screen.getByRole('link', { name: 'Início' }))
+      expect(await screen.findByTestId('portal-home')).toBeInTheDocument()
+    });
+
+    it('trilha "← Portal de Serviços" só nas páginas de serviço com >1 serviço ativo', async () => {
+      window.location.hash = '#/orfaos'
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true }))
+      renderWithClient()
+      await screen.findByTestId('public-orfaos')
+      const trilha = screen.getByRole('navigation', { name: 'Você está em' })
+      expect(trilha).toHaveTextContent('Portal de Serviços')
+      expect(trilha).toHaveTextContent('Recursos Órfãos')
+    });
+
+    it('sem trilha na página inicial nem com um serviço só', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true }))
+      const { unmount } = renderWithClient()
+      await screen.findByTestId('portal-home')
+      expect(screen.queryByRole('navigation', { name: 'Você está em' })).not.toBeInTheDocument()
+      unmount()
+
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: false }))
+      renderWithClient()
+      await screen.findByTestId('public-calc')
+      expect(screen.queryByRole('navigation', { name: 'Você está em' })).not.toBeInTheDocument()
+    });
+
+    it('saúda pelo nome de quem se identificou e mostra o rodapé', async () => {
+      sessionStorage.setItem('portal_ident', JSON.stringify({ nome: 'Carlos Lima', email: 'carlos@empresa.com' }))
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ solicitar_identificacao: true, orfaos_ativo: true }))
+      renderWithClient()
+      expect(await screen.findByText('Olá, Carlos')).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: 'Dúvidas frequentes' })).toHaveAttribute('href', '/docs-portal-faq.html')
+    });
+
+    it('logo FinOps nas duas variantes de tema no cabeçalho', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig())
+      const { container } = renderWithClient()
+      await screen.findByTestId('public-calc')
+      expect(container.querySelector('.portal-header img.topbar-logo-light')).toHaveAttribute('src', '/finops-logo.png')
+      expect(container.querySelector('.portal-header img.topbar-logo-dark')).toHaveAttribute('src', '/finops-logo-dark.png')
+    });
+
+    it('deep link #/orfaos abre direto os órfãos', async () => {
+      window.location.hash = '#/orfaos'
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true }))
+      renderWithClient()
+      expect(await screen.findByTestId('public-orfaos')).toBeInTheDocument()
+    });
+
+    it('só órfãos ativo (calculadora desligada): abre direto em órfãos, sem início nem menu', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true, calculadora_ativa: false }))
+      renderWithClient()
+      expect(await screen.findByTestId('public-orfaos')).toBeInTheDocument()
+      expect(screen.queryByTestId('portal-home')).not.toBeInTheDocument()
+      expect(screen.queryByRole('navigation', { name: 'Menu do portal' })).not.toBeInTheDocument()
+    });
+
+    it('rota de serviço desativado cai na página inicial (nunca abre o serviço)', async () => {
+      window.location.hash = '#/orfaos'
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: false }))
+      renderWithClient()
+      expect(await screen.findByTestId('public-calc')).toBeInTheDocument()
+      expect(screen.queryByTestId('public-orfaos')).not.toBeInTheDocument()
+    });
+
+    it('nenhum serviço ativo: mostra a mensagem', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: false, calculadora_ativa: false }))
+      renderWithClient()
+      expect(await screen.findByText('Nenhum serviço disponível')).toBeInTheDocument()
+    });
+
+    it('identificação exigida e ainda não feita: não mostra início, menu nem serviços', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ solicitar_identificacao: true, orfaos_ativo: true }))
+      renderWithClient()
+      await screen.findByText('Identificação')
+      expect(screen.queryByTestId('portal-home')).not.toBeInTheDocument()
+      expect(screen.queryByRole('navigation', { name: 'Menu do portal' })).not.toBeInTheDocument()
+      expect(screen.queryByTestId('public-orfaos')).not.toBeInTheDocument()
+    });
   });
 });

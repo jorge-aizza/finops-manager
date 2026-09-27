@@ -3688,6 +3688,24 @@
             <!-- Config body — oculto quando portal inativo -->
             <div id="portal-cfg-body" style="display:none;flex-direction:column;gap:18px;">
 
+            <!-- Serviços do portal (cards da página inicial) -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Serviços do Portal</div>
+              <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                <input type="checkbox" id="portal-cfg-calc-ativo" checked onchange="atualizarAvisoServicosPortal()" style="width:14px;height:14px;accent-color:var(--accent);">
+                <div>
+                  <span style="font-weight:600;">Calculadora de custos</span>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Estimativa de custos Azure por horas de uso. Desmarque para ter um portal só de Recursos Órfãos.</div>
+                </div>
+              </label>
+              <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
+                Recursos Órfãos é ligado mais abaixo, no card “Recursos Órfãos no Portal”. Com <strong style="color:var(--text-dim);">dois ou mais serviços ativos</strong> o portal abre numa página inicial com um card por serviço; com um só, abre direto nele.
+              </div>
+              <div id="portal-cfg-servicos-aviso" style="display:none;font-size:11px;color:var(--danger,#ef4444);">
+                ⚠ Nenhum serviço ativo: o portal mostrará “Nenhum serviço disponível”.
+              </div>
+            </div>
+
             <!-- Título e descrição -->
             <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
               <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Aparência</div>
@@ -3763,6 +3781,43 @@
                   <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Quando desativado, todos os recursos são selecionados automaticamente e os botões Sel. todos / Limpar ficam desativados</div>
                 </div>
               </label>
+            </div>
+
+            <!-- Recursos órfãos no portal -->
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Recursos Órfãos no Portal</div>
+              <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                <input type="checkbox" id="portal-cfg-orfaos-ativo" onchange="togglePortalOrfaos(this.checked)" style="width:14px;height:14px;accent-color:var(--accent);">
+                <div>
+                  <span style="font-weight:600;">Exibir a visão de recursos órfãos no portal</span>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Adiciona ao portal um menu com Calculadora e Recursos Órfãos. Só aparece o que for marcado abaixo (nome, tipo, Resource Group, SKU, custo e dias órfão — nunca o ID completo do recurso). O portal não tem login: qualquer pessoa com o link vê estes dados.</div>
+                </div>
+              </label>
+              <div id="portal-cfg-orfaos-body" style="display:none;flex-direction:column;gap:12px;">
+                <div>
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
+                    Assinaturas exibidas <span style="opacity:.6;">(nenhuma marcada = nada é exibido)</span>
+                  </label>
+                  <div id="portal-cfg-orfaos-subs-list" style="display:flex;flex-direction:column;gap:4px;max-height:160px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;"></div>
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
+                    Tipos de recurso exibidos <span style="opacity:.6;">(nenhum marcado = nada é exibido)</span>
+                  </label>
+                  <div id="portal-cfg-orfaos-cats-list" style="display:flex;flex-direction:column;gap:4px;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;"></div>
+                </div>
+                <div>
+                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                    <label style="font-size:12px;color:var(--text-muted);">
+                      Resource Groups exibidos <span style="opacity:.6;">(nenhum marcado = todos os RGs das assinaturas escolhidas)</span>
+                    </label>
+                    <button onclick="carregarRgsOrfaosPortal()" class="btn-ghost" style="padding:4px 10px;font-size:11px;">↻ Carregar Resource Groups</button>
+                  </div>
+                  <div id="portal-cfg-orfaos-rgs-list" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;">
+                    <span style="font-size:12px;color:var(--text-muted);font-style:italic;">Clique em “Carregar Resource Groups” para listar os RGs que têm recursos órfãos (consulta o Azure, pode levar alguns segundos).</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- Identificação de usuários -->

@@ -8,6 +8,14 @@ function brl(v: number): string {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v || 0)
 }
 
+// Nome sugerido pelo navegador ao "Salvar como PDF" (Ctrl+P dentro do iframe) vem do <title>
+// do documento gerado aqui — não do título mostrado no modal de prévia. Por isso o número da
+// estimativa entra no <title>, não só no cabeçalho visual do PDF. Caracteres proibidos em nome
+// de arquivo no Windows (\ / : * ? " < > |) viram espaço; espaços duplicados colapsam.
+function nomeArquivo(s: string): string {
+  return s.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
 // Porta verbatim de _buildPDFHtml(p) (calculadora.js, ~350 linhas) — função
 // pura (só lê p.*, sem DOM em tempo de build). O <script> embutido no HTML
 // gerado roda depois, dentro do <iframe srcdoc>, independente do React —
@@ -73,8 +81,10 @@ export function buildPdfHtml(p: PdfInvoiceInput): string {
   })() : ''
 
   const origin = (typeof window !== 'undefined' && window.location) ? window.location.origin : ''
+  const origemLabel = p.origem === 'portal' ? 'Portal de Serviço' : 'FinOps Manager'
+  const nomeDocumento = nomeArquivo(`${origemLabel} — ${p.invoiceNum} — ${p.titulo}`)
   return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
-<title>${esc(p.titulo)}</title>
+<title>${esc(nomeDocumento)}</title>
 <style>
 @font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:300 700;font-display:swap;src:url('${origin}/fonts/ibm-plex-sans-latin-400.woff2') format('woff2')}
 @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('${origin}/fonts/ibm-plex-mono-latin-400.woff2') format('woff2')}
@@ -83,8 +93,8 @@ body{font-family:'IBM Plex Sans','Segoe UI',Arial,sans-serif;font-size:9pt;color
 .page{background:#fff;max-width:960px;margin:0 auto;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.10)}
 .hdr{background:linear-gradient(135deg,#faf7ff 0%,#f0e6ff 100%);display:flex;align-items:center;height:52px;padding:0 18px;gap:14px;position:relative;overflow:hidden}
 .hdr::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:rgba(147,51,234,.25)}
-.hdr-vivo{display:flex;align-items:center;gap:4px;flex-shrink:0}
-.hdr-mascote{height:30px;width:auto;object-fit:contain;vertical-align:middle}
+.hdr-logo{display:flex;align-items:center;flex-shrink:0}
+.hdr-logo img{height:28px;width:auto;display:block}
 .hdr-divider{width:1px;height:26px;background:rgba(147,51,234,.2);flex-shrink:0}
 .hdr-meta{flex:1;display:flex;flex-direction:column;justify-content:center;gap:1px}
 .hdr-title{font-size:9pt;font-weight:700;color:#5b21b6;letter-spacing:.01em}
@@ -152,44 +162,19 @@ tfoot td{padding:5px 8px}
 <script>
 var inIframe=window!==window.parent;
 window.onload=function(){
-  var img=document.getElementById('pdf-mascote');
-  function applyColor(cb){
-    try{
-      var W=img.naturalWidth,H=img.naturalHeight;
-      if(W&&H){
-        var cvs=document.createElement('canvas');cvs.width=W;cvs.height=H;
-        var ctx=cvs.getContext('2d');ctx.drawImage(img,0,0);
-        var d=ctx.getImageData(0,0,W,H),px=d.data;
-        var cs=[[0,0],[W-1,0],[0,H-1],[W-1,H-1],[Math.floor(W/2),0],[Math.floor(W/2),H-1]];
-        var bgR=0,bgG=0,bgB=0;
-        for(var ci=0;ci<cs.length;ci++){var p4=(cs[ci][1]*W+cs[ci][0])*4;bgR+=px[p4];bgG+=px[p4+1];bgB+=px[p4+2];}
-        bgR/=cs.length;bgG/=cs.length;bgB/=cs.length;
-        var HARD=80,SOFT=120;
-        for(var i=0;i<px.length;i+=4){
-          var r=px[i],g=px[i+1],b=px[i+2];
-          var dr=r-bgR,dg=g-bgG,db=b-bgB,dSq=dr*dr+dg*dg+db*db;
-          if(dSq<HARD*HARD){px[i+3]=0;}
-          else if(dSq<SOFT*SOFT){var d2=Math.sqrt(dSq);px[i+3]=Math.round(255*(d2-HARD)/(SOFT-HARD));px[i]=Math.round(r*0.35+147*0.65);px[i+1]=Math.round(g*0.35+51*0.65);px[i+2]=Math.round(b*0.35+234*0.65);}
-          else{px[i+3]=255;px[i]=Math.round(r*0.35+147*0.65);px[i+1]=Math.round(g*0.35+51*0.65);px[i+2]=Math.round(b*0.35+234*0.65);}
-        }
-        ctx.putImageData(d,0,0);img.src=cvs.toDataURL('image/png');
-      }
-    }catch(e){}
-    if(cb)cb();
-  }
+  var img=document.getElementById('pdf-logo');
   function doPrint(){window.print();window.onfocus=function(){setTimeout(function(){window.close();},400);};}
-  function run(){applyColor(inIframe?null:doPrint);}
-  if(!img){if(!inIframe)doPrint();return;}
+  function run(){if(!inIframe)doPrint();}
+  if(!img){run();return;}
   if(img.complete&&img.naturalWidth){run();}
-  else{img.onload=run;img.onerror=function(){if(!inIframe)doPrint();};}
+  else{img.onload=run;img.onerror=run;}
 };
 <\/script>
 </head><body>
 <div class="page">
 <div class="hdr">
-  <div class="hdr-vivo">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="52" height="24"><text id="pdf-vivo-text" x="1" y="28" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="28" fill="#9333ea" letter-spacing="-1">vivo</text></svg>
-    <img id="pdf-mascote" class="hdr-mascote" src="${origin}/mascote.png" height="30" alt="" onerror="this.style.display='none'">
+  <div class="hdr-logo">
+    <img id="pdf-logo" src="${origin}/finops-logo.png" alt="FinOps">
   </div>
   <div class="hdr-divider"></div>
   <div class="hdr-meta">
@@ -248,7 +233,7 @@ ${p.obs ? '<div class="obs"><div class="obs-lbl">Observa&ccedil;&otilde;es</div>
 ${itensFixos.length > 0 ? '<div style="padding:5px 14px;background:#fff7ed;border-top:1px solid #fed7aa;font-size:6pt;color:#92400e;font-style:italic;">⚠ Os custos fixos mensais não estão incluídos no Total Estimado. São cobrados mensalmente pelo Azure independente das horas do projeto.</div>' : ''}
 <div class="foot">
   <div class="foot-l">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 78 36" width="24" height="11" style="opacity:.7"><text x="1" y="28" font-family="'Arial Black','Arial Bold',Arial" font-weight="900" font-size="28" fill="#9333ea" letter-spacing="-1">vivo</text></svg>
+    <img src="${origin}/finops-logo.png" alt="FinOps" style="height:11px;width:auto;opacity:.7;display:block">
     <span class="foot-dot"></span>
     <span>FinOps Manager &middot; ${esc(p.invoiceNum)} &middot; ${new Date().toLocaleString('pt-BR')}</span>
     <span class="foot-dot"></span>

@@ -4049,7 +4049,9 @@ app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
 
 // Helper: lê config do portal do banco
 async function _getPortalConfig() {
-  const _defaults = { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [], titulo: 'Portal de Serviço', descricao: '' };
+  const _defaults = { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [], titulo: 'Portal de Serviço', descricao: '',
+    calculadora_ativa: true,
+    orfaos_ativo: false, orfaos_subscription_ids: [], orfaos_resource_groups: [], orfaos_categorias: [] };
   try {
     const r = await pool.query(`SELECT value FROM portal_config WHERE key = 'config'`);
     if (!r.rows.length) return _defaults;
@@ -4069,6 +4071,16 @@ async function _portalMiddleware(req, res, next) {
   } catch (e) { _dbErr(res, e); }
 }
 
+// Serviço "Calculadora" do portal desligável pelo admin. Aplicado só nas rotas de dados da
+// calculadora (não em /config nem /identificar, usados pela página inicial e pelo modal) — o
+// portal não tem sessão, então esconder o card na tela não basta: o servidor também recusa.
+function _calculadoraAtivaMiddleware(req, res, next) {
+  if (req.portalCfg && req.portalCfg.calculadora_ativa === false) {
+    return res.status(403).json({ error: 'Calculadora desativada' });
+  }
+  next();
+}
+
 // ── GET /api/admin/portal-config ─────────────────────────────────────────────
 app.get('/api/admin/portal-config', authMiddleware, dbMiddleware, async (_req, res) => {
   try { res.json(await _getPortalConfig()); }
@@ -4080,9 +4092,19 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
   try {
     const { ativo, subscription_ids = [], resource_groups = [], dominios_aceitos = [], titulo = 'Portal de Serviço', descricao = '',
             taxa_imposto, taxa_cond, taxa_gordura, horario_livre, solicitar_identificacao,
-            permitir_selecao_periodo, permitir_selecao_recursos } = req.body;
+            permitir_selecao_periodo, permitir_selecao_recursos,
+            orfaos_ativo, orfaos_subscription_ids, orfaos_resource_groups, orfaos_categorias, calculadora_ativa } = req.body;
+    // Recursos órfãos no portal: allowlist explícita. Listas sempre normalizadas (strings não vazias);
+    // categorias filtradas contra as 8 válidas — nada vindo do cliente entra sem validação.
+    const _strList = (v) => (Array.isArray(v) ? v : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 2000);
     const cfg = {
       ativo: !!ativo, subscription_ids, resource_groups, dominios_aceitos, titulo, descricao,
+      // `!== false`: cliente antigo que não envia o campo não desliga a calculadora sem querer.
+      calculadora_ativa: calculadora_ativa !== false,
+      orfaos_ativo: !!orfaos_ativo,
+      orfaos_subscription_ids: _strList(orfaos_subscription_ids),
+      orfaos_resource_groups: _strList(orfaos_resource_groups),
+      orfaos_categorias: _strList(orfaos_categorias).filter((c) => Object.prototype.hasOwnProperty.call(_DESP_LABEL_XLSX, c)),
       taxa_imposto:           taxa_imposto  != null ? parseFloat(taxa_imposto)  : 18.65,
       taxa_cond:              taxa_cond     != null ? parseFloat(taxa_cond)     : 13.00,
       taxa_gordura:           taxa_gordura  != null ? parseFloat(taxa_gordura)  : 0,
@@ -4103,7 +4125,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
 });
 
 // ── GET /api/public/calculadora/projetos ─────────────────────────────────────
-app.get('/api/public/calculadora/projetos', _portalMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/public/calculadora/projetos', _portalMiddleware, _calculadoraAtivaMiddleware, dbMiddleware, async (_req, res) => {
   try {
     const r = await pool.query(
       `SELECT id, nome, descricao, status
@@ -4115,7 +4137,7 @@ app.get('/api/public/calculadora/projetos', _portalMiddleware, dbMiddleware, asy
 
 // ── POST /api/public/calculadora/estimativas ─────────────────────────────────
 // Salva estimativa gerada pelo portal público (sem auth JWT)
-app.post('/api/public/calculadora/estimativas', _portalMiddleware, dbMiddleware, async (req, res) => {
+app.post('/api/public/calculadora/estimativas', _portalMiddleware, _calculadoraAtivaMiddleware, dbMiddleware, async (req, res) => {
   const {
     projeto_id, projeto_nome, numero, titulo, responsavel, validade_dias,
     data_estimativa, horas, pct_imposto, pct_cond, vl_imposto, vl_cond,
@@ -4174,7 +4196,98 @@ app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
           solicitar_identificacao = false,
           permitir_selecao_periodo = true, permitir_selecao_recursos = true } = req.portalCfg;
   res.json({ titulo, descricao, dominios_aceitos, taxa_imposto, taxa_cond, taxa_gordura, horario_livre,
-             solicitar_identificacao, permitir_selecao_periodo, permitir_selecao_recursos });
+             solicitar_identificacao, permitir_selecao_periodo, permitir_selecao_recursos,
+             calculadora_ativa: req.portalCfg.calculadora_ativa !== false,
+             orfaos_ativo: !!req.portalCfg.orfaos_ativo });
+});
+
+// ── GET /api/public/orfaos ────────────────────────────────────────────────────
+// Visão de recursos órfãos do portal. Sem sessão (como o resto do portal), então: allowlist
+// explícita do admin (assinaturas + tipos; RG opcional), campos sanitizados (NUNCA resource_id,
+// subscription_id ou erros) e rate limit — a 1ª chamada com cache frio dispara consultas ao
+// Resource Graph. Reaproveita o cache da rota autenticada (mesma chave: todas as assinaturas do
+// Inventário) e NÃO grava em azure_desperdicio_deteccao.
+const _orfaosPublicoLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Muitas requisições. Tente novamente em instantes.' },
+});
+app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const cfg = req.portalCfg;
+    if (!cfg.orfaos_ativo) return res.status(403).json({ error: 'Visão de recursos órfãos desativada' });
+    const subsPermitidas = new Set((cfg.orfaos_subscription_ids || []).map((s) => String(s).toLowerCase()));
+    const categorias = new Set(cfg.orfaos_categorias || []);
+    const rgs = new Set((cfg.orfaos_resource_groups || []).map((r) => String(r).toUpperCase()));
+    const vazio = { gerado_em: new Date().toISOString(), total_itens: 0, custo_mensal_estimado_total: 0, por_categoria: [], itens: [] };
+    if (!subsPermitidas.size || !categorias.size) return res.json(vazio);
+
+    await ensureAzureColetaTable();
+    const { subs } = await _getInventarioSpConfig();
+    const cache = await _getDesperdicioCached(subs, 90);
+    const filtrados = cache.filter((x) =>
+      subsPermitidas.has(String(x.subscription_id).toLowerCase())
+      && categorias.has(x.categoria)
+      && (!rgs.size || (x.resource_group && rgs.has(String(x.resource_group).toUpperCase()))));
+
+    const det = filtrados.length
+      ? await pool.query(
+          `SELECT resource_id_upper, primeira_deteccao_em FROM azure_desperdicio_deteccao WHERE resource_id_upper = ANY($1)`,
+          [filtrados.map((x) => String(x.resource_id).toUpperCase())])
+      : { rows: [] };
+    const primeira = new Map(det.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
+
+    const itens = filtrados.map((x) => {
+      const desde = x.marcado_orfao_em || primeira.get(String(x.resource_id).toUpperCase());
+      return {
+        nome: x.nome || null,
+        categoria: x.categoria,
+        resource_group: x.resource_group || null,
+        sku: x.sku || null,
+        tamanho_gb: x.tamanho_gb ?? null,
+        custo_mensal_estimado: x.custo_mensal_estimado ?? null,
+        dias_orfao: desde ? Math.max(0, Math.floor((Date.now() - new Date(desde).getTime()) / 86400000)) : null,
+      };
+    }).sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
+
+    const porCat = {};
+    for (const it of itens) {
+      const c = (porCat[it.categoria] ||= { categoria: it.categoria, itens: 0, custo_mensal_estimado: 0 });
+      c.itens++;
+      c.custo_mensal_estimado += it.custo_mensal_estimado || 0;
+    }
+    res.json({
+      gerado_em: new Date().toISOString(),
+      total_itens: itens.length,
+      custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
+      por_categoria: Object.values(porCat).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
+      itens,
+    });
+  } catch (e) {
+    console.error('[Portal Órfãos] erro:', e.message);
+    res.status(500).json({ error: 'Não foi possível carregar os recursos órfãos no momento.' });
+  }
+});
+
+// ── GET /api/admin/portal-config/orfaos-opcoes ────────────────────────────────
+// Alimenta a tela de configuração do portal: tipos válidos e Resource Groups que têm órfãos.
+app.get('/api/admin/portal-config/orfaos-opcoes', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureAzureColetaTable();
+    const { subs } = await _getInventarioSpConfig();
+    const cache = await _getDesperdicioCached(subs, 90);
+    const rgMap = new Map();
+    for (const x of cache) {
+      if (!x.resource_group) continue;
+      const k = String(x.subscription_id).toLowerCase() + '::' + String(x.resource_group).toUpperCase();
+      const e = rgMap.get(k) || { subscription_id: x.subscription_id, resource_group: x.resource_group, itens: 0 };
+      e.itens++;
+      rgMap.set(k, e);
+    }
+    res.json({
+      categorias: Object.entries(_DESP_LABEL_XLSX).map(([id, label]) => ({ id, label })),
+      resource_groups: Array.from(rgMap.values()).sort((a, b) => a.resource_group.localeCompare(b.resource_group)),
+    });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // ── POST /api/public/calculadora/identificar ──────────────────────────────────
@@ -4216,7 +4329,7 @@ app.get('/api/admin/portal-acessos', authMiddleware, dbMiddleware, async (req, r
 });
 
 // ── GET /api/public/calculadora/subscriptions ────────────────────────────────
-app.get('/api/public/calculadora/subscriptions', _portalMiddleware, async (req, res) => {
+app.get('/api/public/calculadora/subscriptions', _portalMiddleware, _calculadoraAtivaMiddleware, async (req, res) => {
   try {
     const { subscription_ids } = req.portalCfg;
     if (!subscription_ids.length) return res.json([]);
@@ -4243,7 +4356,7 @@ app.get('/api/public/calculadora/subscriptions', _portalMiddleware, async (req, 
 });
 
 // ── GET /api/public/calculadora/resource-groups ──────────────────────────────
-app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req, res) => {
+app.get('/api/public/calculadora/resource-groups', _portalMiddleware, _calculadoraAtivaMiddleware, async (req, res) => {
   try {
     const { subscription_ids = [], resource_groups = [] } = req.portalCfg;
     const { subscription_id } = req.query;
@@ -4301,7 +4414,7 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, async (req
 
 // ── GET /api/public/calculadora/recursos ─────────────────────────────────────
 // Reutiliza lógica do endpoint privado mas valida filtros pelo portalCfg
-app.get('/api/public/calculadora/recursos', _portalMiddleware, async (req, res) => {
+app.get('/api/public/calculadora/recursos', _portalMiddleware, _calculadoraAtivaMiddleware, async (req, res) => {
   try {
     const { subscription_ids: allowedSubs = [], resource_groups: allowedRGs = [] } = req.portalCfg;
     const { subscription_id, resource_group, data_inicio, data_fim } = req.query;

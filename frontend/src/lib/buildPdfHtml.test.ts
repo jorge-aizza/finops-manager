@@ -27,6 +27,31 @@ function makeInput(overrides: Partial<PdfInvoiceInput> = {}): PdfInvoiceInput {
 }
 
 describe('buildPdfHtml', () => {
+  it('usa o logo FinOps padrão (sem o "vivo"/mascote antigos)', () => {
+    const html = buildPdfHtml(makeInput())
+    expect(html).toContain('/finops-logo.png')
+    expect(html).toContain('id="pdf-logo"')
+    expect(html).not.toContain('mascote')
+    expect(html).not.toMatch(/>vivo<\/text>/)
+  });
+
+  it('inclui o número da estimativa no <title> do documento (nome sugerido ao salvar o PDF)', () => {
+    const semOrigem = buildPdfHtml(makeInput({ invoiceNum: 'EST-000111', titulo: 'Calculadora de Custos' }))
+    expect(semOrigem).toMatch(/<title>FinOps Manager — EST-000111 — Calculadora de Custos<\/title>/)
+
+    const app = buildPdfHtml(makeInput({ invoiceNum: 'EST-000111', titulo: 'Calculadora de Custos', origem: 'app' }))
+    expect(app).toMatch(/<title>FinOps Manager — EST-000111 — Calculadora de Custos<\/title>/)
+
+    const portal = buildPdfHtml(makeInput({ invoiceNum: 'EST-000111', titulo: 'Calculadora de Custos', origem: 'portal' }))
+    expect(portal).toMatch(/<title>Portal de Servi[çc]o — EST-000111 — Calculadora de Custos<\/title>/)
+  });
+
+  it('remove caracteres proibidos em nome de arquivo do <title>', () => {
+    const html = buildPdfHtml(makeInput({ invoiceNum: 'EST-000111', titulo: 'Projeto: A/B "teste"?' }))
+    const m = html.match(/<title>([^<]*)<\/title>/)
+    expect(m![1]).not.toMatch(/[\\/:*?"<>|]/)
+  });
+
   it('inclui número, título, projeto e valores no documento gerado', () => {
     const html = buildPdfHtml(makeInput())
     expect(html).toContain('EST-123456')

@@ -15,6 +15,9 @@ function fmtData(iso: string | null): string {
   if (!iso) return '—'
   return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
+function fmtDataCurta(dataISO: string): string {
+  return new Date(dataISO + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' })
+}
 
 const ACAO_BADGE: Record<AzureAuditoriaAcao, { color: string; bg: string; label: string }> = {
   CRIACAO: { color: 'var(--green,#22c55e)', bg: 'rgba(34,197,94,.10)', label: '✚ Criação' },
@@ -44,10 +47,25 @@ export function calcularImpactoCusto(custoDiario: { cost_date: string; custo: nu
   }
 }
 
-export default function RecursoDetalheModal({ resourceId, subscriptionId, onClose }: {
+// Verifica se um evento caiu dentro do período De/Até que estava selecionado na tela que abriu
+// este modal (aba Auditoria). Histórico de Alterações busca a vida inteira do recurso (ver
+// propHistQuery abaixo), não só esse período — por isso os totais divergem da tabela de origem
+// se não for marcado. `fim` inclui o dia inteiro, mesmo critério usado pelo backend
+// (`detectado_em < fim + 1 dia`, server.js:8736).
+export function estaDentroPeriodo(quando: string, periodo: { inicio: string; fim: string }): boolean {
+  const t = new Date(quando).getTime()
+  const ini = new Date(periodo.inicio + 'T00:00:00').getTime()
+  const fim = new Date(periodo.fim + 'T23:59:59.999').getTime()
+  return t >= ini && t <= fim
+}
+
+export default function RecursoDetalheModal({ resourceId, subscriptionId, onClose, periodoFiltro }: {
   resourceId: string
   subscriptionId: string
   onClose: () => void
+  /** Período De/Até da tela que abriu o modal (aba Auditoria) — usado só pra marcar quais
+   * alterações caem fora dele; o histórico em si nunca é filtrado por isso. */
+  periodoFiltro?: { inicio: string; fim: string }
 }) {
   const q = useQuery({
     queryKey: ['azure-inv-recurso-detalhe', subscriptionId, resourceId],
@@ -210,23 +228,43 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                 })}
               </div>
 
-              {propHistQuery.data && propHistQuery.data.total > 0 && (
+              {propHistQuery.data && propHistQuery.data.total > 0 && (() => {
+                const foraDoPeriodo = periodoFiltro
+                  ? propHistQuery.data.mudancas.filter((m) => !estaDentroPeriodo(m.detectado_em, periodoFiltro)).length
+                  : 0
+                return (
                 <div style={{ marginTop: 16 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
                     Histórico de Alterações ({propHistQuery.data.total} {propHistQuery.data.total === 1 ? 'alteração' : 'alterações'})
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    {periodoFiltro
+                      ? foraDoPeriodo > 0
+                        ? `Mostra a vida inteira do recurso, não só o período selecionado na tela (${fmtDataCurta(periodoFiltro.inicio)} a ${fmtDataCurta(periodoFiltro.fim)}) — por isso o total aqui pode ser maior que o da tabela. ${foraDoPeriodo} ${foraDoPeriodo === 1 ? 'está marcada' : 'estão marcadas'} abaixo como fora desse período.`
+                        : `Todas as alterações abaixo caem dentro do período selecionado na tela (${fmtDataCurta(periodoFiltro.inicio)} a ${fmtDataCurta(periodoFiltro.fim)}).`
+                      : 'Mostra a vida inteira do recurso, não limitado a nenhum período selecionado em tela.'}
                   </div>
                   <div style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
                     {propHistQuery.data.mudancas.map((m) => {
                       const impacto = PROPRIEDADES_COM_IMPACTO_CUSTO.has(m.propriedade) && data.custo_diario.length > 0
                         ? calcularImpactoCusto(data.custo_diario, m.detectado_em)
                         : null
+                      const foraPeriodo = periodoFiltro ? !estaDentroPeriodo(m.detectado_em, periodoFiltro) : false
                       return (
-                        <div key={m.id} style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+                        <div key={m.id} style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, opacity: foraPeriodo ? 0.7 : 1 }}>
                           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                             <span style={{ color: 'var(--text-muted)', fontWeight: 600, minWidth: 140 }}>{m.propriedade_label}</span>
                             <span style={{ color: 'var(--red,#ff4d6a)' }}>{m.valor_anterior || '—'}</span>
                             <span style={{ color: 'var(--text-muted)' }}>→</span>
                             <span style={{ color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.valor_novo || '—'}</span>
+                            {foraPeriodo && (
+                              <span
+                                style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-muted)', padding: '1px 7px', borderRadius: 20, fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}
+                                title="Este evento caiu fora do período De/Até selecionado na tela — por isso não aparece na tabela de Alterações de Propriedade"
+                              >
+                                fora do período
+                              </span>
+                            )}
                             <span style={{ flex: 1 }} />
                             <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={m.evento_autor || ''}>{m.evento_autor_nome || m.evento_autor || 'desconhecido'}</span>
                             <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{fmtData(m.detectado_em)}</span>
@@ -249,7 +287,8 @@ export default function RecursoDetalheModal({ resourceId, subscriptionId, onClos
                     })}
                   </div>
                 </div>
-              )}
+                )
+              })()}
 
               {data.custo_diario.length > 0 && (
                 <>

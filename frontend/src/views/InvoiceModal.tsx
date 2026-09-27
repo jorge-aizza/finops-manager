@@ -44,10 +44,12 @@ interface InvoiceModalProps {
   api?: InvoiceModalApi
   defaultResp?: string
   defaultEmail?: string
+  /** 'portal' quando chamado a partir do Portal Público — muda o nome sugerido ao salvar o PDF. */
+  origem?: 'app' | 'portal'
 }
 
 export default function InvoiceModal({
-  estimativa, periodos, onClose, onGerado, api = defaultApi, defaultResp = '', defaultEmail = '',
+  estimativa, periodos, onClose, onGerado, api = defaultApi, defaultResp = '', defaultEmail = '', origem = 'app',
 }: InvoiceModalProps) {
   const projetosQuery = useQuery({ queryKey: ['projetos', api === defaultApi ? 'privada' : 'publica'], queryFn: api.listProjetos })
   const [projetoId, setProjetoId] = useState('')
@@ -115,7 +117,7 @@ export default function InvoiceModal({
     }).catch(() => {})
 
     const html = buildPdfHtml({
-      invoiceNum, dataFmt, dataValid, nomeProjeto,
+      invoiceNum, origem, dataFmt, dataValid, nomeProjeto,
       titulo: titulo.trim() || 'Estimativa de Custos Azure',
       resp: resp.trim(), email: email.trim(), obs: obs.trim(),
       itens: estimativa.resultados,

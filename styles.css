@@ -1944,12 +1944,9 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 [data-theme="light"] .finops-logo {
   filter: none;
 }
-/* O cabecalho do portal e roxo solido nos DOIS temas, entao o realce ali nao
-   depende do tema -- sem isso o roxo do logo se perde no roxo da barra. */
-.portal-header .finops-logo,
-[data-theme="light"] .portal-header .finops-logo {
-  filter: brightness(0) invert(1);
-}
+/* O cabecalho do portal segue o mesmo padrao da top-bar do Sistema: claro no tema
+   claro (logo colorido padrao, sem filtro) e escuro no escuro (logo dark com realce).
+   Antes o logo virava uma silhueta branca (invert) sobre uma faixa roxa nos dois temas. */
 
 
 /* ---------------------------------------------------------------------------

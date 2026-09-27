@@ -2773,6 +2773,10 @@ function _updatePlSchedProx(cfg) {
 // ── Portal Público — Configuração ──────────────────────────────────────────────
 
 async function loadPortalConfig() {
+  _initFerramentasLista('portal-cfg-subs-list', 'Buscar assinatura...');
+  _initFerramentasLista('portal-cfg-orfaos-subs-list', 'Buscar assinatura...');
+  _initFerramentasLista('portal-cfg-orfaos-cats-list', 'Buscar tipo de recurso...');
+  _initFerramentasLista('portal-cfg-orfaos-rgs-list', 'Buscar Resource Group...');
   try {
     const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
     const res = await fetch('/api/admin/portal-config', { headers: { Authorization: 'Bearer ' + token } });
@@ -2826,8 +2830,193 @@ async function loadPortalConfig() {
     });
     togglePortalHLWeekend();
     _updatePortalLink(d);
+    _portalOrfaos.subs = new Set(d.orfaos_subscription_ids || []);
+    _portalOrfaos.cats = new Set(d.orfaos_categorias || []);
+    _portalOrfaos.rgs  = new Set(d.orfaos_resource_groups || []);
+    const calcAtivo = document.getElementById('portal-cfg-calc-ativo');
+    if (calcAtivo) calcAtivo.checked = d.calculadora_ativa !== false;
+    const orfAtivo = document.getElementById('portal-cfg-orfaos-ativo');
+    if (orfAtivo) orfAtivo.checked = !!d.orfaos_ativo;
+    atualizarAvisoServicosPortal();
+    _mostrarCorpoOrfaosPortal(!!d.orfaos_ativo);
+    _renderCatsOrfaosPortal();
+    _renderRgsOrfaosPortal([]);
     await _carregarSubsPortalList(d.subscription_ids || []);
+    await _carregarSubsOrfaosPortal();
   } catch (e) { console.warn('[Portal Config] loadPortalConfig:', e.message); }
+}
+
+// ── Listas de seleção com busca + Marcar/Desmarcar todos ──────────────────────
+// Mesmo comportamento do checklist de regiões do Price List (_buildPlRegionChecklist): a busca
+// filtra as linhas e "Marcar todos"/"Desmarcar" atuam só sobre as linhas visíveis. Idempotente:
+// a barra é criada uma vez por lista e um MutationObserver a atualiza sempre que a lista é
+// re-renderizada (as funções de render só trocam o innerHTML da lista, a barra é irmã dela).
+// Os checkboxes são alterados com .click() — assim o onchange de cada um roda (é ele que
+// mantém _portalOrfaos em dia) — e o contador reage ao evento 'change' que borbulha até a lista.
+function _normBusca(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+}
+
+function _initFerramentasLista(listId, placeholder) {
+  const list = document.getElementById(listId);
+  if (!list || document.getElementById(listId + '-tools')) return;
+
+  const tools = document.createElement('div');
+  tools.id = listId + '-tools';
+  tools.style.cssText = 'display:none;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px';
+  const btnCss = 'font-size:10px;padding:3px 8px;border:1px solid var(--border-light);border-radius:4px;cursor:pointer;';
+  tools.innerHTML =
+    `<input type="text" id="${listId}-busca" placeholder="🔍 ${escHtml(placeholder || 'Buscar...')}"
+       style="flex:1;min-width:140px;box-sizing:border-box;background:var(--bg);border:1px solid var(--border-light);border-radius:5px;color:var(--text);font-size:11px;padding:5px 8px;outline:none">
+     <button type="button" data-acao="marcar" style="${btnCss}background:var(--accent-dim);color:var(--text)">Marcar todos</button>
+     <button type="button" data-acao="desmarcar" style="${btnCss}background:transparent;color:var(--text-muted)">Desmarcar</button>
+     <span id="${listId}-contador" style="font-size:11px;color:var(--text-muted);white-space:nowrap"></span>`;
+  list.parentNode.insertBefore(tools, list);
+
+  const busca = tools.querySelector('input');
+  const linhas = () => Array.from(list.querySelectorAll('label'));
+  const atualizar = () => {
+    const cbs = list.querySelectorAll('input[type=checkbox]');
+    tools.style.display = cbs.length ? 'flex' : 'none';
+    const marcados = list.querySelectorAll('input[type=checkbox]:checked').length;
+    const contador = tools.querySelector('span');
+    contador.textContent = `${marcados} de ${cbs.length} selecionados`;
+    contador.style.color = marcados ? 'var(--accent)' : 'var(--text-muted)';
+  };
+  const filtrar = () => {
+    const q = _normBusca(busca.value.trim());
+    linhas().forEach(l => { l.style.display = (q && !_normBusca(l.textContent).includes(q)) ? 'none' : 'flex'; });
+  };
+  const aplicarEmVisiveis = (marcar) => {
+    linhas().forEach(l => {
+      if (l.style.display === 'none') return;
+      const cb = l.querySelector('input[type=checkbox]');
+      if (cb && cb.checked !== marcar) cb.click();
+    });
+    atualizar();
+  };
+
+  busca.addEventListener('input', filtrar);
+  tools.querySelector('[data-acao=marcar]').addEventListener('click', () => aplicarEmVisiveis(true));
+  tools.querySelector('[data-acao=desmarcar]').addEventListener('click', () => aplicarEmVisiveis(false));
+  list.addEventListener('change', atualizar);
+  new MutationObserver(() => { filtrar(); atualizar(); }).observe(list, { childList: true });
+  atualizar();
+}
+
+// ── Portal Público — Recursos Órfãos ──────────────────────────────────────────
+// Estado da seleção mantido em memória (não lido do DOM): o salvamento automático de
+// togglePortalAtivo() roda antes da lista de Resource Groups ser carregada, e ler do DOM
+// apagaria em silêncio a seleção já gravada.
+const _portalOrfaos = { subs: new Set(), cats: new Set(), rgs: new Set() };
+const _PORTAL_ORFAOS_CATS = [
+  ['disco_orfao', 'Disco não anexado'], ['snapshot_antigo', 'Snapshot antigo'], ['ip_solto', 'IP público sem uso'],
+  ['nic_orfa', 'NIC não anexada'], ['app_service_plan_vazio', 'App Service Plan sem apps'],
+  ['lb_sem_backend', 'Load Balancer sem backend'], ['appgw_sem_backend', 'App Gateway sem backend'],
+  ['vm_parada', 'VM parada (sem desalocar)'],
+];
+
+function _mostrarCorpoOrfaosPortal(ativo) {
+  const body = document.getElementById('portal-cfg-orfaos-body');
+  if (!body) return;
+  body.style.display = ativo ? 'flex' : 'none';
+  body.style.flexDirection = 'column';
+}
+
+function togglePortalOrfaos(ativo) {
+  // Primeira ativação: já marca os 8 tipos, o admin desmarca o que não quer expor.
+  if (ativo && _portalOrfaos.cats.size === 0) {
+    _PORTAL_ORFAOS_CATS.forEach(([id]) => _portalOrfaos.cats.add(id));
+    _renderCatsOrfaosPortal();
+  }
+  _mostrarCorpoOrfaosPortal(ativo);
+  atualizarAvisoServicosPortal();
+}
+
+// Avisa quando calculadora e órfãos estão ambos desligados (o portal ficaria sem serviço).
+function atualizarAvisoServicosPortal() {
+  const aviso = document.getElementById('portal-cfg-servicos-aviso');
+  if (!aviso) return;
+  const calc = document.getElementById('portal-cfg-calc-ativo')?.checked !== false;
+  const orf  = !!document.getElementById('portal-cfg-orfaos-ativo')?.checked;
+  aviso.style.display = (!calc && !orf) ? 'block' : 'none';
+}
+
+function _checkboxOrfaosHtml(value, label, checked, kind, extra) {
+  return `<label style="display:flex;align-items:center;gap:8px;padding:4px;border-radius:5px;cursor:pointer;font-size:12px;color:var(--text);">
+    <input type="checkbox" value="${escHtml(value)}"${checked ? ' checked' : ''} onchange="portalOrfaosSel('${kind}', this.value, this.checked)"
+      style="width:14px;height:14px;accent-color:var(--accent);flex-shrink:0;">
+    <span>${escHtml(label)}${extra ? ` <span style="opacity:.6;">${escHtml(extra)}</span>` : ''}</span>
+  </label>`;
+}
+
+function portalOrfaosSel(kind, value, marcado) {
+  const s = _portalOrfaos[kind];
+  if (!s) return;
+  if (marcado) s.add(value); else s.delete(value);
+}
+
+function _renderCatsOrfaosPortal() {
+  const el = document.getElementById('portal-cfg-orfaos-cats-list');
+  if (!el) return;
+  el.innerHTML = _PORTAL_ORFAOS_CATS.map(([id, label]) => _checkboxOrfaosHtml(id, label, _portalOrfaos.cats.has(id), 'cats')).join('');
+}
+
+async function _carregarSubsOrfaosPortal() {
+  const el = document.getElementById('portal-cfg-orfaos-subs-list');
+  if (!el) return;
+  const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+  el.innerHTML = '<span style="font-size:12px;color:var(--text-muted);font-style:italic;">Carregando...</span>';
+  try {
+    const res  = await fetch('/api/calculadora/subscriptions', { headers: { Authorization: 'Bearer ' + token } });
+    const subs = await res.json();
+    if (!Array.isArray(subs) || !subs.length) {
+      el.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">Nenhuma assinatura encontrada no banco.</span>';
+      return;
+    }
+    el.innerHTML = subs.map(s => _checkboxOrfaosHtml(s.subscription_id, s.subscription_name || s.subscription_id, _portalOrfaos.subs.has(s.subscription_id), 'subs')).join('');
+  } catch (e) {
+    el.innerHTML = '<span style="font-size:12px;color:var(--danger);">Erro ao carregar: ' + escHtml(e.message) + '</span>';
+  }
+}
+
+function _renderRgsOrfaosPortal(opcoes) {
+  const el = document.getElementById('portal-cfg-orfaos-rgs-list');
+  if (!el) return;
+  // Uma linha por nome de RG (a config guarda só o nome, como na calculadora); RGs já
+  // selecionados que não têm órfãos agora continuam listados para poderem ser desmarcados.
+  const porNome = new Map();
+  (opcoes || []).forEach(o => {
+    const k = String(o.resource_group).toUpperCase();
+    const e = porNome.get(k) || { nome: o.resource_group, itens: 0 };
+    e.itens += o.itens;
+    porNome.set(k, e);
+  });
+  _portalOrfaos.rgs.forEach(rg => { if (!porNome.has(String(rg).toUpperCase())) porNome.set(String(rg).toUpperCase(), { nome: rg, itens: 0 }); });
+  if (!porNome.size) return;
+  el.innerHTML = Array.from(porNome.values())
+    .sort((a, b) => a.nome.localeCompare(b.nome))
+    .map(e => _checkboxOrfaosHtml(e.nome, e.nome, _portalOrfaos.rgs.has(e.nome), 'rgs', e.itens ? `(${e.itens} órfão${e.itens > 1 ? 's' : ''})` : '(sem órfãos agora)'))
+    .join('');
+}
+
+async function carregarRgsOrfaosPortal() {
+  const el = document.getElementById('portal-cfg-orfaos-rgs-list');
+  if (!el) return;
+  const token = sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token') || '';
+  el.innerHTML = '<span style="font-size:12px;color:var(--text-muted);font-style:italic;">Consultando o Azure... pode levar alguns segundos.</span>';
+  try {
+    const res = await fetch('/api/admin/portal-config/orfaos-opcoes', { headers: { Authorization: 'Bearer ' + token } });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'Erro ao consultar');
+    if (!d.resource_groups.length && !_portalOrfaos.rgs.size) {
+      el.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">Nenhum Resource Group com recursos órfãos no momento.</span>';
+      return;
+    }
+    _renderRgsOrfaosPortal(d.resource_groups);
+  } catch (e) {
+    el.innerHTML = '<span style="font-size:12px;color:var(--danger);">Erro: ' + escHtml(e.message) + '</span>';
+  }
 }
 
 async function savePortalConfig() {
@@ -2857,6 +3046,11 @@ async function savePortalConfig() {
         permitir_selecao_periodo:  document.getElementById('portal-cfg-permitir-periodo')?.checked  || false,
         permitir_selecao_recursos: document.getElementById('portal-cfg-permitir-recursos')?.checked || false,
         solicitar_identificacao:   document.getElementById('portal-cfg-solicitar-ident')?.checked   || false,
+        calculadora_ativa:         document.getElementById('portal-cfg-calc-ativo')?.checked !== false,
+        orfaos_ativo:              document.getElementById('portal-cfg-orfaos-ativo')?.checked || false,
+        orfaos_subscription_ids:   Array.from(_portalOrfaos.subs),
+        orfaos_categorias:         Array.from(_portalOrfaos.cats),
+        orfaos_resource_groups:    Array.from(_portalOrfaos.rgs),
         horario_livre: {
           ativo:      document.getElementById('portal-cfg-hl-ativo')?.checked   || false,
           inicio:     document.getElementById('portal-cfg-hl-ini')?.value       || '09:00',

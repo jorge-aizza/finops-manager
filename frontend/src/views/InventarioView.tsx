@@ -490,7 +490,10 @@ export default function InventarioView() {
   const [filtroTipo, setFiltroTipo] = useState('')
   const [periodoA, setPeriodoA] = useState(defaultPeriodo(60))
   const [periodoB, setPeriodoB] = useState(defaultPeriodo(30))
-  const [recursoDetalhe, setRecursoDetalhe] = useState<{ resourceId: string; subscriptionId: string } | null>(null)
+  // periodoFiltro só é preenchido quando o modal abre a partir de uma tela filtrada por período
+  // (aba Auditoria) — usado lá dentro só pra marcar quais alterações do histórico completo do
+  // recurso ficam fora dessa janela, nunca pra filtrar o que é buscado.
+  const [recursoDetalhe, setRecursoDetalhe] = useState<{ resourceId: string; subscriptionId: string; periodoFiltro?: { inicio: string; fim: string } } | null>(null)
   // Vista "Por Assinatura" (2026-08-31, pedido do usuário) — drill-down Assinatura → Resource
   // Group → Recurso. `paSub`/`paRg` null = ainda não desceu naquele nível.
   const [paSub, setPaSub] = useState<string | null>(null)
@@ -1190,7 +1193,7 @@ export default function InventarioView() {
                   {auditoriaQuery.data.eventos.map((ev) => {
                     const b = ACAO_BADGE[ev.acao]
                     return (
-                      <tr key={ev.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: ev.resource_id, subscriptionId: ev.subscription_id })}>
+                      <tr key={ev.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: ev.resource_id, subscriptionId: ev.subscription_id, periodoFiltro: periodo })}>
                         <td style={{ fontSize: 12 }}>{fmtData(ev.quando)}</td>
                         <td><span style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 600 }}>{b.label}</span></td>
                         <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--accent)' }} title={ev.resource_id}>{ev.nome || ev.resource_id.split('/').pop()}</td>
@@ -1228,7 +1231,7 @@ export default function InventarioView() {
                 <thead><tr><th>Detectado em</th><th>Recurso</th><th>RG</th><th>Propriedade</th><th>Valor anterior</th><th></th><th>Valor novo</th><th>Autor da mudança</th></tr></thead>
                 <tbody>
                   {propriedadeHistoricoQuery.data.mudancas.map((m) => (
-                    <tr key={m.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: m.resource_id, subscriptionId: m.subscription_id })}>
+                    <tr key={m.id} style={{ cursor: 'pointer' }} title="Clique para ver detalhes e a linha do tempo" onClick={() => setRecursoDetalhe({ resourceId: m.resource_id, subscriptionId: m.subscription_id, periodoFiltro: periodo })}>
                       <td style={{ fontSize: 12 }}>{fmtData(m.detectado_em)}</td>
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--accent)' }} title={m.resource_id}>{m.nome || m.resource_id.split('/').pop()}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{m.resource_group || '—'}</td>
@@ -1714,6 +1717,7 @@ export default function InventarioView() {
         <RecursoDetalheModal
           resourceId={recursoDetalhe.resourceId}
           subscriptionId={recursoDetalhe.subscriptionId}
+          periodoFiltro={recursoDetalhe.periodoFiltro}
           onClose={() => setRecursoDetalhe(null)}
         />
       )}
