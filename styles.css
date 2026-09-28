@@ -2484,7 +2484,15 @@ input[type="time"]::-webkit-calendar-picker-indicator {
    SVG proprio, sem lib de grafico: e a politica do projeto e o
    cockpit desenha barras agrupadas simples, que cabem em SVG.
    ============================================================ */
-.ck-chart-wrap { height: 345px; position: relative; }
+/* O SVG tem viewBox fixo 900x300 (proporção 3:1) e preserveAspectRatio="none" (esticar sem
+   manter proporção, de propósito — width:100% variável casado com um viewBox de largura fixa).
+   Sem limite de largura, um container bem mais largo que 3x a altura (monitores grandes,
+   colunas wide, ou zoom do navegador reduzido — mais espaço em px CSS cabendo na tela, mesma
+   altura fixa em px) estica o eixo X desproporcionalmente e sobra: barras finas demais viram
+   uma faixa listrada uniforme e o texto dos eixos/legenda deforma. max-width trava a largura
+   na MESMA proporção do viewBox (345px * 3), então o SVG nunca precisa esticar além da
+   proporção original — sobra só espaço vazio nas laterais em telas muito largas, centralizado. */
+.ck-chart-wrap { height: 345px; max-width: 1035px; margin: 0 auto; position: relative; }
 .ck-chart-wrap svg { width: 100%; height: 100%; display: block; }
 .ck-chart-empty {
   padding: 42px 20px;
