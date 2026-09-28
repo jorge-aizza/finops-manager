@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getDatabricksCotas, getDatabricksCotaSerie } from '../api/databricksColeta'
+import { getGenieQuotaUsuario } from '../api/genieBudgets'
 import CkBarChart from './CkBarChart'
 import type { CkSerie } from './CkBarChart'
 import DatabricksCotaDetalheModal from './DatabricksCotaDetalheModal'
@@ -234,6 +235,17 @@ export default function DatabricksCotasPanel() {
     // sempre: sem workspace escolhido o painel mostra a serie agregada
   })
 
+  // Quota Genie NATIVA (Budgets API — pode bloquear o Genie de verdade), distinta do
+  // orcamento local acima (so alerta). So busca com usuario selecionado -- sem usuario nao
+  // ha "de quem" resolver o principal_id. retry:false: 400 (sem conexao OAuth M2M
+  // configurada) e o caso comum, nao uma falha transitoria pra insistir.
+  const quotaGenieQuery = useQuery({
+    queryKey: ['genie-quota-usuario', userSel, wsSel],
+    queryFn: () => getGenieQuotaUsuario(userSel!, wsSel),
+    enabled: userSel != null,
+    retry: false,
+  })
+
   const d = cotasQuery.data
   const wsOpts = [...new Set((d?.por_workspace || []).map((w) => w.workspace_id))].sort()
   const userOpts = [...new Set((d?.por_usuario || []).map((u) => u.usuario).filter(Boolean))].sort()
@@ -408,6 +420,10 @@ export default function DatabricksCotasPanel() {
   const diasUser = preencher(linhasUser)
   const mapaUser = new Map(linhasUser.map((x) => [x.dia, x]))
   const picoUser = picoDe(diasUser.map((dd) => mapaUser.get(dd)?.dbus_free || 0))
+  // Quota Genie NATIVA (Budgets API) resolvida para o usuario selecionado -- so entra
+  // quando configurada (limite != null); nunca desenhada em zero, mesmo motivo da cota
+  // local logo acima ("uma barra fixa em zero passaria a falsa impressao de cota zero").
+  const quotaGenieNativa = quotaGenieQuery.data?.limite ?? null
   const serieUserChart: CkSerie[] = [
     // DBU e USD em escalas separadas: na mesma, uma das duas viraria uma linha
     // rente ao chao (o Genie e free-tier, entao o USD dele e zero)
@@ -418,6 +434,10 @@ export default function DatabricksCotasPanel() {
     ...(limiteUserSel != null ? [{
       label: 'Cota do Usuário (USD)', cor: 'var(--ck-red)', fmt: usd,
       valores: diasUser.map(() => limiteUserSel),
+    }] : []),
+    ...(quotaGenieNativa != null ? [{
+      label: 'Quota Genie nativa (USD)', cor: 'var(--ck-yellow)', fmt: usd,
+      valores: diasUser.map(() => quotaGenieNativa),
     }] : []),
   ]
 
@@ -473,12 +493,18 @@ export default function DatabricksCotasPanel() {
 
         <PainelGrafico
           titulo="Genie · Cota e uso do usuário"
-          nota={userSel != null
-            ? `${userSel || '(não identificado)'} — ${limiteUserSel != null
-                ? 'cota configurada de ' + usd(limiteUserSel)
-                : 'sem cota por usuário configurada'}, dia a dia`
+          nota={(() => {
+            if (userSel == null) return 'Cota, uso (USD) e DBU Free do usuário selecionado, dia a dia'
+            const partes: string[] = []
+            if (limiteUserSel != null) partes.push('cota configurada de ' + usd(limiteUserSel))
+            if (quotaGenieNativa != null) {
+              const acaoTxt = quotaGenieQuery.data?.acao === 'BLOCK_USAGE' ? 'de bloqueio' : 'de notificação'
+              partes.push(`quota nativa ${acaoTxt} de ${usd(quotaGenieNativa)}`)
+            }
+            if (!partes.length) partes.push('sem cota por usuário configurada')
+            return `${userSel || '(não identificado)'} — ${partes.join(' · ')}, dia a dia`
               + (picoUser >= 0 ? ` · maior dia de DBU: ${diaBR(diasUser[picoUser])}` : '')
-            : 'Cota, uso (USD) e DBU Free do usuário selecionado, dia a dia'}
+          })()}
           vazio={userSel != null ? null : 'Selecione um usuário no filtro para ver a cota, o uso e o DBU Free dele ao longo do tempo.'}
         >
           <CkBarChart dias={diasUser} series={serieUserChart}

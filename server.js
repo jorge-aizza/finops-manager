@@ -12460,6 +12460,66 @@ app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, as
   }
 });
 
+// Resolve a quota Genie nativa (Budgets API, BLOCK_USAGE/EMAIL_NOTIFICATION) aplicável a um
+// usuário — 2026-09-28, pedido do usuário: trazer pro gráfico "Genie · Cota e uso do
+// usuário" (DatabricksCotasPanel.tsx) a quota que REALMENTE pode bloquear o Genie, distinta
+// do orçamento local (databricks_budgets, só alerta). Não existe endpoint pronto pra isso —
+// a Budgets API só devolve principal_id numérico nos overrides, nunca e-mail, então é
+// preciso resolver e-mail → principal_id primeiro (mesma lógica de /genie-principals, mas
+// com filtro exato, não substring — aqui queremos UM usuário, não uma lista pra escolher).
+app.get('/api/databricks-coleta/genie-quota-usuario', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { usuario, workspace_id } = req.query;
+    if (!usuario) return res.status(400).json({ error: 'usuario é obrigatório' });
+    const cfg = await _getDbxAccountConfigRow();
+    const demo = _dbxDemoModeNeeded(cfg);
+
+    let principalId = null;
+    if (demo) {
+      const achado = _GENIE_DEMO_PRINCIPALS.user.find(p => p.nome.toLowerCase() === String(usuario).toLowerCase());
+      principalId = achado ? achado.id : null;
+    }
+
+    let budgets;
+    let accountId, token;
+    if (demo) {
+      const rows = await pool.query(`SELECT payload FROM databricks_genie_budgets_demo ORDER BY criado_em`);
+      budgets = rows.rows.map(r => r.payload);
+    } else {
+      ({ accountId, token } = await _getDbxAccountCredentials());
+      const filterVal = String(usuario).replace(/"/g, '\\"');
+      const filter = encodeURIComponent(`userName eq "${filterVal}"`);
+      const scim = await _dbxScimFetch(accountId, token, `/scim/v2/Users?filter=${filter}&count=1`);
+      const achado = (scim.Resources || [])[0];
+      principalId = achado ? achado.id : null;
+      const data = await _dbxBudgetsFetch(accountId, token, '/budgets?include_spend_status=true');
+      budgets = (data.budgets || []).filter(b => b.resource_type === 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY');
+    }
+
+    if (!principalId) return res.json({ limite: null, acao: null, principal_encontrado: false, demo });
+
+    const wsNum = workspace_id ? Number(workspace_id) : null;
+    const aplicaveis = [];
+    for (const b of budgets) {
+      const wsFiltro = b.filter?.workspace_id?.values;
+      if (wsNum != null && Array.isArray(wsFiltro) && wsFiltro.length && !wsFiltro.includes(wsNum)) continue;
+      for (const alerta of b.alert_configurations || []) {
+        for (const ov of alerta.principal_overrides || []) {
+          if (String(ov.principal_id) === String(principalId)) {
+            const valor = parseFloat(ov.override_threshold ?? alerta.quantity_threshold);
+            if (Number.isFinite(valor)) aplicaveis.push({ valor, acao: alerta.action_configurations?.[0]?.action_type || null });
+          }
+        }
+      }
+    }
+    if (!aplicaveis.length) return res.json({ limite: null, acao: null, principal_encontrado: true, demo });
+    // Mais de uma quota aplicável: a mais restritiva (menor teto) é a que dispara primeiro —
+    // somar não faz sentido para um limite de bloqueio.
+    aplicaveis.sort((a, b) => a.valor - b.valor);
+    res.json({ limite: aplicaveis[0].valor, acao: aplicaveis[0].acao, principal_encontrado: true, demo });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Validação + montagem do payload — compartilhado entre POST (criar) e PUT (atualizar,
 // 2026-08-28): a Budgets API não tem PATCH parcial, PUT é substituição total do budget
 // (mesmo payload de criação, só que no path /budgets/{id} em vez de /budgets). Extraído

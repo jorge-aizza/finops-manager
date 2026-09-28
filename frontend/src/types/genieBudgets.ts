@@ -50,6 +50,19 @@ export interface GeniePrincipal {
   nome: string
 }
 
+// Quota Genie nativa resolvida para UM usuário (GET .../genie-quota-usuario) — usada pelo
+// gráfico "Genie · Cota e uso do usuário" (DatabricksCotasPanel.tsx), distinta do orçamento
+// local (DatabricksBudget, types/databricksResumo.ts): esta é a que pode bloquear o Genie de
+// verdade. `principal_encontrado: false` = e-mail não existe no diretório da conta Databricks
+// (SCIM); `limite: null` com `principal_encontrado: true` = usuário existe mas não tem
+// override de quota configurado — os dois casos não desenham a série no gráfico.
+export interface GenieQuotaUsuarioResposta {
+  limite: number | null
+  acao: GenieActionType | null
+  principal_encontrado: boolean
+  demo: boolean
+}
+
 // Resposta crua da Budgets API — campos vistos na documentação; qualquer campo extra
 // (ex: spend status, cujo shape exato não foi confirmado) passa direto sem tipagem
 // rígida, renderizado defensivamente no card.

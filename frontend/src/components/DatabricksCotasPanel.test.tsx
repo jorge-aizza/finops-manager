@@ -3,9 +3,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import DatabricksCotasPanel from './DatabricksCotasPanel'
 import * as api from '../api/databricksColeta'
+import * as genieApi from '../api/genieBudgets'
 import type { DatabricksCotas, DatabricksCotaWorkspace } from '../types/databricksResumo'
 
 vi.mock('../api/databricksColeta')
+vi.mock('../api/genieBudgets')
 
 // Genie e free-tier: custo zero, so DBU -- e assim que a serie chega na tela
 const serie = (dias: string[]) => ({
@@ -324,6 +326,49 @@ describe('DatabricksCotasPanel', () => {
     expect(await screen.findByText('DBU Free')).toBeInTheDocument()
     expect(screen.getByText('Uso de usuário (USD)')).toBeInTheDocument()
     expect(screen.getByText('Cota do Usuário (USD)')).toBeInTheDocument()
+  })
+
+  it('traz a quota Genie nativa (Budgets API) quando configurada para o usuário, distinta do orçamento local', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
+    // pedro@vivo.com.br não tem orçamento local (nenhum `limite`) neste cenário — só a quota nativa.
+    vi.mocked(genieApi.getGenieQuotaUsuario).mockResolvedValue({ limite: 50, acao: 'BLOCK_USAGE', principal_encontrado: true, demo: false })
+    renderPanel()
+    await screen.findByText('Genie · Cota e uso do usuário')
+
+    fireEvent.click(cartao('Usuário', 'pedro@vivo.com.br'))
+
+    expect(await screen.findByText('Quota Genie nativa (USD)')).toBeInTheDocument()
+    expect(genieApi.getGenieQuotaUsuario).toHaveBeenCalledWith('pedro@vivo.com.br', null)
+    expect(await screen.findByText(/quota nativa de bloqueio de US\$ 50/)).toBeInTheDocument()
+  })
+
+  it('sem quota nativa configurada, não desenha a série extra nem quebra o gráfico', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
+    vi.mocked(genieApi.getGenieQuotaUsuario).mockResolvedValue({ limite: null, acao: null, principal_encontrado: true, demo: false })
+    renderPanel()
+    await screen.findByText('Genie · Cota e uso do usuário')
+
+    fireEvent.click(cartao('Usuário', 'pedro@vivo.com.br'))
+
+    await screen.findByText('DBU Free')
+    expect(screen.queryByText('Quota Genie nativa (USD)')).not.toBeInTheDocument()
+  })
+
+  it('cota local e quota nativa configuradas ao mesmo tempo aparecem juntas', async () => {
+    vi.mocked(api.getDatabricksCotas).mockResolvedValue(cotas())
+    vi.mocked(api.getDatabricksCotaSerie).mockResolvedValue(serie(['2026-08-01', '2026-08-02']))
+    // ana@vivo.com.br já tem orçamento local (limite: 400, ver cotas()) — soma-se à quota nativa.
+    vi.mocked(genieApi.getGenieQuotaUsuario).mockResolvedValue({ limite: 50, acao: 'EMAIL_NOTIFICATION', principal_encontrado: true, demo: false })
+    renderPanel()
+    await screen.findByText('Genie · Cota e uso do usuário')
+
+    fireEvent.click(cartao('Usuário', 'ana@vivo.com.br'))
+
+    expect(await screen.findByText('Cota do Usuário (USD)')).toBeInTheDocument()
+    expect(await screen.findByText('Quota Genie nativa (USD)')).toBeInTheDocument()
+    expect(await screen.findByText(/cota configurada de US\$ 400 · quota nativa de notificação de US\$ 50/)).toBeInTheDocument()
   })
 
   it('o detalhe do workspace não repete a lista de usuários', async () => {

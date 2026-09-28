@@ -1,5 +1,5 @@
 import { apiFetch } from './client'
-import type { GenieBudget, GenieBudgetInput, GeniePrincipal } from '../types/genieBudgets'
+import type { GenieBudget, GenieBudgetInput, GeniePrincipal, GenieQuotaUsuarioResposta } from '../types/genieBudgets'
 
 export const listGenieBudgets = () => apiFetch<GenieBudget[]>('GET', '/databricks-coleta/genie-budgets')
 
@@ -18,3 +18,11 @@ export const deleteGenieBudget = (id: string) =>
 // GenieBudgetPrincipalOverride, types/genieBudgets.ts).
 export const searchGeniePrincipals = (tipo: 'user' | 'group', query: string) =>
   apiFetch<GeniePrincipal[]>('GET', `/databricks-coleta/genie-principals?tipo=${tipo}&query=${encodeURIComponent(query)}`)
+
+// Quota Genie nativa (Budgets API) aplicável a um usuário — distinta do orçamento local
+// (getDatabricksCotas). `workspaceId` opcional restringe aos budgets que filtram por ele.
+export const getGenieQuotaUsuario = (usuario: string, workspaceId?: string | null) => {
+  const q = new URLSearchParams({ usuario })
+  if (workspaceId) q.set('workspace_id', workspaceId)
+  return apiFetch<GenieQuotaUsuarioResposta>('GET', `/databricks-coleta/genie-quota-usuario?${q.toString()}`)
+}
