@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getOrfaosPublica } from '../api/orfaosPublica'
+import PortalHero from '../components/PortalHero'
 import type { OrfaoCategoria } from '../types/orfaosPublica'
 
 const CATEGORIA_LABEL: Record<OrfaoCategoria, string> = {
@@ -41,8 +42,22 @@ export default function PublicOrfaosView() {
   const temFiltro = !!(tipo || rg || termo)
 
   return (
-    <div className="portal-calc-wrap" data-testid="public-orfaos">
-      <div className="card" style={{ margin: '16px 0' }}>
+    <>
+      {/* Mesmo hero com raios/brilho da página inicial (PortalHero) — layout único em todo o
+          portal, não um visual por tela. */}
+      <PortalHero
+        titulo="Recursos Órfãos"
+        descricao="Encontre discos, IPs, NICs e outros recursos sem uso que continuam gerando custo nas suas assinaturas Azure."
+      >
+        <div className="portal-hero-chips">
+          <span className="portal-chip">💾 Discos e snapshots</span>
+          <span className="portal-chip">🌐 IPs e NICs sem uso</span>
+          <span className="portal-chip">⏸️ VMs paradas</span>
+          <span className="portal-chip">💰 Custo estimado por mês</span>
+        </div>
+      </PortalHero>
+      <div className="portal-calc-wrap" data-testid="public-orfaos">
+        <div className="card" style={{ margin: '16px 0' }}>
         <div className="card-header">
           <span className="card-title">Recursos Órfãos</span>
           {query.data && <span className="badge">{query.data.total_itens}</span>}
@@ -145,6 +160,7 @@ export default function PublicOrfaosView() {
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </>
   )
 }

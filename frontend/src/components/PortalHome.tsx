@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import PortalHero from './PortalHero'
 
 export interface PortalHomeServico {
   id: string
@@ -31,15 +32,9 @@ export default function PortalHome({ titulo, descricao, nome, servicos }: Portal
   const primeiroNome = nome?.trim().split(/\s+/)[0]
   return (
     <>
-      <section className="portal-hero portal-hero-home" data-testid="portal-home">
-        <div className="portal-rays" aria-hidden="true" />
-        <div className="portal-glow" aria-hidden="true" />
-        <div className="portal-hero-inner">
-          {primeiroNome && <div className="portal-eyebrow">Olá, {primeiroNome}</div>}
-          <h1>{titulo}</h1>
-          <p>{descricao}</p>
-        </div>
-      </section>
+      <div data-testid="portal-home">
+        <PortalHero titulo={titulo} descricao={descricao} eyebrow={primeiroNome ? `Olá, ${primeiroNome}` : undefined} />
+      </div>
       <section className="portal-home" aria-label="Serviços disponíveis">
         <div className="portal-home-grid">
           {servicos.map((s, i) => (

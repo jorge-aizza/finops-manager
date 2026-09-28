@@ -4,6 +4,7 @@ import { getPortalConfig, identificar } from './api/portal'
 import PublicCalculadoraView from './views/PublicCalculadoraView'
 import PublicOrfaosView from './views/PublicOrfaosView'
 import PortalHome from './components/PortalHome'
+import PortalHero from './components/PortalHero'
 import FinopsLogo from './components/FinopsLogo'
 import { IconCalculadora, IconInicio, IconOrfaos } from './components/portalIcons'
 import { hrefDe, usePortalRoute, type ServicoId } from './lib/portalRoute'
@@ -178,18 +179,18 @@ export default function PortalApp() {
 
       {/* Hero sempre visível, mesmo em erro/carregando — igual ao portal.html
           legado, que nunca escondia essa seção (só injetava #portal-inactive
-          abaixo dela). Preservado por fidelidade, não é um bug corrigido aqui. */}
+          abaixo dela). Preservado por fidelidade, não é um bug corrigido aqui.
+          Mesmo hero com raios/brilho da página inicial (PortalHero) — layout único em
+          todo o portal, não um visual por tela. */}
       {(viewAtual === null || viewAtual === 'calculadora') && (
-        <section className="portal-hero">
-          <h1>{heroTitulo}</h1>
-          <p>{heroDesc}</p>
+        <PortalHero titulo={heroTitulo} descricao={heroDesc}>
           <div className="portal-hero-chips">
             <span className="portal-chip">🔍 Busca por Subscription</span>
             <span className="portal-chip">⏱ Estimativa por horas</span>
             <span className="portal-chip">📊 Pico de custo do período</span>
             <span className="portal-chip">📄 Relatório exportável</span>
           </div>
-        </section>
+        </PortalHero>
       )}
 
       {configQuery.isLoading && (
