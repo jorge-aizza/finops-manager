@@ -38,7 +38,7 @@ npm start                # Prod: node server.js
 | **Backend API** | Node.js + Express | 01-STARTUP, 02-ARCHITECTURE |
 | **Authentication** | JWT, LDAP, Entra ID | 03-AUTHENTICATION |
 | **Azure Integration** | Resource Manager, Cost API, Graph | 04-AZURE-API |
-| **Databricks** | OAuth M2M, System Tables | 05-DATABRICKS-API |
+| **Databricks** | OAuth M2M, System Tables | 05-DATABRICKS-API (setup não-técnico: 05-DATABRICKS-SETUP-GUIA) |
 | **Database** | PostgreSQL, partitioned tables | 06-DATABASE |
 | **Alerts** | SMTP, dedup, smart triggers | 07-EMAIL-ALERTS |
 | **Frontend** | React (Vite), Strangler fig pattern | 08-FRONTEND-REACT |
