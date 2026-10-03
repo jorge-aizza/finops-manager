@@ -1,4 +1,4 @@
-# FinOps Manager — v4.0.0
+# FinOps Manager — v4.1.0
 
 Sistema web corporativo para gestão FinOps com inventário de recursos Azure, alocação de custos por tag, dashboard Databricks, e calculadora de custos Azure em tempo real.
 
@@ -25,6 +25,20 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 15. [API Endpoints](#api-endpoints)
 
 ---
+
+## O que há de novo na v4.1.0
+
+### 📜 Log Analytics FinOps (Novo)
+- Inventário de workspaces, tabelas, retenção e custo real (JOIN com `azure_costs`) por workspace/tabela
+- **Diagnostic Settings** — quais logs/métricas estão habilitados por recurso, detecção de fan-out (mesmo recurso enviando para 2+ workspaces)
+- **DCR (Data Collection Rules)** e inventário de Application Insights (sampling %, daily cap, retenção, vínculo com workspace)
+- **Auditoria de Consultas KQL** — habilita `LAQueryLogs` por workspace (opt-in, ação de escrita na Azure) e conta quantas queries rodam por tabela nos últimos 30 dias, refinando a recomendação de downgrade pra plano Basic
+- Painel nativo com rankings, dashboard HTML autocontido pra download, e export Excel
+
+### 💰 Imposto sobre Custo Coletado — correção e consistência
+- Corrigido o valor configurado do split Microsoft/Marketplace (estava um fator de crescimento colado direto no campo de pontos percentuais, gerando um imposto ~15x menor que o real)
+- Tela de Configurações agora valida e explica a unidade do campo (preview ao vivo + aviso de sanidade) pra não repetir o erro
+- **Calculadora** (interna e pública): cada recurso selecionado agora mostra o custo **já com o imposto da sua categoria** (Microsoft ou Marketplace, conforme `publisher_type`) embutido na linha, alinhado com o padrão já usado em Recursos Órfãos e Log Analytics — Total Final não muda, só a composição do Subtotal
 
 ## O que há de novo na v4.0.0
 

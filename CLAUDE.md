@@ -1,4 +1,4 @@
-# CLAUDE.md — FinOps Manager v4.0
+# CLAUDE.md — FinOps Manager v4.1
 
 **Quick reference.** Full docs: `MODULES/` | Memory: `~/.claude/projects/.../memory/MEMORY.md`
 
@@ -43,6 +43,7 @@ npm start                # Prod: node server.js
 | **Alerts** | SMTP, dedup, smart triggers | 07-EMAIL-ALERTS |
 | **Frontend** | React (Vite), Strangler fig pattern | 08-FRONTEND-REACT |
 | **Cost Rules** | RN-* financial formulas | 09-CALCULADORA |
+| **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, Auditoria de Consultas KQL | `server.js` ("LOG ANALYTICS FINOPS" block) |
 | **Deployment** | Docker, PM2, systemd | 10-DEPLOYMENT |
 
 ---
@@ -50,7 +51,7 @@ npm start                # Prod: node server.js
 ## 💡 Memory Topics
 
 - **[[auth-and-secrets]]** — JWT/LDAP/env-vars/encryption
-- **[[business-rules]]** — RN-* rules, Databricks billing, Azure reservations
+- **[[business-rules]]** — RN-* rules, Databricks billing, Azure reservations, Microsoft/Marketplace imposto split
 - **[[database-schema]]** — PostgreSQL tables, indexes, resource_id case
 - **[[frontend-react-migration]]** — Strangler fig, bridge, checklist
 - **[[branding-logos]]** — Theme-aware assets, CSS filters
