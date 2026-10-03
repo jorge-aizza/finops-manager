@@ -20,6 +20,16 @@ export function IconOrfaos({ size = 16 }: IconProps) {
   )
 }
 
+export function IconCotaGenie({ size = 16 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" width={size} height={size} aria-hidden="true">
+      <path d="M4 15.5a6 6 0 1112 0" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" />
+      <path d="M10 11.5l2.6-3.4" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" />
+      <circle cx={10} cy={11.5} r={1} fill="currentColor" />
+    </svg>
+  )
+}
+
 export function IconInicio({ size = 16 }: IconProps) {
   return (
     <svg viewBox="0 0 20 20" fill="none" width={size} height={size} aria-hidden="true">

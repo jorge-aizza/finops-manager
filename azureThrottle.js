@@ -12,7 +12,7 @@
 //  - Só 5xx, timeout e erro de rede contam falha, e só na família da URL.
 //  - Storage (blob) e identidade têm família própria: o problema de uma não bloqueia a outra.
 
-const FAMILIAS = ['custo', 'resourcegraph', 'advisor', 'reservas', 'arm', 'graph', 'identidade', 'blob'];
+const FAMILIAS = ['custo', 'resourcegraph', 'advisor', 'reservas', 'arm', 'graph', 'identidade', 'blob', 'loganalytics'];
 
 function familiaDeUrl(url) {
   const u = String(url || '');
@@ -21,6 +21,7 @@ function familiaDeUrl(url) {
   if (host === 'login.microsoftonline.com') return 'identidade';
   if (host.endsWith('.blob.core.windows.net') || host.endsWith('.dfs.core.windows.net')) return 'blob';
   if (host === 'graph.microsoft.com') return 'graph';
+  if (host === 'api.loganalytics.io') return 'loganalytics';
   const p = u.toLowerCase();
   if (p.includes('/providers/microsoft.resourcegraph/')) return 'resourcegraph';
   if (p.includes('/providers/microsoft.advisor/')) return 'advisor';

@@ -13,6 +13,10 @@ export interface PortalConfig {
   taxa_imposto: number
   taxa_cond: number
   taxa_gordura: number
+  // Split Microsoft/Marketplace (2026-09-29): quando pelo menos uma categoria está ativa,
+  // substitui `taxa_imposto` na estimativa (classifica cada recurso por `publisher_type`).
+  imposto_microsoft: { ativo: boolean; taxa: number }
+  imposto_marketplace: { ativo: boolean; taxa: number }
   // Mesmo shape de HorarioLivre (calculadora.ts) — a config do portal
   // SEMPRE inclui inicio_sab/fim_sab/inicio_dom/fim_dom (admin configura
   // horário de fim de semana separado do de dias úteis; ver
@@ -26,6 +30,9 @@ export interface PortalConfig {
   orfaos_ativo?: boolean
   // Interruptor da calculadora (ausente = ativa, como em servidores/configs anteriores).
   calculadora_ativa?: boolean
+  // "Minha Cota Genie" — login PARALELO via Entra ID (nunca vira usuário do sistema); sem
+  // allowlist do admin, já que cada pessoa só vê os próprios dados.
+  genie_cotas_ativo?: boolean
 }
 
 export interface PortalIdentSessao {

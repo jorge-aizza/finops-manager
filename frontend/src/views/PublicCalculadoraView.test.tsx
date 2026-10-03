@@ -39,6 +39,7 @@ function makeCfg(overrides: Partial<PortalConfig> = {}): PortalConfig {
   return {
     titulo: 'Portal FinOps Vivo', descricao: null, dominios_aceitos: [],
     taxa_imposto: 18.65, taxa_cond: 13, taxa_gordura: 0,
+    imposto_microsoft: { ativo: false, taxa: 18.65 }, imposto_marketplace: { ativo: false, taxa: 18.65 },
     horario_livre: { ativo: false, inicio: '09:00', fim: '18:00', dias: [1, 2, 3, 4, 5], inicio_sab: '09:00', fim_sab: '18:00', inicio_dom: '09:00', fim_dom: '18:00' },
     solicitar_identificacao: false, permitir_selecao_periodo: true, permitir_selecao_recursos: true,
     ...overrides,

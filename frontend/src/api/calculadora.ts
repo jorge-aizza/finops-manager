@@ -8,6 +8,17 @@ import type {
 export const listSubscriptions = () =>
   apiFetch<SubscriptionOption[]>('GET', '/calculadora/subscriptions')
 
+// Imposto travado pelo admin (2026-09-28) — mesma taxa que o Portal Público já usa via
+// GET /public/calculadora/config, liberada aqui pra qualquer usuário logado ver o valor
+// (a Calculadora interna não edita mais o imposto por sessão). `imposto_microsoft`/
+// `imposto_marketplace` (2026-09-29): split que substitui `taxa_imposto` quando ativo.
+export const getTaxaImposto = () =>
+  apiFetch<{
+    taxa_imposto: number
+    imposto_microsoft: { ativo: boolean; taxa: number }
+    imposto_marketplace: { ativo: boolean; taxa: number }
+  }>('GET', '/configuracoes/taxa-imposto')
+
 // Porta de _diagCache()/_forcarRefreshCache() (calculadora.js) — exibido no
 // dropdown de Assinatura quando a lista vem vazia, pra diagnosticar se é
 // falta de import ou cache desatualizado.

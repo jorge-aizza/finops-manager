@@ -627,18 +627,40 @@ function _entraCleanup() {
   for (const [k, v] of _entraHandoffs) if (now - v.criadoEm > _ENTRA_HANDOFF_TTL_MS) _entraHandoffs.delete(k);
 }
 
+// `origem` decide, no /auth/callback, se este login é do app interno (grava em
+// usuarios/sessoes, perfil admin/finops/reader) ou do portal público (login PARALELO —
+// nunca vira um usuário do sistema, só confirma "quem é você" pra filtrar dados pessoais,
+// ver GET /api/public/auth/entra/url). O redirect_uri no Entra ID continua único (evita
+// reconfigurar o app registration); é o state, não a URL de volta, que carrega a origem.
+async function _iniciarLoginEntra(origem) {
+  const cfg = await pool.query("SELECT config FROM integracoes WHERE tipo = 'entra' AND ativo = true");
+  if (!cfg.rows.length) return null;
+  const c = cfg.rows[0].config;
+  _entraCleanup();
+  const state = crypto.randomBytes(24).toString('hex');
+  _entraStates.set(state, { criadoEm: Date.now(), origem });
+  return 'https://login.microsoftonline.com/' + c.tenant_id + '/oauth2/v2.0/authorize?' +
+    'client_id=' + encodeURIComponent(c.client_id) + '&response_type=code' +
+    '&redirect_uri=' + encodeURIComponent(c.redirect_uri) + '&scope=openid+profile+email' +
+    '&state=' + state;
+}
+
 app.get('/api/auth/entra/url', async (req, res) => {
   try {
-    const cfg = await pool.query("SELECT config FROM integracoes WHERE tipo = 'entra' AND ativo = true");
-    if (!cfg.rows.length) return res.status(400).json({ error: 'Entra ID nao configurado' });
-    const c = cfg.rows[0].config;
-    _entraCleanup();
-    const state = crypto.randomBytes(24).toString('hex');
-    _entraStates.set(state, { criadoEm: Date.now() });
-    const url = 'https://login.microsoftonline.com/' + c.tenant_id + '/oauth2/v2.0/authorize?' +
-      'client_id=' + encodeURIComponent(c.client_id) + '&response_type=code' +
-      '&redirect_uri=' + encodeURIComponent(c.redirect_uri) + '&scope=openid+profile+email' +
-      '&state=' + state;
+    const url = await _iniciarLoginEntra('app');
+    if (!url) return res.status(400).json({ error: 'Entra ID nao configurado' });
+    res.json({ url });
+  } catch (err) { _dbErr(res, err); }
+});
+
+// GET /api/public/auth/entra/url — mesmo fluxo OAuth do app interno, mas pro portal
+// público: origem='portal' no state decide em /auth/callback que este login NUNCA grava em
+// usuarios/sessoes nem ganha perfil — só confirma o e-mail pra filtrar a visão pessoal
+// (GET /api/public/genie-cotas). Sem autenticação própria: é a PORTA de entrada.
+app.get('/api/public/auth/entra/url', async (req, res) => {
+  try {
+    const url = await _iniciarLoginEntra('portal');
+    if (!url) return res.status(400).json({ error: 'Entra ID nao configurado' });
     res.json({ url });
   } catch (err) { _dbErr(res, err); }
 });
@@ -657,11 +679,16 @@ app.get('/auth/callback', async (req, res) => {
 
   _entraCleanup();
   if (!_entraStates.has(state)) return fail('Sessão de login expirada ou inválida. Tente novamente.');
+  const { origem } = _entraStates.get(state);
   _entraStates.delete(state); // uso único — nunca revalida o mesmo state duas vezes
+  // Portal público: login PARALELO, nunca grava em usuarios/sessoes nem tem perfil — só
+  // confirma o e-mail. O redirect final é pro portal.html, não pra raiz do app interno.
+  const falhaPortal = (msg) => res.redirect('/portal.html?entra_error=' + encodeURIComponent(msg));
+  const failOrigem = origem === 'portal' ? falhaPortal : fail;
 
   try {
     const cfg = await pool.query("SELECT config FROM integracoes WHERE tipo = 'entra' AND ativo = true");
-    if (!cfg.rows.length) return fail('Entra ID não configurado.');
+    if (!cfg.rows.length) return failOrigem('Entra ID não configurado.');
     const c = cfg.rows[0].config;
 
     const tokenRes = await fetch(`https://login.microsoftonline.com/${c.tenant_id}/oauth2/v2.0/token`, {
@@ -676,7 +703,7 @@ app.get('/auth/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (!tokenRes.ok || !tokenData.id_token) {
       console.error('[Entra] Falha na troca de token:', tokenData.error_description || tokenData.error);
-      return fail('Falha ao autenticar com o Microsoft Entra ID.');
+      return failOrigem('Falha ao autenticar com o Microsoft Entra ID.');
     }
 
     // Valida a assinatura do id_token contra as chaves públicas do tenant (JWKS) —
@@ -686,7 +713,7 @@ app.get('/auth/callback', async (req, res) => {
       cache: true, cacheMaxAge: 24 * 3600 * 1000, rateLimit: true,
     });
     const decoded = jwt.decode(tokenData.id_token, { complete: true });
-    if (!decoded?.header?.kid) return fail('Token inválido recebido do Entra ID.');
+    if (!decoded?.header?.kid) return failOrigem('Token inválido recebido do Entra ID.');
     let claims;
     try {
       const signingKey = (await jwksClient.getSigningKey(decoded.header.kid)).getPublicKey();
@@ -697,12 +724,23 @@ app.get('/auth/callback', async (req, res) => {
       });
     } catch (verErr) {
       console.error('[Entra] id_token com assinatura/claims inválidos:', verErr.message);
-      return fail('Token do Entra ID não pôde ser validado.');
+      return failOrigem('Token do Entra ID não pôde ser validado.');
     }
 
     const email = (claims.email || claims.preferred_username || '').toLowerCase();
     const displayName = claims.name || email;
-    if (!email) return fail('Conta Microsoft sem e-mail associado.');
+    if (!email) return failOrigem('Conta Microsoft sem e-mail associado.');
+
+    // Portal público: NUNCA grava em usuarios/sessoes nem calcula perfil — o login aqui só
+    // confirma "quem é você" pra filtrar a visão pessoal (GET /api/public/genie-cotas).
+    // Token de vida curta (8h, uma sessão de trabalho), com claim `portal:true` — o único
+    // sinal que o middleware do portal aceita (nunca um token do app interno, e vice-versa).
+    if (origem === 'portal') {
+      const portalToken = jwt.sign({ email, nome: displayName, portal: true }, JWT_SECRET, { expiresIn: '8h' });
+      const handoffPortal = crypto.randomBytes(24).toString('hex');
+      _entraHandoffs.set(handoffPortal, { portal: true, token: portalToken, user: { email, nome: displayName }, criadoEm: Date.now() });
+      return res.redirect('/portal.html?portal_handoff=' + handoffPortal);
+    }
 
     // Mapeia grupos (Object ID) pra perfil — mesmo padrão de /api/auth/ad. O claim
     // "groups" só vem no id_token se o app registration no Entra tiver "Add groups
@@ -730,7 +768,7 @@ app.get('/auth/callback', async (req, res) => {
     res.redirect('/?entra_handoff=' + handoff);
   } catch (err) {
     console.error('[Entra] Erro no callback:', err);
-    fail('Erro interno ao autenticar com o Entra ID.');
+    failOrigem('Erro interno ao autenticar com o Entra ID.');
   }
 });
 
@@ -741,7 +779,21 @@ app.get('/api/auth/entra/consume', (req, res) => {
   const { code } = req.query;
   _entraCleanup();
   const entry = code && _entraHandoffs.get(code);
-  if (!entry) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+  // `entry.portal` nunca deve ser consumido aqui — isolamento nos dois sentidos entre o
+  // handoff do app interno e o do portal público (ver /api/public/auth/entra/consume).
+  if (!entry || entry.portal) return res.status(400).json({ error: 'Código inválido ou expirado.' });
+  _entraHandoffs.delete(code); // uso único
+  res.json({ token: entry.token, user: entry.user });
+});
+
+// GET /api/public/auth/entra/consume — mesmo padrão de /api/auth/entra/consume, mas só
+// aceita handoffs do login PARALELO do portal (entry.portal === true) — nunca um handoff do
+// app interno, mesmo que alguém adivinhe o código (uso único de qualquer forma).
+app.get('/api/public/auth/entra/consume', (req, res) => {
+  const { code } = req.query;
+  _entraCleanup();
+  const entry = code && _entraHandoffs.get(code);
+  if (!entry || !entry.portal) return res.status(400).json({ error: 'Código inválido ou expirado.' });
   _entraHandoffs.delete(code); // uso único
   res.json({ token: entry.token, user: entry.user });
 });
@@ -2056,11 +2108,15 @@ let _rgStatsUltimoInicio = 0;
 
 async function _carregarRgStatsDaTabela() {
   try {
-    const r = await pool.query(`SELECT subscription_id, rg, custo, recursos, atualizado_em FROM azure_rg_stats`);
+    const r = await pool.query(`SELECT subscription_id, rg, custo_microsoft, custo_marketplace, recursos, atualizado_em FROM azure_rg_stats`);
     const map = new Map();
     let ts = 0;
     for (const row of r.rows) {
-      map.set(row.subscription_id + '::' + row.rg, { custo: parseFloat(row.custo), recursos: parseInt(row.recursos, 10) });
+      map.set(row.subscription_id + '::' + row.rg, {
+        custo_microsoft: parseFloat(row.custo_microsoft) || 0,
+        custo_marketplace: parseFloat(row.custo_marketplace) || 0,
+        recursos: parseInt(row.recursos, 10),
+      });
       ts = Math.max(ts, new Date(row.atualizado_em).getTime());
     }
     return { map, ts };
@@ -2076,14 +2132,19 @@ function _reconstruirRgStats() {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS azure_rg_stats (
           subscription_id VARCHAR(200) NOT NULL, rg TEXT NOT NULL,
-          custo NUMERIC NOT NULL DEFAULT 0, recursos INTEGER NOT NULL DEFAULT 0,
+          custo_microsoft NUMERIC NOT NULL DEFAULT 0, custo_marketplace NUMERIC NOT NULL DEFAULT 0,
+          recursos INTEGER NOT NULL DEFAULT 0,
           atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           PRIMARY KEY (subscription_id, rg)
         )`);
+      await pool.query(`ALTER TABLE azure_rg_stats ADD COLUMN IF NOT EXISTS custo_microsoft   NUMERIC NOT NULL DEFAULT 0`);
+      await pool.query(`ALTER TABLE azure_rg_stats ADD COLUMN IF NOT EXISTS custo_marketplace NUMERIC NOT NULL DEFAULT 0`);
       // Só SUM no billing (a parte pesada). A contagem de "recursos diferentes" vem do Inventário
       // (todos os IDs já vistos no RG, ativos ou não) — COUNT(DISTINCT resource_id) em azure_costs passa de 300s.
       const custos = await pool.query(`
-        SELECT subscription_id, UPPER(resource_group_name) AS rg, SUM(cost_in_billing_currency) AS custo
+        SELECT subscription_id, UPPER(resource_group_name) AS rg,
+               SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+               SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace
         FROM azure_costs WHERE resource_group_name IS NOT NULL GROUP BY 1, 2`);
       const contagem = await pool.query(`
         SELECT subscription_id, UPPER(resource_group) AS rg, COUNT(*) AS recursos
@@ -2092,19 +2153,28 @@ function _reconstruirRgStats() {
       const map = new Map();
       for (const row of custos.rows) {
         const chave = row.subscription_id + '::' + row.rg;
-        map.set(chave, { custo: parseFloat(row.custo) || 0, recursos: nRec.get(chave) || 0 });
+        map.set(chave, {
+          custo_microsoft: parseFloat(row.custo_microsoft) || 0,
+          custo_marketplace: parseFloat(row.custo_marketplace) || 0,
+          recursos: nRec.get(chave) || 0,
+        });
       }
       // Grava substituindo tudo, numa transação (a tela nunca lê uma tabela pela metade).
       const c = await pool.connect();
       try {
         await c.query('BEGIN');
         await c.query('DELETE FROM azure_rg_stats');
-        const subs = [], rgs = [], cs = [], rc = [];
-        for (const [k, v] of map) { const i = k.indexOf('::'); subs.push(k.slice(0, i)); rgs.push(k.slice(i + 2)); cs.push(v.custo); rc.push(v.recursos); }
+        const subs = [], rgs = [], cms = [], cmps = [], rc = [];
+        for (const [k, v] of map) {
+          const i = k.indexOf('::');
+          subs.push(k.slice(0, i)); rgs.push(k.slice(i + 2));
+          cms.push(v.custo_microsoft); cmps.push(v.custo_marketplace); rc.push(v.recursos);
+        }
         for (let i = 0; i < subs.length; i += 5000) {
           await c.query(
-            `INSERT INTO azure_rg_stats (subscription_id, rg, custo, recursos) SELECT * FROM unnest($1::text[], $2::text[], $3::numeric[], $4::int[])`,
-            [subs.slice(i, i + 5000), rgs.slice(i, i + 5000), cs.slice(i, i + 5000), rc.slice(i, i + 5000)]
+            `INSERT INTO azure_rg_stats (subscription_id, rg, custo_microsoft, custo_marketplace, recursos)
+             SELECT * FROM unnest($1::text[], $2::text[], $3::numeric[], $4::numeric[], $5::int[])`,
+            [subs.slice(i, i + 5000), rgs.slice(i, i + 5000), cms.slice(i, i + 5000), cmps.slice(i, i + 5000), rc.slice(i, i + 5000)]
           );
         }
         await c.query('COMMIT');
@@ -2166,7 +2236,8 @@ async function _refreshAzureCache() {
         dias_com_dados    INT,
         dias_no_mes       INT,
         ultima_importacao VARCHAR(20),
-        total_brl         NUMERIC(20,2),
+        custo_microsoft   NUMERIC(20,2) DEFAULT 0,
+        custo_marketplace NUMERIC(20,2) DEFAULT 0,
         atualizado_em     TIMESTAMPTZ DEFAULT NOW(),
         PRIMARY KEY (mes, subscription_id)
       );
@@ -2175,6 +2246,10 @@ async function _refreshAzureCache() {
         parent_rg TEXT NOT NULL
       );
     `);
+    // Split Microsoft/Marketplace (2026-09-29) em azure_cobertura_cache — tabela já existente
+    // ganha as colunas zeradas; o próximo _refreshAzureCache() preenche de verdade.
+    await pool.query(`ALTER TABLE azure_cobertura_cache ADD COLUMN IF NOT EXISTS custo_microsoft   NUMERIC(20,2) DEFAULT 0`);
+    await pool.query(`ALTER TABLE azure_cobertura_cache ADD COLUMN IF NOT EXISTS custo_marketplace NUMERIC(20,2) DEFAULT 0`);
 
     // Diagnóstico rápido via pg_stat_user_tables (sem scan — usa estatísticas do autovacuum)
     try {
@@ -2231,7 +2306,8 @@ async function _refreshAzureCache() {
                COUNT(*)::int                              AS dias_com_dados,
                MAX(dias_no_mes)                           AS dias_no_mes,
                MAX(ultima_importacao)                     AS ultima_importacao,
-               ROUND(SUM(total_brl)::numeric, 2)         AS total_brl
+               ROUND(SUM(custo_microsoft)::numeric, 2)    AS custo_microsoft,
+               ROUND(SUM(custo_marketplace)::numeric, 2)  AS custo_marketplace
         FROM (
           SELECT
             TO_CHAR(DATE_TRUNC('month', cost_date), 'YYYY-MM-DD')   AS mes,
@@ -2242,7 +2318,8 @@ async function _refreshAzureCache() {
             ((DATE_TRUNC('month', cost_date) + INTERVAL '1 month')::date
               - DATE_TRUNC('month', cost_date)::date)                 AS dias_no_mes,
             TO_CHAR(MAX(importado_em), 'DD/MM/YYYY HH24:MI')        AS ultima_importacao,
-            SUM(cost_in_billing_currency)                             AS total_brl
+            SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+            SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace
           FROM azure_costs
           WHERE cost_date >= NOW() - INTERVAL '36 months'
             AND subscription_id IS NOT NULL AND subscription_id <> ''
@@ -2298,8 +2375,8 @@ async function _refreshAzureCache() {
         await cw.query('DELETE FROM azure_cobertura_cache');
         await cw.query(
           `INSERT INTO azure_cobertura_cache
-             (mes, subscription_id, subscription_name, registros, dias_com_dados, dias_no_mes, ultima_importacao, total_brl)
-           SELECT * FROM UNNEST($1::text[],$2::text[],$3::text[],$4::int[],$5::int[],$6::int[],$7::text[],$8::numeric[])`,
+             (mes, subscription_id, subscription_name, registros, dias_com_dados, dias_no_mes, ultima_importacao, custo_microsoft, custo_marketplace)
+           SELECT * FROM UNNEST($1::text[],$2::text[],$3::text[],$4::int[],$5::int[],$6::int[],$7::text[],$8::numeric[],$9::numeric[])`,
           [
             cobRows.map(r => r.mes),
             cobRows.map(r => r.subscription_id),
@@ -2308,7 +2385,8 @@ async function _refreshAzureCache() {
             cobRows.map(r => r.dias_com_dados),
             cobRows.map(r => r.dias_no_mes),
             cobRows.map(r => r.ultima_importacao || null),
-            cobRows.map(r => r.total_brl)
+            cobRows.map(r => r.custo_microsoft || 0),
+            cobRows.map(r => r.custo_marketplace || 0)
           ]
         );
       }
@@ -4051,13 +4129,62 @@ app.post('/api/price-list/import', authMiddleware, dbMiddleware, (req, res) => {
 async function _getPortalConfig() {
   const _defaults = { ativo: false, subscription_ids: [], resource_groups: [], dominios_aceitos: [], titulo: 'Portal de Serviço', descricao: '',
     calculadora_ativa: true,
-    orfaos_ativo: false, orfaos_subscription_ids: [], orfaos_resource_groups: [], orfaos_categorias: [] };
+    orfaos_ativo: false, orfaos_subscription_ids: [], orfaos_resource_groups: [], orfaos_categorias: [],
+    // Minha Cota Genie (2026-09-28): login PARALELO via Entra ID, sem allowlist do admin —
+    // cada usuário só vê os próprios dados, então não há "quais workspaces aparecem" pra
+    // configurar (diferente de orfaos_*/subscription_ids acima).
+    genie_cotas_ativo: false,
+    // Imposto sobre custo coletado (2026-09-28): DOIS impostos independentes — Serviço Microsoft
+    // e Marketplace (`publisher_type` em azure_costs distingue os dois; medido no dado real que
+    // Marketplace é ~36% do custo total, não é um caso de borda). Cada um só se aplica se
+    // `ativo=true` — o padrão é `false` (mantém o valor cru da Azure) até o admin configurar E
+    // ativar; diferente do imposto único da Calculadora (`taxa_imposto`, sempre ligado, 18.65%
+    // default), que continua existindo separado pra não mudar o comportamento da estimativa.
+    imposto_microsoft:   { ativo: false, taxa: 18.65 },
+    imposto_marketplace: { ativo: false, taxa: 18.65 } };
   try {
     const r = await pool.query(`SELECT value FROM portal_config WHERE key = 'config'`);
     if (!r.rows.length) return _defaults;
     // merge com defaults para garantir campos que podem não existir em configs antigas
     return { ..._defaults, ...JSON.parse(r.rows[0].value) };
   } catch (_) { return _defaults; }
+}
+
+// Imposto adicional sobre custo coletado (2026-09-28): dois impostos independentes — Serviço
+// Microsoft e Marketplace (`publisher_type` em azure_costs) — cada um só aplicado se `ativo`,
+// senão mantém o valor cru da Azure. Aplicado SÓ na apresentação — nunca reescreve
+// `azure_costs`/rollups — pra mudar a taxa em Configurações refletir retroativo, sem reprocessar
+// coleta nenhuma. Fica de fora, de propósito: Databricks, Reconciliação (a fatura comparada não
+// inclui esse imposto) e rotas de auditoria/saúde de coleta que precisam bater com o valor cru.
+function _normImpostoCategoria(v) {
+  const taxa = v && Number.isFinite(parseFloat(v.taxa)) ? parseFloat(v.taxa) : 18.65;
+  return { ativo: !!(v && v.ativo), taxa };
+}
+async function _getImpostoConfig() {
+  const cfg = await _getPortalConfig();
+  return {
+    microsoft:   _normImpostoCategoria(cfg.imposto_microsoft),
+    marketplace: _normImpostoCategoria(cfg.imposto_marketplace),
+  };
+}
+// `microsoft`/`marketplace` já vêm de SUMs separados por `publisher_type` (CASE na SQL) — soma
+// cada um com seu próprio multiplicador (ou cru, se a categoria não estiver ativa).
+function _comImpostoSplit(custoMicrosoft, custoMarketplace, impostoCfg) {
+  const m  = custoMicrosoft   == null ? 0 : Number(custoMicrosoft);
+  const mp = custoMarketplace == null ? 0 : Number(custoMarketplace);
+  const vM  = impostoCfg.microsoft.ativo   ? m  * (1 + impostoCfg.microsoft.taxa / 100)   : m;
+  const vMp = impostoCfg.marketplace.ativo ? mp * (1 + impostoCfg.marketplace.taxa / 100) : mp;
+  return vM + vMp;
+}
+// Taxa única ainda usada pela Calculadora (estimativa futura, não classificada por publisher_type
+// — `taxa_imposto`, sempre ligada, default 18.65%) e por telas que ainda não migraram pro split.
+async function _getTaxaImposto() {
+  const cfg = await _getPortalConfig();
+  const t = parseFloat(cfg.taxa_imposto);
+  return Number.isFinite(t) ? t : 18.65;
+}
+function _comImposto(valor, taxaImposto) {
+  return valor == null ? valor : valor * (1 + taxaImposto / 100);
 }
 
 // Middleware: bloqueia se portal inativo
@@ -4093,7 +4220,8 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
     const { ativo, subscription_ids = [], resource_groups = [], dominios_aceitos = [], titulo = 'Portal de Serviço', descricao = '',
             taxa_imposto, taxa_cond, taxa_gordura, horario_livre, solicitar_identificacao,
             permitir_selecao_periodo, permitir_selecao_recursos,
-            orfaos_ativo, orfaos_subscription_ids, orfaos_resource_groups, orfaos_categorias, calculadora_ativa } = req.body;
+            orfaos_ativo, orfaos_subscription_ids, orfaos_resource_groups, orfaos_categorias, calculadora_ativa,
+            genie_cotas_ativo, imposto_microsoft, imposto_marketplace } = req.body;
     // Recursos órfãos no portal: allowlist explícita. Listas sempre normalizadas (strings não vazias);
     // categorias filtradas contra as 8 válidas — nada vindo do cliente entra sem validação.
     const _strList = (v) => (Array.isArray(v) ? v : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 2000);
@@ -4105,9 +4233,12 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
       orfaos_subscription_ids: _strList(orfaos_subscription_ids),
       orfaos_resource_groups: _strList(orfaos_resource_groups),
       orfaos_categorias: _strList(orfaos_categorias).filter((c) => Object.prototype.hasOwnProperty.call(_DESP_LABEL_XLSX, c)),
+      genie_cotas_ativo: !!genie_cotas_ativo,
       taxa_imposto:           taxa_imposto  != null ? parseFloat(taxa_imposto)  : 18.65,
       taxa_cond:              taxa_cond     != null ? parseFloat(taxa_cond)     : 13.00,
       taxa_gordura:           taxa_gordura  != null ? parseFloat(taxa_gordura)  : 0,
+      imposto_microsoft:   _normImpostoCategoria(imposto_microsoft),
+      imposto_marketplace: _normImpostoCategoria(imposto_marketplace),
       horario_livre:          horario_livre || { ativo: false, inicio: '09:00', fim: '18:00', dias: [1,2,3,4,5] },
       solicitar_identificacao:    !!solicitar_identificacao,
       permitir_selecao_periodo:   !!permitir_selecao_periodo,
@@ -4196,9 +4327,12 @@ app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
           solicitar_identificacao = false,
           permitir_selecao_periodo = true, permitir_selecao_recursos = true } = req.portalCfg;
   res.json({ titulo, descricao, dominios_aceitos, taxa_imposto, taxa_cond, taxa_gordura, horario_livre,
+             imposto_microsoft: _normImpostoCategoria(req.portalCfg.imposto_microsoft),
+             imposto_marketplace: _normImpostoCategoria(req.portalCfg.imposto_marketplace),
              solicitar_identificacao, permitir_selecao_periodo, permitir_selecao_recursos,
              calculadora_ativa: req.portalCfg.calculadora_ativa !== false,
-             orfaos_ativo: !!req.portalCfg.orfaos_ativo });
+             orfaos_ativo: !!req.portalCfg.orfaos_ativo,
+             genie_cotas_ativo: !!req.portalCfg.genie_cotas_ativo });
 });
 
 // ── GET /api/public/orfaos ────────────────────────────────────────────────────
@@ -4236,6 +4370,8 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       : { rows: [] };
     const primeira = new Map(det.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
 
+    // Imposto (Microsoft/Marketplace) já aplicado em _coletarDesperdicio, na origem — não
+    // reaplicar aqui (dobraria o multiplicador).
     const itens = filtrados.map((x) => {
       const desde = x.marcado_orfao_em || primeira.get(String(x.resource_id).toUpperCase());
       return {
@@ -4265,6 +4401,86 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
   } catch (e) {
     console.error('[Portal Órfãos] erro:', e.message);
     res.status(500).json({ error: 'Não foi possível carregar os recursos órfãos no momento.' });
+  }
+});
+
+// Middleware do login PARALELO do portal (ver /api/public/auth/entra/url) — exige
+// `payload.portal === true`, nunca aceita um JWT do app interno (e o inverso: authMiddleware
+// das rotas internas não tem por que checar esse claim, mas aqui SEMPRE se checa, fechando o
+// isolamento nos dois sentidos). Popula `req.portalUser = { email, nome }`.
+function _portalEntraMiddleware(req, res, next) {
+  const header = req.headers['authorization'];
+  const token = header && header.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Não autenticado.' });
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (!payload.portal) return res.status(401).json({ error: 'Token inválido.' });
+    req.portalUser = { email: payload.email, nome: payload.nome };
+    next();
+  } catch {
+    res.status(401).json({ error: 'Sessão expirada. Entre novamente.' });
+  }
+}
+
+// GET /api/public/genie-cotas — visão PESSOAL de cota Genie no portal público (2026-09-28,
+// pedido do usuário). Diferente de /api/public/orfaos: não depende de portal_config.ativo
+// nem de allowlist do admin — a proteção é o próprio login Entra ID (_portalEntraMiddleware),
+// e o filtro é sempre pelo e-mail autenticado, nunca de query string. Só devolve dados do
+// PRÓPRIO usuário — nunca a lista de outros workspaces/usuários (isso é exclusivo da tela
+// interna, DatabricksCotasPanel.tsx).
+app.get('/api/public/genie-cotas', _portalEntraMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const pcfg = await _getPortalConfig();
+    if (!pcfg.ativo || !pcfg.genie_cotas_ativo) return res.status(403).json({ error: 'Minha Cota Genie desativada' });
+
+    const usuario = req.portalUser.email;
+    const bs = (await pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true`)).rows;
+    const consUser = await pool.query(
+      `SELECT workspace_id, COALESCE(SUM(custo_estimado),0) AS custo
+         FROM databricks_consumo
+        WHERE COALESCE(usuario,'') = $1 AND sku_name ILIKE '%GENIE%'
+        GROUP BY workspace_id`,
+      [usuario]
+    );
+
+    const workspaces = await Promise.all(consUser.rows.map(async (r) => {
+      const wsId = r.workspace_id;
+      const custo = parseFloat(r.custo);
+      const b = bs.find(x => (x.escopo_tipo === 'usuario' && x.usuario === usuario && x.workspace_id === wsId)
+        || (x.escopo_tipo === 'usuario' && x.usuario === usuario && !x.workspace_id)
+        || (x.escopo_tipo === 'workspace_por_usuario' && x.workspace_id === wsId));
+      const limiteLocal = b ? parseFloat(b.valor_mensal) : null;
+
+      const serieRows = await pool.query(
+        `SELECT to_char(usage_date,'YYYY-MM-DD') AS dia,
+                COALESCE(SUM(custo_estimado),0) AS custo,
+                COALESCE(SUM(usage_quantity),0) AS dbus,
+                COALESCE(SUM(CASE WHEN sku_name ILIKE '%FREE%' OR custo_estimado = 0 THEN usage_quantity ELSE 0 END),0) AS dbus_free
+           FROM databricks_consumo
+          WHERE COALESCE(usuario,'') = $1 AND workspace_id = $2 AND sku_name ILIKE '%GENIE%'
+          GROUP BY 1 ORDER BY 1`,
+        [usuario, wsId]
+      );
+
+      const quotaNativa = await _resolverGenieQuotaUsuario(usuario, wsId);
+
+      return {
+        workspace_id: wsId,
+        custo,
+        limite_local: limiteLocal,
+        quota_nativa: quotaNativa.limite,
+        acao_nativa: quotaNativa.acao,
+        dias: serieRows.rows.map(x => ({
+          dia: x.dia, custo: parseFloat(x.custo),
+          dbus: parseFloat(x.dbus), dbus_free: parseFloat(x.dbus_free),
+        })),
+      };
+    }));
+
+    res.json({ ativo: true, nome: req.portalUser.nome, workspaces });
+  } catch (e) {
+    console.error('[Portal Genie Cotas] erro:', e.message);
+    res.status(500).json({ error: 'Não foi possível carregar sua cota Genie no momento.' });
   }
 });
 
@@ -4460,6 +4676,17 @@ app.get('/api/public/calculadora/recursos', _portalMiddleware, _calculadoraAtiva
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── GET /api/calculadora/subscriptions ───────────────────────────────────────
+// Imposto travado da Calculadora interna (2026-09-28): mesma taxa/trava que o Portal Público já
+// usa (`GET /api/public/calculadora/config`), liberada aqui pra qualquer usuário logado (não só
+// admin) poder ver o valor sem poder editá-lo — o campo da Calculadora deixou de aceitar
+// sobreposição por sessão.
+app.get('/api/configuracoes/taxa-imposto', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const [taxa_imposto, impostoCfg] = await Promise.all([_getTaxaImposto(), _getImpostoConfig()]);
+    res.json({ taxa_imposto, imposto_microsoft: impostoCfg.microsoft, imposto_marketplace: impostoCfg.marketplace });
+  } catch (e) { _dbErr(res, e); }
+});
+
 app.get('/api/calculadora/subscriptions', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     const _t0 = Date.now();
@@ -4770,7 +4997,8 @@ app.get('/api/calculadora/reconciliacao', authMiddleware, dbMiddleware, async (r
         SELECT
           COALESCE(charge_type, '(sem tipo)') AS charge_type,
           COUNT(*)                             AS linhas,
-          SUM(COALESCE(cost_in_billing_currency, 0)) AS total
+          SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS microsoft,
+          SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type = 'Marketplace')                AS marketplace
         FROM azure_costs ${where}
         GROUP BY charge_type
         ORDER BY SUM(COALESCE(cost_in_billing_currency, 0)) DESC
@@ -4778,18 +5006,22 @@ app.get('/api/calculadora/reconciliacao', authMiddleware, dbMiddleware, async (r
       pool.query(`
         SELECT
           COALESCE(billing_currency, 'USD') AS moeda,
-          SUM(COALESCE(cost_in_billing_currency, 0)) AS total
+          SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS microsoft,
+          SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type = 'Marketplace')                AS marketplace
         FROM azure_costs ${where}
         GROUP BY billing_currency
-        ORDER BY total DESC
+        ORDER BY (SUM(COALESCE(cost_in_billing_currency, 0))) DESC
       `, params),
     ]);
 
+    // SEM imposto, de propósito (ver comentário de _normImpostoCategoria/_getImpostoConfig) —
+    // esta tela compara o total do banco contra a fatura/Cost Management da Azure, que não
+    // inclui o imposto configurável; aplicar aqui invalidaria a própria comparação.
     const excluidos = ['Tax', 'Refund', 'RoundingAdjustment'];
     const porTipo = rTipo.rows.map(r => ({
       charge_type: r.charge_type,
       linhas:      parseInt(r.linhas, 10),
-      total:       parseFloat(r.total) || 0,
+      total:       Number(r.microsoft || 0) + Number(r.marketplace || 0),
       excluido:    excluidos.includes(r.charge_type),
     }));
 
@@ -4799,7 +5031,7 @@ app.get('/api/calculadora/reconciliacao', authMiddleware, dbMiddleware, async (r
 
     res.json({
       por_tipo:        porTipo,
-      por_moeda:       rMoeda.rows.map(r => ({ moeda: r.moeda, total: parseFloat(r.total) || 0 })),
+      por_moeda:       rMoeda.rows.map(r => ({ moeda: r.moeda, total: Number(r.microsoft || 0) + Number(r.marketplace || 0) })),
       total_bruto:     totalBruto,
       total_excluido:  totalExcluido,
       total_sistema:   totalSistema,
@@ -5255,14 +5487,18 @@ app.get('/api/calculadora/detalhe-diario', authMiddleware, dbMiddleware, async (
         MAX(resource_group_name)                                                         AS resource_group_name,
         COALESCE(MAX(consumed_service), '')                                              AS service_name,
         COALESCE(MAX(meter_name), '')                                                    AS meter,
-        SUM(COALESCE(cost_in_billing_currency, 0))                                       AS cost
+        SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+        SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace
       FROM azure_costs
       ${where}
       GROUP BY cost_date, subscription_id, resource_id, consumed_service, meter_name
       ORDER BY cost_date DESC, SUM(COALESCE(cost_in_billing_currency,0)) DESC
       LIMIT 15000
     `, params);
-    res.json(r.rows);
+    const impostoCfgDD = await _getImpostoConfig();
+    res.json(r.rows.map(({ custo_microsoft, custo_marketplace, ...rest }) => ({
+      ...rest, cost: _comImpostoSplit(custo_microsoft, custo_marketplace, impostoCfgDD),
+    })));
   } catch (err) {
     _dbErr(res, err);
   }
@@ -5292,13 +5528,17 @@ app.get('/api/calculadora/por-servico', authMiddleware, dbMiddleware, async (req
         COALESCE(NULLIF(consumed_service,''), meter_category, 'Desconhecido') AS service_name,
         COUNT(DISTINCT resource_id)                                            AS qtd_recursos,
         COUNT(DISTINCT resource_group_name)                                    AS qtd_rgs,
-        SUM(COALESCE(cost_in_billing_currency, 0))                             AS total_brl
+        SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+        SUM(COALESCE(cost_in_billing_currency, 0)) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace
       FROM azure_costs
       ${where}
       GROUP BY COALESCE(NULLIF(consumed_service,''), meter_category, 'Desconhecido')
-      ORDER BY total_brl DESC
+      ORDER BY (SUM(COALESCE(cost_in_billing_currency, 0))) DESC
     `, params);
-    res.json(r.rows);
+    const impostoCfgPS = await _getImpostoConfig();
+    res.json(r.rows.map(({ custo_microsoft, custo_marketplace, ...rest }) => ({
+      ...rest, total_brl: _comImpostoSplit(custo_microsoft, custo_marketplace, impostoCfgPS),
+    })));
   } catch (err) {
     _dbErr(res, err);
   }
@@ -5533,19 +5773,28 @@ app.get('/api/azure-costs/resumo', authMiddleware, dbMiddleware, async (_req, re
         SELECT COUNT(*)                       AS total,
                MIN(cost_date)                 AS data_inicio,
                MAX(cost_date)                 AS data_fim,
-               SUM(cost_in_billing_currency)  AS total_billing,
+               SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+               SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace,
                MIN(billing_currency)          AS moeda
         FROM azure_costs
       `),
       pool.query(`
         SELECT TO_CHAR(cost_date,'YYYY-MM')   AS mes,
                COUNT(*)                       AS registros,
-               SUM(cost_in_billing_currency)  AS total_billing
+               SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+               SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace
         FROM azure_costs
         GROUP BY mes ORDER BY mes DESC LIMIT 24
       `)
     ]);
-    const payload = { resumo: r.rows[0], por_mes: byMonth.rows };
+    const impostoCfgResumo = await _getImpostoConfig();
+    const { custo_microsoft, custo_marketplace, ...resumoRest } = r.rows[0];
+    const payload = {
+      resumo: { ...resumoRest, total_billing: _comImpostoSplit(custo_microsoft, custo_marketplace, impostoCfgResumo) },
+      por_mes: byMonth.rows.map(({ custo_microsoft: m, custo_marketplace: mp, ...rest }) => ({
+        ...rest, total_billing: _comImpostoSplit(m, mp, impostoCfgResumo),
+      })),
+    };
     _resumoCache = payload;
     _resumoCacheTs = now;
     res.json(payload);
@@ -5620,16 +5869,22 @@ app.get('/api/azure-costs/imports', authMiddleware, dbMiddleware, async (_req, r
     const r = await pool.query(`
       SELECT arquivo_origem, COUNT(*) AS linhas,
              MIN(cost_date) AS periodo_inicio, MAX(cost_date) AS periodo_fim,
-             SUM(cost_in_usd) AS total_usd, SUM(cost_in_billing_currency) AS total_billing,
+             SUM(cost_in_usd) AS total_usd,
+             SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+             SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace,
              MIN(billing_currency) AS moeda, MAX(importado_em) AS importado_em
       FROM azure_costs
       WHERE (fonte IS NULL OR fonte = 'manual')
         AND (arquivo_origem IS NULL OR arquivo_origem NOT LIKE 'api-%')
       GROUP BY arquivo_origem ORDER BY importado_em DESC
     `);
-    _importsCache = r.rows;
+    const impostoCfgImports = await _getImpostoConfig();
+    const rows = r.rows.map(({ custo_microsoft, custo_marketplace, ...rest }) => ({
+      ...rest, total_billing: _comImpostoSplit(custo_microsoft, custo_marketplace, impostoCfgImports),
+    }));
+    _importsCache = rows;
     _importsCacheTs = now;
-    res.json(r.rows);
+    res.json(rows);
   } catch (err) { _dbErr(res, err); }
 });
 
@@ -6695,10 +6950,18 @@ async function ensureAzureColetaTable() {
       tag_chave       VARCHAR(200)  NOT NULL,
       tag_valor       VARCHAR(500)  NOT NULL,
       custo           NUMERIC(20,6) NOT NULL DEFAULT 0,
+      custo_microsoft   NUMERIC(20,6) NOT NULL DEFAULT 0,
+      custo_marketplace NUMERIC(20,6) NOT NULL DEFAULT 0,
       linhas          BIGINT        NOT NULL DEFAULT 0,
       PRIMARY KEY (mes, subscription_id, tag_chave, tag_valor)
     )
   `);
+  // Split Microsoft/Marketplace (2026-09-28) — colunas paralelas, não uma dimensão nova no PK:
+  // o `custo` total continua exato pra tudo que já lia essa coluna, e o ranking de top-500
+  // valores (feito por `custo` total) não precisa mudar. Migração aditiva — tabela já existente
+  // ganha as colunas zeradas; o próximo rebuild forçado preenche o histórico de verdade.
+  await pool.query(`ALTER TABLE azure_custo_por_tag ADD COLUMN IF NOT EXISTS custo_microsoft   NUMERIC(20,6) NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE azure_custo_por_tag ADD COLUMN IF NOT EXISTS custo_marketplace NUMERIC(20,6) NOT NULL DEFAULT 0`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_custo_por_tag_chave ON azure_custo_por_tag (mes, tag_chave)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS azure_tag_chaves (
@@ -6706,9 +6969,13 @@ async function ensureAzureColetaTable() {
       tag_chave         VARCHAR(200)  NOT NULL,
       valores_distintos INT           NOT NULL DEFAULT 0,
       custo             NUMERIC(20,6) NOT NULL DEFAULT 0,
+      custo_microsoft   NUMERIC(20,6) NOT NULL DEFAULT 0,
+      custo_marketplace NUMERIC(20,6) NOT NULL DEFAULT 0,
       PRIMARY KEY (mes, tag_chave)
     )
   `);
+  await pool.query(`ALTER TABLE azure_tag_chaves ADD COLUMN IF NOT EXISTS custo_microsoft   NUMERIC(20,6) NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE azure_tag_chaves ADD COLUMN IF NOT EXISTS custo_marketplace NUMERIC(20,6) NOT NULL DEFAULT 0`);
   // Cobertura de commitment (Reservation/Savings Plan) — capability "Rate Optimization".
   // Medida em HORAS, não em dinheiro: confirmado contra o dado real que as linhas cobertas têm
   // `cost=0` E `payg_cost=0` E `effective_price=0` — só `quantity`. Uma fórmula em R$ daria 0%,
@@ -6834,16 +7101,22 @@ async function _rebuildAlocacaoTagsMes(mes, origem = 'agendado') {
   await client.query(`DELETE FROM azure_custo_por_tag WHERE mes = $1`, [mes]);
   await client.query(`DELETE FROM azure_tag_chaves    WHERE mes = $1`, [mes]);
 
+  // `pub`: normaliza publisher_type pra só 2 baldes — NULL (import antigo/incompleto) cai em
+  // 'Microsoft', o mesmo catch-all já usado nas outras rotas que fazem esse split.
   const r = await client.query(
     `WITH base AS (
        SELECT subscription_id::text AS sub,
               COALESCE(cost_in_billing_currency,0) AS custo,
+              CASE WHEN publisher_type = 'Marketplace' THEN 'Marketplace' ELSE 'Microsoft' END AS pub,
               NULLIF(NULLIF(NULLIF(tags,''),'null'),'{}') AS t
        FROM azure_costs
        WHERE cost_date >= $2::date AND cost_date < ($2::date + INTERVAL '1 month')
      ), bruto AS (
        SELECT b.sub, kv.key AS chave, LEFT(kv.value, 500) AS valor,
-              SUM(b.custo) AS custo, COUNT(*) AS linhas
+              SUM(b.custo) AS custo,
+              SUM(b.custo) FILTER (WHERE b.pub = 'Microsoft')   AS custo_microsoft,
+              SUM(b.custo) FILTER (WHERE b.pub = 'Marketplace') AS custo_marketplace,
+              COUNT(*) AS linhas
        FROM base b
        CROSS JOIN LATERAL jsonb_each_text(b.t::jsonb) AS kv
        WHERE b.t IS NOT NULL AND pg_input_is_valid(b.t, 'jsonb')
@@ -6851,19 +7124,23 @@ async function _rebuildAlocacaoTagsMes(mes, origem = 'agendado') {
      ), ranked AS (
        SELECT *, ROW_NUMBER() OVER (PARTITION BY sub, chave ORDER BY custo DESC) AS rn FROM bruto
      )
-     INSERT INTO azure_custo_por_tag (mes, subscription_id, tag_chave, tag_valor, custo, linhas)
-     SELECT $1, sub, chave, valor, custo, linhas FROM ranked WHERE rn <= $3
+     INSERT INTO azure_custo_por_tag (mes, subscription_id, tag_chave, tag_valor, custo, custo_microsoft, custo_marketplace, linhas)
+     SELECT $1, sub, chave, valor, custo, COALESCE(custo_microsoft,0), COALESCE(custo_marketplace,0), linhas FROM ranked WHERE rn <= $3
      UNION ALL
-     SELECT $1, sub, chave, '(outros)', SUM(custo), SUM(linhas) FROM ranked WHERE rn > $3 GROUP BY sub, chave`,
+     SELECT $1, sub, chave, '(outros)', SUM(custo), COALESCE(SUM(custo_microsoft),0), COALESCE(SUM(custo_marketplace),0), SUM(linhas)
+     FROM ranked WHERE rn > $3 GROUP BY sub, chave`,
     [mes, ini, _TAG_ROLLUP_TOP_N]
   );
 
   // Linhas '__total__' — custo total do mês por subscription, INCLUSIVE o que não tem tag
   // nenhuma. É o denominador de pct_alocado.
   await client.query(
-    `INSERT INTO azure_custo_por_tag (mes, subscription_id, tag_chave, tag_valor, custo, linhas)
+    `INSERT INTO azure_custo_por_tag (mes, subscription_id, tag_chave, tag_valor, custo, custo_microsoft, custo_marketplace, linhas)
      SELECT $1, subscription_id::text, '__total__', '__total__',
-            SUM(COALESCE(cost_in_billing_currency,0)), COUNT(*)
+            SUM(COALESCE(cost_in_billing_currency,0)),
+            COALESCE(SUM(COALESCE(cost_in_billing_currency,0)) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0),
+            COALESCE(SUM(COALESCE(cost_in_billing_currency,0)) FILTER (WHERE publisher_type = 'Marketplace'), 0),
+            COUNT(*)
      FROM azure_costs
      WHERE cost_date >= $2::date AND cost_date < ($2::date + INTERVAL '1 month')
      GROUP BY 2`,
@@ -6871,8 +7148,8 @@ async function _rebuildAlocacaoTagsMes(mes, origem = 'agendado') {
   );
 
   await client.query(
-    `INSERT INTO azure_tag_chaves (mes, tag_chave, valores_distintos, custo)
-     SELECT mes, tag_chave, COUNT(DISTINCT tag_valor), SUM(custo)
+    `INSERT INTO azure_tag_chaves (mes, tag_chave, valores_distintos, custo, custo_microsoft, custo_marketplace)
+     SELECT mes, tag_chave, COUNT(DISTINCT tag_valor), SUM(custo), SUM(custo_microsoft), SUM(custo_marketplace)
      FROM azure_custo_por_tag WHERE mes = $1 AND tag_chave <> '__total__'
      GROUP BY 1, 2`,
     [mes]
@@ -7388,7 +7665,10 @@ async function _checkRelatorioSemanalInventario() {
 
   const [eventosR, custoR, topRgR] = await Promise.all([
     pool.query(`SELECT acao, COUNT(*) AS total FROM azure_recursos_auditoria_eventos WHERE quando >= $1 GROUP BY acao`, [seteDiasAtras.toISOString()]),
-    pool.query(`SELECT COALESCE(SUM(cost_in_billing_currency),0) AS total FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2`, [inicioStr, fimStr]),
+    pool.query(`
+      SELECT COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'), 0) AS marketplace,
+             COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS microsoft
+      FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2`, [inicioStr, fimStr]),
     pool.query(`
       SELECT resource_group, COUNT(*) AS criacoes FROM azure_recursos_auditoria_eventos
       WHERE acao='CRIACAO' AND quando >= $1 AND resource_group IS NOT NULL
@@ -7398,7 +7678,7 @@ async function _checkRelatorioSemanalInventario() {
 
   const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
   for (const row of eventosR.rows) eventos[row.acao] = parseInt(row.total, 10);
-  const custoTotal = parseFloat(custoR.rows[0].total);
+  const custoTotal = _comImpostoSplit(custoR.rows[0].microsoft, custoR.rows[0].marketplace, await _getImpostoConfig());
 
   const topRgHtml = topRgR.rows.length
     ? `<ul style="margin:8px 0;padding-left:20px">${topRgR.rows.map(r => `<li>${_escHtmlServer(r.resource_group)} — ${r.criacoes} recurso(s) criado(s)</li>`).join('')}</ul>`
@@ -7922,8 +8202,14 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
   try {
     const force = req.query.force === '1';
     const now = Date.now();
+    // `_coberturaCache` guarda o split cru (custo_microsoft/custo_marketplace) — SEM imposto,
+    // de propósito: esta é a tela de saúde/cobertura de coleta, precisa bater com o valor cru
+    // importado da Azure, não com o custo já ajustado pelo imposto configurável.
+    const _comResposta = async (linhas) => linhas.map(({ custo_microsoft, custo_marketplace, ...rest }) => ({
+      ...rest, total_brl: Number(custo_microsoft || 0) + Number(custo_marketplace || 0),
+    }));
     if (!force && _coberturaCache && (now - _coberturaCacheTs) < _COBERTURA_TTL) {
-      return res.json(_coberturaCache);
+      return res.json(await _comResposta(_coberturaCache));
     }
 
     // Tenta carregar do banco (sobrevive a restarts — populado pelo _refreshAzureCache)
@@ -7931,13 +8217,13 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
       try {
         const { rows: dbRows } = await pool.query(
           `SELECT mes, subscription_id, subscription_name, registros, dias_com_dados,
-                  dias_no_mes, ultima_importacao, total_brl::float AS total_brl
+                  dias_no_mes, ultima_importacao, custo_microsoft::float AS custo_microsoft, custo_marketplace::float AS custo_marketplace
            FROM azure_cobertura_cache ORDER BY mes DESC, registros DESC`
         );
         if (dbRows.length) {
           _coberturaCache   = dbRows;
           _coberturaCacheTs = now;
-          return res.json(dbRows);
+          return res.json(await _comResposta(dbRows));
         }
       } catch (_) {}
     }
@@ -7949,7 +8235,7 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
       while (_cacheRefreshing && Date.now() < deadline) {
         await new Promise(r => setTimeout(r, 2000));
       }
-      if (_coberturaCache) return res.json(_coberturaCache);
+      if (_coberturaCache) return res.json(await _comResposta(_coberturaCache));
     }
 
     // Cache não foi populado pelo refresh — roda query direta com workers paralelos
@@ -7963,7 +8249,8 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
                COUNT(*)::int                             AS dias_com_dados,
                MAX(dias_no_mes)                          AS dias_no_mes,
                MAX(ultima_importacao)                    AS ultima_importacao,
-               ROUND(SUM(total_brl)::numeric, 2)        AS total_brl
+               ROUND(SUM(custo_microsoft)::numeric, 2)   AS custo_microsoft,
+               ROUND(SUM(custo_marketplace)::numeric, 2) AS custo_marketplace
         FROM (
           SELECT
             TO_CHAR(DATE_TRUNC('month', cost_date), 'YYYY-MM-DD')   AS mes,
@@ -7974,7 +8261,8 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
             ((DATE_TRUNC('month', cost_date) + INTERVAL '1 month')::date
               - DATE_TRUNC('month', cost_date)::date)                 AS dias_no_mes,
             TO_CHAR(MAX(importado_em), 'DD/MM/YYYY HH24:MI')        AS ultima_importacao,
-            SUM(cost_in_billing_currency)                             AS total_brl
+            SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+            SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace')                AS custo_marketplace
           FROM azure_costs
           WHERE cost_date >= NOW() - INTERVAL '36 months'
             AND subscription_id IS NOT NULL AND subscription_id <> ''
@@ -7988,7 +8276,7 @@ app.get('/api/azure-coleta/cobertura-meses', authMiddleware, dbMiddleware, async
     }
     _coberturaCache = rows;
     _coberturaCacheTs = Date.now();
-    res.json(rows);
+    res.json(await _comResposta(rows));
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -8285,7 +8573,8 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
 
     const r = await pool.query(
       `SELECT ri.*,
-         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado,
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id) AND ac.publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS custo_acumulado_microsoft,
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id) AND ac.publisher_type = 'Marketplace'), 0) AS custo_acumulado_marketplace,
          cac1.nome AS criado_por_nome, cac2.nome AS atualizado_por_nome, cac3.nome AS excluido_por_nome
        FROM azure_recursos_inventario ri
        LEFT JOIN azure_autores_cache cac1 ON cac1.guid = ri.criado_por
@@ -8308,10 +8597,16 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
     // cada request — um RG grande sozinho já levava 17-23s pra somar (ver comentário na
     // declaração do cache), inaceitável mesmo batendo só 1 query por página.
     const rgStats = await _getRgStatsCache();
-    const recursos = r.rows.map(row => ({
-      ...row,
-      custo_resource_group: row.resource_group ? (rgStats.get(row.subscription_id + '::' + row.resource_group.toUpperCase())?.custo || 0) : 0,
-    }));
+    const impostoCfgRg = await _getImpostoConfig();
+    const recursos = r.rows.map(row => {
+      const rg = row.resource_group ? rgStats.get(row.subscription_id + '::' + row.resource_group.toUpperCase()) : null;
+      const { custo_acumulado_microsoft, custo_acumulado_marketplace, ...rest } = row;
+      return {
+        ...rest,
+        custo_acumulado: _comImpostoSplit(custo_acumulado_microsoft, custo_acumulado_marketplace, impostoCfgRg),
+        custo_resource_group: rg ? _comImpostoSplit(rg.custo_microsoft, rg.custo_marketplace, impostoCfgRg) : 0,
+      };
+    });
 
     res.json({ total: recursos.length, recursos });
   } catch (e) { _dbErr(res, e); }
@@ -8378,10 +8673,12 @@ app.get('/api/azure-inventario/export/excel', authMiddleware, dbMiddleware, asyn
     });
     headerRow.height = 20;
 
+    const impostoCfgExport = await _getImpostoConfig();
     let rowIdx = 2;
     for (const row of r.rows) {
       const rgKey = row.resource_group ? row.subscription_id + '::' + row.resource_group.toUpperCase() : null;
-      const custoRg = rgKey ? (rgStats.get(rgKey)?.custo || 0) : 0;
+      const rgVal = rgKey ? rgStats.get(rgKey) : null;
+      const custoRg = rgVal ? _comImpostoSplit(rgVal.custo_microsoft, rgVal.custo_marketplace, impostoCfgExport) : 0;
       const excelRow = ws.getRow(rowIdx);
       excelRow.getCell(1).value = subsMap.get(row.subscription_id) || row.subscription_id;
       excelRow.getCell(2).value = row.resource_group || '';
@@ -8822,14 +9119,16 @@ app.get('/api/azure-inventario/comparativo', authMiddleware, dbMiddleware, async
       const custoCond = subscription_id ? ` AND subscription_id = $3` : '';
       const custoParams = subscription_id ? [inicio, fim, subscription_id] : [inicio, fim];
       const custo = await pool.query(
-        `SELECT COALESCE(SUM(cost_in_billing_currency),0) AS total FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2${custoCond}`,
+        `SELECT COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS microsoft,
+                COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'), 0)                AS marketplace
+         FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2${custoCond}`,
         custoParams
       );
 
       return {
         inicio, fim,
         total_recursos: parseInt(snap.rows[0].total, 10),
-        custo_total: custo.rows[0].total,
+        custo_total: _comImpostoSplit(custo.rows[0].microsoft, custo.rows[0].marketplace, await _getImpostoConfig()),
         criados: eventos.CRIACAO, atualizados: eventos.ATUALIZACAO, excluidos: eventos.EXCLUSAO,
       };
     }
@@ -8874,7 +9173,8 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
 
     const recursoR = await pool.query(
       `SELECT ri.*,
-         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id)), 0) AS custo_acumulado,
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id) AND ac.publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS custo_acumulado_microsoft,
+         COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id) AND ac.publisher_type = 'Marketplace'), 0) AS custo_acumulado_marketplace,
          cac1.nome AS criado_por_nome, cac2.nome AS atualizado_por_nome, cac3.nome AS excluido_por_nome
        FROM azure_recursos_inventario ri
        LEFT JOIN azure_autores_cache cac1 ON cac1.guid = ri.criado_por
@@ -8884,7 +9184,9 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
       [subscription_id, resource_id]
     );
     if (!recursoR.rows.length) return res.status(404).json({ error: 'Recurso não encontrado no inventário' });
-    const recurso = recursoR.rows[0];
+    const impostoCfgDet = await _getImpostoConfig();
+    const { custo_acumulado_microsoft, custo_acumulado_marketplace, ...recurso } = recursoR.rows[0];
+    recurso.custo_acumulado = _comImpostoSplit(custo_acumulado_microsoft, custo_acumulado_marketplace, impostoCfgDet);
 
     // Custo do Resource Group inteiro — além do custo DIRETO do resource_id (que fica
     // sistematicamente zerado pra VMs/discos/NICs efêmeros de cluster Databricks, já que a
@@ -8903,7 +9205,10 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
         [subscription_id, resource_id]
       ),
       pool.query(
-        `SELECT cost_date, SUM(cost_in_billing_currency) AS custo FROM azure_costs
+        `SELECT cost_date,
+                SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS microsoft,
+                SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace')                AS marketplace
+         FROM azure_costs
          WHERE UPPER(resource_id)=UPPER($1) AND cost_date >= CURRENT_DATE - INTERVAL '90 days'
          GROUP BY cost_date ORDER BY cost_date`,
         [resource_id]
@@ -8913,9 +9218,9 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
       // UM RG) já chegou a levar 17-23s pra RGs grandes de alta rotatividade (Databricks).
       recurso.resource_group
         ? _getRgStatsCache().then((map) => ({
-            rows: [map.get(subscription_id + '::' + recurso.resource_group.toUpperCase()) || { custo: 0, recursos: 0 }],
+            rows: [map.get(subscription_id + '::' + recurso.resource_group.toUpperCase()) || { custo_microsoft: 0, custo_marketplace: 0, recursos: 0 }],
           }))
-        : Promise.resolve({ rows: [{ custo: 0, recursos: 0 }] }),
+        : Promise.resolve({ rows: [{ custo_microsoft: 0, custo_marketplace: 0, recursos: 0 }] }),
     ]);
 
     // SKU/tipo (2026-08-31, pedido do usuário: "é possível colar o SKU da Máquina, tipo de
@@ -8988,8 +9293,8 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
     res.json({
       recurso,
       eventos: eventosR.rows,
-      custo_diario: custoR.rows,
-      custo_resource_group: custoRGR.rows[0].custo,
+      custo_diario: custoR.rows.map(r => ({ cost_date: r.cost_date, custo: _comImpostoSplit(r.microsoft, r.marketplace, impostoCfgDet) })),
+      custo_resource_group: _comImpostoSplit(custoRGR.rows[0].custo_microsoft, custoRGR.rows[0].custo_marketplace, impostoCfgDet),
       resource_group_recursos: parseInt(custoRGR.rows[0].recursos, 10) || 0,
       billing_detalhe,
     });
@@ -9045,6 +9350,14 @@ async function _computeAnomaliasCrescimentoRaw() {
   const inicioStr = inicio.toISOString().slice(0, 10);
 
   const rgsGerenciados = await _getRgsGerenciados();
+  // Multiplicador por publisher_type injetado direto no SQL (não dá pra separar-e-recombinar
+  // em JS aqui: o custo alimenta AVG/STDDEV_POP dentro da própria query, pra calcular o
+  // Z-score). Matematicamente seguro: multiplicar cada `custo` por uma constante NÃO muda o
+  // Z-score (média e desvio escalam pelo mesmo fator, a razão fica idêntica) — só corrige o
+  // valor absoluto exibido.
+  const impostoCfgAnom = await _getImpostoConfig();
+  const multMs = impostoCfgAnom.microsoft.ativo   ? 1 + impostoCfgAnom.microsoft.taxa / 100   : 1;
+  const multMp = impostoCfgAnom.marketplace.ativo ? 1 + impostoCfgAnom.marketplace.taxa / 100 : 1;
 
   // Exclusão de RG gerenciado SEM filtrar por linha antes de agregar — bug real de
   // performance encontrado testando contra o ambiente real (~3,7M linhas em `azure_costs`):
@@ -9079,11 +9392,13 @@ async function _computeAnomaliasCrescimentoRaw() {
         SELECT t.subscription_id, t.dia, t.criacoes - COALESCE(g.criacoes,0) AS criacoes
         FROM criacoes_todas t LEFT JOIN criacoes_gerenciadas g ON g.subscription_id=t.subscription_id AND g.dia=t.dia
       ), custos_todos AS (
-        SELECT subscription_id, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
+        SELECT subscription_id, cost_date AS dia,
+               SUM(cost_in_billing_currency * CASE WHEN publisher_type = 'Marketplace' THEN $5::numeric ELSE $4::numeric END) AS custo
         FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2
         GROUP BY 1, 2
       ), custos_gerenciados AS (
-        SELECT subscription_id, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
+        SELECT subscription_id, cost_date AS dia,
+               SUM(cost_in_billing_currency * CASE WHEN publisher_type = 'Marketplace' THEN $5::numeric ELSE $4::numeric END) AS custo
         FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2 AND UPPER(resource_group_name) = ANY($3::text[])
         GROUP BY 1, 2
       ), custos AS (
@@ -9109,7 +9424,7 @@ async function _computeAnomaliasCrescimentoRaw() {
         CASE WHEN s.desvio_custo > 0 THEN (co.custo - s.media_custo) / s.desvio_custo ELSE 0 END AS zscore_custo
       FROM combinado co JOIN stats s USING (subscription_id)
       ORDER BY co.subscription_id, co.dia
-    `, [inicioStr, fim, rgsGerenciados]),
+    `, [inicioStr, fim, rgsGerenciados, multMs, multMp]),
     pool.query(`
       WITH criacoes AS (
         SELECT * FROM (
@@ -9120,7 +9435,8 @@ async function _computeAnomaliasCrescimentoRaw() {
         ) g WHERE NOT (resource_group = ANY($3::text[]))
       ), custos AS (
         SELECT * FROM (
-          SELECT subscription_id, UPPER(resource_group_name) AS resource_group, cost_date AS dia, SUM(cost_in_billing_currency) AS custo
+          SELECT subscription_id, UPPER(resource_group_name) AS resource_group, cost_date AS dia,
+                 SUM(cost_in_billing_currency * CASE WHEN publisher_type = 'Marketplace' THEN $5::numeric ELSE $4::numeric END) AS custo
           FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2 AND resource_group_name IS NOT NULL
           GROUP BY 1, 2, 3
         ) g WHERE NOT (resource_group = ANY($3::text[]))
@@ -9144,7 +9460,7 @@ async function _computeAnomaliasCrescimentoRaw() {
         CASE WHEN s.desvio_custo > 0 THEN (co.custo - s.media_custo) / s.desvio_custo ELSE 0 END AS zscore_custo
       FROM combinado co JOIN stats s USING (subscription_id, resource_group)
       ORDER BY co.subscription_id, co.resource_group, co.dia
-    `, [inicioStr, fim, rgsGerenciados]),
+    `, [inicioStr, fim, rgsGerenciados, multMs, multMp]),
     pool.query(`
       WITH persistentes AS (
         SELECT subscription_id, DATE_TRUNC('day', CURRENT_TIMESTAMP)::DATE AS dia,
@@ -9349,6 +9665,7 @@ async function _computeOrcamentosInventarioAlertas() {
 
   const inicioMes = new Date(); inicioMes.setDate(1);
   const inicioMesStr = inicioMes.toISOString().slice(0, 10);
+  const impostoCfg = await _getImpostoConfig();
 
   const alertas = [];
   for (const o of orcamentos) {
@@ -9360,11 +9677,11 @@ async function _computeOrcamentosInventarioAlertas() {
       // vivo). É o trade-off de não varrer 3,7M linhas por orçamento a cada checagem.
       const mesAtual = new Date().toISOString().slice(0, 7);
       const params = [mesAtual, o.tag_chave, o.tag_valor];
-      let sql = `SELECT COALESCE(SUM(custo),0) AS total FROM azure_custo_por_tag
-                 WHERE mes=$1 AND tag_chave=$2 AND tag_valor=$3`;
+      let sql = `SELECT COALESCE(SUM(custo_microsoft),0) AS microsoft, COALESCE(SUM(custo_marketplace),0) AS marketplace
+                 FROM azure_custo_por_tag WHERE mes=$1 AND tag_chave=$2 AND tag_valor=$3`;
       if (o.subscription_id) { params.push(o.subscription_id); sql += ` AND subscription_id=$4`; }
       const r = await pool.query(sql, params);
-      atual = parseFloat(r.rows[0].total);
+      atual = _comImpostoSplit(r.rows[0].microsoft, r.rows[0].marketplace, impostoCfg);
     } else if (o.tipo_limite === 'recursos') {
       const params = [o.subscription_id];
       let sql = `SELECT COUNT(*) AS total FROM azure_recursos_inventario WHERE ativo=true AND subscription_id=$1`;
@@ -9373,10 +9690,12 @@ async function _computeOrcamentosInventarioAlertas() {
       atual = parseInt(r.rows[0].total, 10);
     } else {
       const params = [inicioMesStr, o.subscription_id];
-      let sql = `SELECT COALESCE(SUM(cost_in_billing_currency),0) AS total FROM azure_costs WHERE cost_date >= $1 AND subscription_id=$2`;
+      let sql = `SELECT COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'), 0) AS marketplace,
+                        COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS microsoft
+                 FROM azure_costs WHERE cost_date >= $1 AND subscription_id=$2`;
       if (o.resource_group) { params.push(o.resource_group); sql += ` AND UPPER(resource_group_name)=UPPER($3)`; }
       const r = await pool.query(sql, params);
-      atual = parseFloat(r.rows[0].total);
+      atual = _comImpostoSplit(r.rows[0].microsoft, r.rows[0].marketplace, impostoCfg);
     }
     const limite = parseFloat(o.limite_valor);
     const pct = limite > 0 ? atual / limite : 0;
@@ -9605,14 +9924,17 @@ app.get('/api/azure-costs/tag-chaves', authMiddleware, dbMiddleware, async (req,
     if (mes_inicio) { params.push(mes_inicio); where += ` AND mes >= $${params.length}`; }
     if (mes_fim)    { params.push(mes_fim);    where += ` AND mes <= $${params.length}`; }
     const r = await pool.query(
-      `SELECT tag_chave, MAX(valores_distintos) AS valores_distintos, SUM(custo) AS custo
+      `SELECT tag_chave, MAX(valores_distintos) AS valores_distintos,
+              SUM(custo_microsoft) AS custo_microsoft, SUM(custo_marketplace) AS custo_marketplace
        FROM azure_tag_chaves WHERE ${where}
-       GROUP BY 1 ORDER BY 3 DESC LIMIT 200`, params
+       GROUP BY 1 ORDER BY (SUM(custo_microsoft) + SUM(custo_marketplace)) DESC LIMIT 200`, params
     );
     const st = await pool.query(`SELECT mes, construido_em FROM azure_tag_rollup_status ORDER BY mes`);
+    const impostoCfg = await _getImpostoConfig();
     res.json({
       chaves: r.rows.map(x => ({
-        chave: x.tag_chave, valores_distintos: Number(x.valores_distintos), custo: Number(x.custo),
+        chave: x.tag_chave, valores_distintos: Number(x.valores_distintos),
+        custo: _comImpostoSplit(x.custo_microsoft, x.custo_marketplace, impostoCfg),
       })),
       meses_construidos: st.rows.map(x => ({ mes: x.mes.trim(), construido_em: x.construido_em })),
     });
@@ -9649,16 +9971,18 @@ app.get('/api/azure-costs/alocacao-tags', authMiddleware, dbMiddleware, async (r
 
     const [rItens, rTotal, rMes, rStatus] = await Promise.all([
       pool.query(
-        `SELECT tag_valor, SUM(custo) AS custo, SUM(linhas) AS linhas
+        `SELECT tag_valor, SUM(custo_microsoft) AS custo_microsoft, SUM(custo_marketplace) AS custo_marketplace, SUM(linhas) AS linhas
          FROM azure_custo_por_tag WHERE tag_chave = $1 AND TRIM(tag_valor) <> ''${comChave.extra}
-         GROUP BY 1 ORDER BY 2 DESC LIMIT 100`, comChave.params),
+         GROUP BY 1 ORDER BY (SUM(custo_microsoft) + SUM(custo_marketplace)) DESC LIMIT 100`, comChave.params),
       pool.query(
-        `SELECT SUM(custo) AS total FROM azure_custo_por_tag
+        `SELECT SUM(custo_microsoft) AS custo_microsoft, SUM(custo_marketplace) AS custo_marketplace FROM azure_custo_por_tag
          WHERE tag_chave = '__total__'${semChave.extra}`, semChave.params),
       pool.query(
         `SELECT mes,
-                SUM(custo) FILTER (WHERE tag_chave = $1 AND TRIM(tag_valor) <> '') AS alocado,
-                SUM(custo) FILTER (WHERE tag_chave = '__total__')                  AS total
+                SUM(custo_microsoft)   FILTER (WHERE tag_chave = $1 AND TRIM(tag_valor) <> '') AS alocado_microsoft,
+                SUM(custo_marketplace) FILTER (WHERE tag_chave = $1 AND TRIM(tag_valor) <> '') AS alocado_marketplace,
+                SUM(custo_microsoft)   FILTER (WHERE tag_chave = '__total__')                  AS total_microsoft,
+                SUM(custo_marketplace) FILTER (WHERE tag_chave = '__total__')                  AS total_marketplace
          FROM azure_custo_por_tag
          WHERE (tag_chave = $1 OR tag_chave = '__total__')${comChave.extra}
          GROUP BY 1 ORDER BY 1`, comChave.params),
@@ -9667,20 +9991,28 @@ app.get('/api/azure-costs/alocacao-tags', authMiddleware, dbMiddleware, async (r
 
     // `alocado` vem da soma por MÊS (que cobre todos os valores), não da lista de itens — essa
     // é capada em 100 e subestimaria o alocado numa chave com muitos valores.
-    const alocado = rMes.rows.reduce((a, x) => a + Number(x.alocado || 0), 0);
-    const total = Number(rTotal.rows[0]?.total || 0);
+    // Imposto aplicado nos valores brutos (por categoria) antes de qualquer %: como multiplica
+    // numerador e denominador pelo mesmo fator quando a MESMA categoria está ativa nos dois lados,
+    // pct_alocado/pct seguem corretos.
+    const impostoCfg = await _getImpostoConfig();
+    const alocado = _comImpostoSplit(
+      rMes.rows.reduce((a, x) => a + Number(x.alocado_microsoft || 0), 0),
+      rMes.rows.reduce((a, x) => a + Number(x.alocado_marketplace || 0), 0),
+      impostoCfg);
+    const total = _comImpostoSplit(rTotal.rows[0]?.custo_microsoft, rTotal.rows[0]?.custo_marketplace, impostoCfg);
     res.json({
       chave,
       total,
       alocado,
       nao_alocado: Math.max(0, total - alocado),
       pct_alocado: total > 0 ? alocado / total : null,
-      itens: rItens.rows.map(x => ({
-        valor: x.tag_valor, custo: Number(x.custo), linhas: Number(x.linhas),
-        pct: total > 0 ? Number(x.custo) / total : null,
-      })),
+      itens: rItens.rows.map(x => {
+        const custo = _comImpostoSplit(x.custo_microsoft, x.custo_marketplace, impostoCfg);
+        return { valor: x.tag_valor, custo, linhas: Number(x.linhas), pct: total > 0 ? custo / total : null };
+      }),
       por_mes: rMes.rows.map(x => {
-        const a = Number(x.alocado || 0), t = Number(x.total || 0);
+        const a = _comImpostoSplit(x.alocado_microsoft, x.alocado_marketplace, impostoCfg);
+        const t = _comImpostoSplit(x.total_microsoft, x.total_marketplace, impostoCfg);
         return { mes: x.mes.trim(), alocado: a, total: t, nao_alocado: Math.max(0, t - a), pct_alocado: t > 0 ? a / t : null };
       }),
       atualizado_em: rStatus.rows[0]?.construido_em || null,
@@ -9698,12 +10030,14 @@ app.get('/api/azure-costs/serie-mensal', authMiddleware, dbMiddleware, async (_r
   try {
     await ensureAzureColetaTable();
     const [rSerie, rMax] = await Promise.all([
-      pool.query(`SELECT mes, SUM(custo) AS total FROM azure_custo_por_tag WHERE tag_chave = '__total__' GROUP BY 1 ORDER BY 1`),
+      pool.query(`SELECT mes, SUM(custo_microsoft) AS microsoft, SUM(custo_marketplace) AS marketplace
+                  FROM azure_custo_por_tag WHERE tag_chave = '__total__' GROUP BY 1 ORDER BY 1`),
       pool.query(`SELECT MAX(cost_date) AS ate FROM azure_costs`),
     ]);
     const ate = rMax.rows[0]?.ate;
+    const impostoCfg = await _getImpostoConfig();
     res.json({
-      por_mes: rSerie.rows.map(x => ({ mes: x.mes.trim(), custo: Number(x.total) })),
+      por_mes: rSerie.rows.map(x => ({ mes: x.mes.trim(), custo: _comImpostoSplit(x.microsoft, x.marketplace, impostoCfg) })),
       // Formata como YYYY-MM-DD sem passar por toISOString (que converteria pro fuso UTC e
       // poderia voltar um dia — armadilha de timezone já documentada neste arquivo).
       ate: ate ? `${ate.getFullYear()}-${String(ate.getMonth() + 1).padStart(2, '0')}-${String(ate.getDate()).padStart(2, '0')}` : null,
@@ -9891,7 +10225,8 @@ async function _custoObservadoPorResourceId(ids, desdeISO) {
     const lote = ids.slice(i, i + 1000).map((x) => x.toUpperCase());
     const r = await pool.query(
       `SELECT UPPER(ac.resource_id) AS rid,
-              SUM(COALESCE(ac.cost_in_billing_currency,0)) AS custo,
+              SUM(COALESCE(ac.cost_in_billing_currency,0)) FILTER (WHERE ac.publisher_type = 'Marketplace') AS custo_marketplace,
+              SUM(COALESCE(ac.cost_in_billing_currency,0)) FILTER (WHERE ac.publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
               COUNT(DISTINCT ac.cost_date) AS dias
        FROM azure_costs ac
        JOIN unnest($2::text[]) AS t(rid) ON UPPER(ac.resource_id) = t.rid
@@ -9899,7 +10234,11 @@ async function _custoObservadoPorResourceId(ids, desdeISO) {
        GROUP BY 1`,
       [desdeISO, lote]
     );
-    for (const row of r.rows) out.set(row.rid, { custo: Number(row.custo), dias: Number(row.dias) });
+    for (const row of r.rows) out.set(row.rid, {
+      custo_microsoft: Number(row.custo_microsoft || 0),
+      custo_marketplace: Number(row.custo_marketplace || 0),
+      dias: Number(row.dias),
+    });
   }
   return out;
 }
@@ -9949,6 +10288,7 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
   const desde = new Date();
   desde.setDate(desde.getDate() - 30);
   const custos = await _custoObservadoPorResourceId(itens.map((x) => x.id), desde.toISOString().slice(0, 10));
+  const impostoCfg = await _getImpostoConfig();
 
   return itens.map((x) => {
     const c = custos.get(String(x.id || '').toUpperCase());
@@ -9957,11 +10297,14 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
     // Disco nunca anexado não tem LastOwnershipUpdateTime: órfão desde a criação.
     const desdeReal = x.categoria === 'disco_orfao' ? (x.orfaoDesde || x.criadoEm || null)
       : x.categoria === 'snapshot_antigo' ? (x.criadoEm || null) : null;
+    // Custo com imposto (Microsoft/Marketplace, cada um só se ativo) aplicado aqui, ANTES de
+    // dividir pelos dias — assim o multiplicador não se acumula na extrapolação mensal.
+    const custoPeriodoComImposto = c ? _comImpostoSplit(c.custo_microsoft, c.custo_marketplace, impostoCfg) : null;
     // Extrapolação honesta NESTAS categorias: disco managed e IP Standard estático faturam a
     // mesma taxa anexados ou não, então o custo observado É o desperdício. Sem billing conhecido
     // → null, NUNCA zero (mesma convenção de `nao_verificaveis` no compliance de tags): zero
     // significaria "não custa nada", e o que sabemos é "não sabemos".
-    const custoMensal = c && c.dias > 0 ? (c.custo / c.dias) * 30 : null;
+    const custoMensal = c && c.dias > 0 ? (custoPeriodoComImposto / c.dias) * 30 : null;
     return {
       categoria: x.categoria,
       subscription_id: String(x.id || '').split('/')[2] || null,
@@ -9972,7 +10315,7 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
       sku: x.sku || null,
       tamanho_gb: x.sizeGB ?? null,
       criado_em: x.criadoEm || null,
-      custo_periodo: c ? c.custo : null,
+      custo_periodo: custoPeriodoComImposto,
       dias_observados: c ? c.dias : 0,
       custo_mensal_estimado: custoMensal,
       marcado_orfao_em: desdeReal,
@@ -10023,6 +10366,8 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
         catch (e2) { erros.push({ subscription_id: sid, erro: e2.message }); return []; }
       });
     }
+    // Imposto (Microsoft/Marketplace) já aplicado em _coletarDesperdicio, na origem — não
+    // reaplicar aqui (dobraria o multiplicador).
     const itens = listas.flat().map((x) => ({ ...x }));
 
     // Primeira detecção (1 query para todos). Se ficou >3 dias sem ser visto como órfão, o
@@ -12467,56 +12812,66 @@ app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, as
 // a Budgets API só devolve principal_id numérico nos overrides, nunca e-mail, então é
 // preciso resolver e-mail → principal_id primeiro (mesma lógica de /genie-principals, mas
 // com filtro exato, não substring — aqui queremos UM usuário, não uma lista pra escolher).
+// Função pura por trás de GET /api/databricks-coleta/genie-quota-usuario — extraída pra ser
+// reaproveitada por GET /api/public/genie-cotas (2026-09-28, visão pessoal do portal
+// público), que precisa da MESMA resolução mas nunca deve confiar num e-mail vindo de query
+// string (ali o e-mail vem do JWT autenticado via Entra ID, não de req.query).
+async function _resolverGenieQuotaUsuario(usuario, workspaceId) {
+  const cfg = await _getDbxAccountConfigRow();
+  const demo = _dbxDemoModeNeeded(cfg);
+
+  let principalId = null;
+  if (demo) {
+    const achado = _GENIE_DEMO_PRINCIPALS.user.find(p => p.nome.toLowerCase() === String(usuario).toLowerCase());
+    principalId = achado ? achado.id : null;
+  }
+
+  let budgets;
+  if (demo) {
+    const rows = await pool.query(`SELECT payload FROM databricks_genie_budgets_demo ORDER BY criado_em`);
+    budgets = rows.rows.map(r => r.payload);
+  } else {
+    const { accountId, token } = await _getDbxAccountCredentials();
+    const filterVal = String(usuario).replace(/"/g, '\\"');
+    const filter = encodeURIComponent(`userName eq "${filterVal}"`);
+    const scim = await _dbxScimFetch(accountId, token, `/scim/v2/Users?filter=${filter}&count=1`);
+    const achado = (scim.Resources || [])[0];
+    principalId = achado ? achado.id : null;
+    const data = await _dbxBudgetsFetch(accountId, token, '/budgets?include_spend_status=true');
+    budgets = (data.budgets || []).filter(b => b.resource_type === 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY');
+  }
+
+  if (!principalId) return { limite: null, acao: null, principal_encontrado: false, demo };
+
+  const wsNum = workspaceId ? Number(workspaceId) : null;
+  const aplicaveis = [];
+  for (const b of budgets) {
+    const wsFiltro = b.filter?.workspace_id?.values;
+    if (wsNum != null && Array.isArray(wsFiltro) && wsFiltro.length && !wsFiltro.includes(wsNum)) continue;
+    for (const alerta of b.alert_configurations || []) {
+      for (const ov of alerta.principal_overrides || []) {
+        if (String(ov.principal_id) === String(principalId)) {
+          const valor = parseFloat(ov.override_threshold ?? alerta.quantity_threshold);
+          if (Number.isFinite(valor)) aplicaveis.push({ valor, acao: alerta.action_configurations?.[0]?.action_type || null });
+        }
+      }
+    }
+  }
+  if (!aplicaveis.length) return { limite: null, acao: null, principal_encontrado: true, demo };
+  // Mais de uma quota aplicável: a mais restritiva (menor teto) é a que dispara primeiro —
+  // somar não faz sentido para um limite de bloqueio.
+  aplicaveis.sort((a, b) => a.valor - b.valor);
+  return { limite: aplicaveis[0].valor, acao: aplicaveis[0].acao, principal_encontrado: true, demo };
+}
+
+// 2026-09-28, pedido do usuário: trazer pro gráfico "Genie · Cota e uso do usuário"
+// (DatabricksCotasPanel.tsx) a quota que REALMENTE pode bloquear o Genie, distinta do
+// orçamento local (databricks_budgets, só alerta).
 app.get('/api/databricks-coleta/genie-quota-usuario', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { usuario, workspace_id } = req.query;
     if (!usuario) return res.status(400).json({ error: 'usuario é obrigatório' });
-    const cfg = await _getDbxAccountConfigRow();
-    const demo = _dbxDemoModeNeeded(cfg);
-
-    let principalId = null;
-    if (demo) {
-      const achado = _GENIE_DEMO_PRINCIPALS.user.find(p => p.nome.toLowerCase() === String(usuario).toLowerCase());
-      principalId = achado ? achado.id : null;
-    }
-
-    let budgets;
-    let accountId, token;
-    if (demo) {
-      const rows = await pool.query(`SELECT payload FROM databricks_genie_budgets_demo ORDER BY criado_em`);
-      budgets = rows.rows.map(r => r.payload);
-    } else {
-      ({ accountId, token } = await _getDbxAccountCredentials());
-      const filterVal = String(usuario).replace(/"/g, '\\"');
-      const filter = encodeURIComponent(`userName eq "${filterVal}"`);
-      const scim = await _dbxScimFetch(accountId, token, `/scim/v2/Users?filter=${filter}&count=1`);
-      const achado = (scim.Resources || [])[0];
-      principalId = achado ? achado.id : null;
-      const data = await _dbxBudgetsFetch(accountId, token, '/budgets?include_spend_status=true');
-      budgets = (data.budgets || []).filter(b => b.resource_type === 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY');
-    }
-
-    if (!principalId) return res.json({ limite: null, acao: null, principal_encontrado: false, demo });
-
-    const wsNum = workspace_id ? Number(workspace_id) : null;
-    const aplicaveis = [];
-    for (const b of budgets) {
-      const wsFiltro = b.filter?.workspace_id?.values;
-      if (wsNum != null && Array.isArray(wsFiltro) && wsFiltro.length && !wsFiltro.includes(wsNum)) continue;
-      for (const alerta of b.alert_configurations || []) {
-        for (const ov of alerta.principal_overrides || []) {
-          if (String(ov.principal_id) === String(principalId)) {
-            const valor = parseFloat(ov.override_threshold ?? alerta.quantity_threshold);
-            if (Number.isFinite(valor)) aplicaveis.push({ valor, acao: alerta.action_configurations?.[0]?.action_type || null });
-          }
-        }
-      }
-    }
-    if (!aplicaveis.length) return res.json({ limite: null, acao: null, principal_encontrado: true, demo });
-    // Mais de uma quota aplicável: a mais restritiva (menor teto) é a que dispara primeiro —
-    // somar não faz sentido para um limite de bloqueio.
-    aplicaveis.sort((a, b) => a.valor - b.valor);
-    res.json({ limite: aplicaveis[0].valor, acao: aplicaveis[0].acao, principal_encontrado: true, demo });
+    res.json(await _resolverGenieQuotaUsuario(usuario, workspace_id));
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -12713,6 +13068,32 @@ async function _graphGetToken(tenantId, clientId, clientSecret) {
   return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
 }
 
+// Mesmo fluxo client_credentials de _managementGetToken, mas pro recurso do Log
+// Analytics Query API (api.loganalytics.io) — usado pela feature Log Analytics FinOps
+// (2026-09-29) pra rodar KQL contra os workspaces descobertos via ARM. Exige o papel
+// "Log Analytics Reader" (ou "Monitoring Reader") concedido a esta Service Principal —
+// sem isso o token é emitido normalmente (client_credentials sempre emite), mas toda
+// query retorna 403 (verificado no momento da chamada, não aqui — mesmo caveat já
+// documentado em _graphGetToken).
+async function _logAnalyticsGetToken(tenantId, clientId, clientSecret) {
+  const resp = await _cbFetch(
+    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials', client_id: clientId,
+        client_secret: clientSecret, scope: 'https://api.loganalytics.io/.default'
+      }).toString(),
+    },
+    { timeoutMs: 30_000, countCbFailure: false }
+  );
+  if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Log Analytics falhou (${resp.status}): ${e}`); }
+  const tkData = await _safeRespJson(resp);
+  if (!tkData.access_token) throw new Error('Token Log Analytics: resposta sem access_token');
+  return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
+}
+
 // Retorna função getToken() que renova automaticamente 10 min antes do vencimento
 function _makeTokenGetter(tenantId, clientId, clientSecret) {
   let _tok = null, _exp = 0;
@@ -12724,6 +13105,20 @@ function _makeTokenGetter(tenantId, clientId, clientSecret) {
       _tok = token;
       _exp = agoraMs + expiresIn * 1000;
       _logColeta(`[Token] Renovado — motivo: ${motivo}, válido por ${Math.round(expiresIn / 60)} min`);
+    }
+    return _tok;
+  };
+}
+
+// Mesmo padrão de _makeTokenGetter, pro escopo do Log Analytics Query API.
+function _makeLogAnalyticsTokenGetter(tenantId, clientId, clientSecret) {
+  let _tok = null, _exp = 0;
+  return async function getLogAnalyticsToken(force = false) {
+    const agoraMs = Date.now();
+    if (force || !_tok || agoraMs >= _exp - 600_000) {
+      const { token, expiresIn } = await _logAnalyticsGetToken(tenantId, clientId, clientSecret);
+      _tok = token;
+      _exp = agoraMs + expiresIn * 1000;
     }
     return _tok;
   };
@@ -13085,9 +13480,13 @@ async function _getInventarioSpConfig() {
   const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
   if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
   const spCfg = spRow.rows[0];
-  const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
+  const tenantId = _safeDecrypt(spCfg.tenant_id), clientId = _safeDecrypt(spCfg.client_id), clientSecret = _safeDecrypt(spCfg.client_secret);
+  const getToken = _makeTokenGetter(tenantId, clientId, clientSecret);
+  // Log Analytics FinOps (2026-09-29): mesma SP, escopo diferente (api.loganalytics.io) —
+  // exige o papel "Log Analytics Reader" concedido à parte, ver _logAnalyticsGetToken.
+  const getLogAnalyticsToken = _makeLogAnalyticsTokenGetter(tenantId, clientId, clientSecret);
   const subs = (spCfg.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-  return { cfg, spCfg, getToken, subs };
+  return { cfg, spCfg, getToken, getLogAnalyticsToken, subs };
 }
 
 // Query genérica ao Resource Graph com paginação por $skipToken (2026-09-04). Criada em vez de
@@ -14307,10 +14706,14 @@ async function _validarColeta(histId, subIds, inicio, fim) {
     // Totais do período
     const mainQ = subsArr.length
       ? `SELECT COUNT(DISTINCT cost_date) AS dias, COUNT(DISTINCT subscription_id) AS subs,
-                COUNT(*) AS total, COALESCE(SUM(cost_in_billing_currency),0) AS custo
+                COUNT(*) AS total,
+                COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS custo_microsoft,
+                COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'), 0)                AS custo_marketplace
          FROM azure_costs WHERE subscription_id = ANY($1) AND cost_date BETWEEN $2 AND $3`
       : `SELECT COUNT(DISTINCT cost_date) AS dias, COUNT(DISTINCT subscription_id) AS subs,
-                COUNT(*) AS total, COALESCE(SUM(cost_in_billing_currency),0) AS custo
+                COUNT(*) AS total,
+                COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS custo_microsoft,
+                COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'), 0)                AS custo_marketplace
          FROM azure_costs WHERE cost_date BETWEEN $1 AND $2`;
     const mainParams = subsArr.length ? [subsArr, periodoInicio, periodoFim] : [periodoInicio, periodoFim];
     const { rows: [row] } = await pool.query(mainQ, mainParams);
@@ -14318,7 +14721,9 @@ async function _validarColeta(histId, subIds, inicio, fim) {
     const diasComDados = parseInt(row.dias  || 0);
     const subsComDados = parseInt(row.subs  || 0);
     const totalReg     = parseInt(row.total || 0);
-    const custoTotal   = parseFloat(row.custo || 0);
+    // SEM imposto, de propósito — validação de saúde de coleta precisa bater com o valor cru
+    // importado da Azure, não com o custo já ajustado pelo imposto configurável.
+    const custoTotal   = Number(row.custo_microsoft || 0) + Number(row.custo_marketplace || 0);
 
     // Dias sem dados (máx 31 para não pesar)
     let diasSemDados = [];
@@ -14595,6 +15000,1667 @@ app.get('/api/azure-coleta/agendamentos', authMiddleware, dbMiddleware, async (_
   } catch (e) { _dbErr(res, e); }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LOG ANALYTICS FINOPS (2026-09-29) — v1: descoberta de workspaces + ingestão
+// diária por tabela + motor de regras + export Excel. Reaproveita a MESMA
+// Service Principal do Inventário (_getInventarioSpConfig), só com um escopo de
+// token adicional (_logAnalyticsGetToken) — exige o papel "Log Analytics
+// Reader" concedido a essa SP, separado do acesso a Resource Graph/Cost
+// Management que ela já tem. Fora do escopo desta v1: score 0-100, os 3
+// dashboards, modelo de economia em R$, coleta 3x/dia, alertas, limiares
+// configuráveis pelo admin (ficam fixos por enquanto, ver
+// _LOG_ANALYTICS_LIMIARES) — tudo isso é v2/v3.
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _logAnalyticsTableReady = false;
+async function ensureLogAnalyticsTable() {
+  if (!pool) return;
+  if (_logAnalyticsTableReady) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_workspaces (
+      resource_id     TEXT PRIMARY KEY,
+      workspace_guid  TEXT NOT NULL,
+      subscription_id VARCHAR(200), resource_group VARCHAR(500), nome VARCHAR(500),
+      retencao_dias   INT, sku VARCHAR(100),
+      atualizado_em   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  // Daily Cap (workspaceCapping.dailyQuotaGb no ARM) — teto diário de ingestão configurado pra
+  // controlar custo. -1 (ou ausente) significa "sem limite" — guardamos como NULL pra
+  // diferenciar de "configurado em 0" (o que travaria toda ingestão, caso real de alerta).
+  await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS daily_cap_gb NUMERIC(14,4)`);
+  // Auditoria de consultas (LAQueryLogs) — ao contrário de tudo que coletamos até aqui, isso
+  // exige HABILITAR algo novo na Azure (Diagnostic Setting categoria "Audit" no próprio
+  // workspace) — nunca liga sozinho, só via botão manual (ver _habilitarAuditoriaConsultas).
+  await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS auditoria_consultas_habilitada BOOLEAN NOT NULL DEFAULT false`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_ws_guid ON log_analytics_workspaces (workspace_guid)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_ingestao_diaria (
+      workspace_guid TEXT NOT NULL, dia DATE NOT NULL, tabela VARCHAR(200) NOT NULL,
+      gb NUMERIC(14,4) NOT NULL DEFAULT 0,
+      PRIMARY KEY (workspace_guid, dia, tabela)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_recomendacoes (
+      id SERIAL PRIMARY KEY,
+      workspace_guid TEXT NOT NULL, regra VARCHAR(50) NOT NULL, severidade VARCHAR(20) NOT NULL,
+      detalhe TEXT, criado_em TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (workspace_guid, regra)
+    )
+  `);
+  // 'origem' separa quem é dono de cada recomendação: _avaliarRegrasLogAnalytics (diário) só
+  // apaga/recria as suas ('ingestao'); o fan-out de Diagnostic Settings (semanal) só mexe nas
+  // dele ('diagnostic_settings') — sem isso, a coleta diária apagaria a recomendação de fan-out
+  // todo dia, já que ela faz DELETE+INSERT completo por workspace.
+  await pool.query(`ALTER TABLE log_analytics_recomendacoes ADD COLUMN IF NOT EXISTS origem VARCHAR(30) NOT NULL DEFAULT 'ingestao'`);
+  // Config de retenção POR TABELA (ARM Tables - List) — o workspace tem uma retenção padrão,
+  // mas cada tabela pode sobrescrever isso, e é aí que custo de retenção "escondido" aparece.
+  // retencao_e_padrao=false é o sinal direto de "alguém customizou a retenção desta tabela".
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_tabelas (
+      workspace_guid TEXT NOT NULL, tabela VARCHAR(200) NOT NULL,
+      plano VARCHAR(20), retencao_dias INT, retencao_total_dias INT, retencao_arquivo_dias INT,
+      retencao_e_padrao BOOLEAN, atualizado_em TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (workspace_guid, tabela)
+    )
+  `);
+  // Quantas queries KQL rodaram em cada tabela (LAQueryLogs, só pros workspaces com auditoria
+  // habilitada — ver auditoria_consultas_habilitada). Atribuição de tabela é por TEXTO (não
+  // existe coluna oficial "tabela consultada" no LAQueryLogs) — aproximação documentada no
+  // plano, não é garantia pra queries complexas (union/múltiplos joins).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_consultas_tabela (
+      workspace_guid TEXT NOT NULL, tabela VARCHAR(200) NOT NULL,
+      consultas_30d INT NOT NULL DEFAULT 0, gb_escaneado_30d NUMERIC(14,4) NOT NULL DEFAULT 0,
+      ultima_consulta TIMESTAMPTZ, atualizado_em TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (workspace_guid, tabela)
+    )
+  `);
+  // Diagnostic Settings — "quais recursos estão coletando" via API oficial por recurso (o
+  // Resource Graph não indexa esse recurso de extensão de forma confiável em todo tenant/tipo,
+  // ver comentário de _coletarDiagnosticSettings). Etapa cara, cadência própria (não é a coleta
+  // diária) — por isso fica em tabela separada, sobrescrita por execução completa (não upsert
+  // incremental: um recurso que perdeu o Diagnostic Setting não pode "sobrar" aqui).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_diagnostic_settings (
+      id BIGSERIAL PRIMARY KEY,
+      workspace_guid TEXT NOT NULL, nome_config VARCHAR(500),
+      recurso_id TEXT NOT NULL, recurso_tipo VARCHAR(200),
+      categorias_habilitadas TEXT, categorias_desabilitadas TEXT, grupos_categoria TEXT,
+      metricas_habilitadas TEXT, metricas_desabilitadas TEXT,
+      envia_storage BOOLEAN DEFAULT false, envia_eventhub BOOLEAN DEFAULT false,
+      atualizado_em TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_diag_ws ON log_analytics_diagnostic_settings (workspace_guid)`);
+  // DCR (Data Collection Rule) — a outra via de coleta (Azure Monitor Agent: Syslog, Windows
+  // Event Log, Performance Counters, Custom Logs, extensões). 1 chamada por subscription, barato
+  // o bastante pra entrar na coleta diária normal.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_dcrs (
+      id BIGSERIAL PRIMARY KEY,
+      subscription_id VARCHAR(200), resource_group VARCHAR(500), nome VARCHAR(500),
+      workspace_guid_destino TEXT, streams TEXT, tipos_fonte TEXT, detalhe_fontes TEXT,
+      atualizado_em TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_dcr_ws ON log_analytics_dcrs (workspace_guid_destino)`);
+  // Application Insights — alavancas de custo próprias (Sampling, Daily Cap, Retenção),
+  // diferentes de Diagnostic Settings. sampling_percentage/retencao_dias/ingestion_mode/
+  // workspace_resource_id vêm do Resource Graph (barato, 1 query pra todos os componentes);
+  // daily_cap_gb vem de uma chamada por componente (currentbillingfeatures), mas como o volume
+  // é só "componentes de App Insights" (não os ~42 tipos monitoráveis), cabe na coleta diária.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_app_insights (
+      resource_id         TEXT PRIMARY KEY,
+      subscription_id     VARCHAR(200), resource_group VARCHAR(500), nome VARCHAR(500),
+      sampling_percentage NUMERIC(5,2), retencao_dias INT, ingestion_mode VARCHAR(50),
+      workspace_resource_id TEXT, daily_cap_gb NUMERIC(14,4),
+      atualizado_em TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_ai_ws ON log_analytics_app_insights (workspace_resource_id)`);
+  _logAnalyticsTableReady = true;
+}
+
+// Tipos de recurso candidatos a ter Diagnostic Setting configurado — mesma lista usada pelo
+// framework de assessment de referência (Azure_LogAnalytics_FinOps_Assessment_Framework),
+// cobrindo compute, dados, rede, integração, segurança e IA (~42 tipos). Ajustar aqui se o
+// tenant usar um tipo de recurso não coberto.
+const _LOG_ANALYTICS_TIPOS_MONITORAVEIS = [
+  'microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachinescalesets',
+  'microsoft.containerservice/managedclusters', 'microsoft.containerinstance/containergroups',
+  'microsoft.containerregistry/registries', 'microsoft.app/containerapps', 'microsoft.batch/batchaccounts',
+  'microsoft.web/sites', 'microsoft.sql/servers/databases', 'microsoft.sql/managedinstances',
+  'microsoft.dbforpostgresql/servers', 'microsoft.dbforpostgresql/flexibleservers',
+  'microsoft.dbformysql/servers', 'microsoft.dbformysql/flexibleservers', 'microsoft.documentdb/databaseaccounts',
+  'microsoft.cache/redis', 'microsoft.datafactory/factories', 'microsoft.synapse/workspaces',
+  'microsoft.kusto/clusters', 'microsoft.databricks/workspaces', 'microsoft.search/searchservices',
+  'microsoft.network/networksecuritygroups', 'microsoft.network/applicationgateways',
+  'microsoft.network/azurefirewalls', 'microsoft.network/loadbalancers', 'microsoft.network/publicipaddresses',
+  'microsoft.network/virtualnetworkgateways', 'microsoft.network/expressroutecircuits',
+  'microsoft.network/bastionhosts', 'microsoft.network/trafficmanagerprofiles', 'microsoft.network/frontdoors',
+  'microsoft.cdn/profiles', 'microsoft.network/privatednszones', 'microsoft.network/dnszones',
+  'microsoft.apimanagement/service', 'microsoft.servicebus/namespaces', 'microsoft.eventhub/namespaces',
+  'microsoft.logic/workflows', 'microsoft.automation/automationaccounts', 'microsoft.devices/iothubs',
+  'microsoft.signalrservice/signalr', 'microsoft.keyvault/vaults', 'microsoft.aad/domainservices',
+  'microsoft.recoveryservices/vaults', 'microsoft.storage/storageaccounts', 'microsoft.insights/components',
+  'microsoft.machinelearningservices/workspaces', 'microsoft.cognitiveservices/accounts',
+];
+
+// Descoberta via ARM (plano de gerência — usa o token/acesso que a SP já tem hoje, sem
+// precisar da permissão nova). Upsert em log_analytics_workspaces.
+async function _descobrirLogAnalyticsWorkspaces() {
+  await ensureLogAnalyticsTable();
+  const { getToken, subs } = await _getInventarioSpConfig();
+  const token = await getToken();
+  const todos = [];
+  await _mapLimit(subs, 4, async (sub) => {
+    const url = `https://management.azure.com/subscriptions/${sub}/providers/Microsoft.OperationalInsights/workspaces?api-version=2023-09-01`;
+    let resp;
+    try {
+      resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+    } catch (e) {
+      console.warn(`[LogAnalytics] Erro ao listar workspaces da assinatura ${sub}:`, e.message);
+      return;
+    }
+    if (!resp.ok) { console.warn(`[LogAnalytics] Assinatura ${sub} retornou ${resp.status} ao listar workspaces`); return; }
+    const data = await _safeRespJson(resp);
+    for (const ws of (data.value || [])) {
+      if (!ws.properties?.customerId) continue;
+      // dailyQuotaGb vem -1 quando "sem limite" (e não costuma vir ausente, mas o `?? null`
+      // cobre workspaces antigos/tier legado onde o campo nem existe) — guardamos -1 como NULL
+      // pra "Daily Cap" na tela virar direto "Sem limite" sem lógica extra no consumidor.
+      const dailyQuotaGb = ws.properties.workspaceCapping?.dailyQuotaGb;
+      todos.push({
+        resource_id: ws.id,
+        workspace_guid: ws.properties.customerId,
+        subscription_id: sub,
+        resource_group: String(ws.id).split('/')[4] || null,
+        nome: ws.name,
+        retencao_dias: ws.properties.retentionInDays ?? null,
+        sku: ws.properties.sku?.name ?? null,
+        daily_cap_gb: (dailyQuotaGb == null || dailyQuotaGb < 0) ? null : dailyQuotaGb,
+      });
+    }
+  });
+  if (!todos.length) return todos;
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    for (const w of todos) {
+      await c.query(
+        `INSERT INTO log_analytics_workspaces (resource_id, workspace_guid, subscription_id, resource_group, nome, retencao_dias, sku, daily_cap_gb, atualizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+         ON CONFLICT (resource_id) DO UPDATE SET
+           workspace_guid=EXCLUDED.workspace_guid, resource_group=EXCLUDED.resource_group, nome=EXCLUDED.nome,
+           retencao_dias=EXCLUDED.retencao_dias, sku=EXCLUDED.sku, daily_cap_gb=EXCLUDED.daily_cap_gb, atualizado_em=NOW()`,
+        [w.resource_id, w.workspace_guid, w.subscription_id, w.resource_group, w.nome, w.retencao_dias, w.sku, w.daily_cap_gb]
+      );
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return todos;
+}
+
+// UMA query KQL por workspace cobre as 5 regras (ingestão por tabela × dia, 30d) — ver
+// _avaliarRegrasLogAnalytics. Plano de dados — exige "Log Analytics Reader" na SP.
+async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
+  const token = await getLogAnalyticsToken();
+  const kql = `Usage | where TimeGenerated > ago(30d) | summarize GB = sum(Quantity)/1024 by DataType, bin(TimeGenerated, 1d)`;
+  const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
+  const resp = await _cbFetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: kql }),
+  }, { timeoutMs: 30_000 });
+  if (!resp.ok) {
+    const errTxt = await resp.text().catch(() => '');
+    if (resp.status === 403) {
+      throw new Error(`Sem permissão de leitura no workspace ${ws.nome} (403) — confirme o papel "Log Analytics Reader" concedido à Service Principal.`);
+    }
+    throw new Error(`Consulta KQL falhou no workspace ${ws.nome} (${resp.status}): ${errTxt.slice(0, 300)}`);
+  }
+  const data = await _safeRespJson(resp);
+  const table = data.tables?.[0];
+  if (!table || !table.rows?.length) return [];
+  const cols = table.columns.map(c => c.name);
+  const iGB = cols.indexOf('GB'), iTipo = cols.indexOf('DataType'), iDia = cols.indexOf('TimeGenerated');
+  const linhas = table.rows.map(r => ({ tabela: r[iTipo], dia: String(r[iDia]).slice(0, 10), gb: Number(r[iGB]) || 0 }));
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    for (const l of linhas) {
+      await c.query(
+        `INSERT INTO log_analytics_ingestao_diaria (workspace_guid, dia, tabela, gb)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (workspace_guid, dia, tabela) DO UPDATE SET gb = EXCLUDED.gb`,
+        [ws.workspace_guid, l.dia, l.tabela, l.gb]
+      );
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return linhas;
+}
+
+// Config de retenção por tabela — plano de gerência (ARM), MESMO token do
+// _getInventarioSpConfig usado pra descobrir os workspaces (não precisa do escopo extra
+// de Log Analytics Reader, que só serve pra Query API de ingestão). Responde diretamente
+// "quais tabelas estão pagando retenção diferente do padrão do workspace".
+async function _coletarTabelasWorkspace(ws, getToken) {
+  const token = await getToken();
+  const url = `https://management.azure.com${ws.resource_id}/tables?api-version=2023-09-01`;
+  const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+  if (!resp.ok) {
+    console.warn(`[LogAnalytics] Falha ao listar tabelas do workspace ${ws.nome} (${resp.status})`);
+    return [];
+  }
+  const data = await _safeRespJson(resp);
+  const tabelas = (data.value || []).map(t => {
+    const p = t.properties || {};
+    return {
+      tabela: t.name,
+      plano: p.plan || 'Analytics',
+      retencao_dias: p.retentionInDays ?? null,
+      retencao_total_dias: p.totalRetentionInDays ?? null,
+      retencao_arquivo_dias: p.archiveRetentionInDays ?? null,
+      retencao_e_padrao: p.retentionInDaysAsDefault !== false && p.totalRetentionInDaysAsDefault !== false,
+    };
+  });
+  if (!tabelas.length) return tabelas;
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    for (const t of tabelas) {
+      await c.query(
+        `INSERT INTO log_analytics_tabelas (workspace_guid, tabela, plano, retencao_dias, retencao_total_dias, retencao_arquivo_dias, retencao_e_padrao, atualizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+         ON CONFLICT (workspace_guid, tabela) DO UPDATE SET
+           plano=EXCLUDED.plano, retencao_dias=EXCLUDED.retencao_dias, retencao_total_dias=EXCLUDED.retencao_total_dias,
+           retencao_arquivo_dias=EXCLUDED.retencao_arquivo_dias, retencao_e_padrao=EXCLUDED.retencao_e_padrao, atualizado_em=NOW()`,
+        [ws.workspace_guid, t.tabela, t.plano, t.retencao_dias, t.retencao_total_dias, t.retencao_arquivo_dias, t.retencao_e_padrao]
+      );
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return tabelas;
+}
+
+// Habilita a auditoria de consultas (LAQueryLogs) — PRIMEIRA ação de ESCRITA na Azure em todo
+// o projeto (tudo antes disso é leitura). Nunca roda sozinho: só via botão manual, porque muda
+// configuração real do cliente e gera ingestão nova (pequena, mas real e billable). Cria um
+// Diagnostic Setting no PRÓPRIO workspace (categoria "Audit"), mandando a auditoria pra ele
+// mesmo — mesmo padrão documentado pela Microsoft ("select the workspace so that the auditing
+// data is stored in the same workspace"). Exige que a SP tenha permissão de ESCRITA
+// (Microsoft.Insights/diagnosticSettings/write) no workspace — ela só precisa de leitura pra
+// tudo mais nesta feature, então isso tem que ser concedido à parte.
+async function _habilitarAuditoriaConsultas(ws, getToken) {
+  const token = await getToken();
+  const nomeConfig = 'finops-audit-consultas';
+  const url = `https://management.azure.com${ws.resource_id}/providers/microsoft.insights/diagnosticSettings/${nomeConfig}?api-version=2021-05-01-preview`;
+  const body = {
+    properties: {
+      workspaceId: ws.resource_id, // auditoria do workspace mandada pra ele mesmo
+      logs: [{ category: 'Audit', enabled: true }],
+    },
+  };
+  const resp = await _cbFetch(url, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, { timeoutMs: 30_000 });
+  if (!resp.ok) {
+    const errTxt = await resp.text().catch(() => '');
+    const msg = resp.status === 403
+      ? `Sem permissão de escrita (403) — confirme que a Service Principal tem "Microsoft.Insights/diagnosticSettings/write" neste workspace (ela só precisa de leitura pra tudo mais).`
+      : `Falha ao habilitar auditoria (${resp.status}): ${errTxt.slice(0, 300)}`;
+    throw new Error(msg);
+  }
+  await pool.query(`UPDATE log_analytics_workspaces SET auditoria_consultas_habilitada = true WHERE workspace_guid = $1`, [ws.workspace_guid]);
+  return { ok: true };
+}
+
+// Quantas queries rodaram em cada tabela, últimos 30 dias — só pros workspaces com auditoria
+// habilitada (ver _habilitarAuditoriaConsultas). Mesma Query API/token de
+// _coletarIngestaoWorkspace, só muda a tabela-alvo (LAQueryLogs em vez de Usage).
+//
+// Atribuição de tabela por TEXTO: LAQueryLogs não tem coluna "tabela consultada" (só
+// QueryText cru e RequestContext com workspaces/recursos, não tabelas) — pegamos o primeiro
+// identificador da query e só contamos se ele bater com uma tabela já conhecida deste
+// workspace (evita contar qualquer palavra solta como "tabela"). Aproximação: queries simples
+// (`Tabela | where ...`) acertam, queries complexas (union, múltiplos joins) podem não ser
+// atribuídas a nenhuma tabela — fica de fora da contagem em vez de adivinhar errado.
+async function _coletarConsultasPorTabela(ws, getLogAnalyticsToken) {
+  const tabelasConhecidas = new Set(
+    (await pool.query(`SELECT tabela FROM log_analytics_tabelas WHERE workspace_guid = $1`, [ws.workspace_guid])).rows.map(r => r.tabela)
+  );
+  if (!tabelasConhecidas.size) return [];
+
+  const token = await getLogAnalyticsToken();
+  const kql = `LAQueryLogs | where TimeGenerated > ago(30d) | project QueryText, TimeGenerated, ScannedGB`;
+  const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
+  const resp = await _cbFetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: kql }),
+  }, { timeoutMs: 30_000 });
+  if (!resp.ok) {
+    console.warn(`[LogAnalytics] Falha ao consultar LAQueryLogs do workspace ${ws.nome} (${resp.status})`);
+    return [];
+  }
+  const data = await _safeRespJson(resp);
+  const table = data.tables?.[0];
+  if (!table || !table.rows?.length) return [];
+  const cols = table.columns.map(c => c.name);
+  const iQuery = cols.indexOf('QueryText'), iTime = cols.indexOf('TimeGenerated'), iGB = cols.indexOf('ScannedGB');
+
+  const agregados = new Map(); // tabela -> { consultas, gb, ultima }
+  for (const row of table.rows) {
+    const texto = String(row[iQuery] || '').trim();
+    const primeiroToken = (texto.match(/^[A-Za-z_][A-Za-z0-9_]*/) || [])[0];
+    if (!primeiroToken || !tabelasConhecidas.has(primeiroToken)) continue; // não atribuível, fica de fora
+    const ag = agregados.get(primeiroToken) || { consultas: 0, gb: 0, ultima: null };
+    ag.consultas++;
+    ag.gb += Number(row[iGB]) || 0;
+    const dataConsulta = row[iTime];
+    if (!ag.ultima || dataConsulta > ag.ultima) ag.ultima = dataConsulta;
+    agregados.set(primeiroToken, ag);
+  }
+
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(`DELETE FROM log_analytics_consultas_tabela WHERE workspace_guid = $1`, [ws.workspace_guid]);
+    for (const [tabela, ag] of agregados.entries()) {
+      await c.query(
+        `INSERT INTO log_analytics_consultas_tabela (workspace_guid, tabela, consultas_30d, gb_escaneado_30d, ultima_consulta, atualizado_em)
+         VALUES ($1,$2,$3,$4,$5,NOW())`,
+        [ws.workspace_guid, tabela, ag.consultas, ag.gb, ag.ultima]
+      );
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return Array.from(agregados.entries());
+}
+
+// Data Collection Rules (Azure Monitor Agent — Syslog, Windows Event Log, Performance
+// Counters, Custom Logs, extensões) — 1 chamada por subscription, barato o bastante pra
+// entrar na coleta diária normal (ao contrário de Diagnostic Settings, que é por recurso).
+// Só grava linhas cujo destino bate com um workspace já inventariado (uma DCR pode ter mais
+// de um destino Log Analytics — 1 linha por destino que interessa).
+async function _coletarDCRs(getToken, workspaceByResourceId) {
+  const { subs } = await _getInventarioSpConfig();
+  const token = await getToken();
+  const todasLinhas = [];
+  await _mapLimit(subs, 4, async (sub) => {
+    const url = `https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Insights/dataCollectionRules?api-version=2023-03-11`;
+    let resp;
+    try {
+      resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
+    } catch (e) {
+      console.warn(`[LogAnalytics] Erro ao listar DCRs da assinatura ${sub}:`, e.message);
+      return;
+    }
+    if (!resp.ok) { console.warn(`[LogAnalytics] Assinatura ${sub} retornou ${resp.status} ao listar DCRs`); return; }
+    const data = await _safeRespJson(resp);
+    for (const dcr of (data.value || [])) {
+      const p = dcr.properties || {};
+      const destinosLA = p.destinations?.logAnalytics || [];
+      const streams = Array.from(new Set((p.dataFlows || []).flatMap(f => f.streams || []))).sort();
+      const { tiposFonte, detalheFontes } = _descreverFontesDcr(p.dataSources);
+      for (const dest of destinosLA) {
+        const wsGuid = workspaceByResourceId.get(String(dest.workspaceResourceId || '').toLowerCase());
+        if (!wsGuid) continue; // destino fora do inventário de workspaces conhecidos
+        todasLinhas.push({
+          subscription_id: sub,
+          resource_group: String(dcr.id).split('/')[4] || null,
+          nome: dcr.name,
+          workspace_guid_destino: wsGuid,
+          streams: streams.join('; '),
+          tipos_fonte: tiposFonte,
+          detalhe_fontes: detalheFontes,
+        });
+      }
+    }
+  });
+  if (todasLinhas.length) {
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query(`DELETE FROM log_analytics_dcrs WHERE subscription_id = ANY($1)`, [subs]);
+      for (const l of todasLinhas) {
+        await c.query(
+          `INSERT INTO log_analytics_dcrs (subscription_id, resource_group, nome, workspace_guid_destino, streams, tipos_fonte, detalhe_fontes, atualizado_em)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+          [l.subscription_id, l.resource_group, l.nome, l.workspace_guid_destino, l.streams, l.tipos_fonte, l.detalhe_fontes]
+        );
+      }
+      await c.query('COMMIT');
+    } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  }
+  return todasLinhas;
+}
+
+// Decompõe dcr.properties.dataSources (equivalente, pra DCR, das "categorias habilitadas" de
+// um Diagnostic Setting) num resumo legível por tipo de fonte de coleta.
+function _descreverFontesDcr(dataSources) {
+  if (!dataSources) return { tiposFonte: null, detalheFontes: null };
+  const tipos = [];
+  const detalhes = [];
+  if (dataSources.performanceCounters?.length) {
+    tipos.push('PerformanceCounters');
+    const specs = Array.from(new Set(dataSources.performanceCounters.flatMap(d => d.counterSpecifiers || []))).slice(0, 15);
+    detalhes.push('Perf: ' + specs.join(', '));
+  }
+  if (dataSources.windowsEventLogs?.length) {
+    tipos.push('WindowsEventLogs');
+    const q = Array.from(new Set(dataSources.windowsEventLogs.flatMap(d => d.xPathQueries || []))).slice(0, 10);
+    detalhes.push('WinEvent: ' + q.join(', '));
+  }
+  if (dataSources.syslog?.length) {
+    tipos.push('Syslog');
+    const facilities = Array.from(new Set(dataSources.syslog.flatMap(d => d.facilityNames || [])));
+    detalhes.push('Syslog: ' + facilities.join(', '));
+  }
+  if (dataSources.extensions?.length) {
+    tipos.push('Extensions');
+    const nomes = Array.from(new Set(dataSources.extensions.map(d => d.extensionName).filter(Boolean)));
+    detalhes.push('Extensions: ' + nomes.join(', '));
+  }
+  if (dataSources.logFiles?.length) {
+    tipos.push('LogFiles');
+    const patterns = Array.from(new Set(dataSources.logFiles.flatMap(d => d.filePatterns || []))).slice(0, 10);
+    detalhes.push('LogFiles: ' + patterns.join(', '));
+  }
+  if (dataSources.iisLogs?.length) tipos.push('IISLogs');
+  if (dataSources.prometheusForwarder?.length) tipos.push('PrometheusMetrics');
+  return { tiposFonte: tipos.join('; ') || null, detalheFontes: detalhes.join(' | ') || null };
+}
+
+// Application Insights — alavancas de custo próprias (Sampling, Daily Cap, Retenção),
+// diferentes de Diagnostic Settings/DCR. Duas chamadas ARM read-only, sem permissão nova:
+// (1) Resource Graph indexa `properties` do componente (SamplingPercentage, RetentionInDays,
+// IngestionMode, WorkspaceResourceId) — UMA query cobre todos os componentes de todas as
+// subscriptions, bem mais barato que Diagnostic Settings (que o Resource Graph não indexa).
+// (2) Daily Cap (`currentbillingfeatures`) é um sub-endpoint fora do Resource Graph — precisa
+// 1 chamada por componente, mas o volume aqui é só "componentes de App Insights", não os ~42
+// tipos monitoráveis de Diagnostic Settings, então cabe na coleta diária normal (sem cadência
+// semanal separada). `workspace_resource_id`, quando presente, é o vínculo direto com
+// log_analytics_workspaces — App Insights "workspace-based" fatura através do workspace.
+async function _coletarAppInsightsTudo() {
+  await ensureLogAnalyticsTable();
+  const { getToken, subs } = await _getInventarioSpConfig();
+  const token = await getToken();
+  const kql = `resources | where type == 'microsoft.insights/components' | project id, name, resourceGroup, subscriptionId, properties`;
+  const componentes = await _resourceGraphQuery(token, subs, kql);
+  if (!componentes.length) return { ok: true, componentes: 0 };
+
+  const linhas = componentes.map(c => {
+    const p = c.properties || {};
+    return {
+      resource_id: c.id,
+      subscription_id: c.subscriptionId,
+      resource_group: c.resourceGroup,
+      nome: c.name,
+      sampling_percentage: p.SamplingPercentage ?? null,
+      retencao_dias: p.RetentionInDays ?? null,
+      ingestion_mode: p.IngestionMode ?? null,
+      workspace_resource_id: p.WorkspaceResourceId ?? null,
+    };
+  });
+
+  // Daily Cap — 1 chamada por componente, em paralelo.
+  await _mapLimit(linhas, 8, async (l) => {
+    const url = `https://management.azure.com${l.resource_id}/currentbillingfeatures?api-version=2015-05-01`;
+    try {
+      const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 20_000 });
+      if (!resp.ok) return;
+      const data = await _safeRespJson(resp);
+      const cap = data.DataVolumeCap?.Cap;
+      l.daily_cap_gb = (cap == null || cap < 0) ? null : cap;
+    } catch (e) {
+      console.warn(`[LogAnalytics] Falha ao buscar Daily Cap de App Insights ${l.nome}:`, e.message);
+    }
+  });
+
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    for (const l of linhas) {
+      await c.query(
+        `INSERT INTO log_analytics_app_insights
+           (resource_id, subscription_id, resource_group, nome, sampling_percentage, retencao_dias,
+            ingestion_mode, workspace_resource_id, daily_cap_gb, atualizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+         ON CONFLICT (resource_id) DO UPDATE SET
+           subscription_id=EXCLUDED.subscription_id, resource_group=EXCLUDED.resource_group, nome=EXCLUDED.nome,
+           sampling_percentage=EXCLUDED.sampling_percentage, retencao_dias=EXCLUDED.retencao_dias,
+           ingestion_mode=EXCLUDED.ingestion_mode, workspace_resource_id=EXCLUDED.workspace_resource_id,
+           daily_cap_gb=EXCLUDED.daily_cap_gb, atualizado_em=NOW()`,
+        [l.resource_id, l.subscription_id, l.resource_group, l.nome, l.sampling_percentage, l.retencao_dias,
+          l.ingestion_mode, l.workspace_resource_id, l.daily_cap_gb ?? null]
+      );
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return { ok: true, componentes: linhas.length };
+}
+
+// Diagnostic Settings — "quais recursos estão coletando" e "quais categorias de log estão
+// habilitadas". Etapa CARA: o Resource Graph não indexa de forma confiável o recurso de
+// extensão `microsoft.insights/diagnosticsettings` (constatado em produção neste tenant — um
+// Diagnostic Setting ativo e visível no Portal, num Azure Firewall, não aparecia via Resource
+// Graph). A API oficial usada pelo próprio Portal é `diagnosticSettings.list` POR RECURSO —
+// então usamos o Resource Graph só pra ENUMERAR candidatos (rápido, tabela `resources` é
+// confiável) e chamamos a API oficial recurso a recurso, em paralelo. Por isso cadência
+// própria (semanal + botão manual), não entra no loop diário de 24h da coleta principal.
+let _logAnalyticsDiagEmExecucao = false;
+async function _coletarDiagnosticSettingsTudo() {
+  if (_logAnalyticsDiagEmExecucao) return { ok: false, motivo: 'coleta de Diagnostic Settings já em execução' };
+  _logAnalyticsDiagEmExecucao = true;
+  const t0 = Date.now();
+  try {
+    await ensureLogAnalyticsTable();
+    const { getToken, subs } = await _getInventarioSpConfig();
+    const wsRows = (await pool.query(`SELECT resource_id, workspace_guid FROM log_analytics_workspaces`)).rows;
+    if (!wsRows.length) return { ok: false, motivo: 'Nenhum workspace inventariado ainda — rode a coleta principal antes' };
+    const workspaceByResourceId = new Map(wsRows.map(w => [String(w.resource_id).toLowerCase(), w.workspace_guid]));
+
+    const token = await getToken();
+    const tiposClause = _LOG_ANALYTICS_TIPOS_MONITORAVEIS.map(t => `'${t}'`).join(', ');
+    const kql = `resources | where type in (${tiposClause}) | project id, type, subscriptionId`;
+    const candidatos = await _resourceGraphQuery(token, subs, kql);
+    console.log(`[LogAnalytics] Diagnostic Settings: ${candidatos.length} recurso(s) candidato(s) de ${_LOG_ANALYTICS_TIPOS_MONITORAVEIS.length} tipo(s) monitorados.`);
+
+    const linhas = [];
+    let checados = 0, naoEncontrados = 0, outrasFalhas = 0;
+    await _mapLimit(candidatos, 8, async (recurso) => {
+      const url = `https://management.azure.com${recurso.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`;
+      let resp;
+      try {
+        resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 20_000 });
+      } catch (e) { outrasFalhas++; return; }
+      checados++;
+      if (resp.status === 404) { naoEncontrados++; return; } // recurso efêmero (ex.: VM de cluster auto-scaling), já não existe
+      if (!resp.ok) { outrasFalhas++; return; }
+      const data = await _safeRespJson(resp);
+      for (const setting of (data.value || [])) {
+        const p = setting.properties || {};
+        const wsGuid = workspaceByResourceId.get(String(p.workspaceId || '').toLowerCase());
+        if (!wsGuid) continue; // não aponta pra um workspace do nosso inventário
+        const logsCat = _categoriasDiagnostic(p.logs);
+        const metricsCat = _categoriasDiagnostic(p.metrics);
+        linhas.push({
+          workspace_guid: wsGuid,
+          nome_config: setting.name,
+          recurso_id: recurso.id,
+          recurso_tipo: recurso.type,
+          categorias_habilitadas: logsCat.habilitadas,
+          categorias_desabilitadas: logsCat.desabilitadas,
+          grupos_categoria: logsCat.grupos,
+          metricas_habilitadas: metricsCat.habilitadas,
+          metricas_desabilitadas: metricsCat.desabilitadas,
+          envia_storage: !!p.storageAccountId,
+          envia_eventhub: !!p.eventHubAuthorizationRuleId,
+        });
+      }
+    });
+
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query(`DELETE FROM log_analytics_diagnostic_settings`);
+      for (const l of linhas) {
+        await c.query(
+          `INSERT INTO log_analytics_diagnostic_settings
+             (workspace_guid, nome_config, recurso_id, recurso_tipo, categorias_habilitadas, categorias_desabilitadas,
+              grupos_categoria, metricas_habilitadas, metricas_desabilitadas, envia_storage, envia_eventhub, atualizado_em)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`,
+          [l.workspace_guid, l.nome_config, l.recurso_id, l.recurso_tipo, l.categorias_habilitadas, l.categorias_desabilitadas,
+            l.grupos_categoria, l.metricas_habilitadas, l.metricas_desabilitadas, l.envia_storage, l.envia_eventhub]
+        );
+      }
+      await c.query('COMMIT');
+    } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+
+    let fanout = 0;
+    try { fanout = await _avaliarFanoutDiagnosticSettings(); }
+    catch (e) { console.warn('[LogAnalytics] Falha ao avaliar fan-out de Diagnostic Settings:', e.message); }
+
+    console.log(`[LogAnalytics] Diagnostic Settings: ${checados} recurso(s) consultado(s) (${naoEncontrados} não encontrados, ${outrasFalhas} outras falhas), ${linhas.length} configuração(ões) casada(s), ${fanout} recurso(s) com fan-out em ${Math.round((Date.now() - t0) / 1000)}s.`);
+    return { ok: true, candidatos: candidatos.length, checados, configuracoes: linhas.length, fanout };
+  } catch (e) {
+    console.warn('[LogAnalytics] Falha geral na coleta de Diagnostic Settings:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _logAnalyticsDiagEmExecucao = false;
+  }
+}
+
+function _categoriasDiagnostic(lista) {
+  if (!lista || !lista.length) return { habilitadas: null, desabilitadas: null, grupos: null };
+  const habilitadas = new Set(), desabilitadas = new Set(), grupos = new Set();
+  for (const item of lista) {
+    const label = item.category || item.categoryGroup || 'N/A';
+    if (item.categoryGroup) grupos.add(item.categoryGroup);
+    (item.enabled ? habilitadas : desabilitadas).add(label);
+  }
+  return {
+    habilitadas: habilitadas.size ? Array.from(habilitadas).sort().join('; ') : null,
+    desabilitadas: desabilitadas.size ? Array.from(desabilitadas).sort().join('; ') : null,
+    grupos: grupos.size ? Array.from(grupos).sort().join('; ') : null,
+  };
+}
+
+// Fan-out: o MESMO recurso (ex.: um Firewall) com Diagnostic Settings mandando log pra MAIS DE
+// UM workspace diferente — cada envio é cobrado como ingestão nova no workspace de destino, ou
+// seja, o mesmo dado é pago em dobro (ou mais). Às vezes é intencional (segregação prod/dev,
+// time de segurança com workspace próprio), mas é raro o suficiente pra merecer confirmação.
+// Roda 1x por coleta de Diagnostic Settings (não é por workspace — é por RECURSO, cruzando os
+// workspaces), por isso recalcula tudo e usa origem='diagnostic_settings' (não mexe nas
+// recomendações 'ingestao' do loop diário, ver coluna `origem`).
+async function _avaliarFanoutDiagnosticSettings() {
+  const r = await pool.query(`
+    SELECT d.recurso_id, d.recurso_tipo,
+           array_agg(DISTINCT w.nome ORDER BY w.nome) AS workspaces,
+           array_agg(DISTINCT d.workspace_guid) AS workspace_guids
+    FROM log_analytics_diagnostic_settings d
+    JOIN log_analytics_workspaces w ON w.workspace_guid = d.workspace_guid
+    GROUP BY d.recurso_id, d.recurso_tipo
+    HAVING COUNT(DISTINCT d.workspace_guid) > 1
+  `);
+
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(`DELETE FROM log_analytics_recomendacoes WHERE origem = 'diagnostic_settings'`);
+    for (const row of r.rows) {
+      const nomeRecurso = String(row.recurso_id).split('/').pop();
+      const regra = ('fanout_' + nomeRecurso).slice(0, 50);
+      const detalhe = `Recurso "${nomeRecurso}" (${row.recurso_tipo}) tem Diagnostic Settings mandando dado pra ${row.workspace_guids.length} workspaces diferentes: ${row.workspaces.join(', ')}. Cada destino é ingestão paga separadamente — confirme se é intencional (ex.: segregação por time/ambiente) ou se há um Diagnostic Setting duplicado pra desligar.`;
+      for (const wsGuid of row.workspace_guids) {
+        await c.query(
+          `INSERT INTO log_analytics_recomendacoes (workspace_guid, regra, severidade, detalhe, origem)
+           VALUES ($1,$2,'atencao',$3,'diagnostic_settings')
+           ON CONFLICT (workspace_guid, regra) DO UPDATE SET detalhe = EXCLUDED.detalhe, criado_em = NOW()`,
+          [wsGuid, regra, detalhe]
+        );
+      }
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return r.rows.length;
+}
+
+// Cadência própria (semanal) — separada do loop diário de 24h da coleta principal, porque é
+// uma etapa muito mais cara (1 chamada de API por recurso candidato do tenant inteiro).
+let _logAnalyticsDiagTimer = null;
+function _iniciarLogAnalyticsDiagAgendador() {
+  if (_logAnalyticsDiagTimer) return;
+  setTimeout(() => { _coletarDiagnosticSettingsTudo().catch(() => {}); }, 600_000);
+  _logAnalyticsDiagTimer = setInterval(() => {
+    _coletarDiagnosticSettingsTudo().catch(() => {});
+  }, 7 * 24 * 60 * 60 * 1000);
+}
+
+// Limiares fixos na v1 (tornar configurável pelo admin fica pra v2, junto do motor de
+// score — mesmo formato do split Microsoft/Marketplace de imposto, quando chegar a hora).
+const _LOG_ANALYTICS_LIMIARES = {
+  appInsightsPct: 30, retencaoDias: 90, diagnosticsPct: 40, containerLogPct: 30, crescimentoPct: 20,
+};
+const _LOG_ANALYTICS_APP_INSIGHTS_TABELAS = ['AppTraces', 'AppRequests', 'AppDependencies', 'AppExceptions', 'AppPageViews', 'AppEvents'];
+
+async function _avaliarRegrasLogAnalytics(ws) {
+  const r = await pool.query(
+    `SELECT dia, tabela, gb FROM log_analytics_ingestao_diaria WHERE workspace_guid = $1 ORDER BY dia`,
+    [ws.workspace_guid]
+  );
+  const linhas = r.rows;
+  const totalGeral = linhas.reduce((a, x) => a + Number(x.gb), 0);
+  const porTabela = {};
+  for (const l of linhas) porTabela[l.tabela] = (porTabela[l.tabela] || 0) + Number(l.gb);
+  const pctTabelas = (nomes) => totalGeral > 0
+    ? (Object.entries(porTabela).filter(([t]) => nomes.includes(t)).reduce((a, [, v]) => a + v, 0) / totalGeral) * 100
+    : 0;
+
+  const recos = [];
+  const appInsightsPct = pctTabelas(_LOG_ANALYTICS_APP_INSIGHTS_TABELAS);
+  if (appInsightsPct > _LOG_ANALYTICS_LIMIARES.appInsightsPct) {
+    recos.push({ regra: 'app_insights_alto', severidade: 'atencao',
+      detalhe: `Application Insights representa ${appInsightsPct.toFixed(1)}% da ingestão dos últimos 30 dias. Considere reduzir logs de nível Information, mantendo Warning/Error/Critical.` });
+  }
+  if (ws.retencao_dias != null && ws.retencao_dias > _LOG_ANALYTICS_LIMIARES.retencaoDias) {
+    recos.push({ regra: 'retencao_alta', severidade: 'atencao',
+      detalhe: `Retenção configurada em ${ws.retencao_dias} dias. Considere mover dados frios para a camada Archive.` });
+  }
+  const diagPct = pctTabelas(['AzureDiagnostics']);
+  if (diagPct > _LOG_ANALYTICS_LIMIARES.diagnosticsPct) {
+    recos.push({ regra: 'diagnostics_alto', severidade: 'atencao',
+      detalhe: `AzureDiagnostics representa ${diagPct.toFixed(1)}% da ingestão. Revise os Diagnostic Settings vinculados a este workspace.` });
+  }
+  const containerPct = pctTabelas(['ContainerLogV2']);
+  if (containerPct > _LOG_ANALYTICS_LIMIARES.containerLogPct) {
+    recos.push({ regra: 'aks_log_alto', severidade: 'atencao',
+      detalhe: `ContainerLogV2 (AKS) representa ${containerPct.toFixed(1)}% da ingestão. Considere reduzir a verbosidade de log dos containers.` });
+  }
+  const porDia = {};
+  for (const l of linhas) porDia[l.dia] = (porDia[l.dia] || 0) + Number(l.gb);
+  const dias = Object.keys(porDia).sort();
+  if (dias.length >= 2) {
+    const ontem = porDia[dias[dias.length - 2]], hoje = porDia[dias[dias.length - 1]];
+    const crescimentoPct = ontem > 0 ? ((hoje - ontem) / ontem) * 100 : 0;
+    if (crescimentoPct > _LOG_ANALYTICS_LIMIARES.crescimentoPct) {
+      recos.push({ regra: 'crescimento_anomalo', severidade: 'critico',
+        detalhe: `Ingestão cresceu ${crescimentoPct.toFixed(1)}% de um dia para o outro (${dias[dias.length - 2]} → ${dias[dias.length - 1]}).` });
+    }
+  }
+
+  // Regras 6 e 7 usam a config real por tabela (ARM), coletada em _coletarTabelasWorkspace —
+  // não fazem sentido sem isso, então saem em silêncio se a tabela ainda não foi populada.
+  const rTabelas = await pool.query(
+    `SELECT tabela, plano, retencao_total_dias, retencao_e_padrao FROM log_analytics_tabelas WHERE workspace_guid = $1`,
+    [ws.workspace_guid]
+  );
+  // Fase 4 do plano de Auditoria de Consultas: quando o workspace tem a auditoria habilitada
+  // (_coletarConsultasPorTabela já rodou antes desta função, ver _coletarLogAnalyticsTudo),
+  // usa a frequência real de consultas pra refinar a confiança da regra de Basic — sem isso,
+  // ela só enxerga volume de ingestão, que sozinho não diz se a tabela é realmente usada.
+  const rConsultas = await pool.query(
+    `SELECT tabela, consultas_30d FROM log_analytics_consultas_tabela WHERE workspace_guid = $1`,
+    [ws.workspace_guid]
+  );
+  const temAuditoria = rConsultas.rows.length > 0;
+  const consultasPorTabela = {};
+  for (const c of rConsultas.rows) consultasPorTabela[c.tabela] = c.consultas_30d;
+
+  for (const t of rTabelas.rows) {
+    const gbTabela = porTabela[t.tabela] || 0;
+    const pctTabela = totalGeral > 0 ? (gbTabela / totalGeral) * 100 : 0;
+    if (t.plano === 'Analytics' && pctTabela > 10 && gbTabela > 0) {
+      const consultas = consultasPorTabela[t.tabela] ?? null;
+      // Consultada com frequência: Basic cobra por GB escaneado em query, então migrar pode
+      // sair mais caro do que continuar em Analytics — suprime a recomendação neste caso.
+      const consultadaComFrequencia = temAuditoria && consultas != null && consultas > 5;
+      if (!consultadaComFrequencia) {
+        const semNenhumaConsulta = temAuditoria && (consultas == null || consultas === 0);
+        recos.push({ regra: ('candidata_basic_' + t.tabela).slice(0, 50), severidade: semNenhumaConsulta ? 'critico' : 'atencao',
+          detalhe: semNenhumaConsulta
+            ? `Tabela "${t.tabela}" está no plano Analytics, representa ${pctTabela.toFixed(1)}% da ingestão e NÃO teve nenhuma consulta nos últimos 30 dias (auditoria de consultas habilitada). Forte candidata a mover para o plano Basic.`
+            : `Tabela "${t.tabela}" está no plano Analytics e representa ${pctTabela.toFixed(1)}% da ingestão. Se não precisa de alertas nem de queries frequentes, considere mover para o plano Basic (ingestão bem mais barata, cobra por GB escaneado em consulta).` });
+      }
+    }
+    if (t.retencao_e_padrao === false && t.retencao_total_dias != null && t.retencao_total_dias > 31) {
+      recos.push({ regra: ('retencao_custom_' + t.tabela).slice(0, 50), severidade: 'atencao',
+        detalhe: `Tabela "${t.tabela}" tem retenção customizada de ${t.retencao_total_dias} dias (acima do padrão do workspace). Confirme se esse prazo é realmente necessário — reduzir a retenção corta o custo de armazenamento dessa tabela.` });
+    }
+  }
+
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(`DELETE FROM log_analytics_recomendacoes WHERE workspace_guid = $1 AND origem = 'ingestao'`, [ws.workspace_guid]);
+    for (const rec of recos) {
+      await c.query(
+        `INSERT INTO log_analytics_recomendacoes (workspace_guid, regra, severidade, detalhe, origem) VALUES ($1,$2,$3,$4,'ingestao')`,
+        [ws.workspace_guid, rec.regra, rec.severidade, rec.detalhe]
+      );
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return recos;
+}
+
+let _logAnalyticsColetaEmExecucao = false;
+async function _coletarLogAnalyticsTudo(origem = 'agendado') {
+  if (_logAnalyticsColetaEmExecucao) return { ok: false, motivo: 'coleta já em execução' };
+  _logAnalyticsColetaEmExecucao = true;
+  const t0 = Date.now();
+  try {
+    await ensureLogAnalyticsTable();
+    const workspaces = await _descobrirLogAnalyticsWorkspaces();
+    const { getToken, getLogAnalyticsToken } = await _getInventarioSpConfig();
+    // `workspaces` vem fresco do ARM (_descobrirLogAnalyticsWorkspaces), não tem o flag que só
+    // existe no nosso banco (setado por _habilitarAuditoriaConsultas) — busca à parte.
+    const comAuditoria = new Set(
+      (await pool.query(`SELECT workspace_guid FROM log_analytics_workspaces WHERE auditoria_consultas_habilitada = true`)).rows.map(r => r.workspace_guid)
+    );
+    const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
+      await _coletarIngestaoWorkspace(ws, getLogAnalyticsToken);
+      await _coletarTabelasWorkspace(ws, getToken);
+      if (comAuditoria.has(ws.workspace_guid)) {
+        try { await _coletarConsultasPorTabela(ws, getLogAnalyticsToken); }
+        catch (e) { console.warn(`[LogAnalytics] Falha ao coletar LAQueryLogs de ${ws.nome}:`, e.message); }
+      }
+      return _avaliarRegrasLogAnalytics(ws);
+    });
+    // DCR é barato (1 chamada por subscription, não por recurso) — entra na coleta diária.
+    // Diagnostic Settings NÃO entra aqui (etapa cara, 1 chamada por recurso do tenant inteiro)
+    // — tem cadência própria, ver _iniciarLogAnalyticsDiagAgendador.
+    try {
+      const workspaceByResourceId = new Map(workspaces.map(w => [String(w.resource_id).toLowerCase(), w.workspace_guid]));
+      await _coletarDCRs(getToken, workspaceByResourceId);
+    } catch (e) {
+      console.warn('[LogAnalytics] Falha ao coletar DCRs:', e.message);
+    }
+    // Application Insights também é barato (1 Resource Graph query + 1 chamada por componente,
+    // não por tipo monitorável) — entra na coleta diária, igual DCR.
+    try {
+      await _coletarAppInsightsTudo();
+    } catch (e) {
+      console.warn('[LogAnalytics] Falha ao coletar Application Insights:', e.message);
+    }
+    const falhas = resultados.filter(r => r.status === 'rejected');
+    console.log(`[LogAnalytics] ${origem}: ${workspaces.length} workspace(s), ${falhas.length} falha(s) em ${Math.round((Date.now() - t0) / 1000)}s`);
+    if (falhas.length) console.warn('[LogAnalytics] Primeira falha:', falhas[0].reason?.message);
+    return { ok: true, workspaces: workspaces.length, falhas: falhas.length };
+  } catch (e) {
+    console.warn('[LogAnalytics] Falha geral na coleta:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _logAnalyticsColetaEmExecucao = false;
+  }
+}
+
+// 1x/dia — v1 não precisa de 3x/dia (isso é v3). Delay de boot próprio, escalonado dos
+// outros scans pesados (mesmo espírito de _iniciarRecursoTagsCache).
+let _logAnalyticsTimer = null;
+function _iniciarLogAnalyticsAgendador() {
+  if (_logAnalyticsTimer) return;
+  setTimeout(() => { _coletarLogAnalyticsTudo('startup').catch(() => {}); }, 240_000);
+  _logAnalyticsTimer = setInterval(() => {
+    _coletarLogAnalyticsTudo('agendado').catch(() => {});
+  }, 24 * 60 * 60 * 1000);
+}
+
+// Custo real (não estimado) vem de `azure_costs`, já coletado todo dia pela Coleta Azure
+// existente (Cost Management) pra toda a assinatura — um workspace de Log Analytics é só
+// mais um resource_id do ARM, então basta o JOIN por resource_id, sem coleta nova nem
+// permissão nova (mesmo padrão de correlação em leitura usado no Inventário/Recursos
+// Órfãos). O bucket ingestão×retenção é por padrão de texto no meter_name porque o nome
+// exato do meter varia entre "Log Analytics", "Azure Monitor" e "Insight and Analytics"
+// (tiers legados) — ver MODULES/04-AZURE-API para o desenho geral de azure_costs.
+//
+// Janela de 30 dias corridos, NÃO "mês corrente" (2026-10-01): a importação de Cost
+// Management tem atraso de publicação do próprio Azure, e nesta base real chegou a ficar
+// 9+ dias sem dado novo — com "mês corrente" isso dava custo zerado pra TODO workspace nos
+// primeiros dias de cada mês (e sempre que a coleta atrasasse), parecendo bug. Últimos 30
+// dias é uma janela móvel que sempre tem alguma sobreposição com o dado mais recente
+// disponível, mesmo com esse atraso. Os nomes das colunas finais (`custo_mes_*`) ficaram
+// mantidos por compatibilidade com o resto do código — o rótulo exibido na UI/Excel/Dashboard
+// é que diz "últimos 30 dias".
+//
+// Vem BRUTO, separado por publisher_type (Microsoft × Marketplace) — não dá pra aplicar o
+// imposto configurável em Configurações (`_getImpostoConfig`/`_comImpostoSplit`, mesma lógica
+// já usada em Inventário/Alocação/Custo por Recurso) direto em SQL porque essa config é lida
+// de forma assíncrona do `portal_config`. Cada consumidor desta constante DEVE passar as linhas
+// por `_aplicarImpostoLogAnalytics(row, impostoCfg)` antes de expor `custo_mes_*` ao cliente —
+// sem isso, o custo mostrado fica "cru", inconsistente com o resto do app.
+const _LOG_ANALYTICS_CUSTO_SQL = `
+  COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+              AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
+              AND ac.meter_name NOT ILIKE '%retention%' AND ac.meter_name NOT ILIKE '%retenção%'), 0) AS _la_ing_ms,
+  COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+              AND ac.publisher_type = 'Marketplace'
+              AND ac.meter_name NOT ILIKE '%retention%' AND ac.meter_name NOT ILIKE '%retenção%'), 0) AS _la_ing_mp,
+  COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+              AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
+              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_ms,
+  COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+              AND ac.publisher_type = 'Marketplace'
+              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_mp
+`;
+
+function _aplicarImpostoLogAnalytics(row, impostoCfg) {
+  const custo_mes_ingestao = _comImpostoSplit(row._la_ing_ms, row._la_ing_mp, impostoCfg);
+  const custo_mes_retencao = _comImpostoSplit(row._la_ret_ms, row._la_ret_mp, impostoCfg);
+  delete row._la_ing_ms; delete row._la_ing_mp; delete row._la_ret_ms; delete row._la_ret_mp;
+  return { ...row, custo_mes_ingestao, custo_mes_retencao, custo_mes_total: custo_mes_ingestao + custo_mes_retencao };
+}
+
+app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureLogAnalyticsTable();
+    const impostoCfg = await _getImpostoConfig();
+    // JOINs pré-agregados (1 scan cada), não sub-select correlacionado por workspace — com
+    // 100+ workspaces isso era 300+ execuções de subquery só pra montar essa lista.
+    const r = await pool.query(`
+      SELECT w.*,
+        COALESCE(ing.gb_mes, 0) AS ingestao_mes_gb,
+        COALESCE(rec.n, 0) AS recomendacoes_abertas,
+        COALESCE(tc.n, 0) AS tabelas_retencao_customizada,
+        ${_LOG_ANALYTICS_CUSTO_SQL}
+      FROM log_analytics_workspaces w
+      LEFT JOIN (
+        SELECT workspace_guid, SUM(gb) AS gb_mes FROM log_analytics_ingestao_diaria
+        WHERE dia >= date_trunc('month', CURRENT_DATE) GROUP BY workspace_guid
+      ) ing ON ing.workspace_guid = w.workspace_guid
+      LEFT JOIN (
+        SELECT workspace_guid, COUNT(*) AS n FROM log_analytics_recomendacoes GROUP BY workspace_guid
+      ) rec ON rec.workspace_guid = w.workspace_guid
+      LEFT JOIN (
+        SELECT workspace_guid, COUNT(*) AS n FROM log_analytics_tabelas WHERE retencao_e_padrao = false GROUP BY workspace_guid
+      ) tc ON tc.workspace_guid = w.workspace_guid
+    `);
+    const linhas = r.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfg))
+      .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
+    res.json(linhas);
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Inventário de Application Insights — nível topo (não dentro do drill-down de um workspace,
+// já que nem todo componente é workspace-based). LEFT JOIN só pra trazer o nome do workspace
+// vinculado quando existir, sem repetir a lógica de custo (App Insights workspace-based já
+// fatura através do workspace, que aparece no card de Workspaces).
+app.get('/api/log-analytics/app-insights', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureLogAnalyticsTable();
+    const r = await pool.query(`
+      SELECT ai.*, w.nome AS workspace_nome
+      FROM log_analytics_app_insights ai
+      LEFT JOIN log_analytics_workspaces w ON UPPER(w.resource_id) = UPPER(ai.workspace_resource_id)
+      ORDER BY ai.nome
+    `);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.get('/api/log-analytics/workspaces/:guid/ingestao', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT dia, tabela, gb FROM log_analytics_ingestao_diaria WHERE workspace_guid = $1 ORDER BY dia, tabela`,
+      [req.params.guid]
+    );
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Inventário completo por tabela (retenção + custo). O custo por tabela é uma ESTIMATIVA por
+// rateio, não a fatura exata — o Cost Management do Azure não fatura por tabela, só por
+// workspace (ver plano aprovado desta feature). Rateio de ingestão pelo peso do GB da tabela;
+// rateio de retenção pelo peso GB × dias de retenção além do período grátis (31d), porque uma
+// tabela pequena com retenção de 2 anos pesa mais no custo de retenção do que uma tabela
+// grande com retenção padrão.
+app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { guid } = req.params;
+    const wsR = await pool.query(`SELECT resource_id, auditoria_consultas_habilitada FROM log_analytics_workspaces WHERE workspace_guid = $1`, [guid]);
+    if (!wsR.rows.length) return res.status(404).json({ error: 'Workspace não encontrado' });
+    const resourceId = wsR.rows[0].resource_id;
+    const auditoriaHabilitada = wsR.rows[0].auditoria_consultas_habilitada;
+
+    const [tabelasR, gbR, custoR, impostoCfg, consultasR] = await Promise.all([
+      pool.query(`SELECT tabela, plano, retencao_dias, retencao_total_dias, retencao_arquivo_dias, retencao_e_padrao
+                  FROM log_analytics_tabelas WHERE workspace_guid = $1`, [guid]),
+      pool.query(`SELECT tabela, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
+                  WHERE workspace_guid = $1 AND dia >= date_trunc('month', CURRENT_DATE) GROUP BY tabela`, [guid]),
+      // Bruto, separado por publisher_type — mesmo motivo de _LOG_ANALYTICS_CUSTO_SQL acima:
+      // precisa passar por _comImpostoSplit antes de virar o total exibido/rateado.
+      pool.query(`SELECT
+          COALESCE(SUM(CASE WHEN (meter_name ILIKE '%retention%' OR meter_name ILIKE '%retenção%') AND publisher_type IS DISTINCT FROM 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ret_ms,
+          COALESCE(SUM(CASE WHEN (meter_name ILIKE '%retention%' OR meter_name ILIKE '%retenção%') AND publisher_type = 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ret_mp,
+          COALESCE(SUM(CASE WHEN meter_name NOT ILIKE '%retention%' AND meter_name NOT ILIKE '%retenção%' AND publisher_type IS DISTINCT FROM 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ing_ms,
+          COALESCE(SUM(CASE WHEN meter_name NOT ILIKE '%retention%' AND meter_name NOT ILIKE '%retenção%' AND publisher_type = 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ing_mp
+        FROM azure_costs WHERE UPPER(resource_id) = UPPER($1) AND cost_date >= CURRENT_DATE - INTERVAL '30 days'`, [resourceId]),
+      _getImpostoConfig(),
+      pool.query(`SELECT tabela, consultas_30d, gb_escaneado_30d, ultima_consulta FROM log_analytics_consultas_tabela WHERE workspace_guid = $1`, [guid]),
+    ]);
+
+    const consultasPorTabela = {};
+    for (const r of consultasR.rows) consultasPorTabela[r.tabela] = r;
+    const gbPorTabela = {};
+    for (const r of gbR.rows) gbPorTabela[r.tabela] = Number(r.gb) || 0;
+    const custoIngestaoTotal = _comImpostoSplit(custoR.rows[0]?.ing_ms, custoR.rows[0]?.ing_mp, impostoCfg);
+    const custoRetencaoTotal = _comImpostoSplit(custoR.rows[0]?.ret_ms, custoR.rows[0]?.ret_mp, impostoCfg);
+
+    const nomesTabelas = new Set([...Object.keys(gbPorTabela), ...tabelasR.rows.map(t => t.tabela)]);
+    const linhas = Array.from(nomesTabelas).map((nome) => {
+      const cfg = tabelasR.rows.find(t => t.tabela === nome) || {};
+      const gb = gbPorTabela[nome] || 0;
+      const diasExtra = Math.max(0, (cfg.retencao_total_dias ?? 31) - 31);
+      return { tabela: nome, gb, pesoRetencao: gb * diasExtra, ...cfg };
+    });
+    const gbTotal = linhas.reduce((a, l) => a + l.gb, 0);
+    const pesoRetencaoTotal = linhas.reduce((a, l) => a + l.pesoRetencao, 0);
+
+    const resultado = linhas.map((l) => {
+      const consulta = consultasPorTabela[l.tabela];
+      return {
+        tabela: l.tabela,
+        plano: l.plano ?? null,
+        retencao_dias: l.retencao_dias ?? null,
+        retencao_total_dias: l.retencao_total_dias ?? null,
+        retencao_arquivo_dias: l.retencao_arquivo_dias ?? null,
+        retencao_e_padrao: l.retencao_e_padrao ?? null,
+        gb_mes: l.gb,
+        custo_ingestao_estimado: gbTotal > 0 ? (custoIngestaoTotal * l.gb / gbTotal) : 0,
+        custo_retencao_estimado: pesoRetencaoTotal > 0 ? (custoRetencaoTotal * l.pesoRetencao / pesoRetencaoTotal) : 0,
+        consultas_30d: consulta ? consulta.consultas_30d : null,
+        gb_escaneado_30d: consulta ? Number(consulta.gb_escaneado_30d) : null,
+        ultima_consulta: consulta ? consulta.ultima_consulta : null,
+      };
+    }).sort((a, b) => (b.custo_ingestao_estimado + b.custo_retencao_estimado) - (a.custo_ingestao_estimado + a.custo_retencao_estimado));
+
+    res.json({ auditoria_consultas_habilitada: auditoriaHabilitada, tabelas: resultado });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Liga a auditoria de consultas (LAQueryLogs) — ver comentário de _habilitarAuditoriaConsultas.
+// Ação de ESCRITA na Azure, por isso é um POST explícito (não acontece em nenhuma coleta
+// automática) e devolve o erro de permissão de forma clara em vez de genérica.
+app.post('/api/log-analytics/workspaces/:guid/auditoria-consultas/habilitar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { guid } = req.params;
+    const wsR = await pool.query(`SELECT resource_id, workspace_guid, nome FROM log_analytics_workspaces WHERE workspace_guid = $1`, [guid]);
+    if (!wsR.rows.length) return res.status(404).json({ error: 'Workspace não encontrado' });
+    const { getToken } = await _getInventarioSpConfig();
+    await _habilitarAuditoriaConsultas(wsR.rows[0], getToken);
+    res.json({ ok: true, message: 'Auditoria de consultas habilitada — dados começam a aparecer a partir da próxima coleta diária (só contam consultas feitas DAQUI pra frente).' });
+  } catch (e) {
+    res.status(e.message?.includes('403') ? 403 : 502).json({ error: e.message });
+  }
+});
+
+// "Fontes de Log" consolidado — de onde vêm os dados de um workspace: Diagnostic Settings
+// (recursos ARM enviando log/métrica diretamente) + Data Collection Rules (pipelines de
+// Custom Logs/Azure Monitor Agent). Mesmo formato de WorkspaceLogSources.csv do framework de
+// assessment de referência.
+app.get('/api/log-analytics/workspaces/:guid/fontes', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { guid } = req.params;
+    const [diagR, dcrR] = await Promise.all([
+      pool.query(`SELECT recurso_tipo, recurso_id, categorias_habilitadas FROM log_analytics_diagnostic_settings WHERE workspace_guid = $1`, [guid]),
+      pool.query(`SELECT nome, streams, tipos_fonte, detalhe_fontes FROM log_analytics_dcrs WHERE workspace_guid_destino = $1 ORDER BY nome`, [guid]),
+    ]);
+
+    const porTipo = new Map();
+    for (const r of diagR.rows) {
+      const grupo = porTipo.get(r.recurso_tipo) || { recursos: new Set(), categorias: new Set() };
+      grupo.recursos.add(r.recurso_id);
+      for (const cat of String(r.categorias_habilitadas || '').split(';')) {
+        const c = cat.trim();
+        if (c) grupo.categorias.add(c);
+      }
+      porTipo.set(r.recurso_tipo, grupo);
+    }
+
+    const fontes = [];
+    for (const [tipo, grupo] of porTipo.entries()) {
+      fontes.push({
+        mecanismo: 'Diagnostic Setting',
+        tipo,
+        contagem: grupo.recursos.size,
+        detalhe: Array.from(grupo.categorias).sort().slice(0, 15).join('; ') || null,
+      });
+    }
+    for (const r of dcrR.rows) {
+      const streamCount = r.streams ? String(r.streams).split(';').filter(s => s.trim()).length : 0;
+      fontes.push({
+        mecanismo: 'Data Collection Rule',
+        tipo: r.nome,
+        contagem: streamCount,
+        detalhe: r.streams || r.detalhe_fontes || null,
+      });
+    }
+    fontes.sort((a, b) => b.contagem - a.contagem);
+
+    const diagAtualizadoEm = (await pool.query(`SELECT MAX(atualizado_em) AS m FROM log_analytics_diagnostic_settings WHERE workspace_guid = $1`, [guid])).rows[0]?.m || null;
+    res.json({ fontes, diagnostic_settings_atualizado_em: diagAtualizadoEm });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Detalhe por RECURSO (não agregado como /fontes) — quais categorias de log estão
+// habilitadas/desabilitadas em cada Diagnostic Setting configurado apontando pra este
+// workspace. Vem direto de log_analytics_diagnostic_settings, já coletado via API oficial
+// (ver _coletarDiagnosticSettingsTudo) — sem chamada nova à Azure.
+app.get('/api/log-analytics/workspaces/:guid/diagnostic-settings', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { guid } = req.params;
+    const r = await pool.query(
+      // outros_workspaces: fan-out — mesmo recurso também apontando pra outro(s) workspace(s)
+      // diferente deste (ver _avaliarFanoutDiagnosticSettings, que já gera a recomendação
+      // correspondente) — aqui é só pra badge inline, não repete a lógica, só confere.
+      `SELECT d.nome_config, d.recurso_id, d.recurso_tipo, d.categorias_habilitadas, d.categorias_desabilitadas,
+              d.grupos_categoria, d.metricas_habilitadas, d.metricas_desabilitadas, d.envia_storage, d.envia_eventhub, d.atualizado_em,
+              (SELECT array_agg(DISTINCT w2.nome ORDER BY w2.nome) FROM log_analytics_diagnostic_settings d2
+                 JOIN log_analytics_workspaces w2 ON w2.workspace_guid = d2.workspace_guid
+                 WHERE d2.recurso_id = d.recurso_id AND d2.workspace_guid <> d.workspace_guid) AS outros_workspaces
+       FROM log_analytics_diagnostic_settings d
+       WHERE d.workspace_guid = $1
+       ORDER BY d.recurso_tipo, d.recurso_id`,
+      [guid],
+    );
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Detalhamento por RECURSO de uma tabela específica — a API de consumo do Log Analytics
+// (tabela Usage, que já usamos pra GB por tabela) não expõe o recurso de origem, só o
+// DataType. Pra saber qual recurso exato gerou o volume é preciso consultar a tabela de log
+// real (custo de scan de verdade, ao contrário do resto da tela que só lê dados já
+// coletados) — por isso é sob demanda (POST, não faz parte de nenhuma coleta automática) e
+// com janela curta (3 dias, não 30) pra limitar o custo dessa query pontual.
+app.post('/api/log-analytics/workspaces/:guid/tabelas/:tabela/detalhar-recurso', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { guid, tabela } = req.params;
+    if (!/^[A-Za-z0-9_]+$/.test(tabela)) return res.status(400).json({ error: 'Nome de tabela inválido' });
+    const { getLogAnalyticsToken } = await _getInventarioSpConfig();
+    const token = await getLogAnalyticsToken();
+    const kql = `${tabela} | where TimeGenerated > ago(3d) | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId | top 20 by GB desc`;
+    const url = `https://api.loganalytics.io/v1/workspaces/${guid}/query`;
+    // 45s, não 30s: é uma query de verdade contra a tabela de log (não a Usage, leve) — uma
+    // tabela grande/verbosa pode legitimamente demorar. O timeout do apiFetch no frontend pra
+    // essa chamada precisa ficar ACIMA deste valor (ver detalharRecursoTabela em
+    // logAnalytics.ts), senão o front aborta antes do backend terminar e some o motivo real.
+    let resp;
+    try {
+      resp = await _cbFetch(url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: kql }),
+      }, { timeoutMs: 45_000 });
+    } catch (fetchErr) {
+      console.error('[LogAnalytics] detalhar-recurso falhou:', fetchErr.message);
+      return res.status(504).json({ error: `Consulta demorou demais ou falhou de rede contra o workspace (tabela "${tabela}"): ${fetchErr.message}` });
+    }
+    if (!resp.ok) {
+      const errTxt = await resp.text().catch(() => '');
+      console.error(`[LogAnalytics] detalhar-recurso (${tabela}) retornou ${resp.status}:`, errTxt.slice(0, 500));
+      return res.status(resp.status === 403 ? 403 : 502).json({ error: `Consulta falhou (${resp.status}) na tabela "${tabela}": ${errTxt.slice(0, 300) || 'sem detalhe retornado pela Azure'}` });
+    }
+    const data = await _safeRespJson(resp);
+    const table = data.tables?.[0];
+    if (!table || !table.rows?.length) return res.json({ recursos: [], janela_dias: 3 });
+    const cols = table.columns.map(c => c.name);
+    const iGB = cols.indexOf('GB'), iRes = cols.indexOf('_ResourceId');
+    const recursos = table.rows.map(r => ({ resource_id: r[iRes], gb: Number(r[iGB]) || 0 }));
+    res.json({ recursos, janela_dias: 3 });
+  } catch (e) {
+    console.error('[LogAnalytics] detalhar-recurso erro inesperado:', e.message);
+    res.status(500).json({ error: `Erro inesperado ao detalhar por recurso: ${e.message}` });
+  }
+});
+
+app.get('/api/log-analytics/recomendacoes', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { severidade } = req.query;
+    const params = []; let where = '1=1';
+    if (severidade) { params.push(severidade); where += ` AND rec.severidade = $${params.length}`; }
+    const r = await pool.query(
+      `SELECT rec.*, w.nome AS workspace_nome, w.subscription_id
+       FROM log_analytics_recomendacoes rec
+       JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
+       WHERE ${where} ORDER BY rec.severidade DESC, rec.criado_em DESC`,
+      params
+    );
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/log-analytics/coleta/forcar', authMiddleware, dbMiddleware, async (_req, res) => {
+  if (_logAnalyticsColetaEmExecucao) return res.status(409).json({ error: 'Coleta de Log Analytics já em execução' });
+  res.status(202).json({ ok: true, message: 'Coleta de Log Analytics iniciada — pode levar alguns minutos' });
+  _coletarLogAnalyticsTudo('manual').catch(e => console.error('[LogAnalytics] Erro na coleta manual:', e.message));
+});
+
+// Separado da coleta principal de propósito — é uma chamada de API por recurso monitorável do
+// tenant inteiro (ver comentário de _coletarDiagnosticSettingsTudo), pode levar minutos.
+app.post('/api/log-analytics/diagnostic-settings/forcar', authMiddleware, dbMiddleware, async (_req, res) => {
+  if (_logAnalyticsDiagEmExecucao) return res.status(409).json({ error: 'Coleta de Diagnostic Settings já em execução' });
+  res.status(202).json({ ok: true, message: 'Coleta de Diagnostic Settings iniciada — em tenants grandes pode levar vários minutos' });
+  _coletarDiagnosticSettingsTudo().catch(e => console.error('[LogAnalytics] Erro na coleta de Diagnostic Settings:', e.message));
+});
+
+app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const ExcelJS = require('exceljs');
+    const impostoCfgExcel = await _getImpostoConfig();
+    const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
+      pool.query(`SELECT w.*, ${_LOG_ANALYTICS_CUSTO_SQL} FROM log_analytics_workspaces w`),
+      pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
+                  JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
+                  ORDER BY rec.severidade DESC, rec.criado_em DESC`),
+      // JOIN pré-agregado, NÃO sub-select correlacionado por linha (log_analytics_tabelas tem
+      // ~74 mil linhas num tenant real — um SELECT escalar por linha contra
+      // log_analytics_ingestao_diaria media SEGUNDOS a mais nessa tela, era o maior gargalo).
+      pool.query(`SELECT w.nome AS workspace_nome, t.tabela, t.plano, t.retencao_dias, t.retencao_total_dias, t.retencao_e_padrao,
+                    COALESCE(g.gb_mes, 0) AS gb_mes
+                  FROM log_analytics_tabelas t
+                  JOIN log_analytics_workspaces w ON w.workspace_guid = t.workspace_guid
+                  LEFT JOIN (
+                    SELECT workspace_guid, tabela, SUM(gb) AS gb_mes
+                    FROM log_analytics_ingestao_diaria
+                    WHERE dia >= date_trunc('month', CURRENT_DATE)
+                    GROUP BY workspace_guid, tabela
+                  ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
+                  ORDER BY w.nome, gb_mes DESC`),
+      pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
+                    d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
+                  FROM log_analytics_diagnostic_settings d
+                  JOIN log_analytics_workspaces w ON w.workspace_guid = d.workspace_guid
+                  ORDER BY w.nome, d.recurso_tipo`),
+      pool.query(`SELECT w.nome AS workspace_nome, c.nome AS dcr_nome, c.streams, c.tipos_fonte, c.resource_group, c.subscription_id
+                  FROM log_analytics_dcrs c
+                  JOIN log_analytics_workspaces w ON w.workspace_guid = c.workspace_guid_destino
+                  ORDER BY w.nome, c.nome`),
+    ]);
+    wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgExcel))
+      .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'FinOps Manager'; wb.created = new Date();
+    const PURPLE = '7B2FBE';
+    const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + PURPLE } };
+    const headerFont = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+    // Aba "Sumário Executivo" — primeira aba do workbook, igual ao AssessmentSummary.xlsx do
+    // framework de referência (reporting.py::_build_executive_summary_sheet), com cartões de
+    // KPI antes das abas de dado bruto. Diferença: nosso custo é REAL (JOIN com azure_costs),
+    // não uma estimativa de preço manual por GB.
+    const subsNoEscopo = new Set(wsRows.rows.map(w => w.subscription_id).filter(Boolean)).size;
+    const gbIngeridoMes = wsRows.rows.reduce((a, w) => a + (Number(w.ingestao_mes_gb) || 0), 0);
+    const custoRealMes = wsRows.rows.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0);
+    const tabelasRetencaoAlta = tabRows.rows.filter(t => Number(t.retencao_total_dias) > 90).length;
+    const tabelasRetencaoCustom = tabRows.rows.filter(t => t.retencao_e_padrao === false).length;
+    const recursosComDiagSetting = new Set(diagRows.rows.map(d => d.recurso_id)).size;
+    const dcrsMapeadas = new Set(dcrRows.rows.map(d => d.dcr_nome)).size;
+
+    const wsSumario = wb.addWorksheet('Sumário Executivo');
+    wsSumario.views = [{ showGridLines: false }];
+    wsSumario.mergeCells('B2:H2');
+    wsSumario.getCell('B2').value = 'Log Analytics — FinOps Assessment';
+    wsSumario.getCell('B2').font = { bold: true, size: 16, color: { argb: 'FF' + PURPLE } };
+    wsSumario.mergeCells('B3:H3');
+    wsSumario.getCell('B3').value = `Gerado em ${new Date().toLocaleString('pt-BR')} · Janela de ingestão: mês corrente`;
+    wsSumario.getCell('B3').font = { italic: true, size: 10, color: { argb: 'FF595959' } };
+
+    const kpis = [
+      ['Subscriptions no escopo', String(subsNoEscopo)],
+      ['Workspaces inventariados', String(wsRows.rows.length)],
+      ['GB ingeridos (mês corrente)', gbIngeridoMes.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' GB'],
+      ['Custo real (últimos 30 dias, R$)', custoRealMes.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })],
+      ['Tabelas com retenção > 90 dias', String(tabelasRetencaoAlta)],
+      ['Tabelas com retenção customizada', String(tabelasRetencaoCustom)],
+      ['Recursos com Diagnostic Setting', String(recursosComDiagSetting)],
+      ['Data Collection Rules mapeadas', String(dcrsMapeadas)],
+    ];
+    let kpiRow = 5, kpiCol = 2;
+    for (const [label, value] of kpis) {
+      wsSumario.mergeCells(kpiRow, kpiCol, kpiRow, kpiCol + 1);
+      wsSumario.getCell(kpiRow, kpiCol).value = label;
+      wsSumario.getCell(kpiRow, kpiCol).font = { bold: true, size: 11 };
+      wsSumario.getCell(kpiRow, kpiCol).alignment = { wrapText: true, vertical: 'top' };
+      wsSumario.mergeCells(kpiRow + 1, kpiCol, kpiRow + 1, kpiCol + 1);
+      wsSumario.getCell(kpiRow + 1, kpiCol).value = value;
+      wsSumario.getCell(kpiRow + 1, kpiCol).font = { bold: true, size: 18, color: { argb: 'FF' + PURPLE } };
+      kpiCol += 2;
+      if (kpiCol > 8) { kpiCol = 2; kpiRow += 4; }
+    }
+
+    const conteudoRow = kpiRow + 5;
+    wsSumario.mergeCells(conteudoRow, 2, conteudoRow, 8);
+    wsSumario.getCell(conteudoRow, 2).value = 'Conteúdo do workbook';
+    wsSumario.getCell(conteudoRow, 2).font = { bold: true, size: 11 };
+    const abas = ['Workspaces', 'Recomendações', 'Tabelas', 'Diagnostic Settings', 'Fontes de Log (DCR)'];
+    abas.forEach((nome, i) => { wsSumario.getCell(conteudoRow + 1 + i, 2).value = '• ' + nome; });
+    for (let c = 2; c <= 8; c++) wsSumario.getColumn(c).width = 18;
+
+    const ws1 = wb.addWorksheet('Workspaces');
+    ws1.columns = [
+      { header: 'Nome', key: 'nome', width: 30 }, { header: 'Assinatura', key: 'subscription_id', width: 38 },
+      { header: 'Resource Group', key: 'resource_group', width: 28 }, { header: 'Retenção (dias)', key: 'retencao_dias', width: 16 },
+      { header: 'SKU', key: 'sku', width: 16 }, { header: 'Daily Cap (GB/dia)', key: 'daily_cap_gb', width: 18 },
+      { header: 'Ingestão do mês (GB)', key: 'ingestao_mes_gb', width: 20 },
+      { header: 'Custo 30d (R$)', key: 'custo_mes_total', width: 18 }, { header: 'Custo ingestão 30d (R$)', key: 'custo_mes_ingestao', width: 18 },
+      { header: 'Custo retenção 30d (R$)', key: 'custo_mes_retencao', width: 18 },
+    ];
+    ws1.getRow(1).font = headerFont; ws1.getRow(1).fill = headerFill;
+    ws1.addRows(wsRows.rows);
+
+    const ws2 = wb.addWorksheet('Recomendações');
+    ws2.columns = [
+      { header: 'Workspace', key: 'workspace_nome', width: 30 }, { header: 'Regra', key: 'regra', width: 22 },
+      { header: 'Severidade', key: 'severidade', width: 14 }, { header: 'Detalhe', key: 'detalhe', width: 70 },
+    ];
+    ws2.getRow(1).font = headerFont; ws2.getRow(1).fill = headerFill;
+    ws2.addRows(recRows.rows);
+
+    const ws3 = wb.addWorksheet('Tabelas');
+    ws3.columns = [
+      { header: 'Workspace', key: 'workspace_nome', width: 30 }, { header: 'Tabela', key: 'tabela', width: 30 },
+      { header: 'Plano', key: 'plano', width: 12 }, { header: 'Retenção interativa (dias)', key: 'retencao_dias', width: 22 },
+      { header: 'Retenção total (dias)', key: 'retencao_total_dias', width: 20 }, { header: 'Retenção customizada?', key: 'retencao_e_padrao', width: 20 },
+      { header: 'Ingestão do mês (GB)', key: 'gb_mes', width: 20 },
+    ];
+    ws3.getRow(1).font = headerFont; ws3.getRow(1).fill = headerFill;
+    ws3.addRows(tabRows.rows.map(r => ({ ...r, retencao_e_padrao: r.retencao_e_padrao === false ? 'Sim' : 'Não' })));
+
+    const ws4 = wb.addWorksheet('Diagnostic Settings');
+    ws4.columns = [
+      { header: 'Workspace', key: 'workspace_nome', width: 30 }, { header: 'Tipo de recurso', key: 'recurso_tipo', width: 30 },
+      { header: 'Recurso', key: 'recurso_id', width: 60 }, { header: 'Nome da config.', key: 'nome_config', width: 24 },
+      { header: 'Categorias habilitadas', key: 'categorias_habilitadas', width: 50 }, { header: 'Categorias desabilitadas', key: 'categorias_desabilitadas', width: 50 },
+      { header: 'Também envia p/ Storage', key: 'envia_storage', width: 20 }, { header: 'Também envia p/ Event Hub', key: 'envia_eventhub', width: 22 },
+    ];
+    ws4.getRow(1).font = headerFont; ws4.getRow(1).fill = headerFill;
+    ws4.addRows(diagRows.rows.map(r => ({ ...r, envia_storage: r.envia_storage ? 'Sim' : 'Não', envia_eventhub: r.envia_eventhub ? 'Sim' : 'Não' })));
+
+    const ws5 = wb.addWorksheet('Fontes de Log (DCR)');
+    ws5.columns = [
+      { header: 'Workspace', key: 'workspace_nome', width: 30 }, { header: 'DCR', key: 'dcr_nome', width: 30 },
+      { header: 'Streams', key: 'streams', width: 40 }, { header: 'Tipos de fonte', key: 'tipos_fonte', width: 30 },
+      { header: 'Resource Group', key: 'resource_group', width: 28 }, { header: 'Assinatura', key: 'subscription_id', width: 38 },
+    ];
+    ws5.getRow(1).font = headerFont; ws5.getRow(1).fill = headerFill;
+    ws5.addRows(dcrRows.rows);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="log-analytics-finops.xlsx"');
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Chart.js vendorizado localmente (vendor/chart.umd.min.js, MIT) — embutido INLINE no HTML do
+// dashboard, igual à técnica do framework de referência: um <script src="cdn...."> quebraria o
+// requisito de "abre sem internet/servidor" (rede corporativa bloqueando CDN, ou o arquivo
+// sendo aberto direto do disco depois de baixado). Lido uma vez, cacheado em memória.
+let _logAnalyticsChartJsCache = null;
+function _getLogAnalyticsChartJs() {
+  if (_logAnalyticsChartJsCache === null) {
+    try {
+      _logAnalyticsChartJsCache = fs.readFileSync(path.join(__dirname, 'vendor', 'chart.umd.min.js'), 'utf8');
+    } catch (e) {
+      console.warn('[LogAnalytics] vendor/chart.umd.min.js não encontrado — dashboard sairá sem gráficos:', e.message);
+      _logAnalyticsChartJsCache = '';
+    }
+  }
+  return _logAnalyticsChartJsCache;
+}
+
+// Dashboard HTML autocontido (réplica do AssessmentDashboard.html do framework de referência,
+// modules/htmlreport.py) — cartões de KPI, 4 gráficos (Chart.js embutido) e tabelas com
+// busca/ordenação em JS puro, sem depender do resto do app (pode ser aberto offline, enviado
+// por e-mail, publicado em storage estático). Paleta roxa (#7B2FBE) — a mesma dos outros
+// exports do FinOps Manager, não o azul do modelo original.
+// Dados puros (sem HTML) por trás do Dashboard — reaproveitados pelo endpoint JSON
+// `/resumo` (painel nativo na tela) E pelo gerador de HTML (`_gerarLogAnalyticsDashboardHtml`),
+// pra não duplicar as 5 queries nem o cálculo de KPIs/rankings nos dois lugares.
+async function _coletarResumoLogAnalytics() {
+  const impostoCfgResumo = await _getImpostoConfig();
+  const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
+    pool.query(`SELECT w.*,
+                  COALESCE(ing.gb_mes, 0) AS ingestao_mes_gb,
+                  ${_LOG_ANALYTICS_CUSTO_SQL}
+                FROM log_analytics_workspaces w
+                LEFT JOIN (
+                  SELECT workspace_guid, SUM(gb) AS gb_mes FROM log_analytics_ingestao_diaria
+                  WHERE dia >= date_trunc('month', CURRENT_DATE) GROUP BY workspace_guid
+                ) ing ON ing.workspace_guid = w.workspace_guid`),
+    pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
+                JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
+                ORDER BY rec.severidade DESC, rec.criado_em DESC`),
+    // JOIN pré-agregado, não sub-select por linha — mesmo motivo do export Excel (74 mil linhas
+    // em log_analytics_tabelas; essa query roda a cada abertura da tela via /resumo).
+    pool.query(`SELECT w.nome AS workspace_nome, t.tabela, t.plano, t.retencao_dias, t.retencao_total_dias, t.retencao_e_padrao,
+                  COALESCE(g.gb_mes, 0) AS gb_mes
+                FROM log_analytics_tabelas t
+                JOIN log_analytics_workspaces w ON w.workspace_guid = t.workspace_guid
+                LEFT JOIN (
+                  SELECT workspace_guid, tabela, SUM(gb) AS gb_mes
+                  FROM log_analytics_ingestao_diaria
+                  WHERE dia >= date_trunc('month', CURRENT_DATE)
+                  GROUP BY workspace_guid, tabela
+                ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
+                ORDER BY w.nome, gb_mes DESC`),
+    pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
+                  d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
+                FROM log_analytics_diagnostic_settings d
+                JOIN log_analytics_workspaces w ON w.workspace_guid = d.workspace_guid
+                ORDER BY w.nome, d.recurso_tipo`),
+    pool.query(`SELECT w.nome AS workspace_nome, c.nome AS dcr_nome, c.streams, c.tipos_fonte, c.resource_group, c.subscription_id
+                FROM log_analytics_dcrs c
+                JOIN log_analytics_workspaces w ON w.workspace_guid = c.workspace_guid_destino
+                ORDER BY w.nome, c.nome`),
+  ]);
+  wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgResumo))
+    .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
+
+  const subsNoEscopo = new Set(wsRows.rows.map(w => w.subscription_id).filter(Boolean)).size;
+  const gbIngeridoMes = wsRows.rows.reduce((a, w) => a + (Number(w.ingestao_mes_gb) || 0), 0);
+  const custoRealMes = wsRows.rows.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0);
+  const tabelasRetencaoAlta = tabRows.rows.filter(t => Number(t.retencao_total_dias) > 90).length;
+  const recursosComDiagSetting = new Set(diagRows.rows.map(d => d.recurso_id)).size;
+  const dcrsMapeadas = new Set(dcrRows.rows.map(d => d.dcr_nome)).size;
+
+  const custoPorWorkspace = wsRows.rows.slice(0, 10).map(w => ({
+    label: w.nome || w.workspace_guid, valor: Number(Number(w.custo_mes_total || 0).toFixed(2)),
+  }));
+
+  const topTabelas = tabRows.rows.slice().sort((a, b) => Number(b.gb_mes) - Number(a.gb_mes)).slice(0, 10).map(t => ({
+    label: `${t.tabela} (${t.workspace_nome})`, valor: Number(Number(t.gb_mes || 0).toFixed(2)),
+  }));
+
+  const fontes = [
+    { label: 'Diagnostic Setting', valor: recursosComDiagSetting },
+    { label: 'Data Collection Rule', valor: dcrsMapeadas },
+  ];
+
+  const faixas = [
+    { label: '≤ 30 dias', min: -1, max: 30 },
+    { label: '31–90 dias', min: 30, max: 90 },
+    { label: '91–180 dias', min: 90, max: 180 },
+    { label: '181–365 dias', min: 180, max: 365 },
+    { label: '> 365 dias', min: 365, max: Infinity },
+  ];
+  const distribuicaoRetencao = faixas.map(f => ({
+    label: f.label,
+    valor: tabRows.rows.filter(t => {
+      const d = Number(t.retencao_total_dias) || 0;
+      return d > f.min && d <= f.max;
+    }).length,
+  }));
+
+  return {
+    kpis: {
+      subsNoEscopo, workspaces: wsRows.rows.length, gbIngeridoMes, custoRealMes,
+      tabelasRetencaoAlta, recursosComDiagSetting, dcrsMapeadas,
+    },
+    custoPorWorkspace, topTabelas, fontes, distribuicaoRetencao,
+    wsRows: wsRows.rows, recRows: recRows.rows, tabRows: tabRows.rows, diagRows: diagRows.rows, dcrRows: dcrRows.rows,
+  };
+}
+
+app.get('/api/log-analytics/resumo', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const resumo = await _coletarResumoLogAnalytics();
+    const { wsRows, recRows, tabRows, diagRows, dcrRows, ...publico } = resumo; // linhas cruas só servem ao HTML/Excel
+    res.json(publico);
+  } catch (e) { _dbErr(res, e); }
+});
+
+async function _gerarLogAnalyticsDashboardHtml() {
+  const resumo = await _coletarResumoLogAnalytics();
+  const { kpis, custoPorWorkspace, topTabelas, fontes, distribuicaoRetencao, wsRows, recRows, tabRows, diagRows, dcrRows } = resumo;
+
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const brl = (v) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v || 0);
+  const fmtGB = (v) => (Number(v) || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' GB';
+
+  const kpiCards = [
+    ['Subscriptions no escopo', String(kpis.subsNoEscopo)],
+    ['Workspaces inventariados', String(kpis.workspaces)],
+    ['GB ingeridos (mês corrente)', fmtGB(kpis.gbIngeridoMes)],
+    ['Custo real (últimos 30 dias)', brl(kpis.custoRealMes)],
+    ['Tabelas com retenção > 90 dias', String(kpis.tabelasRetencaoAlta)],
+    ['Recursos com Diagnostic Setting', String(kpis.recursosComDiagSetting)],
+    ['Data Collection Rules mapeadas', String(kpis.dcrsMapeadas)],
+  ];
+
+  const chartCustoWorkspace = { labels: custoPorWorkspace.map(x => x.label), values: custoPorWorkspace.map(x => x.valor) };
+  const chartTopTabelas = { labels: topTabelas.map(x => x.label), values: topTabelas.map(x => x.valor) };
+  const chartFontes = { labels: fontes.map(x => x.label), values: fontes.map(x => x.valor) };
+  const chartRetencao = { labels: distribuicaoRetencao.map(x => x.label), values: distribuicaoRetencao.map(x => x.valor) };
+
+  // --- tabelas navegáveis (mesmos 5 datasets do Excel) ---
+  const datasets = [
+    { label: 'Workspaces', cols: ['nome', 'subscription_id', 'resource_group', 'retencao_dias', 'sku', 'ingestao_mes_gb', 'custo_mes_total'], rows: wsRows },
+    { label: 'Tabelas', cols: ['workspace_nome', 'tabela', 'plano', 'retencao_dias', 'retencao_total_dias', 'gb_mes'], rows: tabRows },
+    { label: 'Diagnostic Settings', cols: ['workspace_nome', 'recurso_tipo', 'recurso_id', 'categorias_habilitadas'], rows: diagRows },
+    { label: 'Fontes de Log (DCR)', cols: ['workspace_nome', 'dcr_nome', 'streams', 'tipos_fonte'], rows: dcrRows },
+    { label: 'Recomendações', cols: ['workspace_nome', 'regra', 'severidade', 'detalhe'], rows: recRows },
+  ];
+
+  const kpiCardsHtml = kpiCards.map(([label, value]) =>
+    `<div class="kpi-card"><span class="kpi-label">${esc(label)}</span><span class="kpi-value">${esc(value)}</span></div>`,
+  ).join('');
+
+  const tabsHtml = datasets.map((d, i) =>
+    `<button id="btn-panel-${i}" class="tab-button${i === 0 ? ' active' : ''}" onclick="showTab('panel-${i}')">${esc(d.label)} <span class="tab-count">(${d.rows.length})</span></button>`,
+  ).join('');
+
+  const panelsHtml = datasets.map((d, i) => {
+    const tableId = `table-panel-${i}`;
+    if (!d.rows.length) {
+      return `<div id="panel-${i}" class="tab-panel${i === 0 ? ' active' : ''}"><p class="empty-state">Nenhum dado coletado para "${esc(d.label)}".</p></div>`;
+    }
+    const headerCells = d.cols.map((c, ci) => `<th onclick="sortTable('${tableId}', ${ci})">${esc(c)}</th>`).join('');
+    const bodyRows = d.rows.map((r) =>
+      '<tr>' + d.cols.map(c => `<td>${esc(r[c])}</td>`).join('') + '</tr>',
+    ).join('');
+    return `<div id="panel-${i}" class="tab-panel${i === 0 ? ' active' : ''}">
+      <input type="text" class="table-search" placeholder="Buscar em ${esc(d.label)}..." oninput="filterTable(this, '${tableId}')">
+      <div class="table-scroll"><table id="${tableId}"><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table></div>
+    </div>`;
+  }).join('');
+
+  const chartJsSource = _getLogAnalyticsChartJs();
+  const geradoEm = new Date().toLocaleString('pt-BR');
+
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log Analytics — FinOps Assessment</title>
+<script>${chartJsSource}</script>
+<style>
+:root{--primary:#7B2FBE;--accent:#9d5fd6;--bg:#F4F1F9;--card-bg:#FFFFFF;--border:#E4DCF2;--text:#2B2F36;--muted:#6B7280}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Calibri,sans-serif;background:var(--bg);color:var(--text)}
+.banner{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;padding:28px 40px}
+.banner h1{margin:0;font-size:24px}
+.subtitle{margin:4px 0 0;opacity:.85;font-size:13px}
+main{padding:24px 40px 60px;max-width:1400px;margin:0 auto}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:28px}
+.kpi-card{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:6px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.kpi-label{font-size:12.5px;color:var(--muted);font-weight:600}
+.kpi-value{font-size:26px;font-weight:700;color:var(--primary)}
+.charts-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:20px;margin-bottom:32px}
+.chart-card{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:18px 20px 8px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.chart-card h2{font-size:14px;margin:0 0 12px}
+.chart-card canvas{max-height:280px}
+.empty-state{color:var(--muted);font-size:13px;font-style:italic}
+.tables-section h2{font-size:16px;margin-bottom:12px}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:2px solid var(--border)}
+.tab-button{background:none;border:none;padding:10px 16px;cursor:pointer;font-size:13px;color:var(--muted);border-bottom:3px solid transparent;margin-bottom:-2px;font-weight:600}
+.tab-button:hover{color:var(--primary)}
+.tab-button.active{color:var(--primary);border-bottom-color:var(--primary)}
+.tab-count{color:var(--muted);font-weight:400}
+.tab-panel{display:none;background:var(--card-bg);border:1px solid var(--border);border-top:none;padding:16px;border-radius:0 0 10px 10px}
+.tab-panel.active{display:block}
+.table-search{width:100%;max-width:320px;padding:8px 12px;margin-bottom:12px;border:1px solid var(--border);border-radius:6px;font-size:13px}
+.table-scroll{overflow-x:auto;max-height:480px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead th{position:sticky;top:0;background:var(--primary);color:#fff;padding:8px 10px;text-align:left;cursor:pointer;white-space:nowrap}
+thead th:hover{background:var(--accent)}
+tbody td{padding:7px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+tbody tr:nth-child(even){background:#FAF8FC}
+footer{margin-top:40px;text-align:center;color:var(--muted);font-size:11.5px}
+</style></head><body>
+<header class="banner">
+  <div><h1>Log Analytics — FinOps Assessment</h1>
+  <p class="subtitle">Gerado em ${esc(geradoEm)} · Ingestão do mês corrente · Custo real (últimos 30 dias, Cost Management)</p></div>
+</header>
+<main>
+  <section class="kpi-grid">${kpiCardsHtml}</section>
+  <section class="charts-grid">
+    <div class="chart-card"><h2>Custo por Workspace (Top 10, R$)</h2><canvas id="chartCusto"></canvas></div>
+    <div class="chart-card"><h2>Fontes de Log (Diagnostic Setting × DCR)</h2><canvas id="chartFontes"></canvas></div>
+    <div class="chart-card"><h2>Top Tabelas por Volume (Top 10, GB)</h2><canvas id="chartTabelas"></canvas></div>
+    <div class="chart-card"><h2>Distribuição de Retenção por Tabela</h2><canvas id="chartRetencao"></canvas></div>
+  </section>
+  <section class="tables-section">
+    <h2>Dados Detalhados</h2>
+    <div class="tabs">${tabsHtml}</div>
+    ${panelsHtml}
+  </section>
+  <footer><p>FinOps Manager · Log Analytics · Gerado automaticamente — custo por tabela é estimativa por rateio, custo por workspace é real.</p></footer>
+</main>
+<script>
+const chartData = ${JSON.stringify({ custo: chartCustoWorkspace, tabelas: chartTopTabelas, fontes: chartFontes, retencao: chartRetencao })};
+const palette = ['#7B2FBE','#9d5fd6','#b98be0','#d4b8ec','#4a0080','#ff8c42','#ff4d6a','#2f9bbe','#70AD47','#A9D18E'];
+function makeBarChart(id, ds, horizontal) {
+  const ctx = document.getElementById(id);
+  if (!ctx || !ds.labels.length) { if (ctx) ctx.parentElement.innerHTML += '<p class="empty-state">Sem dados coletados.</p>'; return; }
+  try {
+    new Chart(ctx, { type: 'bar', data: { labels: ds.labels, datasets: [{ data: ds.values, backgroundColor: palette[0], borderRadius: 4 }] },
+      options: { indexAxis: horizontal ? 'y' : 'x', responsive: true, plugins: { legend: { display: false } } } });
+  } catch (err) { console.error('Falha ao renderizar ' + id, err); ctx.parentElement.innerHTML += '<p class="empty-state">Não foi possível renderizar.</p>'; }
+}
+function makeDonutChart(id, ds) {
+  const ctx = document.getElementById(id);
+  if (!ctx || !ds.labels.length) { if (ctx) ctx.parentElement.innerHTML += '<p class="empty-state">Sem dados coletados.</p>'; return; }
+  try {
+    new Chart(ctx, { type: 'doughnut', data: { labels: ds.labels, datasets: [{ data: ds.values, backgroundColor: palette }] },
+      options: { responsive: true, plugins: { legend: { position: 'right' } } } });
+  } catch (err) { console.error('Falha ao renderizar ' + id, err); ctx.parentElement.innerHTML += '<p class="empty-state">Não foi possível renderizar.</p>'; }
+}
+if (typeof Chart === 'undefined') {
+  document.querySelectorAll('.chart-card canvas').forEach(c => { c.parentElement.innerHTML += '<p class="empty-state">Biblioteca de gráficos não carregou.</p>'; });
+} else {
+  makeBarChart('chartCusto', chartData.custo, false);
+  makeDonutChart('chartFontes', chartData.fontes);
+  makeBarChart('chartTabelas', chartData.tabelas, true);
+  makeBarChart('chartRetencao', chartData.retencao, false);
+}
+function showTab(id) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  document.getElementById('btn-' + id).classList.add('active');
+}
+function filterTable(inputEl, tableId) {
+  const q = inputEl.value.toLowerCase();
+  document.querySelectorAll('#' + tableId + ' tbody tr').forEach(row => { row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none'; });
+}
+function sortTable(tableId, colIndex) {
+  const table = document.getElementById(tableId);
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  const asc = table.dataset.sortCol == colIndex ? table.dataset.sortDir !== 'asc' : true;
+  rows.sort((a, b) => {
+    const av = a.children[colIndex].textContent.trim(), bv = b.children[colIndex].textContent.trim();
+    const an = parseFloat(av.replace(/[.,]/g, m => m === ',' ? '.' : '')), bn = parseFloat(bv.replace(/[.,]/g, m => m === ',' ? '.' : ''));
+    const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : av.localeCompare(bv, 'pt-BR');
+    return asc ? cmp : -cmp;
+  });
+  rows.forEach(r => tbody.appendChild(r));
+  table.dataset.sortCol = colIndex; table.dataset.sortDir = asc ? 'asc' : 'desc';
+}
+</script>
+</body></html>`;
+}
+
+app.get('/api/log-analytics/export/dashboard', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    const html = await _gerarLogAnalyticsDashboardHtml();
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="log-analytics-dashboard.html"');
+    res.send(html);
+  } catch (e) { _dbErr(res, e); }
+});
+
 // ─── HEALTH CHECK (sem autenticação — para load balancers, PM2, Railway, etc.) ─
 app.get('/health', (_req, res) => {
   const dbOk = !!pool;
@@ -14658,6 +16724,8 @@ app.get('/health', (_req, res) => {
       _iniciarInventarioAgendador();
       _iniciarReconciliacaoAgendador();
       _iniciarRecursoTagsCache();
+      _iniciarLogAnalyticsAgendador();
+      _iniciarLogAnalyticsDiagAgendador();
       // Carrega caches persistentes imediatamente do banco (sem query pesada)
       pool.query(`SELECT ws_name, parent_rg FROM azure_ws_cache`).then(r => {
         if (r.rows.length) {
@@ -14790,6 +16858,8 @@ app.get('/health', (_req, res) => {
       _iniciarInventarioAgendador();
       _iniciarReconciliacaoAgendador();
       _iniciarRecursoTagsCache();
+      _iniciarLogAnalyticsAgendador();
+      _iniciarLogAnalyticsDiagAgendador();
     } catch (e2) {
       pool = null;
       _dbFalhas++;

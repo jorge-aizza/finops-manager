@@ -219,7 +219,7 @@ export default function ReservasView() {
         </div>
       )}
 
-      <div className="table-container">
+      <div className="table-wrapper">
         <table className="data-table">
           <thead>
             <tr>

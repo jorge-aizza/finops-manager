@@ -279,7 +279,7 @@ export default function DashboardView() {
                   <svg viewBox="0 0 20 20" fill="none" width={16} height={16} style={{ verticalAlign: -3, marginRight: 4 }}><path d="M9 5H7a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h0a2 2 0 002-2M9 5a2 2 0 012-2h0a2 2 0 012 2" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
                   Ações Recentes
                 </span>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                   <span className="legend-chip legend-andamento">Em Andamento</span>
                   <span className="legend-chip legend-planejado">Planejado</span>
                   <span className="legend-chip legend-concluido">Concluído</span>
@@ -364,7 +364,7 @@ export default function DashboardView() {
                 <svg viewBox="0 0 16 16" fill="none" width={16} height={16} style={{ verticalAlign: -3, marginRight: 4 }}><path d="M2 8s2.7-5 6-5 6 5 6 5-2.7 5-6 5-6-5-6-5z" stroke="currentColor" strokeWidth={1.5} /><circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth={1.5} /></svg>
                 Estimativas Recentes
               </span>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                 <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 12px' }} onClick={() => window.showView?.('estimativas')}>Ver todas →</button>
                 <span className="badge">{estimativasRecentes.length}</span>
               </div>

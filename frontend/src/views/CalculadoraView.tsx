@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getDetalheDiario, getPorServico } from '../api/calculadora'
+import { getDetalheDiario, getPorServico, getTaxaImposto } from '../api/calculadora'
 import CmsMultiSelect from '../components/CmsMultiSelect'
 import RecursosTable from '../components/RecursosTable'
 import DetalheDiarioTable from '../components/DetalheDiarioTable'
@@ -68,6 +68,8 @@ export default function CalculadoraView() {
     queryFn: () => getPorServico({ subscription_id: calc.subsSel, resource_group: calc.rgsSel, data_inicio: calc.dataInicio, data_fim: calc.dataFim }),
     enabled: calc.visao === 'servico' && calc.subsSel.length > 0,
   })
+  // Imposto travado pelo admin — mesma fonte do Portal Público, sem opção de sobrepor por sessão.
+  const taxaImpostoQuery = useQuery({ queryKey: ['taxa-imposto'], queryFn: getTaxaImposto, staleTime: 5 * 60 * 1000 })
 
   const totalSelecionados = Object.keys(calc.selecionados).length
   const totalRecursos = calc.grupos.length
@@ -236,14 +238,14 @@ export default function CalculadoraView() {
           />
         )}
         {!calc.erro && calc.visao === 'detalhe' && (
-          <div style={{ flex: 1, overflowY: 'auto' }}>
+          <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
             {detalheQuery.isLoading
               ? <div style={{ padding: 30, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>Carregando...</div>
               : <DetalheDiarioTable rows={detalheQuery.data || []} />}
           </div>
         )}
         {!calc.erro && calc.visao === 'servico' && (
-          <div style={{ flex: 1, overflowY: 'auto' }}>
+          <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
             {servicoQuery.isLoading
               ? <div style={{ padding: 30, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>Carregando...</div>
               : <PorServicoTable rows={servicoQuery.data || []} />}
@@ -255,6 +257,11 @@ export default function CalculadoraView() {
         <ConfigurarEstimativaOverlay
           calc={calc}
           taxaBrl={TAXA_BRL_FALLBACK}
+          taxaImpostoAdmin={taxaImpostoQuery.data?.taxa_imposto ?? 18.65}
+          impostoSplit={taxaImpostoQuery.data ? {
+            microsoft: taxaImpostoQuery.data.imposto_microsoft,
+            marketplace: taxaImpostoQuery.data.imposto_marketplace,
+          } : undefined}
           onClose={() => setOverlayOpen(false)}
           onVisualizarEstimativa={(estimativa, periodos) => {
             setOverlayOpen(false)

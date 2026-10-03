@@ -57,10 +57,9 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
   // defaults (18.65/13/desativado) quando o admin nunca configurou, então
   // esses campos nunca chegam null aqui — sempre travados pro público.
   const publicTaxConfig: PublicTaxConfig = useMemo(() => ({
-    imposto: cfg.taxa_imposto,
     cond: cfg.taxa_cond,
     horarioLivre: cfg.horario_livre,
-  }), [cfg.taxa_imposto, cfg.taxa_cond, cfg.horario_livre])
+  }), [cfg.taxa_cond, cfg.horario_livre])
 
   const subOptions = useMemo(
     () => (calc.subsQuery.data || []).map((s) => ({ value: s.subscription_id, label: s.subscription_name || s.subscription_id })),
@@ -242,6 +241,8 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
           calc={calc}
           taxaBrl={TAXA_BRL_FALLBACK}
           publicConfig={publicTaxConfig}
+          taxaImpostoAdmin={cfg.taxa_imposto}
+          impostoSplit={{ microsoft: cfg.imposto_microsoft, marketplace: cfg.imposto_marketplace }}
           onClose={() => setOverlayOpen(false)}
           onVisualizarEstimativa={(estimativa, periodos) => {
             setOverlayOpen(false)

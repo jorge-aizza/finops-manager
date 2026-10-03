@@ -223,7 +223,7 @@ ${catRows ? `<table>
   <tbody>${catRows}${fixoRow}</tbody>
   <tfoot>
     <tr class="tr-sub"><td colspan="3">Subtotal Estimado</td><td>${brl(p.total_brl || 0)}</td></tr>
-    ${(p.pct_imposto || 0) > 0 ? `<tr class="tr-add"><td colspan="3">+ Imposto (` + p.pct_imposto + `%)</td><td>` + brl(p.vl_imposto || 0) + `</td></tr>` : ``}
+    ${(p.pct_imposto || 0) > 0 ? `<tr class="tr-add"><td colspan="3">Imposto (` + p.pct_imposto + `%)</td><td>` + brl(p.vl_imposto || 0) + `</td></tr>` : ``}
     ${(p.pct_cond || 0) > 0 ? `<tr class="tr-add"><td colspan="3">+ Condom\xEDnio (` + p.pct_cond + `%)</td><td>` + brl(p.vl_cond || 0) + `</td></tr>` : ``}
     <tr class="tr-total"><td colspan="3">Total Estimado</td><td>${brl(totalFinal)}</td></tr>
   </tfoot>

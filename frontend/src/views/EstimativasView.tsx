@@ -317,7 +317,7 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
                   <tfoot>
                     <tr><td colSpan={4} style={{ textAlign: 'right' }}>Subtotal</td><td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono',monospace" }}>{formatBRL(e.total_brl)}</td></tr>
                     {e.pct_imposto > 0 && (
-                      <tr><td colSpan={4} style={{ textAlign: 'right', color: 'var(--text-muted)' }}>+ Imposto ({e.pct_imposto}%)</td><td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono',monospace" }}>{formatBRL(e.vl_imposto)}</td></tr>
+                      <tr><td colSpan={4} style={{ textAlign: 'right', color: 'var(--text-muted)' }}>Imposto ({e.pct_imposto}%)</td><td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono',monospace" }}>{formatBRL(e.vl_imposto)}</td></tr>
                     )}
                     {e.pct_cond > 0 && (
                       <tr><td colSpan={4} style={{ textAlign: 'right', color: 'var(--text-muted)' }}>+ Condomínio ({e.pct_cond}%)</td><td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono',monospace" }}>{formatBRL(e.vl_cond)}</td></tr>

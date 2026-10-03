@@ -262,7 +262,7 @@ export default function InvoiceModal({
 
             {estimativa.pct_imposto > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 11 }}>
-                <span style={{ color: 'var(--text-muted)' }}>+ Imposto ({estimativa.pct_imposto}%)</span>
+                <span style={{ color: 'var(--text-muted)' }}>Imposto ({estimativa.pct_imposto}%)</span>
                 <span style={{ fontFamily: "'IBM Plex Mono',monospace" }}>R$ {brl(estimativa.vl_imposto)}</span>
               </div>
             )}

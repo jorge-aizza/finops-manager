@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import { buildEstimativa } from '../lib/buildEstimativa'
+import { buildEstimativa, type ImpostoSplit } from '../lib/buildEstimativa'
 import { calcEstimado } from '../lib/calcEstimado'
 import { calcHorasPeriodo, defaultHorarioLivre } from '../lib/periodo'
 import { recursoKey, type UseCalculadoraReturn } from '../hooks/useCalculadora'
@@ -10,10 +10,8 @@ function brl(v: number): string {
   return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-const TAXA_IMP_DEF = 18.65
 const TAXA_COND_DEF = 13.00
 const TAXA_GORD_DEF = 0
-const LS_IMP = 'finops_taxa_imposto'
 const LS_COND = 'finops_taxa_cond'
 const LS_GORD = 'finops_taxa_gordura'
 const LS_HL = 'finops_horario_livre'
@@ -31,7 +29,6 @@ const LOTE = 100
 // livremente (campo null/undefined). Gordura sempre oculta no portal —
 // nunca fez parte do fluxo público, só do autenticado.
 export interface PublicTaxConfig {
-  imposto: number | null
   cond: number | null
   horarioLivre: HorarioLivre | null
 }
@@ -42,9 +39,18 @@ interface Props {
   onClose: () => void
   onVisualizarEstimativa: (estimativa: EstimativaCalculada, periodos: Periodo[]) => void
   publicConfig?: PublicTaxConfig
+  // Imposto (2026-09-28): deixou de ser editável em qualquer fluxo (interno ou público) — vira
+  // sempre a mesma taxa global definida pelo admin em Configurações, a mesma agora refletida nos
+  // valores reais de coleta (Órfãos, alocação, alertas). Sem isso, a Calculadora podia simular um
+  // "e se o imposto fosse outro", divergindo do que as demais telas realmente cobram.
+  taxaImpostoAdmin: number
+  // Split Microsoft/Marketplace (2026-09-29): quando pelo menos uma categoria está ativa,
+  // substitui `taxaImpostoAdmin` — classifica cada recurso pelo `publisher_type` que já vem em
+  // RecursoBilling, mesma fonte usada nas demais telas de coleta.
+  impostoSplit?: ImpostoSplit
 }
 
-export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, onVisualizarEstimativa, publicConfig }: Props) {
+export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, onVisualizarEstimativa, publicConfig, taxaImpostoAdmin, impostoSplit }: Props) {
   const [modo, setModo] = useState<'horas' | 'periodo'>('horas')
   const [periodos, setPeriodos] = useState<Periodo[]>([])
   const [iniData, setIniData] = useState('')
@@ -52,25 +58,23 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
   const [fimData, setFimData] = useState('')
   const [fimHora, setFimHora] = useState('00:00')
   const [horarioLivre, setHorarioLivre] = useState<HorarioLivre>(() => publicConfig?.horarioLivre || defaultHorarioLivre())
-  const [pctImposto, setPctImposto] = useState(() => publicConfig ? (publicConfig.imposto ?? TAXA_IMP_DEF) : TAXA_IMP_DEF)
+  const pctImposto = taxaImpostoAdmin
   const [pctCond, setPctCond] = useState(() => publicConfig ? (publicConfig.cond ?? TAXA_COND_DEF) : TAXA_COND_DEF)
   const [pctGordura, setPctGordura] = useState(TAXA_GORD_DEF)
   const [visiveis, setVisiveis] = useState(LOTE)
   const [legendaOpen, setLegendaOpen] = useState(false)
 
-  const impostoTravado = !!publicConfig && publicConfig.imposto != null
   const condTravado = !!publicConfig && publicConfig.cond != null
   const horarioLivreTravado = !!publicConfig?.horarioLivre
 
   // Portal público não persiste taxas em localStorage (sessão anônima, sem
   // sentido "lembrar" entre visitantes diferentes de um terminal compartilhado)
-  // — só o fluxo autenticado usa esse comportamento.
+  // — só o fluxo autenticado usa esse comportamento. Imposto não entra mais aqui: nunca é
+  // editável, então não há valor de sessão pra lembrar.
   useEffect(() => {
     if (publicConfig) return
-    const si = localStorage.getItem(LS_IMP)
     const sc = localStorage.getItem(LS_COND)
     const sg = localStorage.getItem(LS_GORD)
-    setPctImposto(si !== null ? parseFloat(si) : TAXA_IMP_DEF)
     setPctCond(sc !== null ? parseFloat(sc) : TAXA_COND_DEF)
     setPctGordura(sg !== null ? parseFloat(sg) : TAXA_GORD_DEF)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -78,10 +82,9 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
 
   useEffect(() => {
     if (publicConfig) return
-    localStorage.setItem(LS_IMP, String(pctImposto))
     localStorage.setItem(LS_COND, String(pctCond))
     localStorage.setItem(LS_GORD, String(pctGordura))
-  }, [publicConfig, pctImposto, pctCond, pctGordura])
+  }, [publicConfig, pctCond, pctGordura])
 
   // Horário Livre — mesmo padrão de persistência das Taxas acima (auto-carrega/
   // auto-salva, sem botão "★ Salvar como padrão" explícito do legado): antes
@@ -128,8 +131,8 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
 
   // ── Estimativa (Subtotal/Total) — fonte única: buildEstimativa/calcEstimado ──
   const estimativa = useMemo(
-    () => buildEstimativa(calc.recursos, calc.selecionados, calc.dbTaxaMap, { pctImposto, pctCond, pctGordura }, taxaBrl, calc.chGlobal),
-    [calc.recursos, calc.selecionados, calc.dbTaxaMap, pctImposto, pctCond, pctGordura, taxaBrl, calc.chGlobal],
+    () => buildEstimativa(calc.recursos, calc.selecionados, calc.dbTaxaMap, { pctImposto, pctCond, pctGordura }, taxaBrl, calc.chGlobal, impostoSplit),
+    [calc.recursos, calc.selecionados, calc.dbTaxaMap, pctImposto, pctCond, pctGordura, taxaBrl, calc.chGlobal, impostoSplit],
   )
 
   const selKeys = useMemo(() => Object.keys(calc.selecionados), [calc.selecionados])
@@ -308,10 +311,11 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
               <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 10 }}>Taxas Adicionais</div>
               <div style={{ display: 'grid', gridTemplateColumns: publicConfig ? '1fr 1fr' : '1fr 1fr 1fr', gap: 8 }}>
                 <div>
-                  <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Imposto %{impostoTravado && ' 🔒'}</label>
-                  <input type="number" step={0.01} className="ci" value={pctImposto} disabled={impostoTravado}
-                    title={impostoTravado ? 'Configurado pelo administrador' : ''}
-                    onChange={(e) => setPctImposto(parseFloat(e.target.value) || 0)} />
+                  <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Imposto % 🔒</label>
+                  <input type="number" step={0.01} className="ci" value={estimativa.pct_imposto} disabled
+                    title={impostoSplit && (impostoSplit.microsoft.ativo || impostoSplit.marketplace.ativo)
+                      ? 'Média ponderada de Serviço Microsoft/Marketplace, configurada pelo administrador'
+                      : 'Configurado pelo administrador em Configurações'} readOnly />
                 </div>
                 <div>
                   <label style={{ fontSize: 10, color: 'var(--text-muted)' }}>Condomínio %{condTravado && ' 🔒'}</label>
@@ -340,9 +344,9 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
                   <span>🔒 Infra Fixa/mês (fora do total)</span><span>{brl(estimativa.total_fixo_mes)}</span>
                 </div>
               )}
-              {pctImposto > 0 && (
+              {estimativa.vl_imposto > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
-                  <span>+ Imposto ({pctImposto}%)</span><span>{brl(estimativa.vl_imposto)}</span>
+                  <span>Imposto ({estimativa.pct_imposto}%)</span><span>{brl(estimativa.vl_imposto)}</span>
                 </div>
               )}
               {pctCond > 0 && (

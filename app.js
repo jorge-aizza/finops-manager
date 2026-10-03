@@ -601,7 +601,7 @@ let allAcoes = [];
 // C:\Users\jorge\.claude\plans\magical-gliding-gem.md. showView() monta o
 // bundle React em #react-root em vez de ativar a antiga #view-<nome>
 // (que fica no HTML vazia, sem conteúdo, até a migração terminar de vez).
-const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks', 'inventario', 'alocacao']);
+const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks', 'inventario', 'alocacao', 'log-analytics']);
 
 // ── VIEW ROUTING ──────────────────────────────
 function showView(view) {
@@ -1344,7 +1344,7 @@ async function viewEstimativa(id) {
          </td></tr>` : '';
 
     const impostoRow = e.pct_imposto > 0
-      ? `<tr><td colspan="4" style="text-align:right;color:var(--text-muted)">+ Imposto (${e.pct_imposto}%)</td><td style="text-align:right;font-family:IBM Plex Mono,monospace">${formatCurrency(e.vl_imposto)}</td></tr>` : '';
+      ? `<tr><td colspan="4" style="text-align:right;color:var(--text-muted)">Imposto (${e.pct_imposto}%)</td><td style="text-align:right;font-family:IBM Plex Mono,monospace">${formatCurrency(e.vl_imposto)}</td></tr>` : '';
     const condRow = e.pct_cond > 0
       ? `<tr><td colspan="4" style="text-align:right;color:var(--text-muted)">+ Condomínio (${e.pct_cond}%)</td><td style="text-align:right;font-family:IBM Plex Mono,monospace">${formatCurrency(e.vl_cond)}</td></tr>` : '';
 
@@ -1975,6 +1975,18 @@ function switchSettingsTab(tab) {
   if (panelEl) panelEl.classList.add('active');
   if (tab === 'coleta') loadColeta();
   if (tab === 'pricelist') { _loadPriceListStatus(); loadPlSchedule(); }
+}
+
+// Sub-abas dentro de "Portal & Sistema" (2026-09-29) — mesmo padrão de switchSettingsTab,
+// um nível abaixo. Nunca precisa recarregar dado nenhum: loadPortalConfig() já preenche
+// todos os campos de todas as sub-abas de uma vez, independente de qual está visível.
+function switchPortalSubTab(tab) {
+  document.querySelectorAll('.settings-subtab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.settings-subtab-panel').forEach(p => p.classList.remove('active'));
+  const tabEl = document.querySelector('[onclick="switchPortalSubTab(\'' + tab + '\')"]');
+  if (tabEl) tabEl.classList.add('active');
+  const panelEl = document.getElementById('portal-subtab-' + tab);
+  if (panelEl) panelEl.classList.add('active');
 }
 
 // ── Price List ─────────────────────────────────────────────────────────────────
@@ -2772,6 +2784,20 @@ function _updatePlSchedProx(cfg) {
 
 // ── Portal Público — Configuração ──────────────────────────────────────────────
 
+// Preview ao vivo do efeito de uma taxa de imposto (pontos percentuais) — ver savePortalConfig
+// pro aviso de sanidade que usa a mesma lógica de detecção de "fator de crescimento" (ex.: 1.186).
+function _ligarPreviewImposto(input, preview) {
+  if (!input || !preview) return;
+  const atualizar = () => {
+    const taxa = parseFloat(input.value);
+    preview.textContent = Number.isFinite(taxa)
+      ? 'R$ 100,00 → R$ ' + (100 * (1 + taxa / 100)).toFixed(2).replace('.', ',')
+      : '';
+  };
+  input.oninput = atualizar;
+  atualizar();
+}
+
 async function loadPortalConfig() {
   _initFerramentasLista('portal-cfg-subs-list', 'Buscar assinatura...');
   _initFerramentasLista('portal-cfg-orfaos-subs-list', 'Buscar assinatura...');
@@ -2807,6 +2833,22 @@ async function loadPortalConfig() {
     if (cond)     cond.value       = d.taxa_cond    ?? 13.00;
     const gordura = document.getElementById('portal-cfg-gordura');
     if (gordura)  gordura.value   = d.taxa_gordura  ?? 0;
+    // Imposto sobre custo coletado (2026-09-28): dois impostos independentes, cada um só
+    // aplicado se ativo — padrão desativado (mantém o dado cru da Azure).
+    const impMsAtivo = document.getElementById('portal-cfg-imposto-ms-ativo');
+    const impMsTaxa  = document.getElementById('portal-cfg-imposto-ms-taxa');
+    const impMpAtivo = document.getElementById('portal-cfg-imposto-mp-ativo');
+    const impMpTaxa  = document.getElementById('portal-cfg-imposto-mp-taxa');
+    const impMs = d.imposto_microsoft   || {};
+    const impMp = d.imposto_marketplace || {};
+    if (impMsAtivo) impMsAtivo.checked = !!impMs.ativo;
+    if (impMsTaxa)  { impMsTaxa.value = impMs.taxa ?? 18.65; impMsTaxa.disabled = !impMs.ativo; }
+    if (impMpAtivo) impMpAtivo.checked = !!impMp.ativo;
+    if (impMpTaxa)  { impMpTaxa.value = impMp.taxa ?? 18.65; impMpTaxa.disabled = !impMp.ativo; }
+    // Preview ao vivo "R$ 100 -> R$ X" pra deixar óbvio o efeito da taxa digitada — evita o erro
+    // de confundir pontos percentuais (18.65 = +18,65%) com um fator de crescimento (1.1865).
+    _ligarPreviewImposto(impMsTaxa, document.getElementById('portal-cfg-imposto-ms-preview'));
+    _ligarPreviewImposto(impMpTaxa, document.getElementById('portal-cfg-imposto-mp-preview'));
     const permPeriodo   = document.getElementById('portal-cfg-permitir-periodo');
     const permRecursos  = document.getElementById('portal-cfg-permitir-recursos');
     if (permPeriodo)  permPeriodo.checked  = !!d.permitir_selecao_periodo;
@@ -2837,7 +2879,10 @@ async function loadPortalConfig() {
     if (calcAtivo) calcAtivo.checked = d.calculadora_ativa !== false;
     const orfAtivo = document.getElementById('portal-cfg-orfaos-ativo');
     if (orfAtivo) orfAtivo.checked = !!d.orfaos_ativo;
+    const genieAtivo = document.getElementById('portal-cfg-genie-ativo');
+    if (genieAtivo) genieAtivo.checked = !!d.genie_cotas_ativo;
     atualizarAvisoServicosPortal();
+    _checarEntraAtivoPortal();
     _mostrarCorpoOrfaosPortal(!!d.orfaos_ativo);
     _renderCatsOrfaosPortal();
     _renderRgsOrfaosPortal([]);
@@ -2933,13 +2978,28 @@ function togglePortalOrfaos(ativo) {
   atualizarAvisoServicosPortal();
 }
 
-// Avisa quando calculadora e órfãos estão ambos desligados (o portal ficaria sem serviço).
+// Avisa quando nenhum dos 3 serviços está ligado (o portal ficaria sem serviço nenhum).
 function atualizarAvisoServicosPortal() {
   const aviso = document.getElementById('portal-cfg-servicos-aviso');
   if (!aviso) return;
-  const calc = document.getElementById('portal-cfg-calc-ativo')?.checked !== false;
-  const orf  = !!document.getElementById('portal-cfg-orfaos-ativo')?.checked;
-  aviso.style.display = (!calc && !orf) ? 'block' : 'none';
+  const calc  = document.getElementById('portal-cfg-calc-ativo')?.checked !== false;
+  const orf   = !!document.getElementById('portal-cfg-orfaos-ativo')?.checked;
+  const genie = !!document.getElementById('portal-cfg-genie-ativo')?.checked;
+  aviso.style.display = (!calc && !orf && !genie) ? 'block' : 'none';
+}
+
+// "Minha Cota Genie" exige a integração Entra ID ativa (é o login que a tela usa) — sem
+// isso o interruptor liga uma tela que nunca vai deixar ninguém entrar. Reaproveita
+// GET /api/integrations, já usado pela aba Integrações, em vez de criar uma rota nova só
+// pra essa checagem.
+async function _checarEntraAtivoPortal() {
+  const aviso = document.getElementById('portal-cfg-genie-sem-entra');
+  if (!aviso) return;
+  try {
+    const integracoes = await api('GET', '/integrations');
+    const entra = (integracoes || []).find(i => i.tipo === 'entra');
+    aviso.style.display = (entra && entra.ativo) ? 'none' : 'block';
+  } catch (e) { console.warn('[Portal Config] _checarEntraAtivoPortal:', e.message); }
 }
 
 function _checkboxOrfaosHtml(value, label, checked, kind, extra) {
@@ -3034,6 +3094,27 @@ async function savePortalConfig() {
   const dominios = (document.getElementById('portal-cfg-dominios')?.value || '')
     .split(/[\n,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
   const msgEl  = document.getElementById('portal-cfg-msg');
+
+  // Aviso de sanidade: taxa ativa entre 0 e 3 é um forte indício de que foi digitado um fator
+  // de crescimento (ex.: 1.186, de uma conta "fatura_real / custo_cru") em vez de pontos
+  // percentuais (18.6) — ver plano "Corrigir e blindar o campo Taxa de Imposto".
+  const _checarTaxaSuspeita = (ativo, taxa, nome) => {
+    if (!ativo || !Number.isFinite(taxa) || taxa <= 0 || taxa >= 3) return true;
+    const equivalente = (taxa - 1) * 100;
+    return confirm(
+      `A taxa de "${nome}" está em ${taxa}%, um valor raso o suficiente pra ser quase sem efeito.\n\n` +
+      `Isso é intencional, ou você digitou um FATOR de crescimento (ex.: fatura_real / custo_cru = ${taxa}) em vez de pontos percentuais?\n` +
+      (equivalente > 0 ? `Se for isso, o valor certo seria aproximadamente ${equivalente.toFixed(4)}.\n\n` : '\n') +
+      `Clique OK pra salvar mesmo assim, ou Cancelar pra corrigir.`
+    );
+  };
+  const _impMsAtivo = document.getElementById('portal-cfg-imposto-ms-ativo')?.checked || false;
+  const _impMsTaxa  = parseFloat(document.getElementById('portal-cfg-imposto-ms-taxa')?.value);
+  const _impMpAtivo = document.getElementById('portal-cfg-imposto-mp-ativo')?.checked || false;
+  const _impMpTaxa  = parseFloat(document.getElementById('portal-cfg-imposto-mp-taxa')?.value);
+  if (!_checarTaxaSuspeita(_impMsAtivo, _impMsTaxa, 'Serviço Microsoft')) return;
+  if (!_checarTaxaSuspeita(_impMpAtivo, _impMpTaxa, 'Marketplace')) return;
+
   try {
     const res = await fetch('/api/admin/portal-config', {
       method: 'POST',
@@ -3043,10 +3124,13 @@ async function savePortalConfig() {
         taxa_imposto:              parseFloat(document.getElementById('portal-cfg-imposto')?.value)  || 18.65,
         taxa_cond:                 parseFloat(document.getElementById('portal-cfg-cond')?.value)     || 13.00,
         taxa_gordura:              parseFloat(document.getElementById('portal-cfg-gordura')?.value)  || 0,
+        imposto_microsoft:   { ativo: _impMsAtivo, taxa: _impMsTaxa || 18.65 },
+        imposto_marketplace: { ativo: _impMpAtivo, taxa: _impMpTaxa || 18.65 },
         permitir_selecao_periodo:  document.getElementById('portal-cfg-permitir-periodo')?.checked  || false,
         permitir_selecao_recursos: document.getElementById('portal-cfg-permitir-recursos')?.checked || false,
         solicitar_identificacao:   document.getElementById('portal-cfg-solicitar-ident')?.checked   || false,
         calculadora_ativa:         document.getElementById('portal-cfg-calc-ativo')?.checked !== false,
+        genie_cotas_ativo:         document.getElementById('portal-cfg-genie-ativo')?.checked || false,
         orfaos_ativo:              document.getElementById('portal-cfg-orfaos-ativo')?.checked || false,
         orfaos_subscription_ids:   Array.from(_portalOrfaos.subs),
         orfaos_categorias:         Array.from(_portalOrfaos.cats),

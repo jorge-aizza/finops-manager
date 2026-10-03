@@ -346,7 +346,7 @@ export default function ColetaView() {
       <div className="card">
         <div className="card-header">
           <span className="card-title">Service Principals</span>
-          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginLeft: 'auto' }}>
             <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDiagOpen(true)}>
               🔍 Diagnóstico do Agendador
             </button>
@@ -407,7 +407,7 @@ export default function ColetaView() {
         <div className="card-header">
           <span className="card-title">Coleta Databricks</span>
           <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>Fase 3 — dashboard ativo</span>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             <button className="btn-ghost" onClick={() => window.showView?.('databricks')}>📊 Ver Dashboard</button>
             <button className="btn-primary" onClick={() => { setEditingDbx(null); setDbxModalOpen(true) }}>
               Nova Configuração
@@ -526,7 +526,7 @@ export default function ColetaView() {
       <div className="card">
         <div className="card-header">
           <span className="card-title">Histórico de Execuções</span>
-          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', alignItems: 'center' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginLeft: 'auto', alignItems: 'center' }}>
             <select className="filter-select" value={histTab} onChange={(e) => setHistTab(e.target.value as HistTab)}>
               <option value="api">API Oficial</option>
               <option value="storage">Via Storage</option>

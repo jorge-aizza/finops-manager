@@ -3,11 +3,13 @@ import { useQuery } from '@tanstack/react-query'
 import { getPortalConfig, identificar } from './api/portal'
 import PublicCalculadoraView from './views/PublicCalculadoraView'
 import PublicOrfaosView from './views/PublicOrfaosView'
+import PublicGenieCotasView from './views/PublicGenieCotasView'
 import PortalHome from './components/PortalHome'
 import PortalHero from './components/PortalHero'
 import FinopsLogo from './components/FinopsLogo'
-import { IconCalculadora, IconInicio, IconOrfaos } from './components/portalIcons'
+import { IconCalculadora, IconInicio, IconOrfaos, IconCotaGenie } from './components/portalIcons'
 import { hrefDe, usePortalRoute, type ServicoId } from './lib/portalRoute'
+import { consumePortalEntraHandoff, setPortalEntraToken } from './api/portalEntra'
 import type { PortalConfig, PortalIdentSessao } from './types/portal'
 
 // Registro de serviços do portal: cada item vira um card na página inicial e um ícone no
@@ -33,6 +35,12 @@ const SERVICOS: ServicoDef[] = [
     descricao: 'Veja discos, IPs, NICs e outros recursos sem uso que continuam gerando custo.',
     ativo: (cfg) => !!cfg.orfaos_ativo,
     icone: (size) => <IconOrfaos size={size} />,
+  },
+  {
+    id: 'genie-cotas', titulo: 'Minha Cota Genie', subtitulo: 'Minha Cota Genie', etiqueta: 'Pessoal',
+    descricao: 'Entre com sua conta Microsoft e veja sua cota e consumo do Genie no Databricks.',
+    ativo: (cfg) => !!cfg.genie_cotas_ativo,
+    icone: (size) => <IconCotaGenie size={size} />,
   },
 ]
 
@@ -69,6 +77,23 @@ export default function PortalApp() {
       toastTimer.current = setTimeout(() => setToast(null), 3500)
     }
     return () => clearTimeout(toastTimer.current)
+  }, [])
+
+  // Handoff do login PARALELO de "Minha Cota Genie" (?portal_handoff=): processado aqui, no
+  // nível do App, e não dentro de PublicGenieCotasView — a Microsoft redireciona pra
+  // portal.html SEM hash, então a view daquele serviço ainda não estaria montada pra tratar
+  // o código. Só esse serviço usa esse mecanismo hoje, então força a rota pra ele ao concluir.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const code = params.get('portal_handoff')
+    if (!code) return
+    window.history.replaceState(null, '', window.location.pathname)
+    consumePortalEntraHandoff(code)
+      .then(({ token }) => {
+        setPortalEntraToken(token)
+        window.location.hash = hrefDe('genie-cotas')
+      })
+      .catch(() => { /* PublicGenieCotasView mostra a tela de login de novo, sem token salvo */ })
   }, [])
 
   function toggleTheme() {
@@ -126,7 +151,7 @@ export default function PortalApp() {
             <div className="portal-brand-sub">{subtitulo}</div>
           </div>
         </div>
-        <div className="portal-header-actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="portal-header-actions" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
           {temMenu && (
             <nav className="portal-nav" aria-label="Menu do portal">
               <a className={'portal-nav-btn' + (viewAtual === 'home' ? ' active' : '')} href={hrefDe('home')}
@@ -142,7 +167,7 @@ export default function PortalApp() {
             </nav>
           )}
           {ident && (
-            <div className="portal-user-badge" style={{ display: 'flex' }}>
+            <div className="portal-user-badge" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
               👤 <span className="pub-nome">{ident.nome}</span>
               <span className="pub-email">{ident.email}</span>
               <button className="pub-sair" title="Trocar identificação" onClick={handleTrocarIdentificacao}>✕</button>
@@ -218,6 +243,7 @@ export default function PortalApp() {
       )}
       {cfg && viewAtual === 'calculadora' && <PublicCalculadoraView cfg={cfg} ident={ident} />}
       {viewAtual === 'orfaos' && <PublicOrfaosView />}
+      {viewAtual === 'genie-cotas' && <PublicGenieCotasView />}
       {viewAtual === 'nenhum' && (
         <div id="portal-inactive" style={{ display: 'block' }}>
           <div className="pi-icon">🔒</div>

@@ -97,13 +97,14 @@ describe('buildPdfHtml', () => {
 
   it('omite a linha de Imposto/Condomínio quando os percentuais são 0', () => {
     const html = buildPdfHtml(makeInput({ pct_imposto: 0, pct_cond: 0 }))
-    expect(html).not.toContain('+ Imposto');
+    expect(html).not.toContain('Imposto (');
     expect(html).not.toContain('+ Condomínio');
   });
 
   it('mostra Imposto/Condomínio quando os percentuais são > 0', () => {
     const html = buildPdfHtml(makeInput({ pct_imposto: 18.65, vl_imposto: 268.56, pct_cond: 13, vl_cond: 187.2, total_final: 1895.76 }))
-    expect(html).toContain('+ Imposto (18.65%)')
+    // Sem "+": imposto já vem embutido no Subtotal por recurso, não é mais somado separadamente.
+    expect(html).toContain('Imposto (18.65%)')
     expect(html).toContain('+ Condomínio (13%)')
     expect(html).toContain(brlOf(1895.76))
   });

@@ -98,7 +98,7 @@ export default function ReconciliacaoModal({ subscriptionIds, resourceGroups, da
               )}
 
               <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--text-muted)', marginBottom: 8 }}>Por Charge Type</div>
-              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                   <thead>
                     <tr style={{ background: 'rgba(255,255,255,.04)' }}>

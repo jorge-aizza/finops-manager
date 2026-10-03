@@ -18,10 +18,15 @@ vi.mock('./views/PublicOrfaosView', () => ({
   default: () => <div data-testid="public-orfaos">órfãos</div>,
 }))
 
+vi.mock('./views/PublicGenieCotasView', () => ({
+  default: () => <div data-testid="public-genie-cotas">cota genie</div>,
+}))
+
 function makeConfig(overrides: Partial<PortalConfig> = {}): PortalConfig {
   return {
     titulo: 'Portal FinOps Vivo', descricao: 'Estime seus custos Azure.',
     dominios_aceitos: [], taxa_imposto: 18.65, taxa_cond: 13, taxa_gordura: 0,
+    imposto_microsoft: { ativo: false, taxa: 18.65 }, imposto_marketplace: { ativo: false, taxa: 18.65 },
     horario_livre: { ativo: false, inicio: '09:00', fim: '18:00', dias: [1, 2, 3, 4, 5], inicio_sab: '09:00', fim_sab: '18:00', inicio_dom: '09:00', fim_dom: '18:00' },
     solicitar_identificacao: false, permitir_selecao_periodo: true, permitir_selecao_recursos: true,
     ...overrides,
@@ -235,6 +240,42 @@ describe('PortalApp', () => {
       expect(screen.queryByTestId('portal-home')).not.toBeInTheDocument()
       expect(screen.queryByRole('navigation', { name: 'Menu do portal' })).not.toBeInTheDocument()
       expect(screen.queryByTestId('public-orfaos')).not.toBeInTheDocument()
+    });
+  });
+
+  describe('serviço "Minha Cota Genie" (login pessoal via Entra ID)', () => {
+    it('sem genie_cotas_ativo: não entra na home nem no menu', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true, genie_cotas_ativo: false }))
+      renderWithClient()
+      await screen.findByTestId('portal-home')
+      expect(screen.queryByTestId('portal-card-genie-cotas')).not.toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: 'Minha Cota Genie' })).not.toBeInTheDocument()
+    });
+
+    it('com genie_cotas_ativo junto de outro serviço: aparece na home e abre pelo menu', async () => {
+      const user = userEvent.setup()
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true, genie_cotas_ativo: true }))
+      renderWithClient()
+      await screen.findByTestId('portal-home')
+
+      expect(screen.getByTestId('portal-card-genie-cotas')).toHaveAttribute('href', '#/genie-cotas')
+      await user.click(screen.getByRole('link', { name: 'Minha Cota Genie' }))
+      expect(await screen.findByTestId('public-genie-cotas')).toBeInTheDocument()
+    });
+
+    it('só "Minha Cota Genie" ativo: abre direto nele, sem início nem menu', async () => {
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: false, calculadora_ativa: false, genie_cotas_ativo: true }))
+      renderWithClient()
+      expect(await screen.findByTestId('public-genie-cotas')).toBeInTheDocument()
+      expect(screen.queryByTestId('portal-home')).not.toBeInTheDocument()
+      expect(screen.queryByRole('navigation', { name: 'Menu do portal' })).not.toBeInTheDocument()
+    });
+
+    it('deep link #/genie-cotas abre direto a visão pessoal', async () => {
+      window.location.hash = '#/genie-cotas'
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ orfaos_ativo: true, genie_cotas_ativo: true }))
+      renderWithClient()
+      expect(await screen.findByTestId('public-genie-cotas')).toBeInTheDocument()
     });
   });
 });

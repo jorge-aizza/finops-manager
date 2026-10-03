@@ -40,11 +40,14 @@ describe('buildEstimativa', () => {
     expect(est.resultados[0].estimado_brl).toBeCloseTo(22, 6)
   })
 
-  it('imposto e condomínio incidem sobre total_brl (já com gordura), não sobre total_final', () => {
+  it('imposto já vem embutido em total_brl/estimado_brl; condomínio continua sobre o valor sem imposto; total_final não muda', () => {
     const r1 = makeRecurso({ resource_id: 'a' })
     const selecionados = { [recursoKey(r1)]: 10 }
     const est = buildEstimativa([r1], selecionados, new Map(), { pctImposto: 10, pctCond: 5, pctGordura: 0 }, 5.7, 10)
-    // total_brl = 20; vlImposto = 2; vlCond = 1; total_final = 23
+    // base sem imposto = 20; vlImposto = 2 (10% de 20); vlCond = 1 (5% dos 20 sem imposto, inalterado);
+    // total_brl (Subtotal) agora já é 20+2=22, embutido por recurso; total_final = 22+1 = 23 (mesmo valor de antes).
+    expect(est.resultados[0].estimado_brl).toBeCloseTo(22, 6)
+    expect(est.total_brl).toBeCloseTo(22, 6)
     expect(est.vl_imposto).toBeCloseTo(2, 6)
     expect(est.vl_cond).toBeCloseTo(1, 6)
     expect(est.total_final).toBeCloseTo(23, 6)

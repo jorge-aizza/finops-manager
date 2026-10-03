@@ -649,6 +649,34 @@
     }
     .settings-panel { display: none; }
     .settings-panel.active { display: block; }
+    /* Sub-abas (2026-09-29) — mesmo padrão de .settings-tabs/.settings-tab, um nível
+       abaixo, visualmente mais discreto pra ficar claro que é uma hierarquia menor. */
+    .settings-subtabs {
+      display: flex;
+      gap: 2px;
+      border-bottom: 1px solid var(--border, #313244);
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .settings-subtab {
+      padding: 7px 14px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted, #6c7086);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      border-radius: 5px 5px 0 0;
+      white-space: nowrap;
+    }
+    .settings-subtab:hover { color: var(--text); background: rgba(147,51,234,.06); }
+    .settings-subtab.active {
+      color: var(--accent, #9333ea);
+      border-bottom-color: var(--accent, #9333ea);
+      font-weight: 600;
+    }
+    .settings-subtab-panel { display: none; }
+    .settings-subtab-panel.active { display: flex; flex-direction: column; gap: 18px; }
     .settings-section-title {
       font-size: 11px;
       font-weight: 700;
@@ -878,6 +906,9 @@
       .settings-tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
       .settings-tabs::-webkit-scrollbar { display: none; }
       .settings-tab  { font-size: 11px; padding: 8px 10px; white-space: nowrap; }
+      .settings-subtabs { flex-wrap: nowrap; }
+      .settings-subtabs::-webkit-scrollbar { display: none; }
+      .settings-subtab { font-size: 11px; padding: 6px 10px; }
       .integration-card { padding: 12px; }
       .integration-header { flex-wrap: wrap; gap: 8px; }
       .user-row { flex-wrap: wrap; gap: 8px; }
@@ -1272,6 +1303,14 @@
             <path d="M12 2a6 6 0 0 1 6 6h-6V2z" stroke="currentColor" stroke-width="1.5"/>
           </svg>
           <span class="nav-label">Alocação</span>
+        </a>
+        <!-- Log Analytics FinOps (2026-09-29, v1): descoberta de workspaces + ingestão diária
+             por tabela + motor de regras + export Excel. -->
+        <a class="nav-item" data-view="log-analytics" onclick="showView('log-analytics')" title="Log Analytics FinOps — ingestão, retenção e oportunidades de economia">
+          <svg viewBox="0 0 20 20" fill="none" width="17" height="17">
+            <path d="M3 15V9M8 15V5M13 15v-3M17 15V7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="nav-label">Log Analytics</span>
         </a>
         <!-- Databricks — grupo expansível (2026-08-28): Dashboard/Orçamentos e Anomalias/Quotas -->
         <div class="nav-group" id="nav-group-databricks">
@@ -3068,7 +3107,7 @@
           <div class="settings-tab" onclick="switchSettingsTab('integracao')">🔗 Integrações</div>
           <div class="settings-tab" onclick="switchSettingsTab('banco')">🗄️ Banco de Dados</div>
           <div class="settings-tab" onclick="switchSettingsTab('pricelist')">💰 Price List</div>
-          <div class="settings-tab" onclick="switchSettingsTab('portal'); loadPortalConfig();">🌐 Portal Público</div>
+          <div class="settings-tab" onclick="switchSettingsTab('portal'); loadPortalConfig();">🌐 Portal &amp; Sistema</div>
         </div>
 
         <!-- Tab: Usuários -->
@@ -3627,59 +3666,53 @@
               <div id="portal-cfg-link" style="display:none;padding:8px;background:rgba(147,51,234,.08);border-radius:6px;border:1px solid rgba(147,51,234,.2);"></div>
             </div>
 
-            <!-- Horário Livre — sempre visível (reflete nos dois portais) -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:8px;">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text);">
-                <input type="checkbox" id="portal-cfg-hl-ativo" onchange="togglePortalHL(this.checked)"
-                  style="width:14px;height:14px;accent-color:var(--accent);">
-                <span style="font-size:13px;font-weight:600;">Ativar Horário Livre</span>
-                <span style="color:var(--text-muted);font-size:11px;">(descontar horas fora do expediente — reflete nos dois portais)</span>
-              </label>
-              <div id="portal-cfg-hl-corpo" style="display:none;flex-direction:column;gap:8px;">
-                <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Dias úteis (Seg–Sex)</div>
-                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                  <div>
-                    <label style="font-size:11px;color:var(--text-muted);">Início</label>
-                    <input type="time" id="portal-cfg-hl-ini" value="09:00"
-                      style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;">
-                  </div>
-                  <div>
-                    <label style="font-size:11px;color:var(--text-muted);">Fim</label>
-                    <input type="time" id="portal-cfg-hl-fim" value="18:00"
-                      style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;">
-                  </div>
+            <!-- Sub-abas — Impostos do Sistema fica sempre acessível (fora do portal-cfg-body);
+                 as outras 3 só fazem sentido com o portal ativo, então continuam dentro dele. -->
+            <div class="settings-subtabs">
+              <div class="settings-subtab active" onclick="switchPortalSubTab('geral')">Geral</div>
+              <div class="settings-subtab" onclick="switchPortalSubTab('servicos')">Serviços &amp; Órfãos</div>
+              <div class="settings-subtab" onclick="switchPortalSubTab('calculadora')">Calculadora Pública</div>
+              <div class="settings-subtab" onclick="switchPortalSubTab('impostos')">⚠️ Impostos do Sistema</div>
+            </div>
+
+            <!-- Sub-aba: Impostos do Sistema (2026-09-29) — vale pro sistema inteiro (interno e
+                 portal), não só esta tela; por isso fica FORA do portal-cfg-body, sempre editável
+                 mesmo com o Portal Público desativado. -->
+            <div id="portal-subtab-impostos" class="settings-subtab-panel">
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Imposto da Calculadora (%)</div>
+                <div style="font-size:11px;color:var(--text-muted);">Usado quando nenhuma categoria abaixo estiver ativada — vale pra Calculadora interna e pública.</div>
+                <div style="max-width:220px;">
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Imposto (%)</label>
+                  <input id="portal-cfg-imposto" type="number" value="18.65" min="0" max="100" step="0.01"
+                    style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
                 </div>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="0" onchange="togglePortalHLWeekend()" style="width:12px;height:12px;accent-color:var(--accent);">Dom</label>
-                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="1" checked style="width:12px;height:12px;accent-color:var(--accent);">Seg</label>
-                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="2" checked style="width:12px;height:12px;accent-color:var(--accent);">Ter</label>
-                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="3" checked style="width:12px;height:12px;accent-color:var(--accent);">Qua</label>
-                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="4" checked style="width:12px;height:12px;accent-color:var(--accent);">Qui</label>
-                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="5" checked style="width:12px;height:12px;accent-color:var(--accent);">Sex</label>
-                  <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="6" onchange="togglePortalHLWeekend()" style="width:12px;height:12px;accent-color:var(--accent);">Sáb</label>
-                </div>
-                <!-- Horário específico Sábado -->
-                <div id="portal-cfg-sab-row" style="display:none;border:1px solid var(--border);border-radius:6px;padding:8px;background:rgba(147,51,234,.04);">
-                  <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;">Sábado — horário específico</div>
-                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                    <div><label style="font-size:11px;color:var(--text-muted);">Início</label>
-                      <input type="time" id="portal-cfg-hl-ini-sab" value="09:00"
-                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
-                    <div><label style="font-size:11px;color:var(--text-muted);">Fim</label>
-                      <input type="time" id="portal-cfg-hl-fim-sab" value="18:00"
-                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
+              </div>
+
+              <!-- Imposto sobre custo coletado (2026-09-28): dois impostos independentes -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Imposto sobre Custo Coletado (Azure)</div>
+                <div style="font-size:11px;color:var(--text-muted);">⚠ Vale para o sistema inteiro (interno e portal público), não só esta tela — está aqui por reaproveitar a mesma configuração da Calculadora. Aplica sobre praticamente todos os valores em R$ vindos direto da Azure (Recursos Órfãos, alertas, Alocação por Tag, Reconciliação, Inventário, Calculadora quando ativado e outros) — <strong>menos Databricks</strong>, que nunca é afetado. Cada categoria só é aplicada se estiver ativada; desativada, mantém o valor original da Azure.</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                  <div style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                      <input type="checkbox" id="portal-cfg-imposto-ms-ativo" onchange="document.getElementById('portal-cfg-imposto-ms-taxa').disabled = !this.checked" style="width:14px;height:14px;accent-color:var(--accent);">
+                      <span style="font-weight:600;">Serviço Microsoft</span>
+                    </label>
+                    <input id="portal-cfg-imposto-ms-taxa" type="number" value="18.65" min="0" max="100" step="0.01" disabled
+                      style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
+                    <div style="font-size:10.5px;color:var(--text-muted);line-height:1.4;">Pontos percentuais a <strong>somar</strong> — ex.: se a fatura real é 18,6% maior que o custo cru da Azure, digite <code>18,6</code> (não <code>1,186</code>, que é o fator de crescimento da fatura).</div>
+                    <div id="portal-cfg-imposto-ms-preview" style="font-size:11px;color:var(--accent);font-family:'IBM Plex Mono',monospace;"></div>
                   </div>
-                </div>
-                <!-- Horário específico Domingo -->
-                <div id="portal-cfg-dom-row" style="display:none;border:1px solid var(--border);border-radius:6px;padding:8px;background:rgba(147,51,234,.04);">
-                  <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;">Domingo — horário específico</div>
-                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                    <div><label style="font-size:11px;color:var(--text-muted);">Início</label>
-                      <input type="time" id="portal-cfg-hl-ini-dom" value="09:00"
-                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
-                    <div><label style="font-size:11px;color:var(--text-muted);">Fim</label>
-                      <input type="time" id="portal-cfg-hl-fim-dom" value="18:00"
-                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
+                  <div style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                      <input type="checkbox" id="portal-cfg-imposto-mp-ativo" onchange="document.getElementById('portal-cfg-imposto-mp-taxa').disabled = !this.checked" style="width:14px;height:14px;accent-color:var(--accent);">
+                      <span style="font-weight:600;">Marketplace</span>
+                    </label>
+                    <input id="portal-cfg-imposto-mp-taxa" type="number" value="18.65" min="0" max="100" step="0.01" disabled
+                      style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
+                    <div style="font-size:10.5px;color:var(--text-muted);line-height:1.4;">Pontos percentuais a <strong>somar</strong> — ex.: se a fatura real é 18,6% maior que o custo cru da Azure, digite <code>18,6</code> (não <code>1,186</code>, que é o fator de crescimento da fatura).</div>
+                    <div id="portal-cfg-imposto-mp-preview" style="font-size:11px;color:var(--accent);font-family:'IBM Plex Mono',monospace;"></div>
                   </div>
                 </div>
               </div>
@@ -3688,163 +3721,237 @@
             <!-- Config body — oculto quando portal inativo -->
             <div id="portal-cfg-body" style="display:none;flex-direction:column;gap:18px;">
 
-            <!-- Serviços do portal (cards da página inicial) -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
-              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Serviços do Portal</div>
-              <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
-                <input type="checkbox" id="portal-cfg-calc-ativo" checked onchange="atualizarAvisoServicosPortal()" style="width:14px;height:14px;accent-color:var(--accent);">
+            <!-- Sub-aba: Geral -->
+            <div id="portal-subtab-geral" class="settings-subtab-panel active">
+              <!-- Título e descrição -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Aparência</div>
                 <div>
-                  <span style="font-weight:600;">Calculadora de custos</span>
-                  <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Estimativa de custos Azure por horas de uso. Desmarque para ter um portal só de Recursos Órfãos.</div>
-                </div>
-              </label>
-              <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
-                Recursos Órfãos é ligado mais abaixo, no card “Recursos Órfãos no Portal”. Com <strong style="color:var(--text-dim);">dois ou mais serviços ativos</strong> o portal abre numa página inicial com um card por serviço; com um só, abre direto nele.
-              </div>
-              <div id="portal-cfg-servicos-aviso" style="display:none;font-size:11px;color:var(--danger,#ef4444);">
-                ⚠ Nenhum serviço ativo: o portal mostrará “Nenhum serviço disponível”.
-              </div>
-            </div>
-
-            <!-- Título e descrição -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
-              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Aparência</div>
-              <div>
-                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Título do Portal</label>
-                <input id="portal-cfg-titulo" type="text" value="Portal de Serviço"
-                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;"
-                  placeholder="Portal de Serviço Azure">
-              </div>
-              <div>
-                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Descrição (subtítulo)</label>
-                <textarea id="portal-cfg-desc" rows="2"
-                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;resize:vertical;"
-                  placeholder="Estime o custo dos seus recursos Azure..."></textarea>
-              </div>
-            </div>
-
-            <!-- Subscriptions permitidas -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
-              <div style="display:flex;align-items:center;justify-content:space-between;">
-                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Filtros de Acesso</div>
-                <button onclick="recarregarSubsPortal()" class="btn-ghost" style="padding:4px 10px;font-size:11px;">↻ Atualizar lista</button>
-              </div>
-              <div>
-                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
-                  Assinaturas permitidas <span style="opacity:.6;">(vazio = todas)</span>
-                </label>
-                <div id="portal-cfg-subs-list" style="display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;">
-                  <span style="font-size:12px;color:var(--text-muted);font-style:italic;">Carregando assinaturas...</span>
-                </div>
-                <!-- fallback hidden — mantém IDs para savePortalConfig() ler -->
-                <textarea id="portal-cfg-subs" style="display:none;"></textarea>
-              </div>
-            </div>
-
-            <!-- Padrões da calculadora -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;">
-              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Padrões da Calculadora Pública</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
-                <div>
-                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Imposto (%)</label>
-                  <input id="portal-cfg-imposto" type="number" value="18.65" min="0" max="100" step="0.01"
-                    style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
-                </div>
-                <div>
-                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Condomínio (%)</label>
-                  <input id="portal-cfg-cond" type="number" value="13" min="0" max="100" step="0.01"
-                    style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
-                </div>
-                <div>
-                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Gordura (%) <span style="font-size:10px;color:var(--text-muted);font-weight:400;">— apenas portal público</span></label>
-                  <input id="portal-cfg-gordura" type="number" value="0" min="0" max="200" step="0.5"
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Título do Portal</label>
+                  <input id="portal-cfg-titulo" type="text" value="Portal de Serviço"
                     style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;"
-                    title="Margem aplicada silenciosamente sobre o estimado no portal público — não aparece como linha separada">
+                    placeholder="Portal de Serviço Azure">
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Descrição (subtítulo)</label>
+                  <textarea id="portal-cfg-desc" rows="2"
+                    style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;resize:vertical;"
+                    placeholder="Estime o custo dos seus recursos Azure..."></textarea>
                 </div>
               </div>
-            </div>
 
-            <!-- Permissões do usuário no portal -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
-              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Permissões do Usuário</div>
-              <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
-                <input type="checkbox" id="portal-cfg-permitir-periodo" style="width:14px;height:14px;accent-color:var(--accent);">
-                <div>
-                  <span style="font-weight:600;">Permitir seleção de período</span>
-                  <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Quando desativado, o portal sempre usa os últimos 30 dias automaticamente</div>
-                </div>
-              </label>
-              <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
-                <input type="checkbox" id="portal-cfg-permitir-recursos" style="width:14px;height:14px;accent-color:var(--accent);">
-                <div>
-                  <span style="font-weight:600;">Permitir seleção de recursos</span>
-                  <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Quando desativado, todos os recursos são selecionados automaticamente e os botões Sel. todos / Limpar ficam desativados</div>
-                </div>
-              </label>
-            </div>
-
-            <!-- Recursos órfãos no portal -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
-              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Recursos Órfãos no Portal</div>
-              <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
-                <input type="checkbox" id="portal-cfg-orfaos-ativo" onchange="togglePortalOrfaos(this.checked)" style="width:14px;height:14px;accent-color:var(--accent);">
-                <div>
-                  <span style="font-weight:600;">Exibir a visão de recursos órfãos no portal</span>
-                  <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Adiciona ao portal um menu com Calculadora e Recursos Órfãos. Só aparece o que for marcado abaixo (nome, tipo, Resource Group, SKU, custo e dias órfão — nunca o ID completo do recurso). O portal não tem login: qualquer pessoa com o link vê estes dados.</div>
-                </div>
-              </label>
-              <div id="portal-cfg-orfaos-body" style="display:none;flex-direction:column;gap:12px;">
-                <div>
-                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
-                    Assinaturas exibidas <span style="opacity:.6;">(nenhuma marcada = nada é exibido)</span>
-                  </label>
-                  <div id="portal-cfg-orfaos-subs-list" style="display:flex;flex-direction:column;gap:4px;max-height:160px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;"></div>
-                </div>
-                <div>
-                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
-                    Tipos de recurso exibidos <span style="opacity:.6;">(nenhum marcado = nada é exibido)</span>
-                  </label>
-                  <div id="portal-cfg-orfaos-cats-list" style="display:flex;flex-direction:column;gap:4px;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;"></div>
-                </div>
-                <div>
-                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-                    <label style="font-size:12px;color:var(--text-muted);">
-                      Resource Groups exibidos <span style="opacity:.6;">(nenhum marcado = todos os RGs das assinaturas escolhidas)</span>
-                    </label>
-                    <button onclick="carregarRgsOrfaosPortal()" class="btn-ghost" style="padding:4px 10px;font-size:11px;">↻ Carregar Resource Groups</button>
-                  </div>
-                  <div id="portal-cfg-orfaos-rgs-list" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;">
-                    <span style="font-size:12px;color:var(--text-muted);font-style:italic;">Clique em “Carregar Resource Groups” para listar os RGs que têm recursos órfãos (consulta o Azure, pode levar alguns segundos).</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Identificação de usuários -->
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
-              <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Identificação de Usuários</div>
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text);">
-                <input type="checkbox" id="portal-cfg-solicitar-ident"
-                  style="width:14px;height:14px;accent-color:var(--accent);">
-                <span style="font-weight:600;">Solicitar identificação ao acessar o portal</span>
-              </label>
-              <div style="font-size:11px;color:var(--text-muted);">Quando ativado, o portal exibe um formulário de nome e e-mail antes de mostrar a calculadora.</div>
-              <div>
-                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">
-                  Domínios de e-mail aceitos <span style="opacity:.6;">(um por linha — vazio = sem restrição)</span>
+              <!-- Identificação de usuários -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Identificação de Usuários</div>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-solicitar-ident"
+                    style="width:14px;height:14px;accent-color:var(--accent);">
+                  <span style="font-weight:600;">Solicitar identificação ao acessar o portal</span>
                 </label>
-                <textarea id="portal-cfg-dominios" rows="3"
-                  style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;font-family:monospace;resize:vertical;"
-                  placeholder="vivo.com.br&#10;telefonica.com"></textarea>
+                <div style="font-size:11px;color:var(--text-muted);">Quando ativado, o portal exibe um formulário de nome e e-mail antes de mostrar a calculadora.</div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">
+                    Domínios de e-mail aceitos <span style="opacity:.6;">(um por linha — vazio = sem restrição)</span>
+                  </label>
+                  <textarea id="portal-cfg-dominios" rows="3"
+                    style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;font-family:monospace;resize:vertical;"
+                    placeholder="vivo.com.br&#10;telefonica.com"></textarea>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
+                  Quando configurado, o portal solicita <strong style="color:var(--text-dim);">nome e e-mail corporativo</strong> antes de exibir a calculadora.
+                  Apenas e-mails com os domínios listados serão aceitos. Os acessos ficam registrados no log abaixo.
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <button onclick="verAcessosPortal()" class="btn-ghost" style="padding:6px 14px;font-size:12px;">📋 Ver log de acessos</button>
+                </div>
+                <div id="portal-acessos-log" style="display:none;max-height:200px;overflow-y:auto;font-size:11px;font-family:monospace;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;color:var(--text-muted);"></div>
               </div>
-              <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
-                Quando configurado, o portal solicita <strong style="color:var(--text-dim);">nome e e-mail corporativo</strong> antes de exibir a calculadora.
-                Apenas e-mails com os domínios listados serão aceitos. Os acessos ficam registrados no log abaixo.
+            </div>
+
+            <!-- Sub-aba: Serviços & Órfãos -->
+            <div id="portal-subtab-servicos" class="settings-subtab-panel">
+              <!-- Serviços do portal (cards da página inicial) -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Serviços do Portal</div>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-calc-ativo" checked onchange="atualizarAvisoServicosPortal()" style="width:14px;height:14px;accent-color:var(--accent);">
+                  <div>
+                    <span style="font-weight:600;">Calculadora de custos</span>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Estimativa de custos Azure por horas de uso. Desmarque para ter um portal só de Recursos Órfãos.</div>
+                  </div>
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-genie-ativo" onchange="atualizarAvisoServicosPortal()" style="width:14px;height:14px;accent-color:var(--accent);">
+                  <div>
+                    <span style="font-weight:600;">Minha Cota Genie (login Microsoft)</span>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Cada pessoa entra com a própria conta Microsoft (Entra ID) e vê só a cota e o consumo dela — não expõe dados de outros colaboradores. Exige a integração Entra ID configurada e ativa.</div>
+                  </div>
+                </label>
+                <div id="portal-cfg-genie-sem-entra" style="display:none;font-size:11px;color:var(--orange,#ff8c42);">
+                  ⚠ Nenhuma integração Entra ID ativa configurada — configure em Configurações → Integrações antes de ativar, ou o login nunca vai funcionar.
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
+                  Recursos Órfãos é ligado mais abaixo, no card “Recursos Órfãos no Portal”. Com <strong style="color:var(--text-dim);">dois ou mais serviços ativos</strong> o portal abre numa página inicial com um card por serviço; com um só, abre direto nele.
+                </div>
+                <div id="portal-cfg-servicos-aviso" style="display:none;font-size:11px;color:var(--danger,#ef4444);">
+                  ⚠ Nenhum serviço ativo: o portal mostrará “Nenhum serviço disponível”.
+                </div>
               </div>
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <button onclick="verAcessosPortal()" class="btn-ghost" style="padding:6px 14px;font-size:12px;">📋 Ver log de acessos</button>
+
+              <!-- Recursos órfãos no portal -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Recursos Órfãos no Portal</div>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-orfaos-ativo" onchange="togglePortalOrfaos(this.checked)" style="width:14px;height:14px;accent-color:var(--accent);">
+                  <div>
+                    <span style="font-weight:600;">Exibir a visão de recursos órfãos no portal</span>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Adiciona ao portal um menu com Calculadora e Recursos Órfãos. Só aparece o que for marcado abaixo (nome, tipo, Resource Group, SKU, custo e dias órfão — nunca o ID completo do recurso). O portal não tem login: qualquer pessoa com o link vê estes dados.</div>
+                  </div>
+                </label>
+                <div id="portal-cfg-orfaos-body" style="display:none;flex-direction:column;gap:12px;">
+                  <div>
+                    <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
+                      Assinaturas exibidas <span style="opacity:.6;">(nenhuma marcada = nada é exibido)</span>
+                    </label>
+                    <div id="portal-cfg-orfaos-subs-list" style="display:flex;flex-direction:column;gap:4px;max-height:160px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;"></div>
+                  </div>
+                  <div>
+                    <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
+                      Tipos de recurso exibidos <span style="opacity:.6;">(nenhum marcado = nada é exibido)</span>
+                    </label>
+                    <div id="portal-cfg-orfaos-cats-list" style="display:flex;flex-direction:column;gap:4px;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;"></div>
+                  </div>
+                  <div>
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                      <label style="font-size:12px;color:var(--text-muted);">
+                        Resource Groups exibidos <span style="opacity:.6;">(nenhum marcado = todos os RGs das assinaturas escolhidas)</span>
+                      </label>
+                      <button onclick="carregarRgsOrfaosPortal()" class="btn-ghost" style="padding:4px 10px;font-size:11px;">↻ Carregar Resource Groups</button>
+                    </div>
+                    <div id="portal-cfg-orfaos-rgs-list" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;">
+                      <span style="font-size:12px;color:var(--text-muted);font-style:italic;">Clique em “Carregar Resource Groups” para listar os RGs que têm recursos órfãos (consulta o Azure, pode levar alguns segundos).</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div id="portal-acessos-log" style="display:none;max-height:200px;overflow-y:auto;font-size:11px;font-family:monospace;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;color:var(--text-muted);"></div>
+            </div>
+
+            <!-- Sub-aba: Calculadora Pública -->
+            <div id="portal-subtab-calculadora" class="settings-subtab-panel">
+              <!-- Subscriptions permitidas — filtra as assinaturas visíveis na Calculadora
+                   Pública (não tem relação com Recursos Órfãos, que tem seu próprio filtro
+                   completo, mais abaixo em "Serviços & Órfãos"). -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;">
+                  <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Filtros de Acesso</div>
+                  <button onclick="recarregarSubsPortal()" class="btn-ghost" style="padding:4px 10px;font-size:11px;">↻ Atualizar lista</button>
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">
+                    Assinaturas permitidas <span style="opacity:.6;">(vazio = todas)</span>
+                  </label>
+                  <div id="portal-cfg-subs-list" style="display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-light);border-radius:6px;padding:8px;">
+                    <span style="font-size:12px;color:var(--text-muted);font-style:italic;">Carregando assinaturas...</span>
+                  </div>
+                  <!-- fallback hidden — mantém IDs para savePortalConfig() ler -->
+                  <textarea id="portal-cfg-subs" style="display:none;"></textarea>
+                </div>
+              </div>
+
+              <!-- Horário Livre — sempre visível (reflete nos dois portais) -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:8px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-hl-ativo" onchange="togglePortalHL(this.checked)"
+                    style="width:14px;height:14px;accent-color:var(--accent);">
+                  <span style="font-size:13px;font-weight:600;">Ativar Horário Livre</span>
+                  <span style="color:var(--text-muted);font-size:11px;">(descontar horas fora do expediente — reflete nos dois portais)</span>
+                </label>
+                <div id="portal-cfg-hl-corpo" style="display:none;flex-direction:column;gap:8px;">
+                  <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Dias úteis (Seg–Sex)</div>
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <div>
+                      <label style="font-size:11px;color:var(--text-muted);">Início</label>
+                      <input type="time" id="portal-cfg-hl-ini" value="09:00"
+                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;">
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--text-muted);">Fim</label>
+                      <input type="time" id="portal-cfg-hl-fim" value="18:00"
+                        style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;">
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="0" onchange="togglePortalHLWeekend()" style="width:12px;height:12px;accent-color:var(--accent);">Dom</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="1" checked style="width:12px;height:12px;accent-color:var(--accent);">Seg</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="2" checked style="width:12px;height:12px;accent-color:var(--accent);">Ter</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="3" checked style="width:12px;height:12px;accent-color:var(--accent);">Qua</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="4" checked style="width:12px;height:12px;accent-color:var(--accent);">Qui</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="5" checked style="width:12px;height:12px;accent-color:var(--accent);">Sex</label>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;"><input type="checkbox" class="portal-hl-dia" data-dia="6" onchange="togglePortalHLWeekend()" style="width:12px;height:12px;accent-color:var(--accent);">Sáb</label>
+                  </div>
+                  <!-- Horário específico Sábado -->
+                  <div id="portal-cfg-sab-row" style="display:none;border:1px solid var(--border);border-radius:6px;padding:8px;background:rgba(147,51,234,.04);">
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;">Sábado — horário específico</div>
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                      <div><label style="font-size:11px;color:var(--text-muted);">Início</label>
+                        <input type="time" id="portal-cfg-hl-ini-sab" value="09:00"
+                          style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
+                      <div><label style="font-size:11px;color:var(--text-muted);">Fim</label>
+                        <input type="time" id="portal-cfg-hl-fim-sab" value="18:00"
+                          style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
+                    </div>
+                  </div>
+                  <!-- Horário específico Domingo -->
+                  <div id="portal-cfg-dom-row" style="display:none;border:1px solid var(--border);border-radius:6px;padding:8px;background:rgba(147,51,234,.04);">
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;">Domingo — horário específico</div>
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                      <div><label style="font-size:11px;color:var(--text-muted);">Início</label>
+                        <input type="time" id="portal-cfg-hl-ini-dom" value="09:00"
+                          style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
+                      <div><label style="font-size:11px;color:var(--text-muted);">Fim</label>
+                        <input type="time" id="portal-cfg-hl-fim-dom" value="18:00"
+                          style="background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px;"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Padrões da calculadora — Condomínio/Gordura (o Imposto ficou na sub-aba Impostos do Sistema) -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Padrões da Calculadora Pública</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                  <div>
+                    <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Condomínio (%)</label>
+                    <input id="portal-cfg-cond" type="number" value="13" min="0" max="100" step="0.01"
+                      style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;">
+                  </div>
+                  <div>
+                    <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Gordura (%) <span style="font-size:10px;color:var(--text-muted);font-weight:400;">— apenas portal público</span></label>
+                    <input id="portal-cfg-gordura" type="number" value="0" min="0" max="200" step="0.5"
+                      style="width:100%;background:var(--bg);border:1px solid var(--border-light);color:var(--text);border-radius:6px;padding:7px 10px;font-size:13px;"
+                      title="Margem aplicada silenciosamente sobre o estimado no portal público — não aparece como linha separada">
+                  </div>
+                </div>
+              </div>
+
+              <!-- Permissões do usuário no portal -->
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
+                <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Permissões do Usuário</div>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-permitir-periodo" style="width:14px;height:14px;accent-color:var(--accent);">
+                  <div>
+                    <span style="font-weight:600;">Permitir seleção de período</span>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Quando desativado, o portal sempre usa os últimos 30 dias automaticamente</div>
+                  </div>
+                </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-permitir-recursos" style="width:14px;height:14px;accent-color:var(--accent);">
+                  <div>
+                    <span style="font-weight:600;">Permitir seleção de recursos</span>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Quando desativado, todos os recursos são selecionados automaticamente e os botões Sel. todos / Limpar ficam desativados</div>
+                  </div>
+                </label>
+              </div>
             </div>
 
             </div><!-- /portal-cfg-body -->
@@ -3857,7 +3964,6 @@
             <div id="portal-cfg-msg" style="font-size:12px;display:none;"></div>
 
           </div>
-        </div>
         </div>
         <!-- /Tab Portal Público -->
 
