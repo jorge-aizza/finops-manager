@@ -4423,11 +4423,11 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       : { rows: [] };
     const primeira = new Map(det.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
 
-    // Disco só entra no portal público com 90+ dias desanexados confirmados — recém-desanexado
-    // tem mais chance de ser reanexado de volta (manutenção, reboot, etc.), então ainda não é um
-    // candidato maduro o bastante para expor publicamente. `dias_orfao: null` (sem data conhecida)
-    // também é excluído aqui — "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 90+".
-    const _DIAS_MIN_DISCO_PUBLICO = 90;
+    // Disco só entra no portal público com 30+ dias desanexados confirmados — mesmo piso da
+    // janela de custo observado (ver `desde` em `_coletarDesperdicio`), pedido do usuário para
+    // alinhar os dois números. `dias_orfao: null` (sem data conhecida) também é excluído aqui —
+    // "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 30+".
+    const _DIAS_MIN_DISCO_PUBLICO = 30;
 
     // Imposto (Microsoft/Marketplace) já aplicado em _coletarDesperdicio, na origem — não
     // reaplicar aqui (dobraria o multiplicador).

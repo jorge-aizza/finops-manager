@@ -98,9 +98,9 @@ export default function PublicOrfaosView() {
           )}
         </div>
         <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-          Recursos provisionados que ninguém está usando. O custo é estimado pelo billing observado nos últimos 30 dias.
-          Recursos sem billing conhecido aparecem como &ldquo;—&rdquo;, nunca como R$ 0,00. Discos só aparecem aqui com
-          90+ dias desanexados confirmados — recém-desanexados e discos de PVC do AKS/ASR passam por validação manual
+          Recursos provisionados que ninguém está usando. O custo é estimado pelo billing observado nos últimos 30
+          dias, e discos só aparecem aqui com 30+ dias desanexados confirmados. Recursos sem billing conhecido
+          aparecem como &ldquo;—&rdquo;, nunca como R$ 0,00. Discos de PVC do AKS/ASR passam por validação manual
           antes de entrar nesta lista.
         </div>
 
