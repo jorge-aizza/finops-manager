@@ -15310,9 +15310,20 @@ app.get('/api/azure-coleta/agendamentos', authMiddleware, dbMiddleware, async (_
 // ═══════════════════════════════════════════════════════════════════════════
 
 let _logAnalyticsTableReady = false;
+let _logAnalyticsTablePromise = null;
+// Guarda contra corrida (achado em produção, 2026-10-03): várias chamadas concorrentes —
+// comum logo após restart, quando LogAnalyticsView dispara ~5 queries em paralelo — viam
+// `_logAnalyticsTableReady === false` ao mesmo tempo (a flag só é setada no FINAL da função) e
+// rodavam todo `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE` concorrentemente. Postgres não
+// garante atomicidade nisso entre sessões — uma das chamadas perdia a corrida e quebrava com
+// 23505 em pg_type (`log_analytics_consultas_tabela` foi o caso real). Com a promise
+// compartilhada, toda chamada concorrente aguarda a MESMA execução em vez de repeti-la.
 async function ensureLogAnalyticsTable() {
   if (!pool) return;
   if (_logAnalyticsTableReady) return;
+  if (_logAnalyticsTablePromise) return _logAnalyticsTablePromise;
+  _logAnalyticsTablePromise = (async () => {
+  try {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS log_analytics_workspaces (
       resource_id     TEXT PRIMARY KEY,
@@ -15419,6 +15430,9 @@ async function ensureLogAnalyticsTable() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_ai_ws ON log_analytics_app_insights (workspace_resource_id)`);
   _logAnalyticsTableReady = true;
+  } finally { _logAnalyticsTablePromise = null; }
+  })();
+  return _logAnalyticsTablePromise;
 }
 
 // Tipos de recurso candidatos a ter Diagnostic Setting configurado — mesma lista usada pelo
