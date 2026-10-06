@@ -1201,6 +1201,35 @@ Antes de implantar em produção:
 
 ---
 
+## Atualizar uma instalação em produção
+
+Depois do primeiro deploy, aplicar uma atualização (nova branch/commit) é um processo diferente do
+setup inicial — não repete o wizard, só atualiza o código e reinicia o processo.
+
+```bash
+cd /caminho/da/instalacao
+git pull origin main
+
+npm install                  # só se package.json mudou
+npm run frontend:build       # SEMPRE — telas React ficam em branco sem isso
+
+# PM2
+pm2 restart finops-manager
+
+# systemd (alternativa)
+sudo systemctl restart finops
+```
+
+- [ ] `git pull` sem conflitos
+- [ ] `npm run frontend:build` concluído sem erro
+- [ ] Processo reiniciado (PM2/systemd)
+- [ ] `/health` retorna `{"status":"ok"}` depois do restart
+- [ ] Testar a tela/feature que motivou a atualização antes de considerar concluído
+
+> **Migrações de banco são automáticas:** todo `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` roda no startup do `server.js` — não é preciso rodar nenhum script SQL manual (ver seção **Database** em `MODULES/06-DATABASE.md`).
+
+---
+
 ## APIs Externas — Liberação de Firewall
 
 O sistema realiza chamadas externas tanto a partir do **servidor Node.js** quanto a partir do **navegador do usuário**. Ambas as direções precisam ser liberadas na infraestrutura de rede.
