@@ -10431,16 +10431,19 @@ const _KQL_DISCOS_ORFAOS = `
 
 // Dentro de `disco_orfao` há dois grupos que precisam de VALIDAÇÃO MANUAL antes de
 // qualquer ação — não são "lixo pronto para apagar" como o resto da categoria:
-// - PVC do AKS: volume persistente do Kubernetes, só aparece aqui porque o cluster
-//   ficou sem o Pod que o usava — pode voltar a ser montado. RG MC_* (mesmo sinal já
-//   usado em `_detectManagedRg`) ou nome prefixado `pvc-` (nomenclatura do CSI driver).
+// - PVC do AKS: volume persistente do Kubernetes, nome prefixado `pvc-` (nomenclatura
+//   do CSI driver) — só aparece aqui porque o cluster ficou sem o Pod que o usava, pode
+//   voltar a ser montado.
 // - ASR (Azure Site Recovery): os times marcam esses discos colocando "asr"/"ASR" no
 //   nome (convenção interna, não uma propriedade do Azure) — convém reaproveitar esse
 //   sinal de nome em vez de inventar um novo, já que é o que os times já usam.
+// Deliberadamente SÓ pelo nome, não pelo Resource Group (MC_*): um disco órfão dentro do
+// RG do cluster que não seja PVC nem ASR é lixo normal e precisa poder ser excluído como
+// qualquer outro órfão — reter pelo RG inteiro escondia esses discos da lista principal
+// e do portal público sem necessidade (2026-10-xx, pedido do usuário).
 function _classificarDiscoValidacao(disco) {
   const nome = (disco.name || '').toLowerCase();
-  const managed = _detectManagedRg(disco.resourceGroup || '');
-  if (managed.managed_type === 'aks' || nome.startsWith('pvc-')) return 'aks_pvc';
+  if (nome.startsWith('pvc-')) return 'aks_pvc';
   if (nome.includes('asr')) return 'asr';
   return null;
 }
