@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getOrfaosPublica } from '../api/orfaosPublica'
 import PortalHero from '../components/PortalHero'
+import CmsMultiSelect from '../components/CmsMultiSelect'
 import type { OrfaoCategoria } from '../types/orfaosPublica'
 
 const CATEGORIA_LABEL: Record<OrfaoCategoria, string> = {
@@ -27,7 +28,7 @@ export default function PublicOrfaosView() {
     retry: false,
   })
   const [tipo, setTipo] = useState<'' | OrfaoCategoria>('')
-  const [rg, setRg] = useState('')
+  const [rgsSelecionados, setRgsSelecionados] = useState<string[]>([])
   const [busca, setBusca] = useState('')
 
   const itens = query.data?.itens ?? []
@@ -35,11 +36,14 @@ export default function PublicOrfaosView() {
   const termo = busca.trim().toLowerCase()
   const filtrados = itens.filter((i) =>
     (!tipo || i.categoria === tipo)
-    && (!rg || i.resource_group === rg)
+    && (!rgsSelecionados.length || (!!i.resource_group && rgsSelecionados.includes(i.resource_group)))
     && (!termo || (i.nome || '').toLowerCase().includes(termo)))
   const custo = filtrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
   const semCusto = filtrados.filter((i) => i.custo_mensal_estimado === null).length
-  const temFiltro = !!(tipo || rg || termo)
+  const temFiltro = !!(tipo || rgsSelecionados.length || termo)
+  const rgLabel = rgsSelecionados.length === 0 ? 'Todos os Resource Groups'
+    : rgsSelecionados.length === 1 ? rgsSelecionados[0]
+    : `${rgsSelecionados.length} Resource Groups`
 
   return (
     <>
@@ -64,7 +68,9 @@ export default function PublicOrfaosView() {
         </div>
         <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
           Recursos provisionados que ninguém está usando. O custo é estimado pelo billing observado nos últimos 30 dias.
-          Recursos sem billing conhecido aparecem como &ldquo;—&rdquo;, nunca como R$ 0,00.
+          Recursos sem billing conhecido aparecem como &ldquo;—&rdquo;, nunca como R$ 0,00. Discos só aparecem aqui com
+          90+ dias desanexados confirmados — recém-desanexados e discos de PVC do AKS/ASR passam por validação manual
+          antes de entrar nesta lista.
         </div>
 
         {query.isLoading && (
@@ -87,14 +93,19 @@ export default function PublicOrfaosView() {
                   <option key={c.categoria} value={c.categoria}>{CATEGORIA_LABEL[c.categoria] || c.categoria} ({c.itens})</option>
                 ))}
               </select>
-              <select className="filter-select" aria-label="Resource Group" value={rg} onChange={(e) => setRg(e.target.value)}>
-                <option value="">Todos os Resource Groups</option>
-                {rgs.map((r) => <option key={r} value={r}>{r}</option>)}
-              </select>
+              <div style={{ minWidth: 220 }}>
+                <CmsMultiSelect
+                  values={rgsSelecionados}
+                  options={rgs.map((r) => ({ value: r, label: r }))}
+                  searchPlaceholder="Buscar Resource Group..."
+                  triggerLabel={rgLabel}
+                  onChange={setRgsSelecionados}
+                />
+              </div>
               <input type="text" className="filter-input" style={{ minWidth: 220 }} placeholder="Buscar por nome do recurso..."
                 value={busca} onChange={(e) => setBusca(e.target.value)} />
               {temFiltro && (
-                <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => { setTipo(''); setRg(''); setBusca('') }}>Limpar filtros</button>
+                <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => { setTipo(''); setRgsSelecionados([]); setBusca('') }}>Limpar filtros</button>
               )}
             </div>
 

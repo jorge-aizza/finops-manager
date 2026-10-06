@@ -51,6 +51,10 @@ const DESPERDICIO_LABEL: Record<AzureDesperdicioCategoria, string> = {
   appgw_sem_backend: '🚪 App Gateway sem backend',
   vm_parada: '⏸️ VM parada (sem desalocar)',
 }
+const MOTIVO_VALIDACAO_LABEL: Record<'aks_pvc' | 'asr', { label: string; color: string; bg: string }> = {
+  aks_pvc: { label: 'AKS/PVC', color: 'var(--accent)', bg: 'color-mix(in srgb, var(--accent) 15%, transparent)' },
+  asr: { label: 'ASR', color: 'var(--orange,#ff8c42)', bg: 'color-mix(in srgb, var(--orange,#ff8c42) 15%, transparent)' },
+}
 function fmtBRLCurto(v: number): string {
   return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
@@ -575,8 +579,14 @@ export default function InventarioView() {
   for (const rg of filtroDespRgs) if (!despRgContagem.has(rg)) despRgContagem.set(rg, 0)
   const despRgs = Array.from(despRgContagem.keys()).sort((a, b) => a.localeCompare(b))
   const despFiltrados = filtroDespTipos.length ? despBase.filter((i) => filtroDespTipos.includes(i.categoria)) : despBase
-  const despCustoMensal = despFiltrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
-  const despSemCusto = despFiltrados.filter((i) => i.custo_mensal_estimado === null).length
+  // Discos de PVC do AKS e de ASR precisam de validação manual antes de qualquer ação
+  // (podem estar em uso por outro sistema) — mostrados em seção separada, nunca na
+  // lista principal de "prontos pra agir". Nunca aparecem no portal público.
+  const despParaValidar = despFiltrados.filter((i) => i.motivo_validacao)
+  const despPronto = despFiltrados.filter((i) => !i.motivo_validacao)
+  const despCustoMensal = despPronto.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
+  const despSemCusto = despPronto.filter((i) => i.custo_mensal_estimado === null).length
+  const despValidarCustoMensal = despParaValidar.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
   const despPorTipo = (desperdicioQuery.data?.por_categoria ?? [])
     .map((c) => {
       const doTipo = despBase.filter((i) => i.categoria === c.categoria)
@@ -1504,8 +1514,15 @@ export default function InventarioView() {
                   </div>
                   <div className="stat-card accent">
                     <div className="stat-label">Recursos ociosos{despTemFiltro ? ` (de ${despItens.length})` : ''}</div>
-                    <div className="stat-value">{despFiltrados.length}</div>
+                    <div className="stat-value">{despPronto.length}</div>
                   </div>
+                  {despParaValidar.length > 0 && (
+                    <div className="stat-card">
+                      <div className="stat-label">⚠️ Para validação (AKS/ASR)</div>
+                      <div className="stat-value">{despParaValidar.length}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtBRLCurto(despValidarCustoMensal)}/mês</div>
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1554,9 +1571,9 @@ export default function InventarioView() {
             <div className="card" style={{ margin: '16px 20px' }}>
               <div className="card-header">
                 <span className="card-title">Recursos ociosos</span>
-                <span className="badge">{despTemFiltro ? `${despFiltrados.length} de ${despItens.length}` : despItens.length}</span>
+                <span className="badge">{despTemFiltro ? `${despPronto.length} de ${despItens.length}` : despPronto.length}</span>
               </div>
-              {despFiltrados.length === 0 && (
+              {despPronto.length === 0 && (
                 <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum recurso bate com os filtros selecionados.</div>
               )}
               <div className="table-wrapper">
@@ -1570,7 +1587,7 @@ export default function InventarioView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {despFiltrados.map((it) => (
+                    {despPronto.map((it) => (
                       <tr key={it.resource_id}>
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
                           {it.nome || it.resource_id}
@@ -1593,6 +1610,56 @@ export default function InventarioView() {
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {despParaValidar.length > 0 && (
+            <div className="card" style={{ margin: '16px 20px' }}>
+              <div className="card-header">
+                <span className="card-title">⚠️ Discos para validação</span>
+                <span className="badge">{despParaValidar.length}</span>
+              </div>
+              <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+                Discos de PVC do AKS (podem voltar a ser montados por um Pod) e discos marcados como ASR pelos times
+                (Azure Site Recovery) — não entram na lista de &ldquo;Recursos ociosos&rdquo; nem no portal público porque
+                podem estar em uso por outro sistema. Valide manualmente antes de qualquer ação.
+              </div>
+              <div className="table-wrapper">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Recurso</th><th>Motivo</th><th>Resource Group</th><th>SKU</th>
+                      <th style={{ textAlign: 'right' }}>Tam.</th>
+                      <th style={{ textAlign: 'right' }}>Custo/mês</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {despParaValidar.map((it) => {
+                      const motivo = it.motivo_validacao ? MOTIVO_VALIDACAO_LABEL[it.motivo_validacao] : null
+                      return (
+                        <tr key={it.resource_id}>
+                          <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
+                            {it.nome || it.resource_id}
+                          </td>
+                          <td>
+                            {motivo && (
+                              <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 6, color: motivo.color, background: motivo.bg }}>
+                                {motivo.label}
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.resource_group || '—'}</td>
+                          <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.sku || '—'}</td>
+                          <td style={{ textAlign: 'right', fontSize: 12 }}>{it.tamanho_gb ? it.tamanho_gb + ' GB' : '—'}</td>
+                          <td style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}>
+                            {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

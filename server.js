@@ -4361,7 +4361,10 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
     const filtrados = cache.filter((x) =>
       subsPermitidas.has(String(x.subscription_id).toLowerCase())
       && categorias.has(x.categoria)
-      && (!rgs.size || (x.resource_group && rgs.has(String(x.resource_group).toUpperCase()))));
+      && (!rgs.size || (x.resource_group && rgs.has(String(x.resource_group).toUpperCase())))
+      // Discos de PVC do AKS e de ASR precisam de validação manual (podem estar em uso
+      // por outro sistema) — nunca expostos no portal público, só na tela interna.
+      && !x.motivo_validacao);
 
     const det = filtrados.length
       ? await pool.query(
@@ -4369,6 +4372,12 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
           [filtrados.map((x) => String(x.resource_id).toUpperCase())])
       : { rows: [] };
     const primeira = new Map(det.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
+
+    // Disco só entra no portal público com 90+ dias desanexados confirmados — recém-desanexado
+    // tem mais chance de ser reanexado de volta (manutenção, reboot, etc.), então ainda não é um
+    // candidato maduro o bastante para expor publicamente. `dias_orfao: null` (sem data conhecida)
+    // também é excluído aqui — "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 90+".
+    const _DIAS_MIN_DISCO_PUBLICO = 90;
 
     // Imposto (Microsoft/Marketplace) já aplicado em _coletarDesperdicio, na origem — não
     // reaplicar aqui (dobraria o multiplicador).
@@ -4383,7 +4392,8 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
         custo_mensal_estimado: x.custo_mensal_estimado ?? null,
         dias_orfao: desde ? Math.max(0, Math.floor((Date.now() - new Date(desde).getTime()) / 86400000)) : null,
       };
-    }).sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
+    }).filter((it) => it.categoria !== 'disco_orfao' || (it.dias_orfao !== null && it.dias_orfao >= _DIAS_MIN_DISCO_PUBLICO))
+      .sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
 
     const porCat = {};
     for (const it of itens) {
@@ -10149,6 +10159,22 @@ const _KQL_DISCOS_ORFAOS = `
             sizeGB = toint(properties.diskSizeGB), criadoEm = tostring(properties.timeCreated), diskState,
             orfaoDesde = tostring(properties.LastOwnershipUpdateTime)`;
 
+// Dentro de `disco_orfao` há dois grupos que precisam de VALIDAÇÃO MANUAL antes de
+// qualquer ação — não são "lixo pronto para apagar" como o resto da categoria:
+// - PVC do AKS: volume persistente do Kubernetes, só aparece aqui porque o cluster
+//   ficou sem o Pod que o usava — pode voltar a ser montado. RG MC_* (mesmo sinal já
+//   usado em `_detectManagedRg`) ou nome prefixado `pvc-` (nomenclatura do CSI driver).
+// - ASR (Azure Site Recovery): os times marcam esses discos colocando "asr"/"ASR" no
+//   nome (convenção interna, não uma propriedade do Azure) — convém reaproveitar esse
+//   sinal de nome em vez de inventar um novo, já que é o que os times já usam.
+function _classificarDiscoValidacao(disco) {
+  const nome = (disco.name || '').toLowerCase();
+  const managed = _detectManagedRg(disco.resourceGroup || '');
+  if (managed.managed_type === 'aks' || nome.startsWith('pvc-')) return 'aks_pvc';
+  if (nome.includes('asr')) return 'asr';
+  return null;
+}
+
 const _KQL_NICS_ORFAS = `
   Resources | where type =~ 'microsoft.network/networkinterfaces'
   | where isnull(properties.virtualMachine) or isempty(tostring(properties.virtualMachine.id))
@@ -10315,6 +10341,7 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
       sku: x.sku || null,
       tamanho_gb: x.sizeGB ?? null,
       criado_em: x.criadoEm || null,
+      motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao(x) : null,
       custo_periodo: custoPeriodoComImposto,
       dias_observados: c ? c.dias : 0,
       custo_mensal_estimado: custoMensal,

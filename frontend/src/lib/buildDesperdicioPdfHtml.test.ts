@@ -4,7 +4,7 @@ import type { AzureDesperdicioItem } from '../types/azureInventario'
 
 const item = (over: Partial<AzureDesperdicioItem>): AzureDesperdicioItem => ({
   categoria: 'disco_orfao', subscription_id: 's', resource_id: '/r/1', nome: 'disco-1', resource_group: 'RG-A',
-  location: null, sku: 'Premium_LRS', tamanho_gb: 128, criado_em: null, custo_periodo: 10, dias_observados: 30,
+  location: null, sku: 'Premium_LRS', tamanho_gb: 128, criado_em: null, motivo_validacao: null, custo_periodo: 10, dias_observados: 30,
   custo_mensal_estimado: 100, marcado_orfao_em: null, dias_orfao: 40, ...over,
 })
 

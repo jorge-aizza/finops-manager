@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -62,7 +62,7 @@ beforeEach(() => {
 
 describe('InventarioView', () => {
   it('aba Desperdício mostra dias órfão e filtra por tempo mínimo', async () => {
-    const base = { subscription_id: 's', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
+    const base = { subscription_id: 's', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [],
       por_categoria: [],
@@ -89,7 +89,7 @@ describe('InventarioView', () => {
   })
 
   it('aba Desperdício filtra por tipo de recurso (cartões e seletor) e Resource Group', async () => {
-    const base = { subscription_id: 's', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 1 }
+    const base = { subscription_id: 's', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 1 }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [],
       por_categoria: [
@@ -173,6 +173,42 @@ describe('InventarioView', () => {
     expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
   }, 30000) // muitos cliques simulados: passa de 5s com a máquina ocupada
+
+  it('aba Desperdício separa discos de PVC do AKS e de ASR numa seção própria de validação', async () => {
+    const base = { subscription_id: 's', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, marcado_orfao_em: null, dias_orfao: 1 }
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [],
+      por_categoria: [{ categoria: 'disco_orfao', itens: 3, custo_mensal_estimado: 180, sem_custo_conhecido: 0 }],
+      itens: [
+        { ...base, categoria: 'disco_orfao', resource_id: '/d1', nome: 'disco-normal', resource_group: 'rg-um', motivo_validacao: null, custo_mensal_estimado: 100 },
+        { ...base, categoria: 'disco_orfao', resource_id: '/d2', nome: 'pvc-abc123', resource_group: 'MC_cluster-teste', motivo_validacao: 'aks_pvc', custo_mensal_estimado: 50 },
+        { ...base, categoria: 'disco_orfao', resource_id: '/d3', nome: 'disco-ASR-backup', resource_group: 'rg-dois', motivo_validacao: 'asr', custo_mensal_estimado: 30 },
+      ],
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+
+    // Disco normal aparece na lista principal de "Recursos ociosos"
+    expect(await screen.findByText('disco-normal')).toBeInTheDocument()
+    // Os dois discos de validação NÃO aparecem na lista principal (escopando a busca
+    // a esse card específico — eles existem no documento, só na outra seção)...
+    const secaoPrincipal = screen.getAllByText('Recursos ociosos', { selector: '.card-title' })[0].closest('.card') as HTMLElement
+    const dentroPrincipal = within(secaoPrincipal)
+    expect(dentroPrincipal.queryByText('pvc-abc123')).not.toBeInTheDocument()
+    expect(dentroPrincipal.queryByText('disco-ASR-backup')).not.toBeInTheDocument()
+
+    // ...mas aparecem na seção separada "Discos para validação", com o badge certo
+    expect(screen.getByText('⚠️ Discos para validação')).toBeInTheDocument()
+    const secaoValidacao = screen.getByText('⚠️ Discos para validação').closest('.card') as HTMLElement
+    const dentro = within(secaoValidacao)
+    expect(dentro.getByText('pvc-abc123')).toBeInTheDocument()
+    expect(dentro.getByText('AKS/PVC')).toBeInTheDocument()
+    expect(dentro.getByText('disco-ASR-backup')).toBeInTheDocument()
+    expect(dentro.getByText('ASR')).toBeInTheDocument()
+
+    // A contagem de "Recursos ociosos" conta só o disco pronto, não os 2 de validação
+    expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
+  })
 
   it('mostra a aba Recursos por padrão', async () => {
     renderWithClient()

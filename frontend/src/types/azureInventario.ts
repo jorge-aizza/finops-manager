@@ -529,6 +529,9 @@ export interface AzureDesperdicioItem {
   sku: string | null
   tamanho_gb: number | null
   criado_em: string | null
+  /** Só preenchido em `disco_orfao` — disco que precisa de validação manual antes de
+   * qualquer ação (pode estar em uso por outro sistema), nunca exposto no portal público. */
+  motivo_validacao: 'aks_pvc' | 'asr' | null
   custo_periodo: number | null
   dias_observados: number
   /** null (nunca 0) quando o recurso não tem billing conhecido — "não sabemos", não "é grátis". */

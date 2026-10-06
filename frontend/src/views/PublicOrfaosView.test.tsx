@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -51,7 +51,10 @@ describe('PublicOrfaosView', () => {
     renderView()
     await screen.findByText('disco-a')
 
-    await user.selectOptions(screen.getByLabelText('Resource Group'), 'RG-B')
+    await user.click(screen.getByText('Todos os Resource Groups'))
+    const dropdown = within(document.querySelector('.cms-dropdown') as HTMLElement)
+    await user.click(dropdown.getByText('RG-B'))
+    await user.click(dropdown.getByRole('button', { name: 'OK ✓' }))
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
     expect(screen.getByText('disco-b')).toBeInTheDocument()
 
@@ -59,6 +62,23 @@ describe('PublicOrfaosView', () => {
     await user.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'ip-')
     expect(screen.getByText('ip-x')).toBeInTheDocument()
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+  })
+
+  it('permite selecionar múltiplos Resource Groups ao mesmo tempo', async () => {
+    const user = userEvent.setup()
+    renderView()
+    await screen.findByText('disco-a')
+
+    await user.click(screen.getByText('Todos os Resource Groups'))
+    const dropdown = within(document.querySelector('.cms-dropdown') as HTMLElement)
+    await user.click(dropdown.getByText('RG-A'))
+    await user.click(dropdown.getByText('RG-B'))
+    await user.click(dropdown.getByRole('button', { name: 'OK ✓' }))
+
+    expect(screen.getByText('disco-a')).toBeInTheDocument()
+    expect(screen.getByText('disco-b')).toBeInTheDocument()
+    expect(screen.getByText('ip-x')).toBeInTheDocument()
+    expect(screen.getByText('2 Resource Groups')).toBeInTheDocument()
   })
 
   it('mostra a mensagem do servidor quando a consulta falha', async () => {
