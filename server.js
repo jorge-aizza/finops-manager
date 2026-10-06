@@ -15337,6 +15337,12 @@ async function ensureLogAnalyticsTable() {
   // controlar custo. -1 (ou ausente) significa "sem limite" — guardamos como NULL pra
   // diferenciar de "configurado em 0" (o que travaria toda ingestão, caso real de alerta).
   await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS daily_cap_gb NUMERIC(14,4)`);
+  // location + capacity_reservation_level (2026-10-03): base pra recomendação de Commitment
+  // Tier — preço do Commitment Tier varia por região, e o nível atual (quando o workspace já
+  // está em CapacityReservation) só vem desse campo, não existe em nenhum outro lugar já
+  // coletado. Ver _avaliarCommitmentTier.
+  await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS location VARCHAR(100)`);
+  await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS capacity_reservation_level NUMERIC(14,4)`);
   // Auditoria de consultas (LAQueryLogs) — ao contrário de tudo que coletamos até aqui, isso
   // exige HABILITAR algo novo na Azure (Diagnostic Setting categoria "Audit" no próprio
   // workspace) — nunca liga sozinho, só via botão manual (ver _habilitarAuditoriaConsultas).
@@ -15493,6 +15499,13 @@ async function _descobrirLogAnalyticsWorkspaces() {
         retencao_dias: ws.properties.retentionInDays ?? null,
         sku: ws.properties.sku?.name ?? null,
         daily_cap_gb: (dailyQuotaGb == null || dailyQuotaGb < 0) ? null : dailyQuotaGb,
+        // location: todo recurso ARM já traz isso no payload — nunca precisou de chamada
+        // extra. capacity_reservation_level: só vem preenchido quando sku.name ===
+        // 'CapacityReservation' — é o nível (GB/dia) do Commitment Tier já contratado, usado
+        // pela recomendação de Commitment Tier (_avaliarCommitmentTier) pra saber se o
+        // workspace já comprometido está no tier certo.
+        location: ws.location ?? null,
+        capacity_reservation_level: ws.properties.sku?.capacityReservationLevel ?? null,
       });
     }
   });
@@ -15502,12 +15515,13 @@ async function _descobrirLogAnalyticsWorkspaces() {
     await c.query('BEGIN');
     for (const w of todos) {
       await c.query(
-        `INSERT INTO log_analytics_workspaces (resource_id, workspace_guid, subscription_id, resource_group, nome, retencao_dias, sku, daily_cap_gb, atualizado_em)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+        `INSERT INTO log_analytics_workspaces (resource_id, workspace_guid, subscription_id, resource_group, nome, retencao_dias, sku, daily_cap_gb, location, capacity_reservation_level, atualizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
          ON CONFLICT (resource_id) DO UPDATE SET
            workspace_guid=EXCLUDED.workspace_guid, resource_group=EXCLUDED.resource_group, nome=EXCLUDED.nome,
-           retencao_dias=EXCLUDED.retencao_dias, sku=EXCLUDED.sku, daily_cap_gb=EXCLUDED.daily_cap_gb, atualizado_em=NOW()`,
-        [w.resource_id, w.workspace_guid, w.subscription_id, w.resource_group, w.nome, w.retencao_dias, w.sku, w.daily_cap_gb]
+           retencao_dias=EXCLUDED.retencao_dias, sku=EXCLUDED.sku, daily_cap_gb=EXCLUDED.daily_cap_gb,
+           location=EXCLUDED.location, capacity_reservation_level=EXCLUDED.capacity_reservation_level, atualizado_em=NOW()`,
+        [w.resource_id, w.workspace_guid, w.subscription_id, w.resource_group, w.nome, w.retencao_dias, w.sku, w.daily_cap_gb, w.location, w.capacity_reservation_level]
       );
     }
     await c.query('COMMIT');
@@ -16122,6 +16136,132 @@ async function _avaliarRegrasLogAnalytics(ws) {
   return recos;
 }
 
+// Commitment Tier (Capacity Reservation) — desconto por volume do Azure Monitor/Log
+// Analytics: compromete um piso de GB/dia por uma tarifa diária menor que o Pay-As-You-Go,
+// desde que o workspace realmente sustente aquele volume (Commitment Tier trava o workspace
+// no nível escolhido por no mínimo 31 dias no Azure — dias abaixo do comprometido cobram o
+// valor cheio do tier mesmo assim). Preço vem do MESMO `azure_price_list` já sincronizado
+// pra Calculadora/Reservas (Retail Prices API) — sem fonte de preço nova. Confirmado contra a
+// API real em 2026-10-03: Commitment Tier aparece como product_name='Azure Monitor',
+// meter_name '<N> GB Commitment Tier Capacity' (cobrança diária, 1/Day); PAYG como
+// product_name='Log Analytics', meter_name='Analytics Logs Data Ingestion' (por GB) — ver
+// plano "Recomendação de Commitment Tier".
+const _LA_COMMITMENT_FALLBACK_REGIAO = 'brazilsouth';
+
+async function _buscarPrecosCommitmentTier(regiao) {
+  const regioes = regiao && regiao !== _LA_COMMITMENT_FALLBACK_REGIAO
+    ? [regiao, _LA_COMMITMENT_FALLBACK_REGIAO] : [_LA_COMMITMENT_FALLBACK_REGIAO];
+  for (const reg of regioes) {
+    const paygR = await pool.query(
+      `SELECT retail_price FROM azure_price_list
+       WHERE product_name = 'Log Analytics' AND meter_name = 'Analytics Logs Data Ingestion'
+         AND arm_region_name = $1 AND retail_price > 0
+       ORDER BY retail_price ASC LIMIT 1`,
+      [reg]
+    );
+    if (!paygR.rows.length) continue;
+    const tiersR = await pool.query(
+      `SELECT meter_name, retail_price FROM azure_price_list
+       WHERE product_name = 'Azure Monitor' AND meter_name ILIKE '%GB Commitment Tier Capacity%'
+         AND arm_region_name = $1 AND retail_price > 0`,
+      [reg]
+    );
+    const tiers = tiersR.rows
+      .map(r => { const m = r.meter_name.match(/^(\d+)\s*GB/i); return m ? { gbDia: parseInt(m[1], 10), precoDiario: Number(r.retail_price) } : null; })
+      .filter(Boolean).sort((a, b) => a.gbDia - b.gbDia);
+    if (!tiers.length) continue;
+    return { payg: Number(paygR.rows[0].retail_price), tiers };
+  }
+  return null; // price list não sincronizado (ou sem essa região/fallback) — fica em silêncio, não é erro
+}
+
+async function _avaliarCommitmentTier(ws) {
+  const r = await pool.query(`
+    SELECT COUNT(*) AS dias, AVG(gb) AS media,
+           percentile_cont(0.25) WITHIN GROUP (ORDER BY gb) AS p25,
+           percentile_cont(0.75) WITHIN GROUP (ORDER BY gb) AS p75
+    FROM (
+      SELECT dia, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
+      WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - INTERVAL '60 days'
+      GROUP BY dia
+    ) diario
+  `, [ws.workspace_guid]);
+  const row = r.rows[0];
+  // Mínimo 14 dias de histórico — mesmo piso das outras regras de ingestão (ver acima). Com
+  // um lock-in mínimo de 31 dias no Azure, recomendar com menos dado que isso é adivinhação.
+  const dias = parseInt(row.dias, 10) || 0;
+  const p25 = Number(row.p25) || 0;
+  const recos = [];
+
+  if (dias >= 14 && p25 > 0) {
+    const precos = await _buscarPrecosCommitmentTier(ws.location);
+    if (precos) {
+      const p75 = Number(row.p75) || 0;
+      const media = Number(row.media) || 0;
+      const impostoCfg = await _getImpostoConfig();
+      // Log Analytics (PAYG/Commitment Tier) é billing direto da Microsoft, nunca Marketplace.
+      const comImposto = (v) => impostoCfg.microsoft.ativo ? v * (1 + impostoCfg.microsoft.taxa / 100) : v;
+      const custoMensalPayg = comImposto(precos.payg) * media * 30;
+
+      // Só considera tiers com piso (p25) >= tier — um tier que o workspace não sustenta com
+      // regularidade vira custo extra, não economia (ver nota de lock-in acima).
+      let melhor = null;
+      for (const t of precos.tiers.filter(t => p25 >= t.gbDia)) {
+        const custoMensal = comImposto(t.precoDiario) * 30;
+        if (!melhor || custoMensal < melhor.custoMensal) melhor = { ...t, custoMensal };
+      }
+
+      const skuAtual = (ws.sku || '').toLowerCase();
+      const nivelAtual = Number(ws.capacity_reservation_level) || 0;
+
+      if (skuAtual !== 'capacityreservation') {
+        if (melhor && melhor.custoMensal < custoMensalPayg) {
+          const economiaRs = custoMensalPayg - melhor.custoMensal;
+          const economiaPct = (economiaRs / custoMensalPayg) * 100;
+          recos.push({
+            regra: 'commitment_tier', severidade: economiaPct > 20 ? 'critico' : 'atencao',
+            detalhe: `Workspace ingere em média ${media.toFixed(1)} GB/dia (mínimo recente: ${p25.toFixed(1)} GB/dia) — migrar para o Commitment Tier de ${melhor.gbDia} GB/dia economizaria ~R$ ${economiaRs.toFixed(2)}/mês (${economiaPct.toFixed(0)}%) frente ao Pay-As-You-Go atual. O Commitment Tier trava o workspace nesse nível por no mínimo 31 dias no Azure.`,
+          });
+        }
+      } else if (nivelAtual > 0) {
+        const tierAtual = precos.tiers.find(t => t.gbDia === nivelAtual);
+        if (tierAtual && p75 < nivelAtual * 0.7) {
+          const alternativa = melhor && melhor.gbDia < nivelAtual ? melhor : null;
+          const custoMensalAtual = comImposto(tierAtual.precoDiario) * 30;
+          recos.push({
+            regra: 'commitment_tier', severidade: 'atencao',
+            detalhe: alternativa
+              ? `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — baixar para o tier de ${alternativa.gbDia} GB/dia economizaria ~R$ ${(custoMensalAtual - alternativa.custoMensal).toFixed(2)}/mês.`
+              : `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — mesmo o menor tier disponível não compensa nesse volume; considere voltar para Pay-As-You-Go.`,
+          });
+        } else if (p25 > nivelAtual) {
+          const proximo = precos.tiers.find(t => t.gbDia > nivelAtual);
+          if (proximo) {
+            recos.push({
+              regra: 'commitment_tier', severidade: 'atencao',
+              detalhe: `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere ${media.toFixed(1)} GB/dia em média (mínimo recente: ${p25.toFixed(1)} GB/dia) — já ultrapassa o contratado com regularidade. Considere subir para o tier de ${proximo.gbDia} GB/dia.`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(`DELETE FROM log_analytics_recomendacoes WHERE workspace_guid = $1 AND origem = 'commitment_tier'`, [ws.workspace_guid]);
+    for (const rec of recos) {
+      await c.query(
+        `INSERT INTO log_analytics_recomendacoes (workspace_guid, regra, severidade, detalhe, origem) VALUES ($1,$2,$3,$4,'commitment_tier')`,
+        [ws.workspace_guid, rec.regra, rec.severidade, rec.detalhe]
+      );
+    }
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  return recos;
+}
+
 let _logAnalyticsColetaEmExecucao = false;
 async function _coletarLogAnalyticsTudo(origem = 'agendado') {
   if (_logAnalyticsColetaEmExecucao) return { ok: false, motivo: 'coleta já em execução' };
@@ -16143,7 +16283,9 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
         try { await _coletarConsultasPorTabela(ws, getLogAnalyticsToken); }
         catch (e) { console.warn(`[LogAnalytics] Falha ao coletar LAQueryLogs de ${ws.nome}:`, e.message); }
       }
-      return _avaliarRegrasLogAnalytics(ws);
+      await _avaliarRegrasLogAnalytics(ws);
+      try { await _avaliarCommitmentTier(ws); }
+      catch (e) { console.warn(`[LogAnalytics] Falha ao avaliar Commitment Tier de ${ws.nome}:`, e.message); }
     });
     // DCR é barato (1 chamada por subscription, não por recurso) — entra na coleta diária.
     // Diagnostic Settings NÃO entra aqui (etapa cara, 1 chamada por recurso do tenant inteiro)
