@@ -214,34 +214,32 @@ export default function LogAnalyticsView() {
   const tabelasCustomizadas = workspacesExibidos.reduce((a, w) => a + (Number(w.tabelas_retencao_customizada) || 0), 0)
 
   return (
-    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: 18 }}>Log Analytics FinOps</h2>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-            Ingestão, retenção e oportunidades de economia nos workspaces de Log Analytics.
-          </div>
-        </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
-            disabled={coletaMutation.isPending} onClick={() => coletaMutation.mutate()}>
-            {coletaMutation.isPending ? 'Coletando...' : '↻ Atualizar agora'}
-          </button>
-          <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
-            disabled={coletaDiagMutation.isPending} onClick={() => coletaDiagMutation.mutate()}
-            title="Etapa separada e mais cara (1 chamada por recurso monitorável do tenant) — pode levar vários minutos em tenants grandes">
-            {coletaDiagMutation.isPending ? 'Coletando...' : '🔎 Atualizar Diagnostic Settings'}
-          </button>
-          <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
-            disabled={exportando} onClick={exportar}>
-            {exportando ? 'Exportando...' : '⬇ Exportar Excel'}
-          </button>
-          <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
-            disabled={gerandoDashboard} onClick={gerarDashboard}
-            title="HTML autocontido (gráficos embutidos) — abre sem login, pode ser enviado por e-mail">
-            {gerandoDashboard ? 'Gerando...' : '📊 Gerar Dashboard'}
-          </button>
-        </div>
+    <div>
+      <div className="view-hero">
+        <div className="page-title">Log Analytics FinOps</div>
+        <div className="view-hero-sub">Ingestão, retenção e oportunidades de economia nos workspaces de Log Analytics.</div>
+      </div>
+
+      <div style={{ padding: '16px 20px 20px', display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 }}>
+        <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
+          disabled={coletaMutation.isPending} onClick={() => coletaMutation.mutate()}>
+          {coletaMutation.isPending ? 'Coletando...' : '↻ Atualizar agora'}
+        </button>
+        <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
+          disabled={coletaDiagMutation.isPending} onClick={() => coletaDiagMutation.mutate()}
+          title="Etapa separada e mais cara (1 chamada por recurso monitorável do tenant) — pode levar vários minutos em tenants grandes">
+          {coletaDiagMutation.isPending ? 'Coletando...' : '🔎 Atualizar Diagnostic Settings'}
+        </button>
+        <button className="btn-export" disabled={exportando} onClick={exportar}>
+          <svg viewBox="0 0 16 16" fill="none" width={14} height={14}><path d="M2 12v2h12v-2M8 2v8M5 7l3 3 3-3" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" /></svg>
+          {exportando ? 'Exportando...' : 'Exportar Excel'}
+        </button>
+        <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
+          disabled={gerandoDashboard} onClick={gerarDashboard}
+          title="HTML autocontido (gráficos embutidos) — abre sem login, pode ser enviado por e-mail">
+          {gerandoDashboard ? 'Gerando...' : '📊 Gerar Dashboard'}
+        </button>
       </div>
 
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))' }}>
@@ -780,6 +778,7 @@ export default function LogAnalyticsView() {
             ))}
           </div>
         )}
+      </div>
       </div>
     </div>
   )
