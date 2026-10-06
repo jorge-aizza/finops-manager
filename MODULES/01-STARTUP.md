@@ -60,7 +60,7 @@ CREATE INDEX IF NOT EXISTS ...
 -- No DROP statements; migrations only add
 ```
 
-**Rollback not automatic** — see `rollback_performance_indexes.sql` for manual reversal.
+**Rollback not automatic** — reverse manually with `DROP INDEX IF EXISTS <name>;` for the specific index (names listed in 06-DATABASE.md).
 
 ## Cold Start Performance
 

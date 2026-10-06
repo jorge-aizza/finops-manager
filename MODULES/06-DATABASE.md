@@ -77,7 +77,7 @@ DO $$ BEGIN
 END $$;
 ```
 
-**No destructive operations**: all migrations only ADD, never DROP (manual reversions in separate `.sql` files).
+**No destructive operations**: all migrations only ADD, never DROP (manual reversions via `DROP INDEX`/`DROP COLUMN` run by hand if ever needed).
 
 ## Connection Pooling
 
@@ -124,4 +124,4 @@ See **10-DEPLOYMENT.md** for per-platform backup checklist.
 
 ---
 
-Schema reference: `.env.example` lists all DB_* variables. SQL files: `schema.sql`, `init.sql`, `indices_performance.sql`.
+Schema reference: `.env.example` lists all DB_* variables. The schema itself lives only in `server.js` (`CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, idempotent, run on startup) — there are no separate `.sql` migration files to keep in sync; a prior set of `schema.sql`/`init.sql`/etc. files (v1.0/v2.0, with diverging column types) was removed to avoid someone running an out-of-date script against a production database.

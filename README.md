@@ -1091,7 +1091,7 @@ O servidor usa `helmet` com CSP desabilitado (para compatibilidade com o SPA inl
 
 ### Arquivos que NÃO são acessíveis via HTTP (v2.0)
 
-`server.js` · `package.json` · `.env` · `.env.key` · `.env.enc` · `.finops_setup` · `schema.sql` · `*.sql`
+`server.js` · `package.json` · `.env` · `.env.key` · `.env.enc` · `.finops_setup` · `*.sql`
 
 **Arquivos servidos estaticamente:** `index.html` · `app.js` · `calculadora.js` · `styles.css` · `favicon.svg` · `mascote.png` · `fonts/*.woff2` · `libs/xlsx.full.min.js`
 
