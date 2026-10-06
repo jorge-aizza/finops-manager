@@ -6161,7 +6161,6 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS is_padrao           BOOLEAN DEFAULT false`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS modo_coleta         VARCHAR(30) DEFAULT 'billing_profile'`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS subscription_ids    TEXT`);
-  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS sp_id            INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL`);
 
   // ── azure_storage_config ──────────────────────────────────────────────────
   await pool.query(`
@@ -6207,6 +6206,7 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS subscriptions_ids TEXT[]`);
   await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS validacao_status  VARCHAR(20)`);
   await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS validacao_json    JSONB`);
+  await run(`ALTER TABLE azure_coleta_historico ADD COLUMN IF NOT EXISTS sp_id             INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL`);
 
   // ── notificacoes_sistema ──────────────────────────────────────────────────
   await pool.query(`
