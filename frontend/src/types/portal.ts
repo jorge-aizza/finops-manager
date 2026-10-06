@@ -33,6 +33,9 @@ export interface PortalConfig {
   // "Minha Cota Genie" — login PARALELO via Entra ID (nunca vira usuário do sistema); sem
   // allowlist do admin, já que cada pessoa só vê os próprios dados.
   genie_cotas_ativo?: boolean
+  // Simulador de Preços — busca sobre o catálogo público da Azure (azure_price_list), sem
+  // allowlist (dado público, não é billing do tenant).
+  price_simulator_ativo?: boolean
 }
 
 export interface PortalIdentSessao {

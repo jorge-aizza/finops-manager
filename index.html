@@ -3670,7 +3670,7 @@
                  as outras 3 só fazem sentido com o portal ativo, então continuam dentro dele. -->
             <div class="settings-subtabs">
               <div class="settings-subtab active" onclick="switchPortalSubTab('geral')">Geral</div>
-              <div class="settings-subtab" onclick="switchPortalSubTab('servicos')">Serviços &amp; Órfãos</div>
+              <div class="settings-subtab" onclick="switchPortalSubTab('servicos')">Serviços</div>
               <div class="settings-subtab" onclick="switchPortalSubTab('calculadora')">Calculadora Pública</div>
               <div class="settings-subtab" onclick="switchPortalSubTab('impostos')">⚠️ Impostos do Sistema</div>
             </div>
@@ -3768,7 +3768,7 @@
               </div>
             </div>
 
-            <!-- Sub-aba: Serviços & Órfãos -->
+            <!-- Sub-aba: Serviços -->
             <div id="portal-subtab-servicos" class="settings-subtab-panel">
               <!-- Serviços do portal (cards da página inicial) -->
               <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
@@ -3790,6 +3790,13 @@
                 <div id="portal-cfg-genie-sem-entra" style="display:none;font-size:11px;color:var(--orange,#ff8c42);">
                   ⚠ Nenhuma integração Entra ID ativa configurada — configure em Configurações → Integrações antes de ativar, ou o login nunca vai funcionar.
                 </div>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-price-sim-ativo" onchange="atualizarAvisoServicosPortal()" style="width:14px;height:14px;accent-color:var(--accent);">
+                  <div>
+                    <span style="font-weight:600;">Simulador de Preços</span>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Busca sobre o catálogo público de preços da Azure (já sincronizado em Configurações → Price List) — simula o custo de um recurso antes de provisioná-lo. Dado público, sem allowlist.</div>
+                  </div>
+                </label>
                 <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
                   Recursos Órfãos é ligado mais abaixo, no card “Recursos Órfãos no Portal”. Com <strong style="color:var(--text-dim);">dois ou mais serviços ativos</strong> o portal abre numa página inicial com um card por serviço; com um só, abre direto nele.
                 </div>
@@ -3840,7 +3847,7 @@
             <div id="portal-subtab-calculadora" class="settings-subtab-panel">
               <!-- Subscriptions permitidas — filtra as assinaturas visíveis na Calculadora
                    Pública (não tem relação com Recursos Órfãos, que tem seu próprio filtro
-                   completo, mais abaixo em "Serviços & Órfãos"). -->
+                   completo, mais abaixo em "Serviços"). -->
               <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;">
                 <div style="display:flex;align-items:center;justify-content:space-between;">
                   <div style="font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Filtros de Acesso</div>

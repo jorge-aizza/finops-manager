@@ -30,6 +30,15 @@ export function IconCotaGenie({ size = 16 }: IconProps) {
   )
 }
 
+export function IconSimulador({ size = 16 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" width={size} height={size} aria-hidden="true">
+      <path d="M11 3H4.5A1.5 1.5 0 003 4.5V11l7.5 7.5a1.5 1.5 0 002.12 0l4.88-4.88a1.5 1.5 0 000-2.12L11 3z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" />
+      <circle cx={7.5} cy={7.5} r={1.1} fill="currentColor" />
+    </svg>
+  )
+}
+
 export function IconInicio({ size = 16 }: IconProps) {
   return (
     <svg viewBox="0 0 20 20" fill="none" width={size} height={size} aria-hidden="true">

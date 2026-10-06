@@ -4,10 +4,11 @@ import { getPortalConfig, identificar } from './api/portal'
 import PublicCalculadoraView from './views/PublicCalculadoraView'
 import PublicOrfaosView from './views/PublicOrfaosView'
 import PublicGenieCotasView from './views/PublicGenieCotasView'
+import PublicPriceSimulatorView from './views/PublicPriceSimulatorView'
 import PortalHome from './components/PortalHome'
 import PortalHero from './components/PortalHero'
 import FinopsLogo from './components/FinopsLogo'
-import { IconCalculadora, IconInicio, IconOrfaos, IconCotaGenie } from './components/portalIcons'
+import { IconCalculadora, IconInicio, IconOrfaos, IconCotaGenie, IconSimulador } from './components/portalIcons'
 import { hrefDe, usePortalRoute, type ServicoId } from './lib/portalRoute'
 import { consumePortalEntraHandoff, setPortalEntraToken } from './api/portalEntra'
 import type { PortalConfig, PortalIdentSessao } from './types/portal'
@@ -41,6 +42,12 @@ const SERVICOS: ServicoDef[] = [
     descricao: 'Entre com sua conta Microsoft e veja sua cota e consumo do Genie no Databricks.',
     ativo: (cfg) => !!cfg.genie_cotas_ativo,
     icone: (size) => <IconCotaGenie size={size} />,
+  },
+  {
+    id: 'price-simulator', titulo: 'Simulador de Preços', subtitulo: 'Simulador de Preços', etiqueta: 'Planejamento',
+    descricao: 'Simule o custo de um recurso Azure antes de provisioná-lo, usando o catálogo público de preços.',
+    ativo: (cfg) => !!cfg.price_simulator_ativo,
+    icone: (size) => <IconSimulador size={size} />,
   },
 ]
 
@@ -244,6 +251,7 @@ export default function PortalApp() {
       {cfg && viewAtual === 'calculadora' && <PublicCalculadoraView cfg={cfg} ident={ident} />}
       {viewAtual === 'orfaos' && <PublicOrfaosView />}
       {viewAtual === 'genie-cotas' && <PublicGenieCotasView />}
+      {viewAtual === 'price-simulator' && <PublicPriceSimulatorView />}
       {viewAtual === 'nenhum' && (
         <div id="portal-inactive" style={{ display: 'block' }}>
           <div className="pi-icon">🔒</div>

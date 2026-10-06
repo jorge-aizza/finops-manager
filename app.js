@@ -2049,7 +2049,7 @@ async function _loadPriceListStatus() {
       badge.style.color      = 'var(--danger,#ff4d6a)';
       if (syncBtn)  syncBtn.disabled       = true;
       if (cbRstBtn) cbRstBtn.style.display = 'inline-flex';
-      return { syncing: false, total: tot, last_result: d.last_result, cb_open: true };
+      return { syncing: false, total: tot, last_result: d.last_result, cb_open: true, progress: d.progress };
     }
     // CB fechado — reabilita botão e esconde reset
     if (syncBtn  && !_plPolling) syncBtn.disabled       = false;
@@ -2103,8 +2103,10 @@ async function _loadPriceListStatus() {
       }
     }
 
-    // Retorna o estado para quem chama (usado pelo polling)
-    return { syncing: d.syncing, total: tot, last_result: d.last_result, cb_open: false };
+    // Retorna o estado para quem chama (usado pelo polling) — inclui `progress` (página/
+    // registros em tempo real) pra quem quiser mostrar o mesmo progresso de outro lugar da
+    // tela, não só no card "Status do cache local" acima.
+    return { syncing: d.syncing, total: tot, last_result: d.last_result, cb_open: false, progress: d.progress };
 
   } catch (e) {
     if (sub) sub.textContent = 'Erro ao consultar status: ' + e.message;
@@ -2146,12 +2148,16 @@ async function syncPriceList() {
       const st = await _loadPriceListStatus();
       if (!st) return;
 
-      // Atualiza mensagem de progresso enquanto sincronizando
+      // Atualiza mensagem de progresso enquanto sincronizando — mesmo dado em tempo real
+      // (página/registros) já mostrado no card "Status do cache local" acima, só que também
+      // aqui, do lado do botão, onde o usuário está olhando logo depois de clicar.
       if (st.syncing) {
-        const badge = document.getElementById('pl-status-badge');
-        if (badge && progMsg) progMsg.textContent = badge.textContent.includes('Sincronizando')
-          ? document.getElementById('pl-status-sub')?.textContent || 'Importando...'
-          : 'Importando...';
+        if (progMsg) {
+          const prog = st.progress;
+          progMsg.textContent = prog && prog.total > 0
+            ? `Importando... ${prog.total.toLocaleString('pt-BR')} registros até agora (página ${prog.pages}). Pode levar bem mais que o normal se a Azure estiver limitando as requisições.`
+            : 'Iniciando importação de preços Azure (USD · global)...';
+        }
         return; // continua polling
       }
 
@@ -2881,6 +2887,8 @@ async function loadPortalConfig() {
     if (orfAtivo) orfAtivo.checked = !!d.orfaos_ativo;
     const genieAtivo = document.getElementById('portal-cfg-genie-ativo');
     if (genieAtivo) genieAtivo.checked = !!d.genie_cotas_ativo;
+    const priceSimAtivo = document.getElementById('portal-cfg-price-sim-ativo');
+    if (priceSimAtivo) priceSimAtivo.checked = !!d.price_simulator_ativo;
     atualizarAvisoServicosPortal();
     _checarEntraAtivoPortal();
     _mostrarCorpoOrfaosPortal(!!d.orfaos_ativo);
@@ -2985,7 +2993,8 @@ function atualizarAvisoServicosPortal() {
   const calc  = document.getElementById('portal-cfg-calc-ativo')?.checked !== false;
   const orf   = !!document.getElementById('portal-cfg-orfaos-ativo')?.checked;
   const genie = !!document.getElementById('portal-cfg-genie-ativo')?.checked;
-  aviso.style.display = (!calc && !orf && !genie) ? 'block' : 'none';
+  const priceSim = !!document.getElementById('portal-cfg-price-sim-ativo')?.checked;
+  aviso.style.display = (!calc && !orf && !genie && !priceSim) ? 'block' : 'none';
 }
 
 // "Minha Cota Genie" exige a integração Entra ID ativa (é o login que a tela usa) — sem
@@ -3131,6 +3140,7 @@ async function savePortalConfig() {
         solicitar_identificacao:   document.getElementById('portal-cfg-solicitar-ident')?.checked   || false,
         calculadora_ativa:         document.getElementById('portal-cfg-calc-ativo')?.checked !== false,
         genie_cotas_ativo:         document.getElementById('portal-cfg-genie-ativo')?.checked || false,
+        price_simulator_ativo:     document.getElementById('portal-cfg-price-sim-ativo')?.checked || false,
         orfaos_ativo:              document.getElementById('portal-cfg-orfaos-ativo')?.checked || false,
         orfaos_subscription_ids:   Array.from(_portalOrfaos.subs),
         orfaos_categorias:         Array.from(_portalOrfaos.cats),

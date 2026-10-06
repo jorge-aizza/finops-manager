@@ -4178,6 +4178,10 @@ async function _getPortalConfig() {
     // cada usuário só vê os próprios dados, então não há "quais workspaces aparecem" pra
     // configurar (diferente de orfaos_*/subscription_ids acima).
     genie_cotas_ativo: false,
+    // Simulador de Preços (2026-10-03): busca sobre `azure_price_list` (catálogo público da
+    // Azure Retail Prices API, já sincronizado em Configurações → Price List) — não é billing
+    // nem dado do tenant, então não precisa de allowlist nem identificação, só liga/desliga.
+    price_simulator_ativo: false,
     // Imposto sobre custo coletado (2026-09-28): DOIS impostos independentes — Serviço Microsoft
     // e Marketplace (`publisher_type` em azure_costs distingue os dois; medido no dado real que
     // Marketplace é ~36% do custo total, não é um caso de borda). Cada um só se aplica se
@@ -4265,7 +4269,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
             taxa_imposto, taxa_cond, taxa_gordura, horario_livre, solicitar_identificacao,
             permitir_selecao_periodo, permitir_selecao_recursos,
             orfaos_ativo, orfaos_subscription_ids, orfaos_resource_groups, orfaos_categorias, calculadora_ativa,
-            genie_cotas_ativo, imposto_microsoft, imposto_marketplace } = req.body;
+            genie_cotas_ativo, price_simulator_ativo, imposto_microsoft, imposto_marketplace } = req.body;
     // Recursos órfãos no portal: allowlist explícita. Listas sempre normalizadas (strings não vazias);
     // categorias filtradas contra as 8 válidas — nada vindo do cliente entra sem validação.
     const _strList = (v) => (Array.isArray(v) ? v : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 2000);
@@ -4278,6 +4282,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
       orfaos_resource_groups: _strList(orfaos_resource_groups),
       orfaos_categorias: _strList(orfaos_categorias).filter((c) => Object.prototype.hasOwnProperty.call(_DESP_LABEL_XLSX, c)),
       genie_cotas_ativo: !!genie_cotas_ativo,
+      price_simulator_ativo: !!price_simulator_ativo,
       taxa_imposto:           taxa_imposto  != null ? parseFloat(taxa_imposto)  : 18.65,
       taxa_cond:              taxa_cond     != null ? parseFloat(taxa_cond)     : 13.00,
       taxa_gordura:           taxa_gordura  != null ? parseFloat(taxa_gordura)  : 0,
@@ -4376,7 +4381,8 @@ app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
              solicitar_identificacao, permitir_selecao_periodo, permitir_selecao_recursos,
              calculadora_ativa: req.portalCfg.calculadora_ativa !== false,
              orfaos_ativo: !!req.portalCfg.orfaos_ativo,
-             genie_cotas_ativo: !!req.portalCfg.genie_cotas_ativo });
+             genie_cotas_ativo: !!req.portalCfg.genie_cotas_ativo,
+             price_simulator_ativo: !!req.portalCfg.price_simulator_ativo });
 });
 
 // ── GET /api/public/orfaos ────────────────────────────────────────────────────
@@ -4455,6 +4461,226 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
   } catch (e) {
     console.error('[Portal Órfãos] erro:', e.message);
     res.status(500).json({ error: 'Não foi possível carregar os recursos órfãos no momento.' });
+  }
+});
+
+// ── Simulador de Preços (2026-10-03) ──────────────────────────────────────────
+// Busca sobre `azure_price_list` — catálogo PÚBLICO da Azure Retail Prices API, já
+// sincronizado em Configurações → Price List (todas as regiões, sem filtro). Não é billing
+// nem dado do tenant, então sem allowlist/identificação — só o toggle `price_simulator_ativo`.
+// Mesmo padrão de rate limit de /api/public/orfaos acima (rota pública sem sessão).
+const _priceSimPublicoLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Muitas requisições. Tente novamente em instantes.' },
+});
+
+app.get('/api/public/price-simulator/categorias', _priceSimPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    if (!req.portalCfg.price_simulator_ativo) return res.status(403).json({ error: 'Simulador de Preços desativado' });
+    const r = await pool.query(
+      `SELECT DISTINCT service_family FROM azure_price_list
+       WHERE type = 'Consumption' AND service_family IS NOT NULL AND service_family <> ''
+       ORDER BY 1`
+    );
+    res.json(r.rows.map((row) => row.service_family));
+  } catch (e) {
+    console.error('[Simulador de Preços] erro ao listar categorias:', e.message);
+    res.status(500).json({ error: 'Não foi possível carregar as categorias no momento.' });
+  }
+});
+
+app.get('/api/public/price-simulator/regioes', _priceSimPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    if (!req.portalCfg.price_simulator_ativo) return res.status(403).json({ error: 'Simulador de Preços desativado' });
+    const r = await pool.query(
+      `SELECT DISTINCT arm_region_name FROM azure_price_list
+       WHERE type = 'Consumption' AND arm_region_name IS NOT NULL AND arm_region_name <> ''
+       ORDER BY 1`
+    );
+    res.json(r.rows.map((row) => row.arm_region_name));
+  } catch (e) {
+    console.error('[Simulador de Preços] erro ao listar regiões:', e.message);
+    res.status(500).json({ error: 'Não foi possível carregar as regiões no momento.' });
+  }
+});
+
+// Mesma taxa de câmbio fixa já usada em buildEstimativa.ts/calcEstimado.ts — a sincronização
+// AO VIVO do Price List (diferente da importação por CSV/planilha) não preenche
+// `retail_price_brl`, então convertemos aqui quando ele vier nulo.
+const _PRICE_SIM_TAXA_BRL_FALLBACK = 5.70;
+
+app.get('/api/public/price-simulator/buscar', _priceSimPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    if (!req.portalCfg.price_simulator_ativo) return res.status(403).json({ error: 'Simulador de Preços desativado' });
+    const { categoria, regiao, q, produto, comPreco } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const porPagina = 50;
+    const params = []; const cond = [`type = 'Consumption'`];
+    if (categoria) { cond.push(`service_family = $${params.length + 1}`); params.push(categoria); }
+    if (regiao)    { cond.push(`arm_region_name = $${params.length + 1}`); params.push(regiao); }
+    // `produto` casa o product_name EXATO — o assistente guiado usa isso para não misturar
+    // famílias parecidas (ex.: "Premium SSD Managed Disks", cobrado por disco/mês, com
+    // "Azure Premium SSD v2" e "Premium SSD Managed Disks_v8", cobrados por GiB/hora).
+    if (produto)   { cond.push(`product_name = $${params.length + 1}`); params.push(produto); }
+    // Alguns meters do catálogo têm preço zero de verdade (ex.: "Provisioned IOPS" do
+    // Premium SSD v2) — inúteis numa lista de sugestão de custo.
+    if (comPreco === '1') { cond.push(`COALESCE(retail_price_brl, retail_price, 0) > 0`); }
+    // `sku` exato — usado pela busca manual em dois níveis (produto → SKU/tier).
+    if (req.query.sku) { cond.push(`sku_name = $${params.length + 1}`); params.push(req.query.sku); }
+    // `produtos` = lista de product_name separada por "|" (caractere que não aparece em nome
+    // de produto). É assim que o assistente busca a caixa de um SERVIÇO: um serviço agrupa
+    // vários produtos do catálogo (ex.: "Azure Cache for Redis" reúne 10 produtos).
+    if (req.query.produtos) {
+      const lista = String(req.query.produtos).split('|').map((s) => s.trim()).filter(Boolean).slice(0, 60);
+      if (lista.length) { cond.push(`product_name = ANY($${params.length + 1})`); params.push(lista); }
+    }
+    if (q?.trim()) {
+      params.push(`%${q.trim()}%`);
+      const i = params.length;
+      cond.push(`(product_name ILIKE $${i} OR sku_name ILIKE $${i} OR meter_name ILIKE $${i})`);
+    }
+    const where = 'WHERE ' + cond.join(' AND ');
+    const [totalR, itensR] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total FROM azure_price_list ${where}`, params),
+      pool.query(
+        `SELECT product_name, sku_name, meter_name, unit_of_measure, retail_price, retail_price_brl, arm_region_name, service_family
+         FROM azure_price_list ${where}
+         ORDER BY product_name, sku_name, meter_name
+         LIMIT ${porPagina} OFFSET ${(page - 1) * porPagina}`,
+        params
+      ),
+    ]);
+    const itens = itensR.rows.map((r) => ({
+      produto: r.product_name, sku: r.sku_name, meter: r.meter_name, unidade: r.unit_of_measure,
+      preco_brl: r.retail_price_brl != null ? Number(r.retail_price_brl) : Number(r.retail_price || 0) * _PRICE_SIM_TAXA_BRL_FALLBACK,
+      regiao: r.arm_region_name, categoria: r.service_family,
+    }));
+    res.json({ itens, total: parseInt(totalR.rows[0].total, 10), page, por_pagina: porPagina });
+  } catch (e) {
+    console.error('[Simulador de Preços] erro na busca:', e.message);
+    res.status(500).json({ error: 'Não foi possível buscar preços no momento.' });
+  }
+});
+
+// Preço em BRL direto no SQL — igual ao cálculo de `preco_brl` acima, mas precisa estar na
+// query para dar MIN()/ORDER BY. A taxa é constante numérica do servidor, não entrada do usuário.
+const _SQL_PRECO_BRL = `COALESCE(retail_price_brl, retail_price * ${_PRICE_SIM_TAXA_BRL_FALLBACK})`;
+
+// Filtros comuns dos dois endpoints de VM do assistente guiado:
+//   - só VM de verdade: `product_name LIKE 'Virtual Machines%'` exclui "Cloud Services FSv2
+//     Series" e "Bsv2 Series Cloud Services", que vivem no mesmo service_family 'Compute';
+//   - SO e modelo de compra ficam NO SERVIDOR porque uma família como "Virtual Machines Easv5
+//     Series" tem 107 meters (Linux + Windows + Spot + Low Priority) e estourava a paginação
+//     de 50 do /buscar antes de qualquer refinamento no cliente.
+function _vmFiltros(regiao, so, modelo) {
+  const params = [];
+  const cond = [
+    `type = 'Consumption'`,
+    `service_family = 'Compute'`,
+    `product_name LIKE 'Virtual Machines%'`,
+    `COALESCE(retail_price_brl, retail_price, 0) > 0`,
+  ];
+  if (regiao) { cond.push(`arm_region_name = $${params.length + 1}`); params.push(regiao); }
+  if (so === 'windows')      cond.push(`product_name ILIKE '%Windows%'`);
+  else if (so === 'linux')   cond.push(`product_name NOT ILIKE '%Windows%'`);
+  if (modelo === 'spot')     cond.push(`meter_name ILIKE '%Spot%'`);
+  else if (modelo === 'sob-demanda') cond.push(`meter_name NOT ILIKE '%Spot%' AND meter_name NOT ILIKE '%Low Priority%'`);
+  return { where: 'WHERE ' + cond.join(' AND '), params };
+}
+
+// Famílias de VM disponíveis (ex.: "Virtual Machines Dsv5 Series") com quantos tamanhos cada
+// uma tem e o preço de entrada — o assistente agrupa isso por tipo (uso geral, memória,
+// computação...) usando a taxonomia da Azure, que NÃO existe no catálogo de preços.
+app.get('/api/public/price-simulator/vm-familias', _priceSimPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    if (!req.portalCfg.price_simulator_ativo) return res.status(403).json({ error: 'Simulador de Preços desativado' });
+    const { where, params } = _vmFiltros(req.query.regiao, req.query.so, req.query.modelo);
+    const r = await pool.query(
+      `SELECT product_name, COUNT(DISTINCT sku_name) AS skus, MIN(${_SQL_PRECO_BRL}) AS preco_min
+       FROM azure_price_list ${where}
+       GROUP BY product_name
+       ORDER BY product_name`,
+      params
+    );
+    res.json(r.rows.map((x) => ({
+      produto: x.product_name, skus: parseInt(x.skus, 10), preco_min: Number(x.preco_min),
+    })));
+  } catch (e) {
+    console.error('[Simulador de Preços] erro ao listar famílias de VM:', e.message);
+    res.status(500).json({ error: 'Não foi possível carregar as famílias de VM no momento.' });
+  }
+});
+
+// Tamanhos (SKUs) de uma família de VM, do mais barato pro mais caro.
+app.get('/api/public/price-simulator/vm-skus', _priceSimPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    if (!req.portalCfg.price_simulator_ativo) return res.status(403).json({ error: 'Simulador de Preços desativado' });
+    const produto = req.query.produto;
+    if (!produto) return res.status(400).json({ error: 'Informe a família de VM (produto).' });
+    const { where, params } = _vmFiltros(req.query.regiao, req.query.so, req.query.modelo);
+    params.push(produto);
+    const r = await pool.query(
+      `SELECT product_name, sku_name, meter_name, unit_of_measure, retail_price, retail_price_brl, arm_region_name, service_family
+       FROM azure_price_list ${where} AND product_name = $${params.length}
+       ORDER BY ${_SQL_PRECO_BRL} ASC
+       LIMIT 100`,
+      params
+    );
+    res.json({
+      itens: r.rows.map((x) => ({
+        produto: x.product_name, sku: x.sku_name, meter: x.meter_name, unidade: x.unit_of_measure,
+        preco_brl: x.retail_price_brl != null ? Number(x.retail_price_brl) : Number(x.retail_price || 0) * _PRICE_SIM_TAXA_BRL_FALLBACK,
+        regiao: x.arm_region_name, categoria: x.service_family,
+      })),
+      total: r.rowCount, page: 1, por_pagina: 100,
+    });
+  } catch (e) {
+    console.error('[Simulador de Preços] erro ao listar SKUs de VM:', e.message);
+    res.status(500).json({ error: 'Não foi possível carregar os tamanhos de VM no momento.' });
+  }
+});
+
+// Facetas do catálogo para a busca manual em dois níveis. Sem `produto`, devolve os PRODUTOS
+// daquela categoria/região — que para Compute são as famílias de VM ("Virtual Machines Dsv5
+// Series") e para Networking são serviços ("Azure Firewall"). Com `produto`, devolve os SKUs
+// dele — que são os tamanhos de VM ("Standard_D4s_v5") ou os tiers do serviço ("Basic",
+// "Standard", "Premium"). É o GROUP BY que o /buscar não faz, generalizado para qualquer tipo.
+app.get('/api/public/price-simulator/facetas', _priceSimPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    if (!req.portalCfg.price_simulator_ativo) return res.status(403).json({ error: 'Simulador de Preços desativado' });
+    const { categoria, regiao, produto, nivel } = req.query;
+    const params = []; const cond = [`type = 'Consumption'`, `COALESCE(retail_price_brl, retail_price, 0) > 0`];
+    if (categoria) { cond.push(`service_family = $${params.length + 1}`); params.push(categoria); }
+    if (regiao)    { cond.push(`arm_region_name = $${params.length + 1}`); params.push(regiao); }
+    if (produto)   { cond.push(`product_name = $${params.length + 1}`); params.push(produto); }
+    // nivel=catalogo devolve TODOS os produtos da região de uma vez, com a categoria de cada
+    // um, para o assistente montar as caixas de serviço. O agrupamento produto→serviço é feito
+    // no cliente, porque o catálogo não tem o nome do serviço: a Azure Retail Prices API expõe
+    // `serviceName` ("Virtual Machines"), mas o sync grava só `serviceFamily` ("Compute") —
+    // a coluna `meter_category` existe no schema e fica sempre nula, já que a API não devolve
+    // esse campo.
+    const catalogo = nivel === 'catalogo';
+    const campo = produto ? 'sku_name' : 'product_name';
+    const r = await pool.query(
+      `SELECT ${campo} AS nome, COUNT(*) AS meters, MIN(${_SQL_PRECO_BRL}) AS preco_min
+              ${catalogo ? ', service_family AS categoria' : ''}
+       FROM azure_price_list
+       WHERE ${cond.join(' AND ')} AND ${campo} IS NOT NULL AND ${campo} <> ''
+       GROUP BY ${campo}${catalogo ? ', service_family' : ''}
+       ORDER BY ${campo}
+       LIMIT ${catalogo ? 2000 : 500}`,
+      params
+    );
+    res.json({
+      nivel: catalogo ? 'catalogo' : produto ? 'sku' : 'produto',
+      itens: r.rows.map((x) => ({
+        nome: x.nome, meters: parseInt(x.meters, 10), preco_min: Number(x.preco_min),
+        ...(catalogo ? { categoria: x.categoria } : {}),
+      })),
+    });
+  } catch (e) {
+    console.error('[Simulador de Preços] erro ao listar facetas:', e.message);
+    res.status(500).json({ error: 'Não foi possível carregar as opções no momento.' });
   }
 });
 
