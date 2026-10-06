@@ -2684,17 +2684,31 @@ async function _syncPriceList(requestedCurrency = 'USD') {
       throw new Error('Nenhum dado retornado pela Azure Retail Prices API. Verifique conectividade com prices.azure.com');
     }
 
-    const c = await pool.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query(`TRUNCATE TABLE azure_price_list`);
+    // TRUNCATE isolado e rápido — de propósito FORA de qualquer transação de longa duração.
+    // Bug real corrigido aqui (2026-10-03, incidente em produção): a versão anterior fazia
+    // BEGIN/TRUNCATE/COMMIT numa ÚNICA transação que só fechava no fim da sincronização
+    // inteira — com o rate limit pesado da Retail Prices API (muitos 429, backoff de até
+    // 150s por tentativa), isso podia segurar o lock exclusivo do TRUNCATE por dezenas de
+    // minutos. Qualquer outra query tocando azure_price_list (inclusive o próprio
+    // GET /api/price-list/status, chamado a cada 8s pelo polling da tela) ficava bloqueada
+    // esperando esse lock — e como cada chamada bloqueada segura uma conexão do pool (máx.
+    // 20) até ser atendida, o pool inteiro esgotava e a aplicação inteira parecia "fora do
+    // ar" pra qualquer tela que dependesse do banco, não só o Price List.
+    await pool.query(`TRUNCATE TABLE azure_price_list`);
 
-      let currentItems = probe.items;
-      let nextLink     = probe.nextLink;
+    let currentItems = probe.items;
+    let nextLink     = probe.nextLink;
 
-      while (true) {
-        pages++;
+    while (true) {
+      pages++;
 
+      // Cada página grava e comita na própria transação curta — nenhuma conexão/lock fica
+      // aberta durante a espera de rede/backoff até a próxima página (onde o rate limit
+      // realmente acontece). Efeito colateral bom: progresso já coletado fica salvo de
+      // verdade a cada página, não se perde tudo se a sincronização for interrompida.
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
         for (const item of currentItems) {
           if (!item.meterId) continue;
           const retailP = item.retailPrice ?? 0;
@@ -2741,37 +2755,37 @@ async function _syncPriceList(requestedCurrency = 'USD') {
           ]);
           total++;
         }
-
-        _syncProgress.pages = pages;
-        _syncProgress.total = total;
-        if (pages % 10 === 0)
-          console.log(`[PriceList] Página ${pages} — ${total} registros...`);
-
-        if (!nextLink) break;
-
-        // Delay entre páginas: evita 429 por burst de requisições.
-        // Com $top=1000 são ~100 páginas no total; 300ms → ~30s overhead tolerável.
-        await new Promise(r => setTimeout(r, 300));
-
-        const next = await _fetchPriceListPage(nextLink);
-        currentItems = next.items;
-        nextLink     = next.nextLink;
+        await c.query('COMMIT');
+      } catch (err) {
+        await c.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        c.release();
       }
 
-      await c.query('COMMIT');
-      _syncProgress.finished = new Date().toISOString();
-      _plCobTs = 0;
-      console.log(`[PriceList] ✅ Sync concluído: ${total} registros em ${pages} páginas`);
+      _syncProgress.pages = pages;
+      _syncProgress.total = total;
+      if (pages % 10 === 0)
+        console.log(`[PriceList] Página ${pages} — ${total} registros...`);
 
-      await _gravaMeta(resultKey, { ok: true, total, pages, currency, region: 'all', ts: _syncProgress.finished });
-      return { ok: true, total, pages, currency, region: 'all' };
+      if (!nextLink) break;
 
-    } catch (err) {
-      await c.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      c.release();
+      // Delay entre páginas: evita 429 por burst de requisições.
+      // Com $top=1000 são ~100 páginas no total; 300ms → ~30s overhead tolerável.
+      await new Promise(r => setTimeout(r, 300));
+
+      const next = await _fetchPriceListPage(nextLink);
+      currentItems = next.items;
+      nextLink     = next.nextLink;
     }
+
+    _syncProgress.finished = new Date().toISOString();
+    _plCobTs = 0;
+    console.log(`[PriceList] ✅ Sync concluído: ${total} registros em ${pages} páginas`);
+
+    await _gravaMeta(resultKey, { ok: true, total, pages, currency, region: 'all', ts: _syncProgress.finished });
+    return { ok: true, total, pages, currency, region: 'all' };
+
   } catch (err) {
     _syncProgress.error    = err.message;
     _syncProgress.finished = new Date().toISOString();
@@ -3878,9 +3892,17 @@ if (_multer) {
 }
 
 // ── Cache de cobertura PL (TTL 5 min) — query pesada não bloqueia o status ───
-let _plCobCache = null, _plCobTs = 0;
+let _plCobCache = null, _plCobTs = 0, _plCobRefreshing = false;
 function _plCobRefresh() {
   if (!pool) return;
+  // Guarda contra empilhamento (achado no mesmo incidente de 2026-10-03 do TRUNCATE): sem
+  // isso, toda chamada a /api/price-list/status enquanto `_plCobTs` ainda está zerado (logo
+  // após um sync/import, ou simplesmente antes da 1ª atualização terminar) disparava OUTRA
+  // cópia dessa query pesada contra azure_costs (10M+ linhas) — com o polling de 8 em 8
+  // segundos da tela, isso empilhava várias consultas concorrentes e ajudava a esgotar o pool
+  // de conexões junto com o bug do TRUNCATE.
+  if (_plCobRefreshing) return;
+  _plCobRefreshing = true;
   // JOIN em vez de EXISTS por meter_id: muito mais rápido com índice LOWER(meter_id)
   pool.query(`
     WITH billing_meters AS (
@@ -3910,7 +3932,7 @@ function _plCobRefresh() {
       cobertura_pct:  bm > 0 ? Math.round(parseInt(r.rows[0].com_pl || 0) / bm * 100) : 0,
     };
     _plCobTs = Date.now();
-  }).catch(() => {});
+  }).catch(() => {}).finally(() => { _plCobRefreshing = false; });
 }
 
 // ── GET /api/price-list/status ───────────────────────────────────────────────
@@ -3918,20 +3940,42 @@ app.get('/api/price-list/status', authMiddleware, dbMiddleware, async (req, res)
   try {
     const currency = 'USD';
 
-    // Queries leves em paralelo — responde rápido sem bloquear
-    const [meta, cnt] = await Promise.all([
-      pool.query(
-        `SELECT value, updated_at FROM azure_price_list_meta WHERE key = $1`,
-        [`last_result_USD_global`]
-      ),
-      pool.query(`
+    // Contagem de azure_price_list com timeout curto e dedicado — blindagem contra o
+    // incidente de 2026-10-03 (ver _syncPriceList): se algo algum dia segurar um lock
+    // exclusivo nessa tabela de novo, essa query falha rápido com erro claro em vez de
+    // ficar pendurada segurando uma conexão do pool até o cliente desistir (foi isso que
+    // fez o polling da tela errar "sincronização terminou sem dados").
+    const cntClient = await pool.connect();
+    let cnt;
+    try {
+      await cntClient.query('BEGIN');
+      await cntClient.query(`SET LOCAL statement_timeout = '5000'`);
+      cnt = await cntClient.query(`
         SELECT COUNT(*)::int                  AS total,
                COUNT(DISTINCT meter_id)::int  AS meters,
                MAX(updated_at)               AS last_updated,
                array_agg(DISTINCT currency_code ORDER BY currency_code) AS currencies
         FROM azure_price_list
-      `)
-    ]);
+      `);
+      await cntClient.query('COMMIT');
+    } catch (e) {
+      await cntClient.query('ROLLBACK').catch(() => {});
+      if (e.code === '57014') { // statement_timeout do Postgres
+        return res.json({ total: null, meters: null, last_updated: null, currencies: [],
+          syncing: _syncingPriceList, progress: _syncingPriceList ? _syncProgress : null,
+          last_result: null, circuit_breaker: { state: _plCB.state },
+          cobertura: _plCobCache,
+          aviso: 'Tabela de preços temporariamente bloqueada (provavelmente por uma sincronização em andamento) — tente de novo em alguns segundos.' });
+      }
+      throw e;
+    } finally {
+      cntClient.release();
+    }
+
+    const meta = await pool.query(
+      `SELECT value, updated_at FROM azure_price_list_meta WHERE key = $1`,
+      [`last_result_USD_global`]
+    );
 
     let last_result = null;
     if (meta.rows[0]) { try { last_result = JSON.parse(meta.rows[0].value); } catch (_) {} }
