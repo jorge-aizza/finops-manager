@@ -1,8 +1,10 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { getOrfaosPublica } from '../api/orfaosPublica'
+import { useQuery, useMutation } from '@tanstack/react-query'
+import { getOrfaosPublica, baixarOrfaosPublicaExcel } from '../api/orfaosPublica'
 import PortalHero from '../components/PortalHero'
 import CmsMultiSelect from '../components/CmsMultiSelect'
+import InvoicePreviewModal from '../components/InvoicePreviewModal'
+import { buildDesperdicioPdfHtml } from '../lib/buildDesperdicioPdfHtml'
 import type { OrfaoCategoria } from '../types/orfaosPublica'
 
 const CATEGORIA_LABEL: Record<OrfaoCategoria, string> = {
@@ -30,6 +32,7 @@ export default function PublicOrfaosView() {
   const [tipo, setTipo] = useState<'' | OrfaoCategoria>('')
   const [rgsSelecionados, setRgsSelecionados] = useState<string[]>([])
   const [busca, setBusca] = useState('')
+  const [pdfHtml, setPdfHtml] = useState<string | null>(null)
 
   const itens = query.data?.itens ?? []
   const rgs = Array.from(new Set(itens.map((i) => i.resource_group).filter((r): r is string => !!r))).sort((a, b) => a.localeCompare(b))
@@ -44,6 +47,15 @@ export default function PublicOrfaosView() {
   const rgLabel = rgsSelecionados.length === 0 ? 'Todos os Resource Groups'
     : rgsSelecionados.length === 1 ? rgsSelecionados[0]
     : `${rgsSelecionados.length} Resource Groups`
+  const filtrosDescricao = [
+    tipo ? `Tipo: ${CATEGORIA_LABEL[tipo]?.replace(/^\S+\s/, '') || tipo}` : '',
+    rgsSelecionados.length ? `Resource Groups: ${rgsSelecionados.join(', ')}` : '',
+    termo ? `Busca: "${busca.trim()}"` : '',
+  ].filter(Boolean).join(' | ') || 'Sem filtros'
+  const exportarExcelMutation = useMutation({
+    mutationFn: () => baixarOrfaosPublicaExcel(filtrados, filtrosDescricao),
+    onError: (e: Error) => window.showToast?.('Erro ao exportar: ' + e.message, 'error'),
+  })
 
   return (
     <>
@@ -65,6 +77,25 @@ export default function PublicOrfaosView() {
         <div className="card-header">
           <span className="card-title">Recursos Órfãos</span>
           {query.data && <span className="badge">{query.data.total_itens}</span>}
+          {filtrados.length > 0 && (
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+              <button
+                className="btn-ghost" style={{ fontSize: 12 }}
+                disabled={exportarExcelMutation.isPending}
+                onClick={() => exportarExcelMutation.mutate()}
+                title="Exporta os recursos filtrados na tela, no mesmo layout do Excel de Ações FinOps"
+              >
+                {exportarExcelMutation.isPending ? 'Exportando...' : '📊 Exportar Excel'}
+              </button>
+              <button
+                className="btn-ghost" style={{ fontSize: 12 }}
+                onClick={() => setPdfHtml(buildDesperdicioPdfHtml(filtrados, filtrosDescricao))}
+                title="Abre a prévia com o logo FinOps para imprimir ou salvar como PDF"
+              >
+                📄 Exportar PDF
+              </button>
+            </div>
+          )}
         </div>
         <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
           Recursos provisionados que ninguém está usando. O custo é estimado pelo billing observado nos últimos 30 dias.
@@ -172,6 +203,9 @@ export default function PublicOrfaosView() {
         )}
       </div>
       </div>
+      {pdfHtml && (
+        <InvoicePreviewModal html={pdfHtml} title="Recursos Órfãos" label="Prévia do Relatório" onClose={() => setPdfHtml(null)} />
+      )}
     </>
   )
 }

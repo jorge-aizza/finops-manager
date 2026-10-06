@@ -1,4 +1,17 @@
-import type { AzureDesperdicioItem } from '../types/azureInventario'
+// Tipo estrutural mínimo — aceita tanto `AzureDesperdicioItem` (tela interna, com
+// `resource_id`) quanto `OrfaoItem` (portal público, sem `resource_id` por segurança: nunca
+// expõe o caminho completo do recurso). `resource_id` fica opcional, usado só como fallback
+// de exibição quando `nome` vier nulo.
+interface DesperdicioPdfItem {
+  nome: string | null
+  resource_id?: string | null
+  categoria: string
+  resource_group: string | null
+  sku: string | null
+  tamanho_gb: number | null
+  custo_mensal_estimado: number | null
+  dias_orfao: number | null
+}
 
 const CATEGORIA_LABEL: Record<string, string> = {
   disco_orfao: 'Disco não anexado',
@@ -19,7 +32,7 @@ function brl(v: number): string {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v || 0)
 }
 
-export function buildDesperdicioPdfHtml(itens: AzureDesperdicioItem[], filtrosDescricao: string): string {
+export function buildDesperdicioPdfHtml(itens: DesperdicioPdfItem[], filtrosDescricao: string): string {
   const origin = (typeof window !== 'undefined' && window.location) ? window.location.origin : ''
   const agora = new Date()
   const geradoEm = agora.toLocaleDateString('pt-BR') + ' às ' + agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })

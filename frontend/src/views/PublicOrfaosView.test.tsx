@@ -81,6 +81,34 @@ describe('PublicOrfaosView', () => {
     expect(screen.getByText('2 Resource Groups')).toBeInTheDocument()
   })
 
+  it('exporta Excel com os itens filtrados e a descrição dos filtros', async () => {
+    const user = userEvent.setup()
+    vi.mocked(orfaosApi.baixarOrfaosPublicaExcel).mockResolvedValue(undefined)
+    renderView()
+    await screen.findByText('disco-a')
+
+    await user.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'disco-')
+    await user.click(screen.getByRole('button', { name: /Exportar Excel/ }))
+
+    expect(orfaosApi.baixarOrfaosPublicaExcel).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({ nome: 'disco-a' }),
+        expect.objectContaining({ nome: 'disco-b' }),
+      ],
+      'Busca: "disco-"',
+    )
+  })
+
+  it('abre a prévia de PDF com o botão Exportar PDF', async () => {
+    const user = userEvent.setup()
+    renderView()
+    await screen.findByText('disco-a')
+
+    await user.click(screen.getByRole('button', { name: /Exportar PDF/ }))
+    expect(await screen.findByRole('button', { name: /Imprimir \/ Salvar PDF/ })).toBeInTheDocument()
+    expect(screen.getByText('Prévia do Relatório')).toBeInTheDocument()
+  })
+
   it('mostra a mensagem do servidor quando a consulta falha', async () => {
     vi.mocked(orfaosApi.getOrfaosPublica).mockRejectedValue(new Error('Visão de recursos órfãos desativada'))
     renderView()
