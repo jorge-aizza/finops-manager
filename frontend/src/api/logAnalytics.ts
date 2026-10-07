@@ -19,6 +19,28 @@ export interface LogAnalyticsWorkspace {
   custo_mes_total: number
   custo_mes_ingestao: number
   custo_mes_retencao: number
+  /** Economia REAL do período selecionado (billing de `azure_costs`, não um snapshot do "agora")
+   * — vs Pay-As-You-Go pelo mesmo volume real ingerido nesse período. null = não houve cobrança
+   * de Commitment Tier nesse período (não estava contratado então, mesmo que esteja hoje) —
+   * "não sabemos/não aplicável" nunca vira 0. Pode ser negativo (comprometido acima do necessário). */
+  economia_commitment_tier_periodo: number | null
+  /** Média de GB/dia no período selecionado (ingestao_mes_gb / dias da janela) — mesma janela
+   * móvel/mês civil de `_janelaLogAnalytics` no backend, null só se a janela não puder ser
+   * determinada (não deveria acontecer em uso normal). */
+  ingestao_media_gb_dia: number | null
+}
+
+/** Um ponto do gráfico de consumo diário (ver `getLogAnalyticsConsumoDiario`). */
+export interface LogAnalyticsConsumoDiarioPonto {
+  dia: string
+  gb: number
+  /** Custo TOTAL do dia (ingestão + retenção, já com imposto) — não só ingestão. */
+  custo: number
+}
+
+export interface LogAnalyticsConsumoDiarioResposta {
+  workspace_nome: string | null
+  pontos: LogAnalyticsConsumoDiarioPonto[]
 }
 
 export interface LogAnalyticsIngestaoDia {
@@ -105,11 +127,17 @@ export interface LogAnalyticsDiagnosticSetting {
 }
 
 export interface LogAnalyticsResumo {
+  mes: string
+  mes_label: string
   kpis: {
     subsNoEscopo: number
     workspaces: number
     gbIngeridoMes: number
     custoRealMes: number
+    /** Soma de `economia_commitment_tier_periodo` de todos os workspaces — real do período
+     * selecionado, não um snapshot do "agora". Pode ser negativo se algum workspace estiver
+     * comprometido acima do necessário. */
+    economiaCommitmentTierMes: number
     tabelasRetencaoAlta: number
     recursosComDiagSetting: number
     dcrsMapeadas: number
@@ -133,8 +161,11 @@ export interface LogAnalyticsRecomendacao {
   criado_em: string
 }
 
-export const getLogAnalyticsWorkspaces = () =>
-  apiFetch<LogAnalyticsWorkspace[]>('GET', '/log-analytics/workspaces')
+// `mes` no formato YYYY-MM — mês selecionado na tela (dropdown "Período"), ver
+// LogAnalyticsView.tsx. Sem `mes`, o backend cai no mês corrente (mesmo comportamento de antes
+// do seletor existir).
+export const getLogAnalyticsWorkspaces = (mes?: string) =>
+  apiFetch<LogAnalyticsWorkspace[]>('GET', '/log-analytics/workspaces' + (mes ? '?mes=' + mes : ''))
 
 export const getLogAnalyticsAppInsights = () =>
   apiFetch<LogAnalyticsAppInsights[]>('GET', '/log-analytics/app-insights')
@@ -142,8 +173,15 @@ export const getLogAnalyticsAppInsights = () =>
 export const getLogAnalyticsIngestao = (workspaceGuid: string) =>
   apiFetch<LogAnalyticsIngestaoDia[]>('GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/ingestao')
 
-export const getLogAnalyticsTabelas = (workspaceGuid: string) =>
-  apiFetch<LogAnalyticsTabelasResposta>('GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/tabelas')
+// Gráfico de detalhe "GB dia a dia + valor" de um workspace (2026-10-xx, pedido do usuário) —
+// `mes` no mesmo formato YYYY-MM do resto da tela; sem ele, o backend cai no mês corrente.
+export const getLogAnalyticsConsumoDiario = (workspaceGuid: string, mes?: string) =>
+  apiFetch<LogAnalyticsConsumoDiarioResposta>(
+    'GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/consumo-diario' + (mes ? '?mes=' + mes : ''),
+  )
+
+export const getLogAnalyticsTabelas = (workspaceGuid: string, mes?: string) =>
+  apiFetch<LogAnalyticsTabelasResposta>('GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/tabelas' + (mes ? '?mes=' + mes : ''))
 
 // Liga a auditoria de consultas (LAQueryLogs) no workspace — ação de ESCRITA na Azure (único
 // PUT de todo o projeto), por isso é disparada manualmente por um botão, não automática. Exige
@@ -159,8 +197,8 @@ export const getLogAnalyticsRecomendacoes = (severidade?: LogAnalyticsSeveridade
 
 // Mesmos dados do "📊 Gerar Dashboard" (HTML p/ download), só que como JSON — pro painel
 // nativo dentro da tela (ver _coletarResumoLogAnalytics em server.js, reaproveitado pelos dois).
-export const getLogAnalyticsResumo = () =>
-  apiFetch<LogAnalyticsResumo>('GET', '/log-analytics/resumo')
+export const getLogAnalyticsResumo = (mes?: string) =>
+  apiFetch<LogAnalyticsResumo>('GET', '/log-analytics/resumo' + (mes ? '?mes=' + mes : ''))
 
 export const getLogAnalyticsFontes = (workspaceGuid: string) =>
   apiFetch<LogAnalyticsFontesResposta>('GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/fontes')
@@ -191,9 +229,9 @@ export const forcarColetaDiagnosticSettings = () =>
 
 // Mesmo padrão de baixarAzureInventarioExcel (api/azureInventario.ts) — resposta binária,
 // não passa por apiFetch (que espera JSON).
-export async function baixarLogAnalyticsExcel() {
+export async function baixarLogAnalyticsExcel(mes?: string) {
   const token = getToken()
-  const resp = await fetch(API_BASE + '/log-analytics/export/excel', {
+  const resp = await fetch(API_BASE + '/log-analytics/export/excel' + (mes ? '?mes=' + mes : ''), {
     headers: token ? { Authorization: 'Bearer ' + token } : {},
   })
   if (!resp.ok) {
@@ -204,16 +242,16 @@ export async function baixarLogAnalyticsExcel() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'log-analytics-finops-' + new Date().toISOString().slice(0, 10) + '.xlsx'
+  a.download = 'log-analytics-finops-' + (mes || new Date().toISOString().slice(0, 7)) + '.xlsx'
   a.click()
   setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
 // Dashboard HTML autocontido (Chart.js embutido inline — abre sem servidor/internet). Mesmo
 // padrão binário do export Excel acima.
-export async function baixarLogAnalyticsDashboardHtml() {
+export async function baixarLogAnalyticsDashboardHtml(mes?: string) {
   const token = getToken()
-  const resp = await fetch(API_BASE + '/log-analytics/export/dashboard', {
+  const resp = await fetch(API_BASE + '/log-analytics/export/dashboard' + (mes ? '?mes=' + mes : ''), {
     headers: token ? { Authorization: 'Bearer ' + token } : {},
   })
   if (!resp.ok) {
@@ -224,7 +262,7 @@ export async function baixarLogAnalyticsDashboardHtml() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'log-analytics-dashboard-' + new Date().toISOString().slice(0, 10) + '.html'
+  a.download = 'log-analytics-dashboard-' + (mes || new Date().toISOString().slice(0, 7)) + '.html'
   a.click()
   setTimeout(() => URL.revokeObjectURL(url), 10000)
 }

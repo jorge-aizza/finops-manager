@@ -526,6 +526,18 @@ body {
   margin-bottom: 24px;
 }
 
+/* Variante de 5 colunas (Log Analytics — 4 custos + Economia com Commitment Tier) — classe
+   própria em vez de alterar .stats-grid (usada em 4 colunas em todo o resto do app) ou de
+   sobrescrever grid-template-columns inline (isso bloquearia as media queries abaixo, que
+   dependem de especificidade de classe para funcionar). Mesma cascata responsiva de
+   .stats-grid, só com o desktop começando em 5 em vez de 4. */
+.stats-grid-5 {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
 .stat-card {
   background: rgba(8, 1, 18, 0.88);
   backdrop-filter: blur(12px);
@@ -1294,12 +1306,14 @@ select option { background: var(--bg-card); }
 /* ── Tablet largo / Desktop pequeno (< 1280px) ── */
 @media (max-width: 1280px) {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-grid-5 { grid-template-columns: repeat(3, 1fr); }
   .dashboard-grid { grid-template-columns: 1fr 280px; }
 }
 
 /* ── Tablet (< 1100px) ── */
 @media (max-width: 1100px) {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-grid-5 { grid-template-columns: repeat(2, 1fr); }
   .dashboard-grid { grid-template-columns: 1fr; }
   .months-grid { grid-template-columns: repeat(3, 1fr); }
   .view-content { padding: 16px; }
@@ -1310,6 +1324,7 @@ select option { background: var(--bg-card); }
   .top-bar { padding: 0 12px; }
   .view-content { padding: 12px; }
   .stats-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stats-grid-5 { grid-template-columns: 1fr 1fr; gap: 10px; }
   .dashboard-grid { grid-template-columns: 1fr; }
   .months-grid { grid-template-columns: repeat(3, 1fr); }
   .detalhe-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1331,6 +1346,7 @@ select option { background: var(--bg-card); }
   .est-dash-panel:first-child { border-right: none; border-bottom: 1px solid var(--border); }
   .est-dash-valor { font-size: 20px; }
   .stats-grid { grid-template-columns: 1fr; gap: 8px; }
+  .stats-grid-5 { grid-template-columns: 1fr; gap: 8px; }
   .months-grid { grid-template-columns: repeat(2, 1fr); }
   .detalhe-grid { grid-template-columns: 1fr; }
   .form-grid-2 { grid-template-columns: 1fr; }

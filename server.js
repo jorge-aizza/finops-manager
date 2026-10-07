@@ -15529,6 +15529,12 @@ async function ensureLogAnalyticsTable() {
   // coletado. Ver _avaliarCommitmentTier.
   await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS location VARCHAR(100)`);
   await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS capacity_reservation_level NUMERIC(14,4)`);
+  // Economia REALIZADA (2026-10-xx, pedido do usuário) — quanto o workspace já economiza por
+  // estar no Commitment Tier vs o que pagaria em PAYG pelo mesmo volume real. Diferente das
+  // recomendações (ação sugerida): aqui é só informativo, inclusive quando bem dimensionado e
+  // sem nenhuma recomendação pendente. NULL quando não aplicável (PAYG, sem histórico
+  // suficiente, tier fora do catálogo). Ver _avaliarCommitmentTier.
+  await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS economia_commitment_tier_mes NUMERIC(14,4)`);
   // Auditoria de consultas (LAQueryLogs) — ao contrário de tudo que coletamos até aqui, isso
   // exige HABILITAR algo novo na Azure (Diagnostic Setting categoria "Audit" no próprio
   // workspace) — nunca liga sozinho, só via botão manual (ver _habilitarAuditoriaConsultas).
@@ -16378,6 +16384,9 @@ async function _avaliarCommitmentTier(ws) {
   const dias = parseInt(row.dias, 10) || 0;
   const p25 = Number(row.p25) || 0;
   const recos = [];
+  // Economia REALIZADA (não é recomendação) — só preenchida quando o workspace já está num
+  // tier reconhecido no catálogo, independente de precisar ou não de redimensionamento.
+  let economiaCommitmentTierMes = null;
 
   if (dias >= 14 && p25 > 0) {
     const precos = await _buscarPrecosCommitmentTier(ws.location);
@@ -16411,22 +16420,28 @@ async function _avaliarCommitmentTier(ws) {
         }
       } else if (nivelAtual > 0) {
         const tierAtual = precos.tiers.find(t => t.gbDia === nivelAtual);
-        if (tierAtual && p75 < nivelAtual * 0.7) {
-          const alternativa = melhor && melhor.gbDia < nivelAtual ? melhor : null;
+        if (tierAtual) {
+          // Calculado sempre que o tier contratado é reconhecido no catálogo — independente de
+          // precisar ou não de redimensionamento, é o que o workspace já está economizando hoje
+          // comparado a estar em Pay-As-You-Go pelo mesmo volume real.
           const custoMensalAtual = comImposto(tierAtual.precoDiario) * 30;
-          recos.push({
-            regra: 'commitment_tier', severidade: 'atencao',
-            detalhe: alternativa
-              ? `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — baixar para o tier de ${alternativa.gbDia} GB/dia economizaria ~R$ ${(custoMensalAtual - alternativa.custoMensal).toFixed(2)}/mês.`
-              : `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — mesmo o menor tier disponível não compensa nesse volume; considere voltar para Pay-As-You-Go.`,
-          });
-        } else if (p25 > nivelAtual) {
-          const proximo = precos.tiers.find(t => t.gbDia > nivelAtual);
-          if (proximo) {
+          economiaCommitmentTierMes = custoMensalPayg - custoMensalAtual;
+          if (p75 < nivelAtual * 0.7) {
+            const alternativa = melhor && melhor.gbDia < nivelAtual ? melhor : null;
             recos.push({
               regra: 'commitment_tier', severidade: 'atencao',
-              detalhe: `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere ${media.toFixed(1)} GB/dia em média (mínimo recente: ${p25.toFixed(1)} GB/dia) — já ultrapassa o contratado com regularidade. Considere subir para o tier de ${proximo.gbDia} GB/dia.`,
+              detalhe: alternativa
+                ? `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — baixar para o tier de ${alternativa.gbDia} GB/dia economizaria ~R$ ${(custoMensalAtual - alternativa.custoMensal).toFixed(2)}/mês.`
+                : `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — mesmo o menor tier disponível não compensa nesse volume; considere voltar para Pay-As-You-Go.`,
             });
+          } else if (p25 > nivelAtual) {
+            const proximo = precos.tiers.find(t => t.gbDia > nivelAtual);
+            if (proximo) {
+              recos.push({
+                regra: 'commitment_tier', severidade: 'atencao',
+                detalhe: `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere ${media.toFixed(1)} GB/dia em média (mínimo recente: ${p25.toFixed(1)} GB/dia) — já ultrapassa o contratado com regularidade. Considere subir para o tier de ${proximo.gbDia} GB/dia.`,
+              });
+            }
           }
         }
       }
@@ -16443,6 +16458,9 @@ async function _avaliarCommitmentTier(ws) {
         [ws.workspace_guid, rec.regra, rec.severidade, rec.detalhe]
       );
     }
+    // Sempre grava (inclusive NULL) — reconcilia a cada coleta, nunca deixa um valor velho morto
+    // se o workspace sair do Commitment Tier ou ficar sem histórico suficiente.
+    await c.query(`UPDATE log_analytics_workspaces SET economia_commitment_tier_mes = $1 WHERE workspace_guid = $2`, [economiaCommitmentTierMes, ws.workspace_guid]);
     await c.query('COMMIT');
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
   return recos;
@@ -16535,36 +16553,145 @@ function _iniciarLogAnalyticsAgendador() {
 // de forma assíncrona do `portal_config`. Cada consumidor desta constante DEVE passar as linhas
 // por `_aplicarImpostoLogAnalytics(row, impostoCfg)` antes de expor `custo_mes_*` ao cliente —
 // sem isso, o custo mostrado fica "cru", inconsistente com o resto do app.
-const _LOG_ANALYTICS_CUSTO_SQL = `
+// Mês selecionável (2026-10-xx, pedido do usuário) — substitui a janela móvel fixa de 30 dias
+// que a tela tinha antes. `mes` chega como query param `YYYY-MM`.
+//
+// IMPORTANTE: pro MÊS CORRENTE (em andamento), a janela continua sendo os últimos 30 dias
+// terminando hoje — NÃO o mês civil desde o dia 1 — pelo mesmo motivo já documentado acima em
+// `_logAnalyticsCustoSql` antes desta mudança: atraso de publicação do Cost Management (já
+// visto 9+ dias sem dado novo em produção) zerava o custo nos primeiros dias do mês. Só MESES
+// PASSADOS (já fechados, sem risco desse atraso) usam o mês civil completo (dia 1 ao último dia).
+const _MES_RE = /^\d{4}-\d{2}$/;
+const _MESES_PT = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+function _mesLogAnalytics(req) {
+  const mes = req.query?.mes;
+  if (typeof mes === 'string' && _MES_RE.test(mes)) return mes;
+  const hoje = new Date();
+  return `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
+}
+function _mesLabelPt(mesYYYYMM) {
+  const [ano, mes] = mesYYYYMM.split('-').map(Number);
+  return `${_MESES_PT[mes - 1]}/${ano}`;
+}
+// { inicio, fimExclusivo } como strings YYYY-MM-DD — mesmo par usado tanto pros 4 subselects de
+// custo (_logAnalyticsCustoSql) quanto pras janelas de GB ingerido (log_analytics_ingestao_diaria).
+function _janelaLogAnalytics(mes) {
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const hoje = new Date();
+  const mesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
+  if (mes === mesAtual) {
+    const inicio = new Date(hoje); inicio.setDate(inicio.getDate() - 30);
+    const fimExclusivo = new Date(hoje); fimExclusivo.setDate(fimExclusivo.getDate() + 1);
+    return { inicio: ymd(inicio), fimExclusivo: ymd(fimExclusivo) };
+  }
+  const [ano, mesNum] = mes.split('-').map(Number);
+  return { inicio: `${mes}-01`, fimExclusivo: ymd(new Date(ano, mesNum, 1)) };
+}
+// Quantos dias a janela cobre — usado por _aplicarImpostoLogAnalytics pra exigir cobertura
+// mínima de histórico de ingestão antes de calcular economia_commitment_tier_periodo.
+function _diasJanelaLogAnalytics(janela) {
+  return Math.round((new Date(janela.fimExclusivo) - new Date(janela.inicio)) / 86400000);
+}
+
+function _logAnalyticsCustoSql(idxInicio, idxFim) {
+  const janela = `ac.cost_date >= $${idxInicio}::date AND ac.cost_date < $${idxFim}::date`;
+  return `
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
-            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
               AND ac.meter_name NOT ILIKE '%retention%' AND ac.meter_name NOT ILIKE '%retenção%'), 0) AS _la_ing_ms,
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
-            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type = 'Marketplace'
               AND ac.meter_name NOT ILIKE '%retention%' AND ac.meter_name NOT ILIKE '%retenção%'), 0) AS _la_ing_mp,
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
-            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
               AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_ms,
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
-            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ac.cost_date >= CURRENT_DATE - INTERVAL '30 days'
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type = 'Marketplace'
-              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_mp
+              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_mp,
+  -- Economia com Commitment Tier (2026-10-xx, pedido do usuário) — REAL por período, não um
+  -- snapshot do "agora": se não houve cobrança de meter Commitment Tier nesse período
+  -- específico, o workspace não estava contratado NESSE mês (independente do SKU atual), e a
+  -- economia não deve aparecer. Billing de Commitment Tier é sempre Microsoft, nunca
+  -- Marketplace (mesma premissa já usada em _avaliarCommitmentTier).
+  COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
+              AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
+              AND ac.meter_name ILIKE '%Commitment Tier%'), 0) AS _la_commit_real,
+  -- Preço PAYG atual do catálogo (região do workspace, fallback brazilsouth) — mesma limitação
+  -- documentada em _buscarPrecosCommitmentTier: o catálogo não é historizado por mês, então
+  -- mesmo pra um mês passado usamos o preço vigente hoje (aproximação aceitável e já assumida
+  -- no resto da feature). Valor vem do JOIN pré-agregado _LOG_ANALYTICS_PRECO_JOIN_SQL (ver
+  -- abaixo), não de subquery correlacionada por linha.
+  COALESCE(pl_loc.retail_price, pl_fallback.retail_price) AS _la_payg_price,
+  -- Cobertura de histórico de ingestão nessa janela (2026-10-xx) — se a coleta diária só
+  -- começou no meio do período (ex: mês em que o agendador foi ligado), ingestao_mes_gb fica
+  -- subestimado e a economia calculada ficaria enganosamente negativa. Não é o custo que
+  -- falta, é o dado de GB pra comparar contra o PAYG.
+  COALESCE((SELECT COUNT(DISTINCT lid.dia) FROM log_analytics_ingestao_diaria lid
+            WHERE lid.workspace_guid = w.workspace_guid
+              AND lid.dia >= $${idxInicio}::date AND lid.dia < $${idxFim}::date), 0) AS _la_dias_com_dados
+`;
+}
+// JOIN pré-agregado do preço PAYG (Analytics Logs Data Ingestion) por região — some depois de
+// `FROM log_analytics_workspaces w` em toda query que usa `_logAnalyticsCustoSql`. Antes isso
+// era subquery correlacionada por linha (COALESCE de 2 SELECTs em azure_price_list, ~547 mil
+// linhas, sem índice pra product_name/meter_name) — rodava uma vez POR WORKSPACE e sozinha
+// levava a tela de Log Analytics de <1s pra 2s+ com ~107 workspaces (regressão encontrada
+// 2026-10-xx). Agrupado uma vez só (pl_loc por região, pl_fallback = brazilsouth), igual ao
+// padrão de "JOINs pré-agregados" já usado pros outros LEFT JOINs desta mesma tela.
+const _LOG_ANALYTICS_PRECO_JOIN_SQL = `
+  LEFT JOIN (
+    SELECT arm_region_name, MIN(retail_price) AS retail_price
+    FROM azure_price_list
+    WHERE product_name = 'Log Analytics' AND meter_name = 'Analytics Logs Data Ingestion' AND retail_price > 0
+    GROUP BY arm_region_name
+  ) pl_loc ON pl_loc.arm_region_name = COALESCE(w.location, 'brazilsouth')
+  LEFT JOIN (
+    SELECT MIN(retail_price) AS retail_price
+    FROM azure_price_list
+    WHERE product_name = 'Log Analytics' AND meter_name = 'Analytics Logs Data Ingestion'
+      AND arm_region_name = 'brazilsouth' AND retail_price > 0
+  ) pl_fallback ON true
 `;
 
-function _aplicarImpostoLogAnalytics(row, impostoCfg) {
+function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
   const custo_mes_ingestao = _comImpostoSplit(row._la_ing_ms, row._la_ing_mp, impostoCfg);
   const custo_mes_retencao = _comImpostoSplit(row._la_ret_ms, row._la_ret_mp, impostoCfg);
+  // Economia REAL do período selecionado — null (não zero) quando não houve cobrança de
+  // Commitment Tier nesse período: "não estava contratado" não é o mesmo que "economia zero".
+  // Billing de Commitment Tier é sempre Microsoft, nunca Marketplace.
+  const comImpostoMs = (v) => impostoCfg.microsoft.ativo ? v * (1 + impostoCfg.microsoft.taxa / 100) : v;
+  const custoCommitReal = comImpostoMs(Number(row._la_commit_real) || 0);
+  // Cobertura insuficiente de log_analytics_ingestao_diaria nessa janela (ex: coleta diária
+  // começou no meio do mês) = não temos GB real suficiente pra comparar contra o PAYG —
+  // mostrar economia aqui seria um número fabricado, não "real do período" como pedido.
+  const coberturaOk = !diasJanela || (Number(row._la_dias_com_dados) || 0) >= diasJanela * 0.9;
+  const economia_commitment_tier_periodo = (custoCommitReal > 0 && coberturaOk)
+    ? comImpostoMs(Number(row._la_payg_price) || 0) * (Number(row.ingestao_mes_gb) || 0) - custoCommitReal
+    : null;
   delete row._la_ing_ms; delete row._la_ing_mp; delete row._la_ret_ms; delete row._la_ret_mp;
-  return { ...row, custo_mes_ingestao, custo_mes_retencao, custo_mes_total: custo_mes_ingestao + custo_mes_retencao };
+  delete row._la_commit_real; delete row._la_payg_price; delete row._la_dias_com_dados;
+  // economia_commitment_tier_mes (coluna crua, snapshot diário usado só internamente por
+  // _avaliarCommitmentTier pra gerar recomendações) não é mais exposta ao cliente — substituída
+  // por economia_commitment_tier_periodo (real, varia por mês selecionado) pra evitar os dois
+  // conceitos convivendo na mesma resposta.
+  delete row.economia_commitment_tier_mes;
+  // Média GB/dia do período selecionado (2026-10-xx, pedido do usuário) — mesmo denominador
+  // (diasJanela) já usado pela cobertura acima, não um /30 fixo: mês corrente é janela móvel,
+  // meses passados são mês civil completo (ver _janelaLogAnalytics).
+  const ingestao_media_gb_dia = diasJanela ? (Number(row.ingestao_mes_gb) || 0) / diasJanela : null;
+  return { ...row, custo_mes_ingestao, custo_mes_retencao, custo_mes_total: custo_mes_ingestao + custo_mes_retencao, economia_commitment_tier_periodo, ingestao_media_gb_dia };
 }
 
-app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureLogAnalyticsTable();
     const impostoCfg = await _getImpostoConfig();
+    const janela = _janelaLogAnalytics(_mesLogAnalytics(req));
     // JOINs pré-agregados (1 scan cada), não sub-select correlacionado por workspace — com
     // 100+ workspaces isso era 300+ execuções de subquery só pra montar essa lista.
     const r = await pool.query(`
@@ -16572,11 +16699,11 @@ app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (_r
         COALESCE(ing.gb_mes, 0) AS ingestao_mes_gb,
         COALESCE(rec.n, 0) AS recomendacoes_abertas,
         COALESCE(tc.n, 0) AS tabelas_retencao_customizada,
-        ${_LOG_ANALYTICS_CUSTO_SQL}
+        ${_logAnalyticsCustoSql(1, 2)}
       FROM log_analytics_workspaces w
       LEFT JOIN (
         SELECT workspace_guid, SUM(gb) AS gb_mes FROM log_analytics_ingestao_diaria
-        WHERE dia >= date_trunc('month', CURRENT_DATE) GROUP BY workspace_guid
+        WHERE dia >= $1::date AND dia < $2::date GROUP BY workspace_guid
       ) ing ON ing.workspace_guid = w.workspace_guid
       LEFT JOIN (
         SELECT workspace_guid, COUNT(*) AS n FROM log_analytics_recomendacoes GROUP BY workspace_guid
@@ -16584,10 +16711,59 @@ app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (_r
       LEFT JOIN (
         SELECT workspace_guid, COUNT(*) AS n FROM log_analytics_tabelas WHERE retencao_e_padrao = false GROUP BY workspace_guid
       ) tc ON tc.workspace_guid = w.workspace_guid
-    `);
-    const linhas = r.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfg))
+      ${_LOG_ANALYTICS_PRECO_JOIN_SQL}
+    `, [janela.inicio, janela.fimExclusivo]);
+    const diasJanela = _diasJanelaLogAnalytics(janela);
+    const linhas = r.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfg, diasJanela))
       .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
     res.json(linhas);
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Consumo dia a dia (GB ingerido + custo real em R$) de um workspace, pro gráfico de detalhe
+// (2026-10-xx, pedido do usuário: "ícone com gráfico que ao clicar abre uma sub tela com
+// gráfico detalhado do consumo, GB dia a dia e valor"). `generate_series` preenche todo dia da
+// janela com zero (não só os dias com linha em log_analytics_ingestao_diaria/azure_costs) pra o
+// gráfico não ter buracos silenciosos. Custo é o TOTAL do dia (ingestão + retenção, mesmo
+// universo de `custo_mes_total`), não só ingestão — "o valor" que o usuário pediu é o que o
+// workspace custou naquele dia, não uma fração dele.
+app.get('/api/log-analytics/workspaces/:guid/consumo-diario', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureLogAnalyticsTable();
+    const w = await pool.query(`SELECT resource_id, nome FROM log_analytics_workspaces WHERE workspace_guid = $1`, [req.params.guid]);
+    if (!w.rows.length) return res.status(404).json({ error: 'Workspace não encontrado' });
+    const { resource_id, nome } = w.rows[0];
+    const impostoCfg = await _getImpostoConfig();
+    const janela = _janelaLogAnalytics(_mesLogAnalytics(req));
+    const r = await pool.query(`
+      WITH dias AS (
+        SELECT generate_series($2::date, $3::date - INTERVAL '1 day', INTERVAL '1 day')::date AS dia
+      ),
+      ing AS (
+        SELECT dia, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
+        WHERE workspace_guid = $1 AND dia >= $2::date AND dia < $3::date
+        GROUP BY dia
+      ),
+      custo AS (
+        SELECT ac.cost_date AS dia,
+          SUM(ac.cost_in_billing_currency) FILTER (WHERE ac.publisher_type IS DISTINCT FROM 'Marketplace') AS ms,
+          SUM(ac.cost_in_billing_currency) FILTER (WHERE ac.publisher_type = 'Marketplace') AS mp
+        FROM azure_costs ac
+        WHERE UPPER(ac.resource_id) = UPPER($4) AND ac.cost_date >= $2::date AND ac.cost_date < $3::date
+        GROUP BY ac.cost_date
+      )
+      SELECT dias.dia, COALESCE(ing.gb, 0) AS gb, COALESCE(custo.ms, 0) AS ms, COALESCE(custo.mp, 0) AS mp
+      FROM dias
+      LEFT JOIN ing ON ing.dia = dias.dia
+      LEFT JOIN custo ON custo.dia = dias.dia
+      ORDER BY dias.dia
+    `, [req.params.guid, janela.inicio, janela.fimExclusivo, resource_id]);
+    const pontos = r.rows.map((row) => ({
+      dia: row.dia.toISOString().slice(0, 10),
+      gb: Number(row.gb) || 0,
+      custo: _comImpostoSplit(row.ms, row.mp, impostoCfg),
+    }));
+    res.json({ workspace_nome: nome, pontos });
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -16632,19 +16808,20 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
     const resourceId = wsR.rows[0].resource_id;
     const auditoriaHabilitada = wsR.rows[0].auditoria_consultas_habilitada;
 
+    const janela = _janelaLogAnalytics(_mesLogAnalytics(req));
     const [tabelasR, gbR, custoR, impostoCfg, consultasR] = await Promise.all([
       pool.query(`SELECT tabela, plano, retencao_dias, retencao_total_dias, retencao_arquivo_dias, retencao_e_padrao
                   FROM log_analytics_tabelas WHERE workspace_guid = $1`, [guid]),
       pool.query(`SELECT tabela, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
-                  WHERE workspace_guid = $1 AND dia >= date_trunc('month', CURRENT_DATE) GROUP BY tabela`, [guid]),
-      // Bruto, separado por publisher_type — mesmo motivo de _LOG_ANALYTICS_CUSTO_SQL acima:
+                  WHERE workspace_guid = $1 AND dia >= $2::date AND dia < $3::date GROUP BY tabela`, [guid, janela.inicio, janela.fimExclusivo]),
+      // Bruto, separado por publisher_type — mesmo motivo de _logAnalyticsCustoSql acima:
       // precisa passar por _comImpostoSplit antes de virar o total exibido/rateado.
       pool.query(`SELECT
           COALESCE(SUM(CASE WHEN (meter_name ILIKE '%retention%' OR meter_name ILIKE '%retenção%') AND publisher_type IS DISTINCT FROM 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ret_ms,
           COALESCE(SUM(CASE WHEN (meter_name ILIKE '%retention%' OR meter_name ILIKE '%retenção%') AND publisher_type = 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ret_mp,
           COALESCE(SUM(CASE WHEN meter_name NOT ILIKE '%retention%' AND meter_name NOT ILIKE '%retenção%' AND publisher_type IS DISTINCT FROM 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ing_ms,
           COALESCE(SUM(CASE WHEN meter_name NOT ILIKE '%retention%' AND meter_name NOT ILIKE '%retenção%' AND publisher_type = 'Marketplace' THEN cost_in_billing_currency ELSE 0 END), 0) AS ing_mp
-        FROM azure_costs WHERE UPPER(resource_id) = UPPER($1) AND cost_date >= CURRENT_DATE - INTERVAL '30 days'`, [resourceId]),
+        FROM azure_costs WHERE UPPER(resource_id) = UPPER($1) AND cost_date >= $2::date AND cost_date < $3::date`, [resourceId, janela.inicio, janela.fimExclusivo]),
       _getImpostoConfig(),
       pool.query(`SELECT tabela, consultas_30d, gb_escaneado_30d, ultima_consulta FROM log_analytics_consultas_tabela WHERE workspace_guid = $1`, [guid]),
     ]);
@@ -16854,12 +17031,14 @@ app.post('/api/log-analytics/diagnostic-settings/forcar', authMiddleware, dbMidd
   _coletarDiagnosticSettingsTudo().catch(e => console.error('[LogAnalytics] Erro na coleta de Diagnostic Settings:', e.message));
 });
 
-app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const ExcelJS = require('exceljs');
     const impostoCfgExcel = await _getImpostoConfig();
+    const mes = _mesLogAnalytics(req);
+    const janela = _janelaLogAnalytics(mes);
     const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
-      pool.query(`SELECT w.*, ${_LOG_ANALYTICS_CUSTO_SQL} FROM log_analytics_workspaces w`),
+      pool.query(`SELECT w.*, ${_logAnalyticsCustoSql(1, 2)} FROM log_analytics_workspaces w ${_LOG_ANALYTICS_PRECO_JOIN_SQL}`, [janela.inicio, janela.fimExclusivo]),
       pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
                   JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
                   ORDER BY rec.severidade DESC, rec.criado_em DESC`),
@@ -16873,10 +17052,10 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
                   LEFT JOIN (
                     SELECT workspace_guid, tabela, SUM(gb) AS gb_mes
                     FROM log_analytics_ingestao_diaria
-                    WHERE dia >= date_trunc('month', CURRENT_DATE)
+                    WHERE dia >= $1::date AND dia < $2::date
                     GROUP BY workspace_guid, tabela
                   ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
-                  ORDER BY w.nome, gb_mes DESC`),
+                  ORDER BY w.nome, gb_mes DESC`, [janela.inicio, janela.fimExclusivo]),
       pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
                     d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
                   FROM log_analytics_diagnostic_settings d
@@ -16887,7 +17066,7 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
                   JOIN log_analytics_workspaces w ON w.workspace_guid = c.workspace_guid_destino
                   ORDER BY w.nome, c.nome`),
     ]);
-    wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgExcel))
+    wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgExcel, _diasJanelaLogAnalytics(janela)))
       .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
     const wb = new ExcelJS.Workbook();
     wb.creator = 'FinOps Manager'; wb.created = new Date();
@@ -16902,6 +17081,7 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
     const subsNoEscopo = new Set(wsRows.rows.map(w => w.subscription_id).filter(Boolean)).size;
     const gbIngeridoMes = wsRows.rows.reduce((a, w) => a + (Number(w.ingestao_mes_gb) || 0), 0);
     const custoRealMes = wsRows.rows.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0);
+    const economiaCommitmentTierMes = wsRows.rows.reduce((a, w) => a + (Number(w.economia_commitment_tier_periodo) || 0), 0);
     const tabelasRetencaoAlta = tabRows.rows.filter(t => Number(t.retencao_total_dias) > 90).length;
     const tabelasRetencaoCustom = tabRows.rows.filter(t => t.retencao_e_padrao === false).length;
     const recursosComDiagSetting = new Set(diagRows.rows.map(d => d.recurso_id)).size;
@@ -16913,14 +17093,15 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
     wsSumario.getCell('B2').value = 'Log Analytics — FinOps Assessment';
     wsSumario.getCell('B2').font = { bold: true, size: 16, color: { argb: 'FF' + PURPLE } };
     wsSumario.mergeCells('B3:H3');
-    wsSumario.getCell('B3').value = `Gerado em ${new Date().toLocaleString('pt-BR')} · Janela de ingestão: mês corrente`;
+    wsSumario.getCell('B3').value = `Gerado em ${new Date().toLocaleString('pt-BR')} · Período: ${_mesLabelPt(mes)}`;
     wsSumario.getCell('B3').font = { italic: true, size: 10, color: { argb: 'FF595959' } };
 
     const kpis = [
       ['Subscriptions no escopo', String(subsNoEscopo)],
       ['Workspaces inventariados', String(wsRows.rows.length)],
-      ['GB ingeridos (mês corrente)', gbIngeridoMes.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' GB'],
-      ['Custo real (últimos 30 dias, R$)', custoRealMes.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })],
+      [`GB ingeridos (${_mesLabelPt(mes)})`, gbIngeridoMes.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' GB'],
+      [`Custo real (${_mesLabelPt(mes)}, R$)`, custoRealMes.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })],
+      ['Economia com Commitment Tier (R$/mês)', economiaCommitmentTierMes.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })],
       ['Tabelas com retenção > 90 dias', String(tabelasRetencaoAlta)],
       ['Tabelas com retenção customizada', String(tabelasRetencaoCustom)],
       ['Recursos com Diagnostic Setting', String(recursosComDiagSetting)],
@@ -16997,7 +17178,7 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
     ws5.addRows(dcrRows.rows);
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="log-analytics-finops.xlsx"');
+    res.setHeader('Content-Disposition', `attachment; filename="log-analytics-finops-${mes}.xlsx"`);
     await wb.xlsx.write(res);
     res.end();
   } catch (e) { _dbErr(res, e); }
@@ -17028,17 +17209,19 @@ function _getLogAnalyticsChartJs() {
 // Dados puros (sem HTML) por trás do Dashboard — reaproveitados pelo endpoint JSON
 // `/resumo` (painel nativo na tela) E pelo gerador de HTML (`_gerarLogAnalyticsDashboardHtml`),
 // pra não duplicar as 5 queries nem o cálculo de KPIs/rankings nos dois lugares.
-async function _coletarResumoLogAnalytics() {
+async function _coletarResumoLogAnalytics(mes) {
+  const janela = _janelaLogAnalytics(mes);
   const impostoCfgResumo = await _getImpostoConfig();
   const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
     pool.query(`SELECT w.*,
                   COALESCE(ing.gb_mes, 0) AS ingestao_mes_gb,
-                  ${_LOG_ANALYTICS_CUSTO_SQL}
+                  ${_logAnalyticsCustoSql(1, 2)}
                 FROM log_analytics_workspaces w
                 LEFT JOIN (
                   SELECT workspace_guid, SUM(gb) AS gb_mes FROM log_analytics_ingestao_diaria
-                  WHERE dia >= date_trunc('month', CURRENT_DATE) GROUP BY workspace_guid
-                ) ing ON ing.workspace_guid = w.workspace_guid`),
+                  WHERE dia >= $1::date AND dia < $2::date GROUP BY workspace_guid
+                ) ing ON ing.workspace_guid = w.workspace_guid
+                ${_LOG_ANALYTICS_PRECO_JOIN_SQL}`, [janela.inicio, janela.fimExclusivo]),
     pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
                 JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
                 ORDER BY rec.severidade DESC, rec.criado_em DESC`),
@@ -17051,10 +17234,10 @@ async function _coletarResumoLogAnalytics() {
                 LEFT JOIN (
                   SELECT workspace_guid, tabela, SUM(gb) AS gb_mes
                   FROM log_analytics_ingestao_diaria
-                  WHERE dia >= date_trunc('month', CURRENT_DATE)
+                  WHERE dia >= $1::date AND dia < $2::date
                   GROUP BY workspace_guid, tabela
                 ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
-                ORDER BY w.nome, gb_mes DESC`),
+                ORDER BY w.nome, gb_mes DESC`, [janela.inicio, janela.fimExclusivo]),
     pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
                   d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
                 FROM log_analytics_diagnostic_settings d
@@ -17065,12 +17248,13 @@ async function _coletarResumoLogAnalytics() {
                 JOIN log_analytics_workspaces w ON w.workspace_guid = c.workspace_guid_destino
                 ORDER BY w.nome, c.nome`),
   ]);
-  wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgResumo))
+  wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgResumo, _diasJanelaLogAnalytics(janela)))
     .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
 
   const subsNoEscopo = new Set(wsRows.rows.map(w => w.subscription_id).filter(Boolean)).size;
   const gbIngeridoMes = wsRows.rows.reduce((a, w) => a + (Number(w.ingestao_mes_gb) || 0), 0);
   const custoRealMes = wsRows.rows.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0);
+  const economiaCommitmentTierMes = wsRows.rows.reduce((a, w) => a + (Number(w.economia_commitment_tier_periodo) || 0), 0);
   const tabelasRetencaoAlta = tabRows.rows.filter(t => Number(t.retencao_total_dias) > 90).length;
   const recursosComDiagSetting = new Set(diagRows.rows.map(d => d.recurso_id)).size;
   const dcrsMapeadas = new Set(dcrRows.rows.map(d => d.dcr_nome)).size;
@@ -17105,7 +17289,7 @@ async function _coletarResumoLogAnalytics() {
 
   return {
     kpis: {
-      subsNoEscopo, workspaces: wsRows.rows.length, gbIngeridoMes, custoRealMes,
+      subsNoEscopo, workspaces: wsRows.rows.length, gbIngeridoMes, custoRealMes, economiaCommitmentTierMes,
       tabelasRetencaoAlta, recursosComDiagSetting, dcrsMapeadas,
     },
     custoPorWorkspace, topTabelas, fontes, distribuicaoRetencao,
@@ -17113,16 +17297,17 @@ async function _coletarResumoLogAnalytics() {
   };
 }
 
-app.get('/api/log-analytics/resumo', authMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/log-analytics/resumo', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const resumo = await _coletarResumoLogAnalytics();
+    const mes = _mesLogAnalytics(req);
+    const resumo = await _coletarResumoLogAnalytics(mes);
     const { wsRows, recRows, tabRows, diagRows, dcrRows, ...publico } = resumo; // linhas cruas só servem ao HTML/Excel
-    res.json(publico);
+    res.json({ ...publico, mes, mes_label: _mesLabelPt(mes) });
   } catch (e) { _dbErr(res, e); }
 });
 
-async function _gerarLogAnalyticsDashboardHtml() {
-  const resumo = await _coletarResumoLogAnalytics();
+async function _gerarLogAnalyticsDashboardHtml(mes) {
+  const resumo = await _coletarResumoLogAnalytics(mes);
   const { kpis, custoPorWorkspace, topTabelas, fontes, distribuicaoRetencao, wsRows, recRows, tabRows, diagRows, dcrRows } = resumo;
 
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -17132,8 +17317,9 @@ async function _gerarLogAnalyticsDashboardHtml() {
   const kpiCards = [
     ['Subscriptions no escopo', String(kpis.subsNoEscopo)],
     ['Workspaces inventariados', String(kpis.workspaces)],
-    ['GB ingeridos (mês corrente)', fmtGB(kpis.gbIngeridoMes)],
-    ['Custo real (últimos 30 dias)', brl(kpis.custoRealMes)],
+    [`GB ingeridos (${_mesLabelPt(mes)})`, fmtGB(kpis.gbIngeridoMes)],
+    [`Custo real (${_mesLabelPt(mes)})`, brl(kpis.custoRealMes)],
+    ['Economia com Commitment Tier (R$/mês)', brl(kpis.economiaCommitmentTierMes)],
     ['Tabelas com retenção > 90 dias', String(kpis.tabelasRetencaoAlta)],
     ['Recursos com Diagnostic Setting', String(kpis.recursosComDiagSetting)],
     ['Data Collection Rules mapeadas', String(kpis.dcrsMapeadas)],
@@ -17219,7 +17405,7 @@ footer{margin-top:40px;text-align:center;color:var(--muted);font-size:11.5px}
 </style></head><body>
 <header class="banner">
   <div><h1>Log Analytics — FinOps Assessment</h1>
-  <p class="subtitle">Gerado em ${esc(geradoEm)} · Ingestão do mês corrente · Custo real (últimos 30 dias, Cost Management)</p></div>
+  <p class="subtitle">Gerado em ${esc(geradoEm)} · Período: ${esc(_mesLabelPt(mes))} (Cost Management)</p></div>
 </header>
 <main>
   <section class="kpi-grid">${kpiCardsHtml}</section>
@@ -17291,11 +17477,12 @@ function sortTable(tableId, colIndex) {
 </body></html>`;
 }
 
-app.get('/api/log-analytics/export/dashboard', authMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/log-analytics/export/dashboard', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const html = await _gerarLogAnalyticsDashboardHtml();
+    const mes = _mesLogAnalytics(req);
+    const html = await _gerarLogAnalyticsDashboardHtml(mes);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="log-analytics-dashboard.html"');
+    res.setHeader('Content-Disposition', `attachment; filename="log-analytics-dashboard-${mes}.html"`);
     res.send(html);
   } catch (e) { _dbErr(res, e); }
 });
