@@ -1694,14 +1694,25 @@ export default function InventarioView() {
                 Ativar coleta automática de Inventário/Auditoria
               </label>
               <div className="form-group" style={{ margin: 0 }}>
-                <label>Service Principal</label>
-                <select value={spId ?? ''} onChange={(e) => setSpId(e.target.value ? Number(e.target.value) : null)}>
-                  <option value="">Selecione...</option>
-                  {(spsQuery.data || []).map((sp) => <option key={sp.id} value={sp.id}>{sp.nome}</option>)}
-                </select>
+                <label>Service Principals coletadas</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 0' }}>
+                  {(spsQuery.data || []).filter((sp) => sp.ativo).map((sp) => {
+                    const n = (sp.subscription_ids || '').split(/[\n,]+/).filter((x) => x.trim()).length
+                    return (
+                      <div key={sp.id} style={{ fontSize: 12 }}>
+                        <span style={{ color: 'var(--green,#22c55e)' }}>●</span> {sp.nome}
+                        <span style={{ color: 'var(--text-muted)' }}> — {n} assinatura{n === 1 ? '' : 's'}</span>
+                      </div>
+                    )
+                  })}
+                  {(spsQuery.data || []).filter((sp) => sp.ativo).length === 0 && (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Nenhuma Service Principal ativa — cadastre em Coleta Azure.</div>
+                  )}
+                </div>
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                As assinaturas coletadas são as selecionadas no Service Principal (Coleta Azure). Para incluir ou remover assinaturas, edite o Service Principal.
+                A coleta percorre <strong>todas as Service Principals ativas</strong>, cada assinatura com a credencial
+                da sua própria SP. Para incluir ou remover assinaturas, edite a Service Principal em Coleta Azure.
               </div>
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Retenção do log de Auditoria (dias)</label>

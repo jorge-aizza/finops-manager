@@ -4406,8 +4406,8 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
     if (!subsPermitidas.size || !categorias.size) return res.json(vazio);
 
     await ensureAzureColetaTable();
-    const { subs } = await _getInventarioSpConfig();
-    const cache = await _getDesperdicioCached(subs, 90);
+    const { escopos } = await _getInventarioEscopos();
+    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 90);
     const filtrados = cache.filter((x) =>
       subsPermitidas.has(String(x.subscription_id).toLowerCase())
       && categorias.has(x.categoria)
@@ -4769,8 +4769,8 @@ app.get('/api/public/genie-cotas', _portalEntraMiddleware, dbMiddleware, async (
 app.get('/api/admin/portal-config/orfaos-opcoes', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
-    const { subs } = await _getInventarioSpConfig();
-    const cache = await _getDesperdicioCached(subs, 90);
+    const { escopos } = await _getInventarioEscopos();
+    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 90);
     const rgMap = new Map();
     for (const x of cache) {
       if (!x.resource_group) continue;
@@ -8856,13 +8856,17 @@ app.post('/api/azure-inventario/reconciliar', authMiddleware, dbMiddleware, asyn
 app.get('/api/azure-inventario/advisor', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { subscription_id, category } = req.query;
-    const { getToken, subs } = await _getInventarioSpConfig();
-    const token = await getToken();
-    const alvo = subscription_id ? [subscription_id] : subs;
+    const { escopos } = await _getInventarioEscopos();
+    const alvo = subscription_id ? [String(subscription_id)] : escopos.map((e) => e.subscriptionId);
     if (!alvo.length) return res.status(400).json({ error: 'Nenhuma subscription configurada' });
+    const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
 
     const porSub = await _mapLimit(alvo, 4, async (sub) => {
       try {
+        // Cada assinatura consultada com a credencial da sua própria SP.
+        const escopo = escopoPorSub.get(String(sub).toLowerCase());
+        if (!escopo) return { subscription_id: sub, recomendacoes: [], erro: 'assinatura fora das SPs ativas' };
+        const token = await escopo.getToken();
         return { subscription_id: sub, recomendacoes: await _getAdvisorCached(token, sub), erro: null };
       } catch (e) {
         return { subscription_id: sub, recomendacoes: [], erro: e.message };
@@ -8912,8 +8916,7 @@ app.get('/api/azure-inventario/rede-topologia', authMiddleware, dbMiddleware, as
   try {
     const { subscription_id } = req.query;
     if (!subscription_id) return res.status(400).json({ error: 'subscription_id é obrigatório' });
-    const { getToken } = await _getInventarioSpConfig();
-    const token = await getToken();
+    const token = await (await _getEscopoDaSubscription(subscription_id)).getToken();
     const body = {
       subscriptions: [subscription_id],
       query: `Resources | where type =~ 'microsoft.network/virtualnetworks' | project id, name, resourceGroup, properties | limit 1000`,
@@ -9565,8 +9568,7 @@ app.get('/api/azure-inventario/recurso-arm-detalhe', authMiddleware, dbMiddlewar
   try {
     const { resource_id, subscription_id } = req.query;
     if (!resource_id || !subscription_id) return res.status(400).json({ error: 'resource_id e subscription_id são obrigatórios' });
-    const { getToken } = await _getInventarioSpConfig();
-    const token = await getToken();
+    const token = await (await _getEscopoDaSubscription(subscription_id)).getToken();
     const recurso = await _resourceGraphFetchRecursoPorId(token, subscription_id, resource_id);
     if (!recurso) return res.status(404).json({ error: 'Recurso não encontrado no Resource Graph (pode ter sido excluído)' });
     res.json(recurso);
@@ -10672,19 +10674,17 @@ async function _custoObservadoPorResourceId(ids, desdeISO) {
 // Recebe a LISTA de assinaturas: 9 chamadas ao Resource Graph no total (uma por tipo de consulta)
 // em vez de 9 por assinatura — com 51 assinaturas eram 459 chamadas, ~45s+ e várias pausas por 429.
 async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
-  const { getToken } = await _getInventarioSpConfig();
-  const token = await getToken();
 
   const [discos, nics, ipsBrutos, ipsRefs, snapshots, asps, lbs, appgws, vms] = await Promise.all([
-    _resourceGraphQuery(token, subscriptionIds, _KQL_DISCOS_ORFAOS),
-    _resourceGraphQuery(token, subscriptionIds, _KQL_NICS_ORFAS),
-    _resourceGraphQuery(token, subscriptionIds, _KQL_IPS_SOLTOS),
-    _resourceGraphQuery(token, subscriptionIds, _KQL_IPS_REFERENCIADOS),
-    _resourceGraphQuery(token, subscriptionIds, _kqlSnapshotsAntigos(diasSnapshot)),
-    _resourceGraphQuery(token, subscriptionIds, _KQL_ASP_VAZIOS),
-    _resourceGraphQuery(token, subscriptionIds, _KQL_LBS_SEM_BACKEND),
-    _resourceGraphQuery(token, subscriptionIds, _KQL_APPGWS_SEM_BACKEND),
-    _resourceGraphQuery(token, subscriptionIds, _KQL_VMS_PARADAS),
+    _resourceGraphQueryTodasSps(_KQL_DISCOS_ORFAOS, subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_NICS_ORFAS, subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_IPS_SOLTOS, subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_IPS_REFERENCIADOS, subscriptionIds),
+    _resourceGraphQueryTodasSps(_kqlSnapshotsAntigos(diasSnapshot), subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_ASP_VAZIOS, subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_LBS_SEM_BACKEND, subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_APPGWS_SEM_BACKEND, subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_VMS_PARADAS, subscriptionIds),
   ]);
 
   const referenciados = new Set(ipsRefs.map((x) => String(x.id || '').toUpperCase()).filter(Boolean));
@@ -10775,8 +10775,8 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     await ensureAzureColetaTable();
     const dias = Math.max(1, Math.min(3650, parseInt(req.query.dias_snapshot, 10) || 90));
     const { subscription_id } = req.query;
-    const { subs } = await _getInventarioSpConfig();
-    const alvos = subscription_id ? [String(subscription_id)] : subs;
+    const { escopos } = await _getInventarioEscopos();
+    const alvos = subscription_id ? [String(subscription_id)] : escopos.map((e) => e.subscriptionId);
     if (!alvos.length) return res.status(400).json({ error: 'Nenhuma subscription configurada no Inventário' });
 
     // Caminho rápido: todas as assinaturas numa chamada por tipo de consulta. Plano B, se a chamada
@@ -13858,20 +13858,9 @@ async function _coletarInventarioAzure(origem = 'manual') {
   let histId;
   try {
     await ensureAzureColetaTable();
-    const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
-    if (!cfgRow.rows.length) throw new Error('Inventário não configurado');
-    const cfg = cfgRow.rows[0];
+    const { cfg, escopos } = await _getInventarioEscopos();
+    if (!cfg) throw new Error('Inventário não configurado');
     if (!cfg.ativo) throw new Error('Inventário desativado');
-    if (!cfg.sp_id) throw new Error('Nenhum Service Principal configurado para o Inventário');
-
-    const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
-    if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
-    const spCfg = spRow.rows[0];
-    const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
-    const token = await getToken();
-
-    const subs = (spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-    if (!subs.length) throw new Error('Nenhuma subscription configurada (nem no Inventário, nem no Service Principal escolhido)');
 
     // Retenção nativa da Change Analysis é 14 dias (vs. 90 do Activity Log antigo) — janela
     // nunca busca mais que 13 dias pra trás (margem de segurança de 1 dia). `ate` fica 5min no
@@ -13894,24 +13883,26 @@ async function _coletarInventarioAzure(origem = 'manual') {
       [origem, desdeISO, ateISO]
     );
     histId = hist.rows[0].id;
-    _logColetaInv(`Inventário — ${desdeISO} → ${ateISO} | ${subs.length} subscription(s)`);
+    _logColetaInv(`Inventário — ${desdeISO} → ${ateISO} | ${escopos.length} subscription(s) de ${[...new Set(escopos.map((e) => e.spNome))].join(', ')}`);
 
     let totalEventos = 0, totalNovos = 0, totalAtualizados = 0, totalExcluidos = 0, totalMudancasProp = 0, totalDescartadas = 0;
-    _invColetaProgresso.sub_total = subs.length;
+    _invColetaProgresso.sub_total = escopos.length;
 
-    for (let i = 0; i < subs.length; i++) {
-      const subId = subs[i];
+    for (let i = 0; i < escopos.length; i++) {
+      const { subscriptionId: subId, spNome } = escopos[i];
       _invColetaProgresso.sub_idx = i + 1;
       _invColetaProgresso.sub_atual = subId;
-      _invColetaProgresso.fase = `[${i + 1}/${subs.length}] Consultando Change Analysis — ${subId}`;
+      _invColetaProgresso.fase = `[${i + 1}/${escopos.length}] Consultando Change Analysis — ${subId}`;
       let mudancas;
       try {
-        mudancas = await _resourceGraphFetchChanges(token, subId, desdeISO, ateISO);
+        mudancas = await _resourceGraphFetchChanges(await escopos[i].getToken(), subId, desdeISO, ateISO);
       } catch (eSub) {
-        _logColetaInv(`  ✗ ${subId}: ${eSub.message}`);
+        // Falha de uma assinatura não derruba as demais — com várias SPs, uma credencial
+        // vencida pararia a coleta inteira das outras.
+        _logColetaInv(`  ✗ ${subId} (${spNome}): ${eSub.message}`);
         continue;
       }
-      _logColetaInv(`  ${subId}: ${mudancas.length} mudança(s) retornada(s)`);
+      _logColetaInv(`  ${subId} (${spNome}): ${mudancas.length} mudança(s) retornada(s)`);
       let mudancasPropSub = 0;
 
       for (const ch of mudancas) {
@@ -14079,31 +14070,99 @@ async function _coletarInventarioAzure(origem = 'manual') {
 // timestamp) tem confiança suficiente pra marcar `ativo=false`. Reconciliação e coleta
 // normal são mutuamente exclusivas (mesma flag `_invColetaEmExecucao`) — as duas escrevem
 // na mesma tabela, evita condição de corrida.
-// Lookup compartilhado (2026-09-02) da credencial/subscriptions configuradas pro Inventário
-// — usado pelas rotas novas de Detalhe ARM e Advisor. Não usado por `_coletarInventarioAzure`/
-// `_reconciliarInventarioResourceGraph` de propósito — são funções já testadas/em produção,
-// evita risco de regressão só pra eliminar uma pequena duplicação.
-async function _getInventarioSpConfig() {
+
+// Escopos de coleta do Inventário/Log Analytics — UMA entrada por assinatura, já com a
+// credencial da SP dona. O Inventário nasceu preso a uma única SP
+// (`azure_inventario_config.sp_id`), então as assinaturas das demais SPs cadastradas nunca
+// chegavam a ser coletadas: a tela mostrava zero recursos pra elas e parecia filtro quebrado.
+// A credencial viaja junto com o escopo (em vez de ser resolvida uma vez no topo da coleta)
+// porque uma assinatura só pode ser consultada com o token da SP que a tem cadastrada — o
+// token de uma SP devolve 403 nas assinaturas da outra.
+async function _getInventarioEscopos() {
   const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
-  if (!cfgRow.rows.length) throw new Error('Inventário não configurado');
-  const cfg = cfgRow.rows[0];
-  if (!cfg.sp_id) throw new Error('Nenhum Service Principal configurado para o Inventário');
-  const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
-  if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
-  const spCfg = spRow.rows[0];
-  const tenantId = _safeDecrypt(spCfg.tenant_id), clientId = _safeDecrypt(spCfg.client_id), clientSecret = _safeDecrypt(spCfg.client_secret);
-  const getToken = _makeTokenGetter(tenantId, clientId, clientSecret);
-  // Log Analytics FinOps (2026-09-29): mesma SP, escopo diferente (api.loganalytics.io) —
-  // exige o papel "Log Analytics Reader" concedido à parte, ver _logAnalyticsGetToken.
-  const getLogAnalyticsToken = _makeLogAnalyticsTokenGetter(tenantId, clientId, clientSecret);
-  const subs = (spCfg.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-  return { cfg, spCfg, getToken, getLogAnalyticsToken, subs };
+  const cfg = cfgRow.rows[0] || null;
+  const sps = (await pool.query(
+    `SELECT * FROM azure_coleta_config WHERE ativo = true ORDER BY is_padrao DESC, id ASC`
+  )).rows;
+  if (!sps.length) throw new Error('Nenhum Service Principal ativo cadastrado');
+
+  const escopos = [];
+  // Assinatura repetida entre SPs é coletada uma vez só (a primeira SP que a declara vence) —
+  // do contrário os mesmos recursos seriam processados duas vezes por execução. Hoje as SPs
+  // não se sobrepõem, mas nada no cadastro impede que passem a se sobrepor.
+  const vistas = new Set();
+  for (const spCfg of sps) {
+    const tenantId = _safeDecrypt(spCfg.tenant_id);
+    const clientId = _safeDecrypt(spCfg.client_id);
+    const clientSecret = _safeDecrypt(spCfg.client_secret);
+    const getToken = _makeTokenGetter(tenantId, clientId, clientSecret);
+    const getLogAnalyticsToken = _makeLogAnalyticsTokenGetter(tenantId, clientId, clientSecret);
+    for (const bruto of (spCfg.subscription_ids || '').split(/[\n,]+/)) {
+      const subscriptionId = bruto.trim();
+      if (!subscriptionId) continue;
+      const chave = subscriptionId.toLowerCase();
+      if (vistas.has(chave)) continue;
+      vistas.add(chave);
+      escopos.push({
+        subscriptionId,
+        spId: spCfg.id,
+        spNome: (spCfg.nome || '').trim(),
+        getToken,
+        getLogAnalyticsToken,
+      });
+    }
+  }
+  if (!escopos.length) throw new Error('Nenhuma subscription configurada em nenhum Service Principal ativo');
+  return { cfg, escopos };
+}
+
+// Mesma consulta KQL rodada uma vez por SP (cada uma com seu token e suas assinaturas), com os
+// resultados concatenados. O Resource Graph aceita várias assinaturas por chamada, mas todas
+// precisam estar no alcance do token — misturar assinaturas de SPs diferentes numa só chamada
+// devolve 403 e derrubaria a consulta inteira. `filtroSubs` restringe a um subconjunto
+// (ex.: o usuário escolheu uma assinatura específica na tela).
+// Credencial da SP dona de uma assinatura específica — pras rotas sob demanda, que recebem a
+// assinatura do próprio pedido. Usar a SP errada aqui devolve 403 silencioso.
+async function _getEscopoDaSubscription(subscriptionId) {
+  const { escopos } = await _getInventarioEscopos();
+  const alvo = String(subscriptionId || '').toLowerCase();
+  const escopo = escopos.find((e) => e.subscriptionId.toLowerCase() === alvo);
+  if (!escopo) throw new Error(`Assinatura ${subscriptionId} não pertence a nenhum Service Principal ativo`);
+  return escopo;
+}
+
+// Idem, a partir de um workspace de Log Analytics já inventariado.
+async function _getEscopoDoWorkspace(workspaceGuid) {
+  const r = await pool.query(`SELECT subscription_id FROM log_analytics_workspaces WHERE workspace_guid = $1 LIMIT 1`, [workspaceGuid]);
+  if (!r.rows.length) throw new Error('Workspace não encontrado no inventário');
+  return _getEscopoDaSubscription(r.rows[0].subscription_id);
+}
+
+async function _resourceGraphQueryTodasSps(kql, filtroSubs = null) {
+  const { escopos } = await _getInventarioEscopos();
+  const permitidas = filtroSubs ? new Set(filtroSubs.map((x) => String(x).toLowerCase())) : null;
+  const porSp = new Map();
+  for (const e of escopos) {
+    if (permitidas && !permitidas.has(e.subscriptionId.toLowerCase())) continue;
+    if (!porSp.has(e.spId)) porSp.set(e.spId, { getToken: e.getToken, spNome: e.spNome, subs: [] });
+    porSp.get(e.spId).subs.push(e.subscriptionId);
+  }
+  const itens = [];
+  for (const { getToken, spNome, subs } of porSp.values()) {
+    // Falha de uma SP não zera o resultado das outras — devolver parcial é melhor que devolver
+    // vazio e fazer a tela parecer que não há nada.
+    try {
+      itens.push(...(await _resourceGraphQuery(await getToken(), subs, kql)));
+    } catch (e) {
+      console.warn(`[ResourceGraph] Falha na SP ${spNome} (${subs.length} assinatura(s)):`, e.message);
+    }
+  }
+  return itens;
 }
 
 // Query genérica ao Resource Graph com paginação por $skipToken (2026-09-04). Criada em vez de
 // generalizar `_resourceGraphFetchRecursos` (logo abaixo): aquela tem query FIXA e é usada pela
-// reconciliação, que já está em produção — mesma justificativa que levou `_getInventarioSpConfig`
-// a não ser retrofitado nas funções de coleta.
+// reconciliação, que já está em produção.
 // `subscriptionId` aceita 1 id ou uma lista (o Resource Graph aceita até 1000 assinaturas por chamada).
 async function _resourceGraphQuery(token, subscriptionId, kql) {
   const itens = [];
@@ -14349,26 +14408,16 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
   let histId;
   try {
     await ensureAzureColetaTable();
-    const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
-    if (!cfgRow.rows.length) throw new Error('Inventário não configurado');
-    const cfg = cfgRow.rows[0];
-    if (!cfg.sp_id) throw new Error('Nenhum Service Principal configurado para o Inventário');
-    const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
-    if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
-    const spCfg = spRow.rows[0];
-    const getToken = _makeTokenGetter(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
-    const token = await getToken();
-
-    const subs = (spCfg.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-    if (!subs.length) throw new Error('Nenhuma subscription configurada (nem no Inventário, nem no Service Principal escolhido)');
+    const { escopos } = await _getInventarioEscopos();
 
     const hist = await pool.query(
       `INSERT INTO azure_inventario_coleta_historico (status,origem) VALUES ('executando',$1) RETURNING id`,
       ['reconciliacao_' + origem]
     );
     histId = hist.rows[0].id;
-    _logColetaInv(`Reconciliação (Resource Graph) — ${subs.length} subscription(s)`);
-    _invColetaProgresso.sub_total = subs.length;
+    const nomesSp = [...new Set(escopos.map((e) => e.spNome))].join(', ');
+    _logColetaInv(`Reconciliação (Resource Graph) — ${escopos.length} subscription(s) de ${nomesSp}`);
+    _invColetaProgresso.sub_total = escopos.length;
 
     // Limpar duplicatas (recursos com mesmo (subscription_id, LOWER(resource_id)))
     // antes de começar a reconciliação — mantém o mais recente
@@ -14392,20 +14441,22 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
     }
 
     let totalEncontrados = 0, totalNovos = 0;
-    for (let i = 0; i < subs.length; i++) {
-      const subId = subs[i];
+    for (let i = 0; i < escopos.length; i++) {
+      const { subscriptionId: subId, spNome } = escopos[i];
       _invColetaProgresso.sub_idx = i + 1;
       _invColetaProgresso.sub_atual = subId;
-      _invColetaProgresso.fase = `[${i + 1}/${subs.length}] Consultando Resource Graph — ${subId}`;
+      _invColetaProgresso.fase = `[${i + 1}/${escopos.length}] Consultando Resource Graph — ${subId}`;
       let recursos;
       const inicioSnapshot = new Date();
       try {
-        recursos = await _resourceGraphFetchRecursos(token, subId);
+        recursos = await _resourceGraphFetchRecursos(await escopos[i].getToken(), subId);
       } catch (eSub) {
-        _logColetaInv(`  ✗ ${subId}: ${eSub.message}`);
+        // Falha de uma assinatura nunca derruba as demais — com várias SPs, uma credencial
+        // vencida pararia a reconciliação inteira das outras.
+        _logColetaInv(`  ✗ ${subId} (${spNome}): ${eSub.message}`);
         continue;
       }
-      _logColetaInv(`  ${subId}: ${recursos.length} recurso(s) encontrado(s)`);
+      _logColetaInv(`  ${subId} (${spNome}): ${recursos.length} recurso(s) encontrado(s)`);
       totalEncontrados += recursos.length;
 
       for (const item of recursos) {
@@ -15641,7 +15692,7 @@ app.get('/api/azure-coleta/agendamentos', authMiddleware, dbMiddleware, async (_
 // ═══════════════════════════════════════════════════════════════════════════
 // LOG ANALYTICS FINOPS (2026-09-29) — v1: descoberta de workspaces + ingestão
 // diária por tabela + motor de regras + export Excel. Reaproveita a MESMA
-// Service Principal do Inventário (_getInventarioSpConfig), só com um escopo de
+// Service Principal do Inventário (_getInventarioEscopos), só com um escopo de
 // token adicional (_logAnalyticsGetToken) — exige o papel "Log Analytics
 // Reader" concedido a essa SP, separado do acesso a Resource Graph/Cost
 // Management que ela já tem. Fora do escopo desta v1: score 0-100, os 3
@@ -15817,13 +15868,15 @@ const _LOG_ANALYTICS_TIPOS_MONITORAVEIS = [
 // precisar da permissão nova). Upsert em log_analytics_workspaces.
 async function _descobrirLogAnalyticsWorkspaces() {
   await ensureLogAnalyticsTable();
-  const { getToken, subs } = await _getInventarioSpConfig();
-  const token = await getToken();
+  const { escopos } = await _getInventarioEscopos();
   const todos = [];
-  await _mapLimit(subs, 4, async (sub) => {
+  await _mapLimit(escopos, 4, async (escopo) => {
+    const sub = escopo.subscriptionId;
     const url = `https://management.azure.com/subscriptions/${sub}/providers/Microsoft.OperationalInsights/workspaces?api-version=2023-09-01`;
     let resp;
     try {
+      // Token da SP dona desta assinatura — ver _getInventarioEscopos.
+      const token = await escopo.getToken();
       resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
     } catch (e) {
       console.warn(`[LogAnalytics] Erro ao listar workspaces da assinatura ${sub}:`, e.message);
@@ -15917,7 +15970,7 @@ async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
 }
 
 // Config de retenção por tabela — plano de gerência (ARM), MESMO token do
-// _getInventarioSpConfig usado pra descobrir os workspaces (não precisa do escopo extra
+// _getInventarioEscopos usado pra descobrir os workspaces (não precisa do escopo extra
 // de Log Analytics Reader, que só serve pra Query API de ingestão). Responde diretamente
 // "quais tabelas estão pagando retenção diferente do padrão do workspace".
 async function _coletarTabelasWorkspace(ws, getToken) {
@@ -16061,14 +16114,16 @@ async function _coletarConsultasPorTabela(ws, getLogAnalyticsToken) {
 // entrar na coleta diária normal (ao contrário de Diagnostic Settings, que é por recurso).
 // Só grava linhas cujo destino bate com um workspace já inventariado (uma DCR pode ter mais
 // de um destino Log Analytics — 1 linha por destino que interessa).
-async function _coletarDCRs(getToken, workspaceByResourceId) {
-  const { subs } = await _getInventarioSpConfig();
-  const token = await getToken();
+async function _coletarDCRs(workspaceByResourceId) {
+  const { escopos } = await _getInventarioEscopos();
   const todasLinhas = [];
-  await _mapLimit(subs, 4, async (sub) => {
+  await _mapLimit(escopos, 4, async (escopo) => {
+    const sub = escopo.subscriptionId;
     const url = `https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Insights/dataCollectionRules?api-version=2023-03-11`;
     let resp;
     try {
+      // Token da SP dona desta assinatura — ver _getInventarioEscopos.
+      const token = await escopo.getToken();
       resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 30_000 });
     } catch (e) {
       console.warn(`[LogAnalytics] Erro ao listar DCRs da assinatura ${sub}:`, e.message);
@@ -16162,10 +16217,8 @@ function _descreverFontesDcr(dataSources) {
 // log_analytics_workspaces — App Insights "workspace-based" fatura através do workspace.
 async function _coletarAppInsightsTudo() {
   await ensureLogAnalyticsTable();
-  const { getToken, subs } = await _getInventarioSpConfig();
-  const token = await getToken();
   const kql = `resources | where type == 'microsoft.insights/components' | project id, name, resourceGroup, subscriptionId, properties`;
-  const componentes = await _resourceGraphQuery(token, subs, kql);
+  const componentes = await _resourceGraphQueryTodasSps(kql);
   if (!componentes.length) return { ok: true, componentes: 0 };
 
   const linhas = componentes.map(c => {
@@ -16182,10 +16235,16 @@ async function _coletarAppInsightsTudo() {
     };
   });
 
-  // Daily Cap — 1 chamada por componente, em paralelo.
+  // Daily Cap — 1 chamada por componente, em paralelo. Cada componente é consultado com a
+  // credencial da SP dona da sua assinatura (ver _getInventarioEscopos).
+  const { escopos } = await _getInventarioEscopos();
+  const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
   await _mapLimit(linhas, 8, async (l) => {
+    const escopo = escopoPorSub.get(String(l.subscription_id || '').toLowerCase());
+    if (!escopo) return;
     const url = `https://management.azure.com${l.resource_id}/currentbillingfeatures?api-version=2015-05-01`;
     try {
+      const token = await escopo.getToken();
       const resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 20_000 });
       if (!resp.ok) return;
       const data = await _safeRespJson(resp);
@@ -16234,23 +16293,27 @@ async function _coletarDiagnosticSettingsTudo() {
   const t0 = Date.now();
   try {
     await ensureLogAnalyticsTable();
-    const { getToken, subs } = await _getInventarioSpConfig();
+    const { escopos } = await _getInventarioEscopos();
+    const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
     const wsRows = (await pool.query(`SELECT resource_id, workspace_guid FROM log_analytics_workspaces`)).rows;
     if (!wsRows.length) return { ok: false, motivo: 'Nenhum workspace inventariado ainda — rode a coleta principal antes' };
     const workspaceByResourceId = new Map(wsRows.map(w => [String(w.resource_id).toLowerCase(), w.workspace_guid]));
 
-    const token = await getToken();
     const tiposClause = _LOG_ANALYTICS_TIPOS_MONITORAVEIS.map(t => `'${t}'`).join(', ');
     const kql = `resources | where type in (${tiposClause}) | project id, type, subscriptionId`;
-    const candidatos = await _resourceGraphQuery(token, subs, kql);
+    const candidatos = await _resourceGraphQueryTodasSps(kql);
     console.log(`[LogAnalytics] Diagnostic Settings: ${candidatos.length} recurso(s) candidato(s) de ${_LOG_ANALYTICS_TIPOS_MONITORAVEIS.length} tipo(s) monitorados.`);
 
     const linhas = [];
     let checados = 0, naoEncontrados = 0, outrasFalhas = 0;
     await _mapLimit(candidatos, 8, async (recurso) => {
+      // Credencial da SP dona da assinatura do recurso (ver _getInventarioEscopos).
+      const escopo = escopoPorSub.get(String(recurso.subscriptionId || '').toLowerCase());
+      if (!escopo) { outrasFalhas++; return; }
       const url = `https://management.azure.com${recurso.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`;
       let resp;
       try {
+        const token = await escopo.getToken();
         resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 20_000 });
       } catch (e) { outrasFalhas++; return; }
       checados++;
@@ -16629,13 +16692,19 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
   try {
     await ensureLogAnalyticsTable();
     const workspaces = await _descobrirLogAnalyticsWorkspaces();
-    const { getToken, getLogAnalyticsToken } = await _getInventarioSpConfig();
+    const { escopos } = await _getInventarioEscopos();
+    // Cada workspace é consultado com a credencial da SP dona da sua assinatura — com mais de
+    // uma SP cadastrada, o token de uma devolve 403 nos workspaces da outra.
+    const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
     // `workspaces` vem fresco do ARM (_descobrirLogAnalyticsWorkspaces), não tem o flag que só
     // existe no nosso banco (setado por _habilitarAuditoriaConsultas) — busca à parte.
     const comAuditoria = new Set(
       (await pool.query(`SELECT workspace_guid FROM log_analytics_workspaces WHERE auditoria_consultas_habilitada = true`)).rows.map(r => r.workspace_guid)
     );
     const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
+      const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+      if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
+      const { getToken, getLogAnalyticsToken } = escopo;
       await _coletarIngestaoWorkspace(ws, getLogAnalyticsToken);
       await _coletarTabelasWorkspace(ws, getToken);
       if (comAuditoria.has(ws.workspace_guid)) {
@@ -16651,7 +16720,7 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
     // — tem cadência própria, ver _iniciarLogAnalyticsDiagAgendador.
     try {
       const workspaceByResourceId = new Map(workspaces.map(w => [String(w.resource_id).toLowerCase(), w.workspace_guid]));
-      await _coletarDCRs(getToken, workspaceByResourceId);
+      await _coletarDCRs(workspaceByResourceId);
     } catch (e) {
       console.warn('[LogAnalytics] Falha ao coletar DCRs:', e.message);
     }
@@ -17028,7 +17097,7 @@ app.post('/api/log-analytics/workspaces/:guid/auditoria-consultas/habilitar', au
     const { guid } = req.params;
     const wsR = await pool.query(`SELECT resource_id, workspace_guid, nome FROM log_analytics_workspaces WHERE workspace_guid = $1`, [guid]);
     if (!wsR.rows.length) return res.status(404).json({ error: 'Workspace não encontrado' });
-    const { getToken } = await _getInventarioSpConfig();
+    const { getToken } = await _getEscopoDoWorkspace(wsR.rows[0].workspace_guid);
     await _habilitarAuditoriaConsultas(wsR.rows[0], getToken);
     res.json({ ok: true, message: 'Auditoria de consultas habilitada — dados começam a aparecer a partir da próxima coleta diária (só contam consultas feitas DAQUI pra frente).' });
   } catch (e) {
@@ -17119,7 +17188,7 @@ app.post('/api/log-analytics/workspaces/:guid/tabelas/:tabela/detalhar-recurso',
   try {
     const { guid, tabela } = req.params;
     if (!/^[A-Za-z0-9_]+$/.test(tabela)) return res.status(400).json({ error: 'Nome de tabela inválido' });
-    const { getLogAnalyticsToken } = await _getInventarioSpConfig();
+    const { getLogAnalyticsToken } = await _getEscopoDoWorkspace(guid);
     const token = await getLogAnalyticsToken();
     const kql = `${tabela} | where TimeGenerated > ago(3d) | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId | top 20 by GB desc`;
     const url = `https://api.loganalytics.io/v1/workspaces/${guid}/query`;
