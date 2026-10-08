@@ -8522,11 +8522,27 @@ app.get('/api/azure-coleta/diag-agendador', authMiddleware, dbMiddleware, async 
   } catch (e) { _dbErr(res, e); }
 });
 
-app.post('/api/azure-coleta/cancelar', authMiddleware, (_req, res) => {
-  if (!_coletaEmExecucao) return res.status(409).json({ error: 'Nenhuma coleta em execução' });
-  _coletaCancelada = true;
-  _logColeta('Cancelamento solicitado pelo usuário via API');
-  res.json({ ok: true, message: 'Cancelamento solicitado' });
+app.post('/api/azure-coleta/cancelar', authMiddleware, (req, res) => {
+  // v4.2: Suporte a cancelamento seletivo (tipo/id) ou global (backward-compat)
+  const { tipo, id } = req.body || {};
+
+  if (tipo && id != null) {
+    // Cancelar apenas esta execução específica
+    if (!_coletaAtiva(tipo, id)) return res.status(409).json({ error: `Nenhuma coleta ${tipo}:#${id} em execução` });
+    const chave = `${tipo}:${id}`;
+    const entry = _coletasEmExecucao.get(chave);
+    if (entry) entry.cancelada = true;
+    res.json({ ok: true, message: `Cancelamento solicitado para ${tipo}:#${id}` });
+  } else {
+    // Cancelamento global (compatibilidade: cancelar todas as execuções ativas)
+    if (_coletasEmExecucao.size === 0) return res.status(409).json({ error: 'Nenhuma coleta em execução' });
+    let canceladas = 0;
+    for (const entry of _coletasEmExecucao.values()) {
+      entry.cancelada = true;
+      canceladas++;
+    }
+    res.json({ ok: true, message: `Cancelamento solicitado para ${canceladas} coleta(s)` });
+  }
 });
 
 app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -8543,10 +8559,25 @@ app.get('/api/azure-coleta/status', authMiddleware, dbMiddleware, async (_req, r
       pool.query(`SELECT ${cols} FROM azure_coleta_historico WHERE tipo='api'     ORDER BY iniciado_em DESC LIMIT 1`),
       pool.query(`SELECT ${cols} FROM azure_coleta_historico WHERE tipo='storage' ORDER BY iniciado_em DESC LIMIT 1`),
     ]);
+    // v4.2: Construir array de execuções ativas + resumo retro-compatível
+    const execucoes = [];
+    for (const [chave, entry] of _coletasEmExecucao.entries()) {
+      const [tipo, idStr] = chave.split(':');
+      execucoes.push({
+        tipo,
+        id: idStr === 'auto' ? null : parseInt(idStr),
+        iniciado_em: entry.iniciadoEm.toISOString(),
+        cancelando: entry.cancelada,
+        progresso: entry.progresso,
+        status: entry.status, // 'concluido', 'erro', null se ainda rodando
+      });
+    }
+
     res.json({
-      em_execucao:     _coletaEmExecucao,
-      cancelando:      _coletaCancelada,
-      progresso:       _coletaProgresso,
+      em_execucao:     _coletasEmExecucao.size > 0,
+      cancelando:      execucoes.some(e => e.cancelando),
+      progresso:       execucoes.length > 0 ? execucoes[0].progresso : { fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] },
+      execucoes,       // v4.2: nova — lista completa de execuções
       ultimo:          rAll.rows[0] || null,
       ultimo_api:      rApi.rows[0] || null,
       ultimo_storage:  rStg.rows[0] || null,
@@ -11199,7 +11230,8 @@ app.patch('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req,
 });
 
 app.post('/api/azure-coleta/sps/:id/coletar-api', authMiddleware, dbMiddleware, async (req, res) => {
-  if (_coletaEmExecucao) return res.status(409).json({ error: 'Coleta já em execução' });
+  const spId = parseInt(req.params.id);
+  if (_coletaAtiva('api', spId)) return res.status(409).json({ error: `Coleta API para SP #${spId} já em execução` });
   const { billing_account_id, billing_profile_id, data_inicio, data_fim, modo, subscription_ids, resource_groups, metric } = req.body;
   if (!data_inicio || !data_fim) return res.status(400).json({ error: 'data_inicio e data_fim são obrigatórios' });
   const modoEfetivo   = modo || 'billing_profile';
@@ -15520,7 +15552,8 @@ app.post('/api/azure-coleta/storages/:id/testar', authMiddleware, dbMiddleware, 
 });
 
 app.post('/api/azure-coleta/storages/:id/executar', authMiddleware, dbMiddleware, (req, res) => {
-  if (_coletaEmExecucao) return res.status(409).json({ error: 'Coleta já em execução' });
+  const storageId = parseInt(req.params.id);
+  if (_coletaAtiva('storage', storageId)) return res.status(409).json({ error: `Coleta Storage #${storageId} já em execução` });
   res.json({ ok: true, message: 'Coleta Storage iniciada' });
   _executarColetaStorage('manual', parseInt(req.params.id)).catch(e => console.error('[ColetaStorage] Erro:', e.message));
 });
