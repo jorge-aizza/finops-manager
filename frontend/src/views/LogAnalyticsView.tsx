@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react'
+import { Fragment, useState, useMemo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getLogAnalyticsWorkspaces, getLogAnalyticsRecomendacoes, getLogAnalyticsTabelas, getLogAnalyticsFontes,
@@ -10,6 +10,7 @@ import {
 } from '../api/logAnalytics'
 import LogAnalyticsConsumoModal from '../components/LogAnalyticsConsumoModal'
 import { TenantSelector } from '../components/TenantSelector'
+import { useTenantFilter } from '../contexts/TenantFilterContext'
 
 // v1 (2026-09-29): descoberta de workspaces + ingestão diária por tabela + as 5 regras do
 // motor de FinOps + export Excel. v1.1 (mesmo dia): retenção por tabela (ARM Tables - List) +
@@ -101,6 +102,7 @@ function RankingList({ title, items, color, fmt }: { title: string; items: LogAn
 
 export default function LogAnalyticsView() {
   const queryClient = useQueryClient()
+  const { selectedTenantId } = useTenantFilter()
   const [filtroSeveridade, setFiltroSeveridade] = useState<LogAnalyticsSeveridade | undefined>(undefined)
   const [exportando, setExportando] = useState(false)
   const [gerandoDashboard, setGerandoDashboard] = useState(false)
@@ -208,7 +210,18 @@ export default function LogAnalyticsView() {
   const recomendacoes = recomendacoesQuery.data || []
   const tabelas = tabelasQuery.data?.tabelas || []
   const auditoriaConsultasHabilitada = tabelasQuery.data?.auditoria_consultas_habilitada ?? false
-  const workspacesExibidos = somenteWorkspacesComCusto ? workspaces.filter((w) => (Number(w.custo_mes_total) || 0) > 0) : workspaces
+
+  // Filtrar por Tenant selecionado (quando sp_id é adicionado aos workspaces)
+  const workspacesFiltroPorTenant = useMemo(() => {
+    if (!selectedTenantId) return workspaces
+    // TODO: Adicionar sp_id aos workspaces na API. Até lá, filtro permanece desativado.
+    // return workspaces.filter((w) => (w as any).sp_id === selectedTenantId)
+    return workspaces
+  }, [workspaces, selectedTenantId])
+
+  const workspacesExibidos = somenteWorkspacesComCusto
+    ? workspacesFiltroPorTenant.filter((w) => (Number(w.custo_mes_total) || 0) > 0)
+    : workspacesFiltroPorTenant
   const tabelasExibidas = somenteTabelasComCusto
     ? tabelas.filter((t) => (Number(t.custo_ingestao_estimado) || 0) + (Number(t.custo_retencao_estimado) || 0) > 0)
     : tabelas
