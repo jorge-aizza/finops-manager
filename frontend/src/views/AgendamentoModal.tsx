@@ -28,6 +28,8 @@ export default function AgendamentoModal({ sp, onClose }: Props) {
   const queryClient = useQueryClient()
   const [ativo, setAtivo] = useState(sp.auto_coleta)
   const [hora, setHora] = useState(sp.hora_execucao ?? 6)
+  const [minuto, setMinuto] = useState(0)
+  const [diasEspecificos, setDiasEspecificos] = useState((sp.dias_semana || '').length > 0)
   const [dias, setDias] = useState<Set<string>>(new Set((sp.dias_semana || '1,2,3,4,5').split(',').filter(Boolean)))
 
   const subscriptionIds = (sp.subscription_ids || '').split(',').map((s) => s.trim()).filter(Boolean)
@@ -37,11 +39,14 @@ export default function AgendamentoModal({ sp, onClose }: Props) {
   }
 
   const salvarMutation = useMutation({
-    mutationFn: () => salvarAgendamentoSP(sp.id, {
-      hora_execucao: ativo ? hora : null,
-      dias_semana: ativo ? [...dias].join(',') : null,
-      auto_coleta: ativo,
-    }),
+    mutationFn: () => {
+      const diasParaEnviar = !diasEspecificos ? '0,1,2,3,4,5,6' : [...dias].join(',')
+      return salvarAgendamentoSP(sp.id, {
+        hora_execucao: ativo ? hora : null,
+        dias_semana: ativo ? diasParaEnviar : null,
+        auto_coleta: ativo,
+      })
+    },
     onSuccess: () => {
       window.showToast?.('Agendamento salvo.', 'success')
       queryClient.invalidateQueries({ queryKey: ['coleta-sps'] })
@@ -114,20 +119,53 @@ export default function AgendamentoModal({ sp, onClose }: Props) {
           </div>
           {ativo && (
             <div style={{ paddingLeft: 24, marginBottom: 16 }}>
-              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                {DIAS_SEMANA.map((d) => (
-                  <label key={d.v} style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={dias.has(d.v)} onChange={(e) => toggleDia(d.v, e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
-                    {d.label}
-                  </label>
-                ))}
+              {/* Horário completo com badge Dia/Noite */}
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 14 }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 700 }}>Horário:</span>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <input type="number" min={0} max={23} className="ci" style={{ width: 50, textAlign: 'center' }} value={String(hora).padStart(2, '0')}
+                      onChange={(e) => setHora(Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)))} />
+                    <span style={{ fontSize: 14, color: 'var(--text-muted)' }}>:</span>
+                    <input type="number" min={0} max={59} className="ci" style={{ width: 50, textAlign: 'center' }} value={String(minuto).padStart(2, '0')}
+                      onChange={(e) => setMinuto(Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))} />
+                  </div>
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+                    background: hora >= 6 && hora < 18 ? 'rgba(255, 193, 7, 0.2)' : 'rgba(63, 81, 181, 0.2)',
+                    color: hora >= 6 && hora < 18 ? '#ff9800' : '#3f51b5',
+                  }}>
+                    {hora >= 6 && hora < 18 ? '☀ Dia' : '🌙 Noite'}
+                  </span>
+                </div>
               </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
-                <span style={{ color: 'var(--text-muted)' }}>Horário:</span>
-                <input type="number" min={0} max={23} className="ci" style={{ width: 70 }} value={hora}
-                  onChange={(e) => setHora(Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)))} />
-                <span style={{ color: 'var(--text-muted)' }}>h</span>
+
+              {/* Seleção de dias: Todos os dias ou dias específicos */}
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', marginBottom: 8 }}>
+                  <input type="radio" checked={!diasEspecificos} onChange={() => {
+                    setDiasEspecificos(false)
+                    setDias(new Set())
+                  }} style={{ width: 'auto', flexShrink: 0 }} />
+                  <span style={{ fontWeight: diasEspecificos ? 400 : 700 }}>A cada 1 dia (todos os dias)</span>
+                </label>
+                <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input type="radio" checked={diasEspecificos} onChange={() => setDiasEspecificos(true)} style={{ width: 'auto', flexShrink: 0 }} />
+                  <span style={{ fontWeight: diasEspecificos ? 700 : 400 }}>Dias específicos da semana</span>
+                </label>
               </div>
+
+              {/* Checkboxes de dias específicos */}
+              {diasEspecificos && (
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8, paddingLeft: 24 }}>
+                  {DIAS_SEMANA.map((d) => (
+                    <label key={d.v} style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={dias.has(d.v)} onChange={(e) => toggleDia(d.v, e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
+                      {d.label}
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
