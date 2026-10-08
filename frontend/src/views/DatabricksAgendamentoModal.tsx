@@ -98,11 +98,11 @@ export default function DatabricksAgendamentoModal({ config, onClose }: Props) {
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 14 }}>
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 700 }}>Horário:</span>
-                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    <input type="number" min={0} max={23} className="ci" style={{ width: 50, textAlign: 'center' }} value={String(hora).padStart(2, '0')}
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input type="number" min={0} max={23} className="ci" style={{ width: 70, height: 36, textAlign: 'center', fontSize: 16, fontWeight: 600 }} value={String(hora).padStart(2, '0')}
                       onChange={(e) => setHora(Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)))} />
-                    <span style={{ fontSize: 14, color: 'var(--text-muted)' }}>:</span>
-                    <input type="number" min={0} max={59} className="ci" style={{ width: 50, textAlign: 'center' }} value={String(minuto).padStart(2, '0')}
+                    <span style={{ fontSize: 18, color: 'var(--text-muted)', fontWeight: 700 }}>:</span>
+                    <input type="number" min={0} max={59} className="ci" style={{ width: 70, height: 36, textAlign: 'center', fontSize: 16, fontWeight: 600 }} value={String(minuto).padStart(2, '0')}
                       onChange={(e) => setMinuto(Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))} />
                   </div>
                   <span style={{
