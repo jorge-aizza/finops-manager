@@ -17302,12 +17302,15 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
     const janela = _janelaLogAnalytics(mes);
     // Mesmo filtro de Tenant da tela — a planilha reflete o que está sendo visto.
     const subsFiltro = await _subsDaSp(req.query.sp_id);
-    const filtroSozinho = subsFiltro ? ' WHERE LOWER(w.subscription_id) = ANY($1)' : '';
-    const pJanela = subsFiltro ? [janela.inicio, janela.fimExclusivo, subsFiltro] : [janela.inicio, janela.fimExclusivo];
-    const pSozinho = subsFiltro ? [subsFiltro] : [];
+    const wsFiltro = req.query.workspace_guid || null;
+    const comJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, [janela.inicio, janela.fimExclusivo]);
+    const semJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, []);
+    const filtroSozinho = semJanela.where;
+    const pJanela = comJanela.params;
+    const pSozinho = semJanela.params;
     const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
       pool.query(`SELECT w.*, ${_logAnalyticsCustoSql(1, 2)} FROM log_analytics_workspaces w ${_LOG_ANALYTICS_PRECO_JOIN_SQL}
-                  ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}`, pJanela),
+                  ${comJanela.where}`, pJanela),
       pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
                   JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
                   ${filtroSozinho}
@@ -17325,7 +17328,7 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
                     WHERE dia >= $1::date AND dia < $2::date
                     GROUP BY workspace_guid, tabela
                   ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
-                  ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}
+                  ${comJanela.where}
                   ORDER BY w.nome, gb_mes DESC`, pJanela),
       pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
                     d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
@@ -17482,17 +17485,28 @@ function _getLogAnalyticsChartJs() {
 // Dados puros (sem HTML) por trás do Dashboard — reaproveitados pelo endpoint JSON
 // `/resumo` (painel nativo na tela) E pelo gerador de HTML (`_gerarLogAnalyticsDashboardHtml`),
 // pra não duplicar as 5 queries nem o cálculo de KPIs/rankings nos dois lugares.
-// `subsFiltro` (lista de subscription_id em minúsculas, ou null) restringe o painel às
-// assinaturas de uma Service Principal — é assim que o filtro de Tenant da tela alcança os
-// rankings, que são agregados no banco e não teriam como ser filtrados no frontend.
-async function _coletarResumoLogAnalytics(mes, subsFiltro = null) {
+// Dois recortes, ambos aplicados no banco porque os rankings são agregados em SQL e não
+// teriam como ser filtrados sobre a resposta já somada:
+//   `subsFiltro` — assinaturas de uma Service Principal (filtro de Tenant da tela)
+//   `wsFiltro`   — um workspace específico (análise detalhada)
+// Cada consulta tem sua própria numeração de parâmetro: as que usam a janela já gastam
+// $1 e $2, as demais começam do $1 — por isso o WHERE é montado por consulta, não global.
+function _filtroLogAnalyticsSql(subsFiltro, wsFiltro, paramsBase) {
+  const cond = [];
+  const params = [...paramsBase];
+  if (subsFiltro) { params.push(subsFiltro); cond.push(`LOWER(w.subscription_id) = ANY($${params.length})`); }
+  if (wsFiltro) { params.push(wsFiltro); cond.push(`w.workspace_guid = $${params.length}`); }
+  return { where: cond.length ? ' WHERE ' + cond.join(' AND ') : '', params };
+}
+
+async function _coletarResumoLogAnalytics(mes, subsFiltro = null, wsFiltro = null) {
   const janela = _janelaLogAnalytics(mes);
   const impostoCfgResumo = await _getImpostoConfig();
-  // O filtro entra como parâmetro extra, por isso o índice muda conforme a consulta já usa
-  // ($1,$2) da janela ou nenhum.
-  const filtroSozinho = subsFiltro ? ' WHERE LOWER(w.subscription_id) = ANY($1)' : '';
-  const pJanela = subsFiltro ? [janela.inicio, janela.fimExclusivo, subsFiltro] : [janela.inicio, janela.fimExclusivo];
-  const pSozinho = subsFiltro ? [subsFiltro] : [];
+  const comJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, [janela.inicio, janela.fimExclusivo]);
+  const semJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, []);
+  const filtroSozinho = semJanela.where;
+  const pJanela = comJanela.params;
+  const pSozinho = semJanela.params;
   const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
     pool.query(`SELECT w.*,
                   COALESCE(ing.gb_mes, 0) AS ingestao_mes_gb,
@@ -17503,7 +17517,7 @@ async function _coletarResumoLogAnalytics(mes, subsFiltro = null) {
                   WHERE dia >= $1::date AND dia < $2::date GROUP BY workspace_guid
                 ) ing ON ing.workspace_guid = w.workspace_guid
                 ${_LOG_ANALYTICS_PRECO_JOIN_SQL}
-                ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}`, pJanela),
+                ${comJanela.where}`, pJanela),
     pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
                 JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
                 ${filtroSozinho}
@@ -17520,7 +17534,7 @@ async function _coletarResumoLogAnalytics(mes, subsFiltro = null) {
                   WHERE dia >= $1::date AND dia < $2::date
                   GROUP BY workspace_guid, tabela
                 ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
-                ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}
+                ${comJanela.where}
                 ORDER BY w.nome, gb_mes DESC`, pJanela),
     pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
                   d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
@@ -17587,14 +17601,14 @@ app.get('/api/log-analytics/resumo', authMiddleware, dbMiddleware, async (req, r
   try {
     const mes = _mesLogAnalytics(req);
     // `sp_id` vem do filtro de Tenant da tela — sem ele, o painel agrega todas as SPs.
-    const resumo = await _coletarResumoLogAnalytics(mes, await _subsDaSp(req.query.sp_id));
+    const resumo = await _coletarResumoLogAnalytics(mes, await _subsDaSp(req.query.sp_id), req.query.workspace_guid || null);
     const { wsRows, recRows, tabRows, diagRows, dcrRows, ...publico } = resumo; // linhas cruas só servem ao HTML/Excel
     res.json({ ...publico, mes, mes_label: _mesLabelPt(mes) });
   } catch (e) { _dbErr(res, e); }
 });
 
-async function _gerarLogAnalyticsDashboardHtml(mes, subsFiltro = null) {
-  const resumo = await _coletarResumoLogAnalytics(mes, subsFiltro);
+async function _gerarLogAnalyticsDashboardHtml(mes, subsFiltro = null, wsFiltro = null) {
+  const resumo = await _coletarResumoLogAnalytics(mes, subsFiltro, wsFiltro);
   const { kpis, custoPorWorkspace, topTabelas, fontes, distribuicaoRetencao, wsRows, recRows, tabRows, diagRows, dcrRows } = resumo;
 
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -17711,12 +17725,20 @@ footer{margin-top:40px;text-align:center;color:var(--muted);font-size:11.5px}
 </main>
 <script>
 const chartData = ${JSON.stringify({ custo: chartCustoWorkspace, tabelas: chartTopTabelas, fontes: chartFontes, retencao: chartRetencao })};
-const palette = ['#7B2FBE','#9d5fd6','#b98be0','#d4b8ec','#4a0080','#ff8c42','#ff4d6a','#2f9bbe','#70AD47','#A9D18E'];
-function makeBarChart(id, ds, horizontal) {
+// Hues categóricas em ordem fixa, validadas sob protanopia/deuteranopia (ΔE OKLab) contra
+// a superfície branca do card. A paleta antiga era roxo + 3 tons dele, indistinguíveis entre si.
+const palette = ['#7B2FBE','#eb6834','#1baf7a','#2a78d6','#eda100','#e87ba4','#008300','#e34948'];
+// Faixas de retenção têm ordem natural (<=30d -> >365d), então a cor repete essa ordem numa
+// rampa de uma hue só. Hues categóricas aqui sugeririam identidades independentes — o oposto
+// do que o dado é.
+const rampaRetencao = ['#ef9c66','#e88044','#db6424','#bd4f19','#8f3a11'];
+// Uma hue por gráfico, não por barra: dentro de um gráfico as barras são a MESMA medida, e
+// colorir cada uma gastaria o canal de identidade repetindo o que o comprimento já mostra.
+function makeBarChart(id, ds, horizontal, cor) {
   const ctx = document.getElementById(id);
   if (!ctx || !ds.labels.length) { if (ctx) ctx.parentElement.innerHTML += '<p class="empty-state">Sem dados coletados.</p>'; return; }
   try {
-    new Chart(ctx, { type: 'bar', data: { labels: ds.labels, datasets: [{ data: ds.values, backgroundColor: palette[0], borderRadius: 4 }] },
+    new Chart(ctx, { type: 'bar', data: { labels: ds.labels, datasets: [{ data: ds.values, backgroundColor: cor || palette[0], borderRadius: 4 }] },
       options: { indexAxis: horizontal ? 'y' : 'x', responsive: true, plugins: { legend: { display: false } } } });
   } catch (err) { console.error('Falha ao renderizar ' + id, err); ctx.parentElement.innerHTML += '<p class="empty-state">Não foi possível renderizar.</p>'; }
 }
@@ -17731,10 +17753,11 @@ function makeDonutChart(id, ds) {
 if (typeof Chart === 'undefined') {
   document.querySelectorAll('.chart-card canvas').forEach(c => { c.parentElement.innerHTML += '<p class="empty-state">Biblioteca de gráficos não carregou.</p>'; });
 } else {
-  makeBarChart('chartCusto', chartData.custo, false);
+  makeBarChart('chartCusto', chartData.custo, false, palette[0]);
   makeDonutChart('chartFontes', chartData.fontes);
-  makeBarChart('chartTabelas', chartData.tabelas, true);
-  makeBarChart('chartRetencao', chartData.retencao, false);
+  makeBarChart('chartTabelas', chartData.tabelas, true, palette[2]);
+  // Rampa cortada no tamanho do dado pra manter o passo mais escuro no fim da escala.
+  makeBarChart('chartRetencao', chartData.retencao, false, rampaRetencao.slice(0, Math.max(1, chartData.retencao.labels.length)));
 }
 function showTab(id) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
@@ -17768,7 +17791,7 @@ app.get('/api/log-analytics/export/dashboard', authMiddleware, dbMiddleware, asy
   try {
     const mes = _mesLogAnalytics(req);
     // Mesmo filtro de Tenant da tela — o dashboard baixado reflete o que está sendo visto.
-    const html = await _gerarLogAnalyticsDashboardHtml(mes, await _subsDaSp(req.query.sp_id));
+    const html = await _gerarLogAnalyticsDashboardHtml(mes, await _subsDaSp(req.query.sp_id), req.query.workspace_guid || null);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="log-analytics-dashboard-${mes}.html"`);
     res.send(html);

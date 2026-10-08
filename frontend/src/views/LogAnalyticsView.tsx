@@ -115,10 +115,19 @@ export default function LogAnalyticsView() {
   const [recomendacoesMostrarTodas, setRecomendacoesMostrarTodas] = useState(false)
   const [mes, setMes] = useState(mesAtualYYYYMM)
   const [consumoModalWorkspace, setConsumoModalWorkspace] = useState<LogAnalyticsWorkspace | null>(null)
+  // Recorte por workspace, pra análise detalhada de um só. '' = todos. O recorte é aplicado no
+  // banco (painel, rankings e exports), não sobre a resposta já agregada.
+  const [workspaceFiltro, setWorkspaceFiltro] = useState('')
 
   const workspacesQuery = useQuery({ queryKey: ['log-analytics-workspaces', mes], queryFn: () => getLogAnalyticsWorkspaces(mes) })
+  // Trocar de SP pode tirar da lista o workspace escolhido; nesse caso o recorte cai pra
+  // "todos" em vez de filtrar por um guid que não está mais à vista.
+  const workspaceAtivo = workspaceFiltro
+    && (workspacesQuery.data || []).some((w) => w.workspace_guid === workspaceFiltro && matchSubscription(w.subscription_id))
+    ? workspaceFiltro
+    : ''
   const appInsightsQuery = useQuery({ queryKey: ['log-analytics-app-insights'], queryFn: getLogAnalyticsAppInsights })
-  const resumoQuery = useQuery({ queryKey: ['log-analytics-resumo', mes, selectedTenantId], queryFn: () => getLogAnalyticsResumo(mes, selectedTenantId) })
+  const resumoQuery = useQuery({ queryKey: ['log-analytics-resumo', mes, selectedTenantId, workspaceAtivo], queryFn: () => getLogAnalyticsResumo(mes, selectedTenantId, workspaceAtivo || null) })
   const tabelasQuery = useQuery({
     queryKey: ['log-analytics-tabelas', workspaceSelecionado?.workspace_guid, mes],
     queryFn: () => getLogAnalyticsTabelas(workspaceSelecionado!.workspace_guid, mes),
@@ -187,7 +196,7 @@ export default function LogAnalyticsView() {
   async function exportar() {
     setExportando(true)
     try {
-      await baixarLogAnalyticsExcel(mes, selectedTenantId)
+      await baixarLogAnalyticsExcel(mes, selectedTenantId, workspaceAtivo || null)
     } catch (e) {
       window.showToast?.(e instanceof Error ? e.message : 'Erro ao exportar', 'error')
     } finally {
@@ -198,7 +207,7 @@ export default function LogAnalyticsView() {
   async function gerarDashboard() {
     setGerandoDashboard(true)
     try {
-      await baixarLogAnalyticsDashboardHtml(mes, selectedTenantId)
+      await baixarLogAnalyticsDashboardHtml(mes, selectedTenantId, workspaceAtivo || null)
     } catch (e) {
       window.showToast?.(e instanceof Error ? e.message : 'Erro ao gerar dashboard', 'error')
     } finally {
@@ -218,9 +227,12 @@ export default function LogAnalyticsView() {
     [workspaces, matchSubscription],
   )
 
-  const workspacesExibidos = somenteWorkspacesComCusto
-    ? workspacesFiltroPorTenant.filter((w) => (Number(w.custo_mes_total) || 0) > 0)
+  const workspacesDoRecorte = workspaceAtivo
+    ? workspacesFiltroPorTenant.filter((w) => w.workspace_guid === workspaceAtivo)
     : workspacesFiltroPorTenant
+  const workspacesExibidos = somenteWorkspacesComCusto
+    ? workspacesDoRecorte.filter((w) => (Number(w.custo_mes_total) || 0) > 0)
+    : workspacesDoRecorte
   const tabelasExibidas = somenteTabelasComCusto
     ? tabelas.filter((t) => (Number(t.custo_ingestao_estimado) || 0) + (Number(t.custo_retencao_estimado) || 0) > 0)
     : tabelas
@@ -260,6 +272,24 @@ export default function LogAnalyticsView() {
       {/* Filtro de Tenant (Service Principal) */}
       <div style={{ padding: '0 20px' }}>
         <TenantSelector />
+        {workspacesFiltroPorTenant.length > 1 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0' }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+              Filtrar por Workspace:
+            </label>
+            <select
+              className="filter-select"
+              value={workspaceAtivo}
+              onChange={(e) => setWorkspaceFiltro(e.target.value)}
+              style={{ flex: 1, maxWidth: 360 }}
+            >
+              <option value="">Todos os workspaces ({workspacesFiltroPorTenant.length})</option>
+              {workspacesFiltroPorTenant.map((w) => (
+                <option key={w.workspace_guid} value={w.workspace_guid}>{w.nome || w.workspace_guid}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       <div style={{ padding: '16px 20px 20px', display: 'flex', flexDirection: 'column', gap: 18 }}>
