@@ -15694,6 +15694,10 @@ async function ensureLogAnalyticsTable() {
   // exige HABILITAR algo novo na Azure (Diagnostic Setting categoria "Audit" no próprio
   // workspace) — nunca liga sozinho, só via botão manual (ver _habilitarAuditoriaConsultas).
   await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS auditoria_consultas_habilitada BOOLEAN NOT NULL DEFAULT false`);
+  // Tenant/Service Principal ID — faz parte do FinOps multi-tenant (Opção 2: filtro dentro de
+  // cada view). sp_id referencia azure_coleta_config.id ou azure_storage_config.id (tipo:id
+  // composto pra evitar colisão). NULL = workspace descoberto sem associação explícita à SP.
+  await pool.query(`ALTER TABLE log_analytics_workspaces ADD COLUMN IF NOT EXISTS sp_id INTEGER`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_ws_guid ON log_analytics_workspaces (workspace_guid)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS log_analytics_ingestao_diaria (

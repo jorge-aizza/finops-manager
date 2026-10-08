@@ -28,6 +28,8 @@ export interface LogAnalyticsWorkspace {
    * móvel/mês civil de `_janelaLogAnalytics` no backend, null só se a janela não puder ser
    * determinada (não deveria acontecer em uso normal). */
   ingestao_media_gb_dia: number | null
+  /** Tenant/Service Principal ID — para multi-tenant filtering. Null = workspace sem associação. */
+  sp_id: number | null
 }
 
 /** Um ponto do gráfico de consumo diário (ver `getLogAnalyticsConsumoDiario`). */

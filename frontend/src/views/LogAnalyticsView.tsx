@@ -211,12 +211,10 @@ export default function LogAnalyticsView() {
   const tabelas = tabelasQuery.data?.tabelas || []
   const auditoriaConsultasHabilitada = tabelasQuery.data?.auditoria_consultas_habilitada ?? false
 
-  // Filtrar por Tenant selecionado (quando sp_id é adicionado aos workspaces)
+  // Filtrar por Tenant selecionado
   const workspacesFiltroPorTenant = useMemo(() => {
     if (!selectedTenantId) return workspaces
-    // TODO: Adicionar sp_id aos workspaces na API. Até lá, filtro permanece desativado.
-    // return workspaces.filter((w) => (w as any).sp_id === selectedTenantId)
-    return workspaces
+    return workspaces.filter((w) => w.sp_id === selectedTenantId)
   }, [workspaces, selectedTenantId])
 
   const workspacesExibidos = somenteWorkspacesComCusto
