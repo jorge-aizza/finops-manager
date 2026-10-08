@@ -369,6 +369,44 @@
     }
     .portal-theme-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+    .portal-refresh-fab {
+      position: fixed; right: 12px; bottom: 12px; z-index: 500;
+      display: flex; align-items: center; gap: 0;
+      padding: 3px 6px 3px 4px;
+      background: var(--surface, #181825); border: 1px solid var(--border, #313244);
+      border-radius: 14px; box-shadow: 0 1px 8px rgba(0,0,0,.3);
+      color: var(--text-muted, #6c7086); opacity: .45; transition: opacity .25s;
+    }
+    .portal-refresh-fab:hover { opacity: .9; }
+    .portal-refresh-fab-btn {
+      display: flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; padding: 0; flex-shrink: 0;
+      border: 0; background: none; color: inherit; cursor: pointer;
+      transition: color .15s;
+    }
+    .portal-refresh-fab-btn:hover { color: var(--accent, #89b4fa); }
+    .portal-refresh-fab-btn:disabled { cursor: progress; }
+    .portal-refresh-fab-sep {
+      width: 1px; height: 11px; margin: 0 4px;
+      background: var(--border, #313244); flex-shrink: 0;
+    }
+    .portal-refresh-fab-select {
+      max-width: 40px; padding: 0; border: 0; outline: 0; background: none;
+      color: var(--text-muted, #6c7086); font: inherit; font-size: 10px; cursor: pointer;
+    }
+    .portal-refresh-fab-select option { background: var(--surface, #181825); }
+    .portal-refresh-status {
+      min-width: 18px; margin-left: 2px; color: var(--accent, #89b4fa);
+      font: 9px monospace;
+    }
+    .portal-refresh-icon.spinning { animation: portal-refresh-spin .7s linear infinite; }
+    @keyframes portal-refresh-spin { to { transform: rotate(360deg); } }
+    @media (pointer: coarse) {
+      .portal-refresh-fab { bottom: 12px; right: 12px; padding: 5px 8px 5px 6px; }
+      .portal-refresh-fab-btn { width: 28px; height: 28px; }
+      .portal-refresh-fab-select { min-height: 28px; }
+    }
+
     /* Menu do portal (Calculadora | Recursos órfãos) */
     .portal-nav { display: flex; align-items: center; gap: 4px; padding: 2px; border: 1px solid var(--border); border-radius: 10px; }
     .portal-nav-btn {

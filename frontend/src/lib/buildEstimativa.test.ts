@@ -53,6 +53,49 @@ describe('buildEstimativa', () => {
     expect(est.total_final).toBeCloseTo(23, 6)
   })
 
+  it('mantém o valor bruto quando o split está configurado e as duas categorias estão desativadas', () => {
+    const recurso = makeRecurso({ resource_id: 'a' })
+    const est = buildEstimativa(
+      [recurso],
+      { [recursoKey(recurso)]: 10 },
+      new Map(),
+      { pctImposto: 18.65, pctCond: 0, pctGordura: 0 },
+      5.7,
+      10,
+      {
+        microsoft: { ativo: false, taxa: 18.65 },
+        marketplace: { ativo: false, taxa: 13.83 },
+      },
+    )
+
+    expect(est.resultados[0].estimado_brl).toBeCloseTo(20, 6)
+    expect(est.total_brl).toBeCloseTo(20, 6)
+    expect(est.vl_imposto).toBe(0)
+    expect(est.pct_imposto).toBe(0)
+  })
+
+  it('aplica somente a categoria ativa e mantém bruto o recurso da categoria desativada', () => {
+    const microsoft = makeRecurso({ resource_id: 'microsoft' })
+    const marketplace = makeRecurso({ resource_id: 'marketplace', publisher_type: 'Marketplace', custo_hora_billing: 4 })
+    const est = buildEstimativa(
+      [microsoft, marketplace],
+      { [recursoKey(microsoft)]: 10, [recursoKey(marketplace)]: 10 },
+      new Map(),
+      { pctImposto: 18.65, pctCond: 0, pctGordura: 0 },
+      5.7,
+      10,
+      {
+        microsoft: { ativo: false, taxa: 18.65 },
+        marketplace: { ativo: true, taxa: 13.83 },
+      },
+    )
+
+    expect(est.resultados[0].estimado_brl).toBeCloseTo(20, 6)
+    expect(est.resultados[1].estimado_brl).toBeCloseTo(45.532, 6)
+    expect(est.total_brl).toBeCloseTo(65.532, 6)
+    expect(est.vl_imposto).toBeCloseTo(5.532, 6)
+  })
+
   it('recursos tipo=mes ficam FORA de total_brl/total_final — vão pra total_fixo_mes', () => {
     const rHora = makeRecurso({ resource_id: 'a' })
     const rMes = makeRecurso({ resource_id: 'b', tipo_custo: 'mes', custo_mes_billing: 500 })

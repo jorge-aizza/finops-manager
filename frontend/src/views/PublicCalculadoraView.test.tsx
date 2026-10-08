@@ -113,7 +113,7 @@ describe('PublicCalculadoraView', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Estimar' })).not.toBeDisabled())
   });
 
-  it('taxas de imposto/condomínio vêm travadas pela config do admin no overlay', async () => {
+  it('imposto fica zerado com categorias desativadas e condomínio continua travado pela config do admin', async () => {
     const user = userEvent.setup()
     renderWithClient(makeCfg({ taxa_imposto: 20, taxa_cond: 15 }))
     await selecionarSubEBuscar(user)
@@ -123,10 +123,11 @@ describe('PublicCalculadoraView', () => {
     await user.click(screen.getByRole('button', { name: 'Estimar' }))
 
     await screen.findByText('Total Final')
-    const impostoInput = screen.getByDisplayValue('20') as HTMLInputElement
+    const impostoInput = screen.getByDisplayValue('0') as HTMLInputElement
     const condInput = screen.getByDisplayValue('15') as HTMLInputElement
     expect(impostoInput).toBeDisabled()
     expect(condInput).toBeDisabled()
+    expect(screen.queryByText(/Imposto \(/)).not.toBeInTheDocument()
     // Gordura nunca aparece no portal público
     expect(screen.queryByText('Gordura %')).not.toBeInTheDocument()
   });

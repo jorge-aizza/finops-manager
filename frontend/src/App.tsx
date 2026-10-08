@@ -48,10 +48,13 @@ export default function App() {
 
   useEffect(() => {
     setViewListener((v) => { setView(v); if (v) setAutenticado(true) })
+    const refreshTaxConfig = () => { void queryClient.invalidateQueries() }
+    window.addEventListener('finops:portal-config-updated', refreshTaxConfig)
     // Botão "Atualizar"/countdown de auto-refresh (app.js, manualRefresh()) —
     // invalida tudo; só as queries ativas (da view montada no momento) de
     // fato refazem a chamada de rede, então isso vale pra qualquer tela.
     setRefreshHandler(() => queryClient.invalidateQueries())
+    return () => window.removeEventListener('finops:portal-config-updated', refreshTaxConfig)
   }, [])
 
   const ViewComponent = view ? VIEWS[view] : undefined

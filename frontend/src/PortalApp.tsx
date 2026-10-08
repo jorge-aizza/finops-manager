@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getPortalConfig, identificar } from './api/portal'
 import PublicCalculadoraView from './views/PublicCalculadoraView'
 import PublicOrfaosView from './views/PublicOrfaosView'
@@ -68,12 +68,33 @@ function isLightTheme(): boolean {
 }
 
 export default function PortalApp() {
+  const queryClient = useQueryClient()
+  const isFetching = useIsFetching()
   const configQuery = useQuery({ queryKey: ['portal-config'], queryFn: getPortalConfig, retry: false })
 
   const [ident, setIdent] = useState<PortalIdentSessao | null>(() => getIdentSessao())
   const [light, setLight] = useState(isLightTheme)
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null)
+  const [refreshMinutes, setRefreshMinutes] = useState(10)
+  const [refreshCountdown, setRefreshCountdown] = useState(10 * 60)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  const atualizarDados = () => queryClient.invalidateQueries({ refetchType: 'active' })
+
+  useEffect(() => {
+    if (refreshMinutes === 0) return
+    setRefreshCountdown(refreshMinutes * 60)
+    const timer = setInterval(() => {
+      setRefreshCountdown((remaining) => {
+        if (remaining <= 1) {
+          void atualizarDados()
+          return refreshMinutes * 60
+        }
+        return remaining - 1
+      })
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [refreshMinutes])
 
   // Toast global — InvoiceModal (Fase B) chama window.showToast?.() ao gerar
   // uma estimativa, mesmo padrão do bundle autenticado.
@@ -146,6 +167,11 @@ export default function PortalApp() {
 
   const irParaInicio = () => { window.location.hash = hrefDe('home') }
   const subtitulo = viewAtual === 'home' ? 'Portal de Serviços' : servicoAtual?.subtitulo ?? 'Calculadora Azure'
+  const refreshLabel = refreshMinutes === 0
+    ? '—'
+    : refreshCountdown >= 60
+      ? `${Math.floor(refreshCountdown / 60)}:${String(refreshCountdown % 60).padStart(2, '0')}`
+      : `${refreshCountdown}s`
 
   return (
     <>
@@ -264,6 +290,27 @@ export default function PortalApp() {
         <span>FinOps Manager · {new Date().getFullYear()}</span>
         <a href="/docs-portal-faq.html" target="_blank" rel="noreferrer">Dúvidas frequentes</a>
       </footer>
+
+      <div className="portal-refresh-fab">
+        <button className="portal-refresh-fab-btn" onClick={() => { void atualizarDados() }}
+          title={isFetching ? 'Atualizando dados...' : 'Atualizar agora'}
+          aria-label="Atualizar os dados da página" aria-busy={isFetching > 0} disabled={isFetching > 0}>
+          <svg className={isFetching > 0 ? 'portal-refresh-icon spinning' : 'portal-refresh-icon'} viewBox="0 0 16 16" fill="none" width={10} height={10} aria-hidden="true">
+            <path d="M13.5 8A5.5 5.5 0 112.5 5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <path d="M2.5 2v3.5H6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <div className="portal-refresh-fab-sep" />
+        <select className="portal-refresh-fab-select" aria-label="Intervalo de atualização" value={refreshMinutes}
+          onChange={(event) => setRefreshMinutes(Number(event.target.value))}>
+          <option value={10}>10m</option>
+          <option value={15}>15m</option>
+          <option value={20}>20m</option>
+          <option value={30}>30m</option>
+          <option value={0}>—</option>
+        </select>
+        <span className="portal-refresh-status" aria-live="polite">{isFetching > 0 ? '…' : refreshLabel}</span>
+      </div>
 
       {toast && <div id="toast" className={'toast show ' + toast.type}>{toast.msg}</div>}
     </>

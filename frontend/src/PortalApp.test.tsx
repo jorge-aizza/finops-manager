@@ -118,6 +118,19 @@ describe('PortalApp', () => {
     expect(localStorage.getItem('finops-theme')).toBe('light')
   });
 
+  it('atualiza os dados ativos quando o botão Atualizar é acionado', async () => {
+    const user = userEvent.setup()
+    vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig())
+    renderWithClient()
+    await screen.findByTestId('public-calc')
+
+    expect(portalApi.getPortalConfig).toHaveBeenCalledTimes(1)
+    const atualizar = screen.getByRole('button', { name: 'Atualizar os dados da página' })
+    expect(atualizar.closest('.portal-refresh-fab')).toBeInTheDocument()
+    await user.click(atualizar)
+    await waitFor(() => expect(portalApi.getPortalConfig).toHaveBeenCalledTimes(2))
+  });
+
   it('reaproveita sessão de identificação já salva em sessionStorage (não pede de novo)', async () => {
     sessionStorage.setItem('portal_ident', JSON.stringify({ nome: 'Carlos', email: 'carlos@empresa.com' }))
     vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ solicitar_identificacao: true }))

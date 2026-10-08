@@ -54,8 +54,8 @@ export function buildEstimativa(
   // poder embutir imposto por recurso (Microsoft/Marketplace, conforme `publisher_type` de cada
   // um) já na hora de montar `estimado_brl`, em vez de só no agregado final.
   const gordFator = 1 + taxas.pctGordura / 100
-  const splitAtivo = !!impostoSplit && (impostoSplit.microsoft.ativo || impostoSplit.marketplace.ativo)
-  const taxaImpostoDoRecurso = (r: RecursoBilling): number => splitAtivo
+  const usaSplitImposto = impostoSplit !== undefined
+  const taxaImpostoDoRecurso = (r: RecursoBilling): number => usaSplitImposto
     ? (r.publisher_type === 'Marketplace'
       ? (impostoSplit!.marketplace.ativo ? impostoSplit!.marketplace.taxa : 0)
       : (impostoSplit!.microsoft.ativo ? impostoSplit!.microsoft.taxa : 0))
@@ -111,14 +111,14 @@ export function buildEstimativa(
   totalFixoMes *= gordFator
   for (const item of resultados) { if (item.fixo_mensal) item.estimado_brl *= gordFator }
 
-  const vlImposto = splitAtivo
+  const vlImposto = usaSplitImposto
     ? totalGeralMicrosoft * (impostoSplit!.microsoft.ativo ? impostoSplit!.microsoft.taxa / 100 : 0)
       + totalGeralMarketplace * (impostoSplit!.marketplace.ativo ? impostoSplit!.marketplace.taxa / 100 : 0)
     : totalGeral * taxas.pctImposto / 100
   // Taxa "efetiva" só pra exibição (ex: "+ Imposto (18,7%)") — com o split, a taxa varia
   // conforme a mistura Microsoft/Marketplace de cada seleção, então mostra a média ponderada
   // real em vez do número fixo de uma categoria só.
-  const pctImpostoExibido = splitAtivo
+  const pctImpostoExibido = usaSplitImposto
     ? (totalGeral > 0 ? Math.round((vlImposto / totalGeral) * 10000) / 100 : 0)
     : taxas.pctImposto
   // Condomínio continua incidindo sobre o valor SEM imposto (totalGeral) — igual a hoje — pra

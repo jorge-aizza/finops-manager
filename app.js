@@ -3160,6 +3160,7 @@ async function savePortalConfig() {
     const d = await res.json();
     if (!d.ok) throw new Error(d.error || 'Erro ao salvar');
     _updatePortalLink(d);
+    window.dispatchEvent(new CustomEvent('finops:portal-config-updated'));
     if (msgEl) {
       msgEl.style.display = 'block';
       msgEl.style.color   = 'var(--green,#22c55e)';
