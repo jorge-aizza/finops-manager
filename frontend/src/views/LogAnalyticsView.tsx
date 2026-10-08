@@ -102,7 +102,7 @@ function RankingList({ title, items, color, fmt }: { title: string; items: LogAn
 
 export default function LogAnalyticsView() {
   const queryClient = useQueryClient()
-  const { tenantNome, matchSubscription } = useTenantFilter()
+  const { selectedTenantId, tenantNome, matchSubscription } = useTenantFilter()
   const [filtroSeveridade, setFiltroSeveridade] = useState<LogAnalyticsSeveridade | undefined>(undefined)
   const [exportando, setExportando] = useState(false)
   const [gerandoDashboard, setGerandoDashboard] = useState(false)
@@ -118,7 +118,7 @@ export default function LogAnalyticsView() {
 
   const workspacesQuery = useQuery({ queryKey: ['log-analytics-workspaces', mes], queryFn: () => getLogAnalyticsWorkspaces(mes) })
   const appInsightsQuery = useQuery({ queryKey: ['log-analytics-app-insights'], queryFn: getLogAnalyticsAppInsights })
-  const resumoQuery = useQuery({ queryKey: ['log-analytics-resumo', mes], queryFn: () => getLogAnalyticsResumo(mes) })
+  const resumoQuery = useQuery({ queryKey: ['log-analytics-resumo', mes, selectedTenantId], queryFn: () => getLogAnalyticsResumo(mes, selectedTenantId) })
   const tabelasQuery = useQuery({
     queryKey: ['log-analytics-tabelas', workspaceSelecionado?.workspace_guid, mes],
     queryFn: () => getLogAnalyticsTabelas(workspaceSelecionado!.workspace_guid, mes),
@@ -198,7 +198,7 @@ export default function LogAnalyticsView() {
   async function gerarDashboard() {
     setGerandoDashboard(true)
     try {
-      await baixarLogAnalyticsDashboardHtml(mes)
+      await baixarLogAnalyticsDashboardHtml(mes, selectedTenantId)
     } catch (e) {
       window.showToast?.(e instanceof Error ? e.message : 'Erro ao gerar dashboard', 'error')
     } finally {

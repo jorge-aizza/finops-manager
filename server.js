@@ -14121,6 +14121,16 @@ async function _getInventarioEscopos() {
 // precisam estar no alcance do token — misturar assinaturas de SPs diferentes numa só chamada
 // devolve 403 e derrubaria a consulta inteira. `filtroSubs` restringe a um subconjunto
 // (ex.: o usuário escolheu uma assinatura específica na tela).
+// Assinaturas de uma SP ativa, em minúsculas — null quando nenhuma SP foi pedida, que é como
+// as consultas expressam "sem filtro de Tenant".
+async function _subsDaSp(spId) {
+  const id = Number(spId);
+  if (!id) return null;
+  const { escopos } = await _getInventarioEscopos();
+  const subs = escopos.filter((e) => e.spId === id).map((e) => e.subscriptionId.toLowerCase());
+  return subs.length ? subs : [];
+}
+
 // Credencial da SP dona de uma assinatura específica — pras rotas sob demanda, que recebem a
 // assinatura do próprio pedido. Usar a SP errada aqui devolve 403 silencioso.
 async function _getEscopoDaSubscription(subscriptionId) {
@@ -17433,9 +17443,17 @@ function _getLogAnalyticsChartJs() {
 // Dados puros (sem HTML) por trás do Dashboard — reaproveitados pelo endpoint JSON
 // `/resumo` (painel nativo na tela) E pelo gerador de HTML (`_gerarLogAnalyticsDashboardHtml`),
 // pra não duplicar as 5 queries nem o cálculo de KPIs/rankings nos dois lugares.
-async function _coletarResumoLogAnalytics(mes) {
+// `subsFiltro` (lista de subscription_id em minúsculas, ou null) restringe o painel às
+// assinaturas de uma Service Principal — é assim que o filtro de Tenant da tela alcança os
+// rankings, que são agregados no banco e não teriam como ser filtrados no frontend.
+async function _coletarResumoLogAnalytics(mes, subsFiltro = null) {
   const janela = _janelaLogAnalytics(mes);
   const impostoCfgResumo = await _getImpostoConfig();
+  // O filtro entra como parâmetro extra, por isso o índice muda conforme a consulta já usa
+  // ($1,$2) da janela ou nenhum.
+  const filtroSozinho = subsFiltro ? ' WHERE LOWER(w.subscription_id) = ANY($1)' : '';
+  const pJanela = subsFiltro ? [janela.inicio, janela.fimExclusivo, subsFiltro] : [janela.inicio, janela.fimExclusivo];
+  const pSozinho = subsFiltro ? [subsFiltro] : [];
   const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
     pool.query(`SELECT w.*,
                   COALESCE(ing.gb_mes, 0) AS ingestao_mes_gb,
@@ -17445,10 +17463,12 @@ async function _coletarResumoLogAnalytics(mes) {
                   SELECT workspace_guid, SUM(gb) AS gb_mes FROM log_analytics_ingestao_diaria
                   WHERE dia >= $1::date AND dia < $2::date GROUP BY workspace_guid
                 ) ing ON ing.workspace_guid = w.workspace_guid
-                ${_LOG_ANALYTICS_PRECO_JOIN_SQL}`, [janela.inicio, janela.fimExclusivo]),
+                ${_LOG_ANALYTICS_PRECO_JOIN_SQL}
+                ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}`, pJanela),
     pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
                 JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
-                ORDER BY rec.severidade DESC, rec.criado_em DESC`),
+                ${filtroSozinho}
+                ORDER BY rec.severidade DESC, rec.criado_em DESC`, pSozinho),
     // JOIN pré-agregado, não sub-select por linha — mesmo motivo do export Excel (74 mil linhas
     // em log_analytics_tabelas; essa query roda a cada abertura da tela via /resumo).
     pool.query(`SELECT w.nome AS workspace_nome, t.tabela, t.plano, t.retencao_dias, t.retencao_total_dias, t.retencao_e_padrao,
@@ -17461,16 +17481,19 @@ async function _coletarResumoLogAnalytics(mes) {
                   WHERE dia >= $1::date AND dia < $2::date
                   GROUP BY workspace_guid, tabela
                 ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
-                ORDER BY w.nome, gb_mes DESC`, [janela.inicio, janela.fimExclusivo]),
+                ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}
+                ORDER BY w.nome, gb_mes DESC`, pJanela),
     pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
                   d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
                 FROM log_analytics_diagnostic_settings d
                 JOIN log_analytics_workspaces w ON w.workspace_guid = d.workspace_guid
-                ORDER BY w.nome, d.recurso_tipo`),
+                ${filtroSozinho}
+                ORDER BY w.nome, d.recurso_tipo`, pSozinho),
     pool.query(`SELECT w.nome AS workspace_nome, c.nome AS dcr_nome, c.streams, c.tipos_fonte, c.resource_group, c.subscription_id
                 FROM log_analytics_dcrs c
                 JOIN log_analytics_workspaces w ON w.workspace_guid = c.workspace_guid_destino
-                ORDER BY w.nome, c.nome`),
+                ${filtroSozinho}
+                ORDER BY w.nome, c.nome`, pSozinho),
   ]);
   wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgResumo, _diasJanelaLogAnalytics(janela)))
     .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
@@ -17524,14 +17547,15 @@ async function _coletarResumoLogAnalytics(mes) {
 app.get('/api/log-analytics/resumo', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const mes = _mesLogAnalytics(req);
-    const resumo = await _coletarResumoLogAnalytics(mes);
+    // `sp_id` vem do filtro de Tenant da tela — sem ele, o painel agrega todas as SPs.
+    const resumo = await _coletarResumoLogAnalytics(mes, await _subsDaSp(req.query.sp_id));
     const { wsRows, recRows, tabRows, diagRows, dcrRows, ...publico } = resumo; // linhas cruas só servem ao HTML/Excel
     res.json({ ...publico, mes, mes_label: _mesLabelPt(mes) });
   } catch (e) { _dbErr(res, e); }
 });
 
-async function _gerarLogAnalyticsDashboardHtml(mes) {
-  const resumo = await _coletarResumoLogAnalytics(mes);
+async function _gerarLogAnalyticsDashboardHtml(mes, subsFiltro = null) {
+  const resumo = await _coletarResumoLogAnalytics(mes, subsFiltro);
   const { kpis, custoPorWorkspace, topTabelas, fontes, distribuicaoRetencao, wsRows, recRows, tabRows, diagRows, dcrRows } = resumo;
 
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -17704,7 +17728,8 @@ function sortTable(tableId, colIndex) {
 app.get('/api/log-analytics/export/dashboard', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const mes = _mesLogAnalytics(req);
-    const html = await _gerarLogAnalyticsDashboardHtml(mes);
+    // Mesmo filtro de Tenant da tela — o dashboard baixado reflete o que está sendo visto.
+    const html = await _gerarLogAnalyticsDashboardHtml(mes, await _subsDaSp(req.query.sp_id));
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="log-analytics-dashboard-${mes}.html"`);
     res.send(html);

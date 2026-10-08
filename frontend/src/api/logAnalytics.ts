@@ -197,8 +197,14 @@ export const getLogAnalyticsRecomendacoes = (severidade?: LogAnalyticsSeveridade
 
 // Mesmos dados do "📊 Gerar Dashboard" (HTML p/ download), só que como JSON — pro painel
 // nativo dentro da tela (ver _coletarResumoLogAnalytics em server.js, reaproveitado pelos dois).
-export const getLogAnalyticsResumo = (mes?: string) =>
-  apiFetch<LogAnalyticsResumo>('GET', '/log-analytics/resumo' + (mes ? '?mes=' + mes : ''))
+// `spId` = filtro de Tenant da tela. Os rankings do painel são agregados no banco, então o
+// filtro precisa viajar até o backend — não dá pra aplicá-lo sobre a resposta.
+export const getLogAnalyticsResumo = (mes?: string, spId?: number | null) => {
+  const q = new URLSearchParams()
+  if (mes) q.set('mes', mes)
+  if (spId) q.set('sp_id', String(spId))
+  return apiFetch<LogAnalyticsResumo>('GET', '/log-analytics/resumo' + (q.toString() ? '?' + q : ''))
+}
 
 export const getLogAnalyticsFontes = (workspaceGuid: string) =>
   apiFetch<LogAnalyticsFontesResposta>('GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/fontes')
@@ -249,9 +255,12 @@ export async function baixarLogAnalyticsExcel(mes?: string) {
 
 // Dashboard HTML autocontido (Chart.js embutido inline — abre sem servidor/internet). Mesmo
 // padrão binário do export Excel acima.
-export async function baixarLogAnalyticsDashboardHtml(mes?: string) {
+export async function baixarLogAnalyticsDashboardHtml(mes?: string, spId?: number | null) {
   const token = getToken()
-  const resp = await fetch(API_BASE + '/log-analytics/export/dashboard' + (mes ? '?mes=' + mes : ''), {
+  const q = new URLSearchParams()
+  if (mes) q.set('mes', mes)
+  if (spId) q.set('sp_id', String(spId))
+  const resp = await fetch(API_BASE + '/log-analytics/export/dashboard' + (q.toString() ? '?' + q : ''), {
     headers: token ? { Authorization: 'Bearer ' + token } : {},
   })
   if (!resp.ok) {
