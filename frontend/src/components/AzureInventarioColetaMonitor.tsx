@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getAzureInventarioStatus } from '../api/azureInventario'
+import { TenantSelector } from './TenantSelector'
 
 // Card de progresso ao vivo pra Coleta de Inventário/Auditoria — mesmo padrão de
 // ColetaMonitor.tsx (Azure)/DatabricksColetaMonitor.tsx (Databricks), pedido do usuário
@@ -48,7 +49,11 @@ export default function AzureInventarioColetaMonitor() {
   const titulo = isReconciliacao ? 'Reconciliação (Resource Graph)' : 'Coleta de Inventário'
 
   return (
-    <div className="stat-card" style={{ margin: '16px 20px 0', padding: '16px 20px', borderColor: corBorda, borderWidth: 2 }}>
+    <>
+      <div style={{ padding: '0 20px' }}>
+        <TenantSelector />
+      </div>
+      <div className="stat-card" style={{ margin: '16px 20px 0', padding: '16px 20px', borderColor: corBorda, borderWidth: 2 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <span style={{ fontSize: 14, fontWeight: 700 }}>
           {emExecucao ? `⏳ ${titulo} em andamento` : (houveErro ? `❌ ${titulo} com erro` : `✅ ${titulo} concluída`)}
@@ -86,6 +91,7 @@ export default function AzureInventarioColetaMonitor() {
           ))}
         </div>
       )}
-    </div>
+      </div>
+    </>
   )
 }
