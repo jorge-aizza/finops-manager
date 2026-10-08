@@ -121,6 +121,7 @@ export default function DatabricksAgendamentoModal({ config, onClose }: Props) {
                   <input type="radio" checked={!diasEspecificos} onChange={() => {
                     setDiasEspecificos(false)
                     setDias(new Set())
+                    setGranularidade(1)
                   }} style={{ width: 'auto', flexShrink: 0 }} />
                   <span style={{ fontWeight: diasEspecificos ? 400 : 700 }}>A cada 1 dia (todos os dias)</span>
                 </label>
