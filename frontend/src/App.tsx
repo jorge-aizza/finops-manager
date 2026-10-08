@@ -1,6 +1,7 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { setRefreshHandler, setViewListener } from './bridge'
+import { TenantFilterProvider } from './contexts/TenantFilterContext'
 import ProjetosView from './views/ProjetosView'
 import ReservasView from './views/ReservasView'
 import AcoesView from './views/AcoesView'
@@ -61,18 +62,20 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {ViewComponent ? (
-        // `key={view}` reseta o ErrorBoundary ao trocar de tela — sem isso,
-        // um erro numa view ficaria "preso" mesmo navegando pra outra.
-        <ErrorBoundary key={view}>
-          <ViewComponent />
-        </ErrorBoundary>
-      ) : null}
-      {autenticado && (
-        <ErrorBoundary>
-          <DatabricksBudgetAlertModal />
-        </ErrorBoundary>
-      )}
+      <TenantFilterProvider>
+        {ViewComponent ? (
+          // `key={view}` reseta o ErrorBoundary ao trocar de tela — sem isso,
+          // um erro numa view ficaria "preso" mesmo navegando pra outra.
+          <ErrorBoundary key={view}>
+            <ViewComponent />
+          </ErrorBoundary>
+        ) : null}
+        {autenticado && (
+          <ErrorBoundary>
+            <DatabricksBudgetAlertModal />
+          </ErrorBoundary>
+        )}
+      </TenantFilterProvider>
     </QueryClientProvider>
   )
 }

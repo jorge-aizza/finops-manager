@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { cancelarColeta, getColetaStatus, listSPs } from '../api/coleta'
+import { cancelarColeta, getColetaStatus } from '../api/coleta'
+import { useTenantFilter } from '../contexts/TenantFilterContext'
+import { TenantSelector } from './TenantSelector'
 import type { ExecucaoAtiva } from '../types/coleta'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -13,8 +15,6 @@ const STATUS_COLOR: Record<string, string> = {
 // Persistido em localStorage — rastreia quais execuções foram dispensadas pelo usuário.
 // Chave composta "tipo:id" (ex. "api:3", "storage:5").
 const DISMISS_PREFIX = 'coleta_monitor_dismissed_'
-// Seletor de tenant — null = todos, número = sp_id específica
-const TENANT_FILTER_KEY = 'coleta_monitor_tenant_filter'
 
 // Porta de #coleta-monitor + loadColetaStatus()/_coletaPolling (app.js) —
 // renderiza cards de progresso ao vivo para cada coleta ativa (via API oficial ou
@@ -23,22 +23,14 @@ const TENANT_FILTER_KEY = 'coleta_monitor_tenant_filter'
 // fica visível em "estado final" colorido até o usuário fechar — mesmo padrão do legado.
 export default function ColetaMonitor() {
   const queryClient = useQueryClient()
+  const { selectedTenantId } = useTenantFilter()
   const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() => {
     const stored = Object.entries(localStorage)
       .filter(([k]) => k.startsWith(DISMISS_PREFIX))
       .map(([k]) => k.slice(DISMISS_PREFIX.length))
     return new Set(stored)
   })
-  const [selectedTenantId, setSelectedTenantId] = useState<number | null>(() => {
-    const stored = localStorage.getItem(TENANT_FILTER_KEY)
-    return stored ? parseInt(stored, 10) : null
-  })
   const wasRunning = useRef(false)
-
-  const spsQuery = useQuery({
-    queryKey: ['coleta-sps'],
-    queryFn: () => listSPs().then(sps => sps.filter(sp => sp.ativo)),
-  })
 
   const statusQuery = useQuery({
     queryKey: ['coleta-status'],
@@ -92,15 +84,6 @@ export default function ColetaMonitor() {
     return true
   })
 
-  function handleTenantChange(newId: number | null) {
-    setSelectedTenantId(newId)
-    if (newId === null) {
-      localStorage.removeItem(TENANT_FILTER_KEY)
-    } else {
-      localStorage.setItem(TENANT_FILTER_KEY, String(newId))
-    }
-  }
-
   if (filteredExecucoes.length === 0) return null
 
   function handleFechar(exec: ExecucaoAtiva) {
@@ -109,36 +92,10 @@ export default function ColetaMonitor() {
     setDismissedKeys(new Set([...dismissedKeys, key]))
   }
 
-  const sps = spsQuery.data || []
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Seletor de Tenant */}
-      {sps.length > 1 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
-          <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>Filtrar por Service Principal:</label>
-          <select
-            value={selectedTenantId === null ? 'all' : String(selectedTenantId)}
-            onChange={(e) => handleTenantChange(e.target.value === 'all' ? null : parseInt(e.target.value, 10))}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              background: 'var(--surface)',
-              color: 'var(--text)',
-              cursor: 'pointer',
-            }}
-          >
-            <option value="all">🌐 Todas as SPs</option>
-            {sps.map((sp) => (
-              <option key={sp.id} value={String(sp.id)}>
-                {sp.nome}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+      {/* Seletor de Tenant (Reutilizável) */}
+      <TenantSelector />
 
       {/* Cards de Execução */}
       {filteredExecucoes.map((exec) => (
