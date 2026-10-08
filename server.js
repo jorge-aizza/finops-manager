@@ -8283,11 +8283,22 @@ function _iniciarAgendador() {
         _cbCore.reset();
       }
     }
-    if (_coletaEmExecucao || !pool) return;
+    if (!pool) return;
+    // v4.2: Já não há `_coletaEmExecucao` global — cada SP/Storage tem sua própria chave no Map
+    // Safety valve: resetar execuções travadas há mais de 6h
+    const agora = Date.now();
+    for (const [chave, entry] of _coletasEmExecucao.entries()) {
+      if (entry.iniciadoEm && agora - entry.iniciadoEm.getTime() > 6 * 60 * 60 * 1000) {
+        console.warn(`[Agendador] SAFETY VALVE: ${chave} travada >6h — removendo`);
+        _coletasEmExecucao.delete(chave);
+      }
+    }
+
     try {
       await ensureAzureColetaTable();
       // Storage: suporta agendamento por hora+dia ou por intervalo (legado)
       // Exige storage_account + storage_container preenchidos (credenciais reais)
+      // v4.2: Buscar TODAS as due, não só 1 — dispara em paralelo
       const rStg = await pool.query(`
         SELECT id, nome, hora_execucao, dias_semana, auto_coleta_horas
         FROM azure_storage_config
@@ -8300,10 +8311,13 @@ function _iniciarAgendador() {
             OR (auto_coleta_horas IS NOT NULL AND auto_coleta_horas > 0)
           )
         ORDER BY proxima_coleta ASC NULLS FIRST
-        LIMIT 1
       `);
-      if (rStg.rows.length) {
-        const stg = rStg.rows[0];
+      for (const stg of rStg.rows) {
+        // Só dispara se não estiver já rodando
+        if (_coletaAtiva('storage', stg.id)) {
+          console.log(`[Agendador] Storage #${stg.id} (${stg.nome}) já em execução — pulando`);
+          continue;
+        }
         console.log(`[Agendador] Disparando coleta Storage #${stg.id} (${stg.nome})`);
         // Calcula próxima execução antes de disparar para evitar duplo disparo
         let proxima;
@@ -8319,12 +8333,12 @@ function _iniciarAgendador() {
         _executarColetaStorage('auto', stg.id).catch(e =>
           console.error(`[Agendador] Erro coleta Storage #${stg.id}:`, e.message)
         );
-        return; // só uma coleta por ciclo
       }
 
       // API: agendamento por hora+dia (suporta modo billing_profile e subscription)
       // Detecção de modo pelas credenciais disponíveis, não pelo campo modo_coleta
       // (evita bloqueio quando modo_coleta está desatualizado no banco)
+      // v4.2: Buscar TODAS as SPs due, não só 1 — dispara em paralelo
       const rApi = await pool.query(`
         SELECT id, nome, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, granularidade_dias, hora_execucao, dias_semana
         FROM azure_coleta_config
@@ -8339,10 +8353,13 @@ function _iniciarAgendador() {
             (subscription_ids IS NOT NULL AND subscription_ids <> '')
           )
         ORDER BY is_padrao DESC, proxima_coleta ASC NULLS FIRST
-        LIMIT 1
       `);
-      if (rApi.rows.length) {
-        const sp = rApi.rows[0];
+      for (const sp of rApi.rows) {
+        // Só dispara se não estiver já rodando
+        if (_coletaAtiva('api', sp.id)) {
+          console.log(`[Agendador] SP #${sp.id} (${sp.nome}) já em execução — pulando`);
+          continue;
+        }
         // Detecta modo pelo que está disponível, não pelo campo modo_coleta
         const modoSp = (sp.billing_account_id && sp.billing_profile_id)
           ? 'billing_profile'
@@ -8371,7 +8388,8 @@ function _iniciarAgendador() {
                 [sp.id]
               );
               for (const p of pend.rows) {
-                if (_coletaEmExecucao) { await new Promise(r => setTimeout(r, 500)); }
+                // v4.2: Checar a chave específica desta SP, não global
+                if (_coletaAtiva('api', sp.id)) { await new Promise(r => setTimeout(r, 500)); }
                 const pSubIds = p.subscription_id ? [p.subscription_id] : subIds;
                 _logColeta(`[Pendente] Iniciando reprocessamento: ${p.descricao || p.data_inicio + '→' + p.data_fim}`);
                 await _executarColetaAPI(sp.id, baId, bpId, p.data_inicio, p.data_fim, modoSp, pSubIds, [], 'ActualCost', 'agendado-pendente')
