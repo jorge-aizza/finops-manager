@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
+import { useTenantFilter } from '../contexts/TenantFilterContext'
+import { TenantSelector } from '../components/TenantSelector'
 import { listSPs } from '../api/coleta'
 import { listSubscriptions } from '../api/calculadora'
 import { setInventarioTabListener } from '../bridge'
@@ -462,6 +464,9 @@ interface EscopoRecursos { subscription_id: string; resource_group: string | nul
 
 export default function InventarioView() {
   const queryClient = useQueryClient()
+  // `selectedTenantId` entra nas queryKeys pra refazer a chamada ao trocar o filtro — o recorte
+  // acontece no backend, por `subscription_id` (ver _getInventarioEscopos em server.js).
+  const { selectedTenantId } = useTenantFilter()
   const [tab, setTab] = useState<InventarioTab>('recursos')
   // Escopo vindo de uma notificação do sino (anomalia de crescimento): filtra Recursos por assinatura,
   // RG e (se houver) dia de criação — a lista do que gerou o alerta.
@@ -543,22 +548,22 @@ export default function InventarioView() {
   // Conformidade de tags obrigatórias por subscription (Fase 1.4) — recursos persistentes
   // em RGs não-gerenciados. Cache 15min no servidor.
   const conformidadeQuery = useQuery({
-    queryKey: ['azure-inv-conformidade'],
-    queryFn: getAzureConformidade,
+    queryKey: ['azure-inv-conformidade', selectedTenantId],
+    queryFn: () => getAzureConformidade(selectedTenantId),
     enabled: tab === 'conformidade',
   })
   // Advisor pode levar bastante tempo na 1ª chamada (backend cacheia por 20min) — só busca
   // quando a aba está de fato aberta.
   const advisorQuery = useQuery({
-    queryKey: ['azure-inv-advisor'],
-    queryFn: () => getAzureAdvisor(),
+    queryKey: ['azure-inv-advisor', selectedTenantId],
+    queryFn: () => getAzureAdvisor(undefined, undefined, selectedTenantId),
     enabled: tab === 'advisor',
   })
   // Chamada real ao Resource Graph (backend cacheia 20min) — só busca com a aba aberta, mesmo
   // padrão já usado pelo Advisor.
   const desperdicioQuery = useQuery({
-    queryKey: ['azure-inv-desperdicio'],
-    queryFn: () => getAzureDesperdicio(),
+    queryKey: ['azure-inv-desperdicio', selectedTenantId],
+    queryFn: () => getAzureDesperdicio(undefined, undefined, selectedTenantId),
     enabled: tab === 'desperdicio',
     staleTime: 5 * 60 * 1000,
   })
@@ -628,10 +633,11 @@ export default function InventarioView() {
   const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
   const historicoQuery = useQuery({ queryKey: ['azure-inv-historico'], queryFn: getAzureInventarioColetaHistorico })
   const recursosQuery = useQuery({
-    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor, escopoRecursos],
+    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor, escopoRecursos, selectedTenantId],
     queryFn: () => getAzureRecursosInventario({
       ativo: filtroAtivo === 'todos' ? undefined : filtroAtivo === 'ativos',
       criado_por: filtroCriadoPor || undefined,
+      sp_id: selectedTenantId,
       ...(escopoRecursos ? {
         subscription_id: escopoRecursos.subscription_id,
         resource_group: escopoRecursos.resource_group || undefined,
@@ -644,8 +650,8 @@ export default function InventarioView() {
     enabled: tab === 'recursos',
   })
   const auditoriaQuery = useQuery({
-    queryKey: ['azure-inv-auditoria', periodo.inicio, periodo.fim, filtroAcao, filtroTipo],
-    queryFn: () => getAzureAuditoriaEventos({ data_inicio: periodo.inicio, data_fim: periodo.fim, acao: filtroAcao || undefined, resource_type: filtroTipo || undefined }),
+    queryKey: ['azure-inv-auditoria', periodo.inicio, periodo.fim, filtroAcao, filtroTipo, selectedTenantId],
+    queryFn: () => getAzureAuditoriaEventos({ data_inicio: periodo.inicio, data_fim: periodo.fim, acao: filtroAcao || undefined, resource_type: filtroTipo || undefined, sp_id: selectedTenantId }),
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
   })
@@ -661,8 +667,8 @@ export default function InventarioView() {
     enabled: tab === 'auditoria',
   })
   const paNivel1Query = useQuery({
-    queryKey: ['azure-inv-resumo-assinatura'],
-    queryFn: () => getAzureResumoPorAssinatura(),
+    queryKey: ['azure-inv-resumo-assinatura', selectedTenantId],
+    queryFn: () => getAzureResumoPorAssinatura(undefined, selectedTenantId),
     enabled: tab === 'porAssinatura' && !paSub,
   })
   const paNivel2Query = useQuery({
@@ -759,7 +765,7 @@ export default function InventarioView() {
   // Exportar Inventário pra Excel (2026-09-02, inspirado no ARI) — download direto, não
   // retorna dado pra cachear/exibir, só o efeito colateral do arquivo baixado.
   const exportarExcelMutation = useMutation({
-    mutationFn: () => baixarAzureInventarioExcel({ ativo: filtroAtivo === 'todos' ? undefined : filtroAtivo === 'ativos' }),
+    mutationFn: () => baixarAzureInventarioExcel({ ativo: filtroAtivo === 'todos' ? undefined : filtroAtivo === 'ativos', sp_id: selectedTenantId }),
     onSuccess: () => window.showToast?.('Inventário exportado.', 'success'),
     onError: (e: Error) => window.showToast?.('Erro ao exportar: ' + e.message, 'error'),
   })
@@ -795,6 +801,10 @@ export default function InventarioView() {
           usuario) -- antes ficavam sempre visiveis e empurravam o conteudo da
           aba escolhida para baixo da dobra, dando a impressao de que trocar de
           aba nao fazia nada. */}
+      <div style={{ padding: '12px 20px 0' }}>
+        <TenantSelector />
+      </div>
+
       <AzureInventarioColetaMonitor />
 
       {tab === 'crescimento' && (

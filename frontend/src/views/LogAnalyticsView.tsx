@@ -187,7 +187,7 @@ export default function LogAnalyticsView() {
   async function exportar() {
     setExportando(true)
     try {
-      await baixarLogAnalyticsExcel(mes)
+      await baixarLogAnalyticsExcel(mes, selectedTenantId)
     } catch (e) {
       window.showToast?.(e instanceof Error ? e.message : 'Erro ao exportar', 'error')
     } finally {

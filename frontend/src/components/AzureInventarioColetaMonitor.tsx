@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getAzureInventarioStatus } from '../api/azureInventario'
-import { TenantSelector } from './TenantSelector'
 
 // Card de progresso ao vivo pra Coleta de Inventário/Auditoria — mesmo padrão de
 // ColetaMonitor.tsx (Azure)/DatabricksColetaMonitor.tsx (Databricks), pedido do usuário
@@ -49,49 +48,44 @@ export default function AzureInventarioColetaMonitor() {
   const titulo = isReconciliacao ? 'Reconciliação (Resource Graph)' : 'Coleta de Inventário'
 
   return (
-    <>
-      <div style={{ padding: '0 20px' }}>
-        <TenantSelector />
-      </div>
-      <div className="stat-card" style={{ margin: '16px 20px 0', padding: '16px 20px', borderColor: corBorda, borderWidth: 2 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <span style={{ fontSize: 14, fontWeight: 700 }}>
-          {emExecucao ? `⏳ ${titulo} em andamento` : (houveErro ? `❌ ${titulo} com erro` : `✅ ${titulo} concluída`)}
-        </span>
-        {!emExecucao && (
-          <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDismissed(true)}>Fechar</button>
-        )}
-      </div>
-
-      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
-        {progresso.fase}
-        {progresso.sub_total > 0 && ` (${progresso.sub_idx}/${progresso.sub_total})`}
-      </div>
-
-      <div style={{ display: 'flex', gap: 18, fontSize: 12, marginBottom: 10, flexWrap: 'wrap' }}>
-        <span>{isReconciliacao ? 'Recursos encontrados' : 'Eventos'}: <strong>{progresso.eventos.toLocaleString('pt-BR')}</strong></span>
-        <span>Novos: <strong style={{ color: 'var(--green,#22c55e)' }}>{progresso.novos.toLocaleString('pt-BR')}</strong></span>
-        {!isReconciliacao && (
-          <>
-            <span>Atualizados: <strong style={{ color: 'var(--accent)' }}>{progresso.atualizados.toLocaleString('pt-BR')}</strong></span>
-            <span>Excluídos: <strong style={{ color: 'var(--red,#ff4d6a)' }}>{progresso.excluidos.toLocaleString('pt-BR')}</strong></span>
-            {!!progresso.descartadas && (
-              <span title="Propriedades vistas na Change Analysis que não bateram na allowlist curada (ruído)">
-                Descartadas: <strong style={{ color: 'var(--text-muted)' }}>{progresso.descartadas.toLocaleString('pt-BR')}</strong>
-              </span>
-            )}
-          </>
-        )}
-      </div>
-
-      {progresso.log?.length > 0 && (
-        <div style={{ maxHeight: 140, overflowY: 'auto', background: 'var(--bg)', borderRadius: 6, padding: '6px 10px', fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: 'var(--text-muted)' }}>
-          {progresso.log.map((l, i) => (
-            <div key={i}>[{l.ts}] {l.msg}</div>
-          ))}
-        </div>
+    <div className="stat-card" style={{ margin: '16px 20px 0', padding: '16px 20px', borderColor: corBorda, borderWidth: 2 }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+      <span style={{ fontSize: 14, fontWeight: 700 }}>
+        {emExecucao ? `⏳ ${titulo} em andamento` : (houveErro ? `❌ ${titulo} com erro` : `✅ ${titulo} concluída`)}
+      </span>
+      {!emExecucao && (
+        <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDismissed(true)}>Fechar</button>
       )}
+    </div>
+
+    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+      {progresso.fase}
+      {progresso.sub_total > 0 && ` (${progresso.sub_idx}/${progresso.sub_total})`}
+    </div>
+
+    <div style={{ display: 'flex', gap: 18, fontSize: 12, marginBottom: 10, flexWrap: 'wrap' }}>
+      <span>{isReconciliacao ? 'Recursos encontrados' : 'Eventos'}: <strong>{progresso.eventos.toLocaleString('pt-BR')}</strong></span>
+      <span>Novos: <strong style={{ color: 'var(--green,#22c55e)' }}>{progresso.novos.toLocaleString('pt-BR')}</strong></span>
+      {!isReconciliacao && (
+        <>
+          <span>Atualizados: <strong style={{ color: 'var(--accent)' }}>{progresso.atualizados.toLocaleString('pt-BR')}</strong></span>
+          <span>Excluídos: <strong style={{ color: 'var(--red,#ff4d6a)' }}>{progresso.excluidos.toLocaleString('pt-BR')}</strong></span>
+          {!!progresso.descartadas && (
+            <span title="Propriedades vistas na Change Analysis que não bateram na allowlist curada (ruído)">
+              Descartadas: <strong style={{ color: 'var(--text-muted)' }}>{progresso.descartadas.toLocaleString('pt-BR')}</strong>
+            </span>
+          )}
+        </>
+      )}
+    </div>
+
+    {progresso.log?.length > 0 && (
+      <div style={{ maxHeight: 140, overflowY: 'auto', background: 'var(--bg)', borderRadius: 6, padding: '6px 10px', fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, color: 'var(--text-muted)' }}>
+        {progresso.log.map((l, i) => (
+          <div key={i}>[{l.ts}] {l.msg}</div>
+        ))}
       </div>
-    </>
+    )}
+    </div>
   )
 }

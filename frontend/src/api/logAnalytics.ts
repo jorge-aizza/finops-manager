@@ -235,9 +235,12 @@ export const forcarColetaDiagnosticSettings = () =>
 
 // Mesmo padrão de baixarAzureInventarioExcel (api/azureInventario.ts) — resposta binária,
 // não passa por apiFetch (que espera JSON).
-export async function baixarLogAnalyticsExcel(mes?: string) {
+export async function baixarLogAnalyticsExcel(mes?: string, spId?: number | null) {
   const token = getToken()
-  const resp = await fetch(API_BASE + '/log-analytics/export/excel' + (mes ? '?mes=' + mes : ''), {
+  const q = new URLSearchParams()
+  if (mes) q.set('mes', mes)
+  if (spId) q.set('sp_id', String(spId))
+  const resp = await fetch(API_BASE + '/log-analytics/export/excel' + (q.toString() ? '?' + q : ''), {
     headers: token ? { Authorization: 'Bearer ' + token } : {},
   })
   if (!resp.ok) {

@@ -57,6 +57,8 @@ export interface AzureRecursosFiltros {
   data_fim?: string
   /** Ignora RG gerenciado (Databricks/AKS) — igual à contagem da anomalia de crescimento por assinatura. */
   excluir_gerenciados?: boolean
+  /** Filtro de Tenant: as SPs não compartilham assinaturas, então o backend recorta por `subscription_id`. */
+  sp_id?: number | null
 }
 export const getAzureRecursosInventario = (filtros?: AzureRecursosFiltros) => {
   const q = new URLSearchParams()
@@ -67,6 +69,7 @@ export const getAzureRecursosInventario = (filtros?: AzureRecursosFiltros) => {
   if (filtros?.criado_por) q.set('criado_por', filtros.criado_por)
   if (filtros?.data_inicio) q.set('data_inicio', filtros.data_inicio)
   if (filtros?.data_fim) q.set('data_fim', filtros.data_fim)
+  if (filtros?.sp_id) q.set('sp_id', String(filtros.sp_id))
   const qs = q.toString()
   return apiFetch<{ total: number; recursos: AzureRecursoInventario[] }>('GET', '/azure-inventario/recursos' + (qs ? '?' + qs : '')).then((r) => ({
     ...r,
@@ -81,6 +84,8 @@ export interface AzureAuditoriaFiltros {
   acao?: string
   subscription_id?: string
   resource_type?: string
+  /** Filtro de Tenant: as SPs não compartilham assinaturas, então o backend recorta por `subscription_id`. */
+  sp_id?: number | null
 }
 export const getAzureAuditoriaEventos = (filtros?: AzureAuditoriaFiltros) => {
   const q = new URLSearchParams()
@@ -90,6 +95,7 @@ export const getAzureAuditoriaEventos = (filtros?: AzureAuditoriaFiltros) => {
   if (filtros?.acao) q.set('acao', filtros.acao)
   if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
   if (filtros?.resource_type) q.set('resource_type', filtros.resource_type)
+  if (filtros?.sp_id) q.set('sp_id', String(filtros.sp_id))
   const qs = q.toString()
   return apiFetch<{ periodo: { inicio: string; fim: string }; total: number; eventos: AzureAuditoriaEvento[]; por_tipo: AzureAuditoriaPorTipo[] }>(
     'GET', '/azure-inventario/auditoria' + (qs ? '?' + qs : '')
@@ -179,8 +185,11 @@ export const getAzureRecursoDetalhe = (resourceId: string, subscriptionId: strin
 // Hierarquia Assinatura → Resource Group (ver AzureResumoPorAssinaturaResposta) — sem
 // subscriptionId, nível 1 (por assinatura); com subscriptionId, nível 2 (por Resource Group
 // dentro dela). O 3º nível (recursos) reaproveita getAzureRecursosInventario direto.
-export const getAzureResumoPorAssinatura = (subscriptionId?: string) => {
-  const q = subscriptionId ? '?subscription_id=' + encodeURIComponent(subscriptionId) : ''
+export const getAzureResumoPorAssinatura = (subscriptionId?: string, spId?: number | null) => {
+  const p = new URLSearchParams()
+  if (subscriptionId) p.set('subscription_id', subscriptionId)
+  if (spId) p.set('sp_id', String(spId))
+  const q = p.toString() ? '?' + p : ''
   return apiFetch<AzureResumoPorAssinaturaResposta>('GET', '/azure-inventario/resumo-por-assinatura' + q).then((r) => ({
     ...r,
     itens: r.itens.map((it) => ({ ...it, total: Number(it.total), por_tipo: it.por_tipo.map((t) => ({ ...t, total: Number(t.total) })) })),
@@ -282,10 +291,11 @@ export const getAzureCommitmentCobertura = (subscriptionId?: string) => {
   return apiFetch<AzureCoberturaResposta>('GET', '/azure-costs/commitment-cobertura' + q)
 }
 
-export const getAzureDesperdicio = (subscriptionId?: string, diasSnapshot?: number) => {
+export const getAzureDesperdicio = (subscriptionId?: string, diasSnapshot?: number, spId?: number | null) => {
   const q = new URLSearchParams()
   if (subscriptionId) q.set('subscription_id', subscriptionId)
   if (diasSnapshot) q.set('dias_snapshot', String(diasSnapshot))
+  if (spId) q.set('sp_id', String(spId))
   const qs = q.toString()
   // Cache frio = ~5 consultas ao Resource Graph por assinatura (com 429): passa fácil de 30s.
   return apiFetch<AzureDesperdicioResposta>('GET', '/azure-inventario/desperdicio' + (qs ? '?' + qs : ''), undefined, 180000)
@@ -327,10 +337,11 @@ export const getAzureRecursoArmDetalhe = (resourceId: string, subscriptionId: st
 
 // Recomendações do Azure Advisor — sem parâmetros, agrega todas as subscriptions
 // configuradas pro Inventário. `category` filtra server-side.
-export const getAzureAdvisor = (subscriptionId?: string, category?: string) => {
+export const getAzureAdvisor = (subscriptionId?: string, category?: string, spId?: number | null) => {
   const q = new URLSearchParams()
   if (subscriptionId) q.set('subscription_id', subscriptionId)
   if (category) q.set('category', category)
+  if (spId) q.set('sp_id', String(spId))
   const qs = q.toString()
   return apiFetch<AzureAdvisorResposta>('GET', '/azure-inventario/advisor' + (qs ? '?' + qs : ''))
 }
@@ -341,8 +352,8 @@ export const getAzureRedeTopologia = (subscriptionId: string) =>
 
 // Conformidade de tags obrigatórias por subscription — apenas recursos persistentes (7+ dias)
 // em RGs não-gerenciados.
-export const getAzureConformidade = () =>
-  apiFetch<AzureConformidadeResposta>('GET', '/azure-inventario/conformidade-por-subscription')
+export const getAzureConformidade = (spId?: number | null) =>
+  apiFetch<AzureConformidadeResposta>('GET', '/azure-inventario/conformidade-por-subscription' + (spId ? '?sp_id=' + spId : ''))
 
 // Exportar Inventário pra Excel — download direto (não é JSON), mesmo padrão já usado pelo
 // export de Ações legado (app.js `exportarExcel()`): fetch com Bearer token (apiFetch não
@@ -368,10 +379,11 @@ export async function baixarAzureDesperdicioExcel(itens: AzureDesperdicioItem[],
   setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
-export async function baixarAzureInventarioExcel(filtros?: { subscription_id?: string; ativo?: boolean }) {
+export async function baixarAzureInventarioExcel(filtros?: { subscription_id?: string; ativo?: boolean; sp_id?: number | null }) {
   const q = new URLSearchParams()
   if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
   if (filtros?.ativo != null) q.set('ativo', String(filtros.ativo))
+  if (filtros?.sp_id) q.set('sp_id', String(filtros.sp_id))
   const qs = q.toString()
   const token = getToken()
   const resp = await fetch(API_BASE + '/azure-inventario/export/excel' + (qs ? '?' + qs : ''), {

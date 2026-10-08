@@ -8857,7 +8857,10 @@ app.get('/api/azure-inventario/advisor', authMiddleware, dbMiddleware, async (re
   try {
     const { subscription_id, category } = req.query;
     const { escopos } = await _getInventarioEscopos();
-    const alvo = subscription_id ? [String(subscription_id)] : escopos.map((e) => e.subscriptionId);
+    // Filtro de Tenant da tela — sem `sp_id`, consulta as assinaturas de todas as SPs ativas.
+    const spEscolhida = Number(req.query.sp_id) || null;
+    const doTenant = spEscolhida ? escopos.filter((e) => e.spId === spEscolhida) : escopos;
+    const alvo = subscription_id ? [String(subscription_id)] : doTenant.map((e) => e.subscriptionId);
     if (!alvo.length) return res.status(400).json({ error: 'Nenhuma subscription configurada' });
     const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
 
@@ -8980,6 +8983,10 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
     if (criado_por) { params.push('%' + criado_por + '%'); where += ` AND ri.criado_por ILIKE $${params.length}`; }
     if (data_inicio) { params.push(data_inicio); where += ` AND ri.criado_em >= $${params.length}`; }
     if (data_fim) { params.push(data_fim); where += ` AND ri.criado_em < $${params.length}::date + INTERVAL '1 day'`; }
+    // Filtro de Tenant da tela: as SPs não compartilham assinaturas, então `subscription_id`
+    // já identifica a dona de cada linha (ver _getInventarioEscopos).
+    const subsSp = await _subsDaSp(req.query.sp_id);
+    if (subsSp) { params.push(subsSp); where += ` AND LOWER(ri.subscription_id) = ANY($${params.length})`; }
 
     const r = await pool.query(
       `SELECT ri.*,
@@ -9037,6 +9044,10 @@ app.get('/api/azure-inventario/export/excel', authMiddleware, dbMiddleware, asyn
     if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
     if (ativo === 'true') where += ` AND ri.ativo = true`;
     else if (ativo === 'false') where += ` AND ri.ativo = false`;
+    // Filtro de Tenant da tela: as SPs não compartilham assinaturas, então `subscription_id`
+    // já identifica a dona de cada linha (ver _getInventarioEscopos).
+    const subsSp = await _subsDaSp(req.query.sp_id);
+    if (subsSp) { params.push(subsSp); where += ` AND LOWER(ri.subscription_id) = ANY($${params.length})`; }
 
     const [r, subsRow, rgStats] = await Promise.all([
       pool.query(
@@ -9148,9 +9159,15 @@ app.get('/api/azure-inventario/resumo-por-assinatura', authMiddleware, dbMiddlew
   try {
     await ensureAzureColetaTable();
     const { subscription_id } = req.query;
+    // Filtro de Tenant: `subscription_id` já identifica a SP dona (ver _getInventarioEscopos).
+    const subsSp = await _subsDaSp(req.query.sp_id);
 
     if (!subscription_id) {
-      const r = await pool.query(`SELECT subscription_id, resource_group, resource_type FROM azure_recursos_inventario WHERE ativo = true`);
+      const r = await pool.query(
+        `SELECT subscription_id, resource_group, resource_type FROM azure_recursos_inventario
+         WHERE ativo = true${subsSp ? ' AND LOWER(subscription_id) = ANY($1)' : ''}`,
+        subsSp ? [subsSp] : [],
+      );
       const bySub = new Map();
       for (const row of r.rows) {
         if (!bySub.has(row.subscription_id)) bySub.set(row.subscription_id, { subscription_id: row.subscription_id, total: 0, tipos: new Map() });
@@ -9375,6 +9392,9 @@ app.get('/api/azure-inventario/auditoria', authMiddleware, dbMiddleware, async (
     const params = [data_inicio, data_fim];
     if (resource_id) { params.push(resource_id); where += ` AND LOWER(e.resource_id) = LOWER($${params.length})`; }
     if (acao) { params.push(acao); where += ` AND e.acao = $${params.length}`; }
+    // Filtro de Tenant da tela (ver _getInventarioEscopos).
+    const subsSpAud = await _subsDaSp(req.query.sp_id);
+    if (subsSpAud) { params.push(subsSpAud); where += ` AND LOWER(e.subscription_id) = ANY($${params.length})`; }
     if (subscription_id) { params.push(subscription_id); where += ` AND e.subscription_id = $${params.length}`; }
 
     // Caixas por Tipo de Recurso (2026-08-31, pedido do usuário) — agregada sobre TODO o
@@ -10219,6 +10239,12 @@ async function _computeTagsFaltantes(subscription_id) {
 app.get('/api/azure-inventario/conformidade-por-subscription', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const dados = await _computeConformidadePorSubscription();
+    // Filtro de Tenant da tela — o cálculo é por assinatura, então basta recortar o resultado.
+    const subsSp = await _subsDaSp(req.query.sp_id);
+    if (subsSp) {
+      const permitidas = new Set(subsSp);
+      dados.por_subscription = (dados.por_subscription || []).filter((x) => permitidas.has(String(x.subscription_id || '').toLowerCase()));
+    }
     res.json(dados);
   } catch (e) { _dbErr(res, e); }
 });
@@ -10776,7 +10802,10 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     const dias = Math.max(1, Math.min(3650, parseInt(req.query.dias_snapshot, 10) || 90));
     const { subscription_id } = req.query;
     const { escopos } = await _getInventarioEscopos();
-    const alvos = subscription_id ? [String(subscription_id)] : escopos.map((e) => e.subscriptionId);
+    // Filtro de Tenant da tela — sem `sp_id`, varre as assinaturas de todas as SPs ativas.
+    const spEscolhida = Number(req.query.sp_id) || null;
+    const doTenant = spEscolhida ? escopos.filter((e) => e.spId === spEscolhida) : escopos;
+    const alvos = subscription_id ? [String(subscription_id)] : doTenant.map((e) => e.subscriptionId);
     if (!alvos.length) return res.status(400).json({ error: 'Nenhuma subscription configurada no Inventário' });
 
     // Caminho rápido: todas as assinaturas numa chamada por tipo de consulta. Plano B, se a chamada
@@ -17271,11 +17300,18 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
     const impostoCfgExcel = await _getImpostoConfig();
     const mes = _mesLogAnalytics(req);
     const janela = _janelaLogAnalytics(mes);
+    // Mesmo filtro de Tenant da tela — a planilha reflete o que está sendo visto.
+    const subsFiltro = await _subsDaSp(req.query.sp_id);
+    const filtroSozinho = subsFiltro ? ' WHERE LOWER(w.subscription_id) = ANY($1)' : '';
+    const pJanela = subsFiltro ? [janela.inicio, janela.fimExclusivo, subsFiltro] : [janela.inicio, janela.fimExclusivo];
+    const pSozinho = subsFiltro ? [subsFiltro] : [];
     const [wsRows, recRows, tabRows, diagRows, dcrRows] = await Promise.all([
-      pool.query(`SELECT w.*, ${_logAnalyticsCustoSql(1, 2)} FROM log_analytics_workspaces w ${_LOG_ANALYTICS_PRECO_JOIN_SQL}`, [janela.inicio, janela.fimExclusivo]),
+      pool.query(`SELECT w.*, ${_logAnalyticsCustoSql(1, 2)} FROM log_analytics_workspaces w ${_LOG_ANALYTICS_PRECO_JOIN_SQL}
+                  ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}`, pJanela),
       pool.query(`SELECT rec.*, w.nome AS workspace_nome FROM log_analytics_recomendacoes rec
                   JOIN log_analytics_workspaces w ON w.workspace_guid = rec.workspace_guid
-                  ORDER BY rec.severidade DESC, rec.criado_em DESC`),
+                  ${filtroSozinho}
+                  ORDER BY rec.severidade DESC, rec.criado_em DESC`, pSozinho),
       // JOIN pré-agregado, NÃO sub-select correlacionado por linha (log_analytics_tabelas tem
       // ~74 mil linhas num tenant real — um SELECT escalar por linha contra
       // log_analytics_ingestao_diaria media SEGUNDOS a mais nessa tela, era o maior gargalo).
@@ -17289,16 +17325,19 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
                     WHERE dia >= $1::date AND dia < $2::date
                     GROUP BY workspace_guid, tabela
                   ) g ON g.workspace_guid = t.workspace_guid AND g.tabela = t.tabela
-                  ORDER BY w.nome, gb_mes DESC`, [janela.inicio, janela.fimExclusivo]),
+                  ${subsFiltro ? 'WHERE LOWER(w.subscription_id) = ANY($3)' : ''}
+                  ORDER BY w.nome, gb_mes DESC`, pJanela),
       pool.query(`SELECT w.nome AS workspace_nome, d.recurso_tipo, d.recurso_id, d.nome_config,
                     d.categorias_habilitadas, d.categorias_desabilitadas, d.envia_storage, d.envia_eventhub
                   FROM log_analytics_diagnostic_settings d
                   JOIN log_analytics_workspaces w ON w.workspace_guid = d.workspace_guid
-                  ORDER BY w.nome, d.recurso_tipo`),
+                  ${filtroSozinho}
+                  ORDER BY w.nome, d.recurso_tipo`, pSozinho),
       pool.query(`SELECT w.nome AS workspace_nome, c.nome AS dcr_nome, c.streams, c.tipos_fonte, c.resource_group, c.subscription_id
                   FROM log_analytics_dcrs c
                   JOIN log_analytics_workspaces w ON w.workspace_guid = c.workspace_guid_destino
-                  ORDER BY w.nome, c.nome`),
+                  ${filtroSozinho}
+                  ORDER BY w.nome, c.nome`, pSozinho),
     ]);
     wsRows.rows = wsRows.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfgExcel, _diasJanelaLogAnalytics(janela)))
       .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
