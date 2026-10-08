@@ -9,6 +9,7 @@ import {
   type LogAnalyticsRankingItem,
 } from '../api/logAnalytics'
 import LogAnalyticsConsumoModal from '../components/LogAnalyticsConsumoModal'
+import { TenantSelector } from '../components/TenantSelector'
 
 // v1 (2026-09-29): descoberta de workspaces + ingestão diária por tabela + as 5 regras do
 // motor de FinOps + export Excel. v1.1 (mesmo dia): retenção por tabela (ARM Tables - List) +
@@ -242,6 +243,11 @@ export default function LogAnalyticsView() {
       <div className="view-hero">
         <div className="page-title">Log Analytics FinOps</div>
         <div className="view-hero-sub">Ingestão, retenção e oportunidades de economia nos workspaces de Log Analytics.</div>
+      </div>
+
+      {/* Filtro de Tenant (Service Principal) */}
+      <div style={{ padding: '0 20px' }}>
+        <TenantSelector />
       </div>
 
       <div style={{ padding: '16px 20px 20px', display: 'flex', flexDirection: 'column', gap: 18 }}>
