@@ -102,7 +102,7 @@ function RankingList({ title, items, color, fmt }: { title: string; items: LogAn
 
 export default function LogAnalyticsView() {
   const queryClient = useQueryClient()
-  const { selectedTenantId } = useTenantFilter()
+  const { tenantNome, matchSubscription } = useTenantFilter()
   const [filtroSeveridade, setFiltroSeveridade] = useState<LogAnalyticsSeveridade | undefined>(undefined)
   const [exportando, setExportando] = useState(false)
   const [gerandoDashboard, setGerandoDashboard] = useState(false)
@@ -211,11 +211,12 @@ export default function LogAnalyticsView() {
   const tabelas = tabelasQuery.data?.tabelas || []
   const auditoriaConsultasHabilitada = tabelasQuery.data?.auditoria_consultas_habilitada ?? false
 
-  // Filtrar por Tenant selecionado
-  const workspacesFiltroPorTenant = useMemo(() => {
-    if (!selectedTenantId) return workspaces
-    return workspaces.filter((w) => w.sp_id === selectedTenantId)
-  }, [workspaces, selectedTenantId])
+  // Atribuição por assinatura: as SPs cadastradas não compartilham subscriptions,
+  // então `subscription_id` já identifica a dona do workspace. Ver TenantFilterContext.
+  const workspacesFiltroPorTenant = useMemo(
+    () => workspaces.filter((w) => matchSubscription(w.subscription_id)),
+    [workspaces, matchSubscription],
+  )
 
   const workspacesExibidos = somenteWorkspacesComCusto
     ? workspacesFiltroPorTenant.filter((w) => (Number(w.custo_mes_total) || 0) > 0)
@@ -350,6 +351,11 @@ export default function LogAnalyticsView() {
         ) : workspaces.length === 0 ? (
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             Nenhum workspace descoberto ainda — clique em "Atualizar agora" para rodar a primeira coleta.
+          </div>
+        ) : workspacesFiltroPorTenant.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Nenhum workspace coletado para <strong>{tenantNome}</strong> — os {workspaces.length} workspaces
+            conhecidos pertencem a assinaturas de outra Service Principal. Selecione "Todas as SPs" para vê-los.
           </div>
         ) : workspacesExibidos.length === 0 ? (
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
