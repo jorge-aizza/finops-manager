@@ -65,7 +65,8 @@ export default function AgendamentoModal({ sp, onClose }: Props) {
   const coletarAgoraMutation = useMutation({
     mutationFn: async () => {
       const fresh = await statusQuery.refetch()
-      if (fresh.data?.em_execucao) throw new Error('Já existe uma coleta em execução.')
+      const apiExecAtiva = fresh.data?.execucoes?.some((e) => e.tipo === 'api' && e.id === sp.id && e.status === null)
+      if (apiExecAtiva) throw new Error('Esta Service Principal já está coletando dados.')
       const fim = new Date()
       const ini = new Date(fim)
       ini.setDate(ini.getDate() - (sp.granularidade_dias || 7))

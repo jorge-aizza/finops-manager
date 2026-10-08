@@ -42,8 +42,10 @@ export const executarStorage = (id: number) =>
 export const coletarAPI = (spId: number, input: ColetarAPIInput) =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/sps/' + spId + '/coletar-api', input, 20000)
 
-export const cancelarColeta = () =>
-  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/cancelar')
+export const cancelarColeta = (tipo?: 'api' | 'storage', id?: number | null) => {
+  const body = (tipo && id !== undefined) ? { tipo, id } : undefined
+  return apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/cancelar', body)
+}
 
 export const getColetaStatus = () => apiFetch<ColetaStatus>('GET', '/azure-coleta/status')
 

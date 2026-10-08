@@ -122,7 +122,8 @@ export default function WizardColetaModal({ sp, onClose }: Props) {
   const coletarMutation = useMutation({
     mutationFn: async () => {
       const fresh = await statusQuery.refetch()
-      if (fresh.data?.em_execucao) throw new Error('Já existe uma coleta em execução.')
+      const apiExecAtiva = fresh.data?.execucoes?.some((e) => e.tipo === 'api' && e.id === sp.id && e.status === null)
+      if (apiExecAtiva) throw new Error('Esta Service Principal já está coletando dados.')
       if (schedAtivo || sp.auto_coleta) await agendamentoMutation.mutateAsync()
       return coletarAPI(sp.id, {
         modo: (skipSubStep ? 'billing_profile' : 'subscription') as ModoColeta,

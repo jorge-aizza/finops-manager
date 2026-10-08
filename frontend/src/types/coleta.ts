@@ -188,10 +188,21 @@ export interface ColetaProgresso {
   log: { ts: string; msg: string }[]
 }
 
+// v4.2: Uma execução ativa de coleta (API ou Storage de uma SP específica)
+export interface ExecucaoAtiva {
+  tipo: 'api' | 'storage'
+  id: number | null // null se for "primeira ativa" de Storage
+  iniciado_em: string // ISO date
+  cancelando: boolean
+  progresso: ColetaProgresso
+  status: 'concluido' | 'erro' | null // null se ainda em andamento
+}
+
 export interface ColetaStatus {
   em_execucao: boolean
   cancelando: boolean
   progresso: ColetaProgresso | null
+  execucoes: ExecucaoAtiva[] // v4.2: lista de todas as execuções ativas/recém-concluídas
   ultimo: HistoricoItem | null
   ultimo_api: HistoricoItem | null
   ultimo_storage: HistoricoItem | null

@@ -29,7 +29,8 @@ function renderWithClient(sp: ServicePrincipal, onClose = vi.fn()) {
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(coletaApi.getColetaStatus).mockResolvedValue({
-    em_execucao: false, cancelando: false, progresso: null, ultimo: null, ultimo_api: null, ultimo_storage: null,
+    em_execucao: false, cancelando: false, progresso: null, execucoes: [],
+    ultimo: null, ultimo_api: null, ultimo_storage: null,
     agendador_ativo: true, circuit_breaker: { state: 'closed', failures: 0, open_until: null },
   })
   vi.mocked(coletaApi.salvarAgendamentoSP).mockResolvedValue({ ok: true, sp: {} })
@@ -80,17 +81,22 @@ describe('AgendamentoModal', () => {
     expect(screen.queryByRole('button', { name: 'Remover agendamento' })).not.toBeInTheDocument()
   });
 
-  it('bloqueia "Coletar agora" se já existe uma coleta em execução', async () => {
+  it('bloqueia "Coletar agora" se a SP específica já está coletando', async () => {
     const user = userEvent.setup()
+    const progresso = { tipo: 'api' as const, fase: 'Buscando', ins: 0, upd: 0, err: 0, log: [] }
     vi.mocked(coletaApi.getColetaStatus).mockResolvedValue({
-      em_execucao: true, cancelando: false, progresso: null, ultimo: null, ultimo_api: null, ultimo_storage: null,
+      em_execucao: true, cancelando: false, progresso, execucoes: [{
+        tipo: 'api', id: 3, iniciado_em: '2026-01-01T00:00:00.000Z', cancelando: false,
+        progresso, status: null,
+      }],
+      ultimo: null, ultimo_api: null, ultimo_storage: null,
       agendador_ativo: true, circuit_breaker: { state: 'closed', failures: 0, open_until: null },
     })
     renderWithClient(spComAgendamento)
 
     await user.click(screen.getByRole('button', { name: /Coletar agora/ }))
 
-    await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('em execução'), 'error'))
+    await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('coletando'), 'error'))
     expect(coletaApi.coletarAPI).not.toHaveBeenCalled()
   });
 });

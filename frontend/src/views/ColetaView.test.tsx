@@ -76,7 +76,8 @@ beforeEach(() => {
   vi.mocked(coletaApi.getImports).mockResolvedValue([])
   vi.mocked(coletaApi.listPendentes).mockResolvedValue(mockPendentes)
   vi.mocked(coletaApi.getColetaStatus).mockResolvedValue({
-    em_execucao: false, cancelando: false, progresso: null, ultimo: null, ultimo_api: null, ultimo_storage: null,
+    em_execucao: false, cancelando: false, progresso: null, execucoes: [],
+    ultimo: null, ultimo_api: null, ultimo_storage: null,
     agendador_ativo: true, circuit_breaker: { state: 'closed', failures: 0, open_until: null },
   })
   vi.mocked(databricksColetaApi.listDatabricksConfigs).mockResolvedValue([])

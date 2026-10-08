@@ -10,7 +10,7 @@ vi.mock('../api/coleta')
 
 function statusBase(overrides: Partial<ColetaStatus> = {}): ColetaStatus {
   return {
-    em_execucao: false, cancelando: false, progresso: null,
+    em_execucao: false, cancelando: false, progresso: null, execucoes: [],
     ultimo: null, ultimo_api: null, ultimo_storage: null,
     agendador_ativo: true, circuit_breaker: { state: 'closed', failures: 0, open_until: null },
     ...overrides,
@@ -42,12 +42,17 @@ describe('ColetaMonitor', () => {
 
   it('coleta em andamento: mostra fase, contadores e permite cancelar', async () => {
     const user = userEvent.setup()
+    const progresso = {
+      tipo: 'api' as const, fase: 'Buscando custos', sub_atual: 'Assinatura A', sub_idx: 1, sub_total: 2,
+      chunk_atual: 3, chunk_total: 10, ins: 120, upd: 40, err: 0, log: [{ ts: '10:00:00', msg: 'Iniciado' }],
+    }
     vi.mocked(coletaApi.getColetaStatus).mockResolvedValue(statusBase({
       em_execucao: true,
-      progresso: {
-        tipo: 'api', fase: 'Buscando custos', sub_atual: 'Assinatura A', sub_idx: 1, sub_total: 2,
-        chunk_atual: 3, chunk_total: 10, ins: 120, upd: 40, err: 0, log: [{ ts: '10:00:00', msg: 'Iniciado' }],
-      },
+      progresso,
+      execucoes: [{
+        tipo: 'api', id: 1, iniciado_em: '2026-08-22T10:00:00.000Z', cancelando: false,
+        progresso, status: null,
+      }],
     }))
     vi.mocked(coletaApi.cancelarColeta).mockResolvedValue({ ok: true, message: 'Cancelamento solicitado' })
     renderWithClient()
@@ -62,9 +67,14 @@ describe('ColetaMonitor', () => {
 
   it('coleta finalizada: mostra estado final e some ao clicar em Fechar', async () => {
     const user = userEvent.setup()
+    const progresso = { tipo: 'api' as const, fase: 'Finalizado com sucesso', ins: 500, upd: 10, err: 0, log: [] }
     vi.mocked(coletaApi.getColetaStatus).mockResolvedValue(statusBase({
       em_execucao: false,
-      progresso: { tipo: 'api', fase: 'Finalizado com sucesso', ins: 500, upd: 10, err: 0, log: [] },
+      progresso,
+      execucoes: [{
+        tipo: 'api', id: 1, iniciado_em: '2026-08-22T09:00:00.000Z', cancelando: false,
+        progresso, status: 'concluido',
+      }],
       ultimo_api: {
         id: 1, tipo: 'api', origem: 'api', iniciado_em: '2026-08-22T09:00:00.000Z', concluido_em: '2026-08-22T09:05:00.000Z',
         status: 'concluido', linhas_inseridas: 500, linhas_atualizadas: 10, linhas_erro: 0, mensagem: null, detalhes: null,
@@ -90,12 +100,17 @@ const ultimoApi: HistoricoItem = {
 }
 
 function statusFinalizado(overrides: Partial<ColetaStatus> = {}): ColetaStatus {
+  const progresso = {
+    tipo: 'api' as const, fase: 'Concluído — 76461b8e-edbd-464c-ad30-b13ba994709c (2/2 assinaturas)',
+    ins: 27063, upd: 0, err: 0,
+    log: [{ ts: '14:32:07', msg: 'Coleta finalizada' }],
+  }
   return statusBase({
-    progresso: {
-      tipo: 'api', fase: 'Concluído — 76461b8e-edbd-464c-ad30-b13ba994709c (2/2 assinaturas)',
-      ins: 27063, upd: 0, err: 0,
-      log: [{ ts: '14:32:07', msg: 'Coleta finalizada' }],
-    },
+    progresso,
+    execucoes: [{
+      tipo: 'api', id: 42, iniciado_em: '2026-08-22T10:00:00.000Z', cancelando: false,
+      progresso, status: 'concluido',
+    }],
     ultimo: ultimoApi, ultimo_api: ultimoApi,
     ...overrides,
   })
@@ -121,7 +136,7 @@ describe('ColetaMonitor — "Fechar" precisa sobreviver a reload/remount', () =>
     await screen.findByText('✅ Concluído — API Oficial')
     await userEvent.click(screen.getByRole('button', { name: 'Fechar' }))
     await waitFor(() => expect(screen.queryByText('✅ Concluído — API Oficial')).not.toBeInTheDocument())
-    expect(localStorage.getItem('coleta_monitor_dismissed')).toBe('api:42')
+    expect(localStorage.getItem('coleta_monitor_dismissed_api:42')).toBe('1')
 
     unmount()
     renderWithClient() // simula reentrar no app / F5 — mesmo job (id 42) ainda vem do servidor
@@ -129,9 +144,21 @@ describe('ColetaMonitor — "Fechar" precisa sobreviver a reload/remount', () =>
   })
 
   it('um job novo (id diferente) reabre o card mesmo com um fechamento antigo persistido', async () => {
-    localStorage.setItem('coleta_monitor_dismissed', 'api:42') // job anterior já fechado antes
+    localStorage.setItem('coleta_monitor_dismissed_api:42', '1') // job anterior já fechado antes
+    const novoUltimo = { ...ultimoApi, id: 43 }
+    const progresso = {
+      tipo: 'api' as const, fase: 'Concluído — 76461b8e-edbd-464c-ad30-b13ba994709c (2/2 assinaturas)',
+      ins: 27063, upd: 0, err: 0,
+      log: [{ ts: '14:32:07', msg: 'Coleta finalizada' }],
+    }
     vi.mocked(coletaApi.getColetaStatus).mockResolvedValue(
-      statusFinalizado({ ultimo_api: { ...ultimoApi, id: 43 } }),
+      statusFinalizado({
+        ultimo_api: novoUltimo,
+        execucoes: [{
+          tipo: 'api', id: 43, iniciado_em: '2026-08-22T10:00:00.000Z', cancelando: false,
+          progresso, status: 'concluido',
+        }],
+      }),
     )
     renderWithClient()
     expect(await screen.findByText('✅ Concluído — API Oficial')).toBeInTheDocument()
