@@ -15012,21 +15012,34 @@ async function _storageDownloadBlob(token, storageAccount, container, blobName) 
 }
 
 async function _executarColetaStorage(modo = 'manual', storageId = null) {
-  if (_coletaEmExecucao) throw new Error('Coleta já em execução');
+  // v4.2: Multi-tenant — Storage agora também tem sua própria chave no Map
   if (!pool) throw new Error('Banco não conectado');
-  _coletaEmExecucao = true;
-  _coletaCancelada  = false;
-  const _coletaStartEm = new Date();
-  _coletaProgresso  = { tipo: 'storage', fase: 'Iniciando...', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] };
-  _logColeta(`Coleta Storage iniciada (${modo}${storageId ? ' STG#'+storageId : ''})`);
 
-  let histId, totalIns = 0, totalUpd = 0, totalErr = 0;
-
+  let histId;
   try {
     await ensureAzureColetaTable();
     const origemDb = modo === 'auto' ? 'agendado' : 'manual';
     const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,origem) VALUES ('executando','storage',$1) RETURNING id`, [origemDb]);
     histId = r.rows[0].id;
+  } catch (e) {
+    throw e;
+  }
+
+  // Criar entrada no Map — storageId pode ser null (pega a primeira ativa), então salvamos na chave quando souber
+  // Por enquanto, usar um placeholder; será atualizado após descobrir qual storage rodou
+  let coletaChave = `storage:${storageId || 'auto'}`;
+
+  // v4.2: Criar entry e sombrear identificadores localmente
+  const coletaEntry = _iniciarColetaEntry('storage', storageId || -999, histId); // -999 = chave temp pra "primeira ativa"
+  const _coletaProgresso = coletaEntry.progresso;
+  const _coletaStartEm = coletaEntry.iniciadoEm;
+  const isCancelada = () => coletaEntry.cancelada;
+
+  _logColeta(`Coleta Storage iniciada (${modo}${storageId ? ' STG#'+storageId : ''})`, _coletaProgresso);
+
+  let totalIns = 0, totalUpd = 0, totalErr = 0;
+
+  try {
 
     // Storage config
     const stgRow = storageId
@@ -15083,7 +15096,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     const sql  = temIdx ? sqlU : sqlI;
 
     for (let bi = 0; bi < blobs.length; bi++) {
-      if (_coletaCancelada) { _logColeta('Cancelado'); break; }
+      if (isCancelada()) { _logColeta('Cancelado', _coletaProgresso); break; }
       const blob = blobs[bi];
       _coletaProgresso.sub_idx   = bi + 1;
       _coletaProgresso.sub_atual = blob.name.split('/').pop();
@@ -15171,7 +15184,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
         plBlobs = plBlobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
         _logPl(`${plBlobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`);
         for (const pb of plBlobs) {
-          if (_coletaCancelada) break;
+          if (isCancelada()) break;
           let plTmp;
           try {
             let plTok = await getStorageToken();
@@ -15216,7 +15229,8 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
 
     const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros${plMsg}`;
     _coletaProgresso.fase = 'Concluída';
-    _logColeta('Concluída: ' + msg);
+    _logColeta('Concluída: ' + msg, _coletaProgresso);
+    _finalizarColetaEntry('storage', storageId || -999, 'concluido');
     await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, msg, JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] }), histId]);
     _validarColeta(histId, null, null, null).catch(() => {});
@@ -15228,10 +15242,11 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     return { ok: true, msg };
   } catch (err) {
     _coletaProgresso.fase = 'Erro: ' + err.message.slice(0, 80);
-    _logColeta('Erro: ' + err.message.slice(0, 80));
+    _logColeta('Erro: ' + err.message.slice(0, 80), _coletaProgresso);
     const detStgErr = JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] });
     if (histId) await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, err.message, detStgErr, histId]).catch(() => {});
+    _finalizarColetaEntry('storage', storageId || -999, 'erro');
     _registrarNotificacaoColeta(
       `Coleta Storage com erro`,
       err.message,
@@ -15240,8 +15255,8 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     _alertarColetaComErro('Coleta Storage com erro', err.message).catch(() => {});
     throw err;
   } finally {
-    _coletaEmExecucao = false;
-    _coletaCancelada  = false;
+    // v4.2: Remover entrada do Map
+    _coletasEmExecucao.delete(coletaChave);
   }
 }
 
