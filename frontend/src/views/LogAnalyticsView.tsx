@@ -349,10 +349,14 @@ export default function LogAnalyticsView() {
         </div>
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: -10 }}>
-        Custo real correlacionado com `azure_costs` (Cost Management) pelo resource_id do workspace. No mês corrente a
-        janela é móvel (últimos 30 dias, não "mês civil") — a importação de custos do Azure tem atraso de publicação, e
-        uma janela fixa de calendário ficaria zerada nos primeiros dias do mês. Meses passados já fechados usam o mês
-        civil completo. Clique em um workspace na tabela abaixo para ver o inventário por tabela.
+        Custo real correlacionado com `azure_costs` (Cost Management) pelo resource_id do workspace. O período
+        selecionado é sempre o mês civil. Clique em um workspace na tabela abaixo para ver o inventário por tabela.
+        {resumoQuery.data?.custo_consolidado_ate && (
+          <> O mês corrente vai do dia 1 até <strong style={{ color: 'var(--orange,#ff8c42)' }}>
+            {new Date(resumoQuery.data.custo_consolidado_ate + 'T00:00:00').toLocaleDateString('pt-BR')}
+          </strong>, o último dia com custo fechado — a Azure publica o billing com atraso, e os dias seguintes ficam de
+          fora para nenhum deles entrar pela metade.</>
+        )}
         {somenteWorkspacesComCusto && (
           <> <strong style={{ color: 'var(--text)' }}>Filtro "só com custo" ativo</strong> — os KPIs acima somam só os workspaces visíveis na tabela, não o total geral (o Painel logo abaixo continua mostrando o total de todos).</>
         )}

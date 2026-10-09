@@ -119,7 +119,7 @@ export default function CkBarChart({ dias, series, empilhado = false, destaqueIn
                       x={x} y={y}
                       width={Math.max(1, larguraBarra - 1)} height={h}
                       // o dia de pico sai na cor de destaque, o resto na cor da serie
-                      fill={i === destaqueIndice ? 'var(--ck-magenta)' : s.cor} rx={2}
+                      fill={i === destaqueIndice ? 'var(--ck-destaque)' : s.cor} rx={2}
                     >
                       <title>{`${dia} · ${s.label}: ${(s.fmt || curto)(v)}`}</title>
                     </rect>
@@ -153,7 +153,7 @@ export default function CkBarChart({ dias, series, empilhado = false, destaqueIn
         {destaqueIndice != null && (
           // a barra do pico sai em magenta: sem esta entrada, aparecia uma cor
           // no grafico que nao existia na legenda
-          <span><i style={{ background: 'var(--ck-magenta)' }} />Maior dia</span>
+          <span><i style={{ background: 'var(--ck-destaque)' }} />Maior dia</span>
         )}
       </div>
     </>

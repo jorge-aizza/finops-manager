@@ -7365,6 +7365,11 @@ async function ensureAzureColetaTable() {
       PRIMARY KEY (cost_date, subscription_id)
     )
   `);
+  // Quando o dia foi visto pela primeira e pela última vez numa importação. A Azure publica
+  // custo em levas: um dia só é confiável depois de ter sido revisitado — enquanto aparece
+  // apenas na leva mais recente, ainda está crescendo. Ver _ultimoDiaCustoFechado.
+  await pool.query(`ALTER TABLE azure_custo_diario ADD COLUMN IF NOT EXISTS primeiro_import TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE azure_custo_diario ADD COLUMN IF NOT EXISTS ultimo_import TIMESTAMPTZ`);
 
   _coletaTableReady = true;
 }
@@ -7548,10 +7553,11 @@ async function _rebuildAlocacaoTagsMes(mes, origem = 'agendado') {
     [ini]
   );
   await client.query(
-    `INSERT INTO azure_custo_diario (cost_date, subscription_id, custo_microsoft, custo_marketplace)
+    `INSERT INTO azure_custo_diario (cost_date, subscription_id, custo_microsoft, custo_marketplace, primeiro_import, ultimo_import)
      SELECT cost_date, subscription_id::text,
             COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'),0),
-            COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'),0)
+            COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'),0),
+            MIN(importado_em), MAX(importado_em)
      FROM azure_costs
      WHERE cost_date >= $1::date AND cost_date < ($1::date + INTERVAL '1 month')
        AND subscription_id IS NOT NULL
@@ -15988,6 +15994,29 @@ const _LOG_ANALYTICS_TIPOS_MONITORAVEIS = [
   'microsoft.signalrservice/signalr', 'microsoft.keyvault/vaults', 'microsoft.aad/domainservices',
   'microsoft.recoveryservices/vaults', 'microsoft.storage/storageaccounts', 'microsoft.insights/components',
   'microsoft.machinelearningservices/workspaces', 'microsoft.cognitiveservices/accounts',
+  // Tipos presentes neste tenant que a lista de referência não cobria (2026-10-xx) — sem eles,
+  // o "detalhe por recurso" omitia silenciosamente quem estivesse enviando log por aqui.
+  // Um tipo que não suporte Diagnostic Setting só devolve 404, contabilizado como
+  // `naoEncontrados` e sem efeito no resultado.
+  'microsoft.automation/automationaccounts/configurations',
+  'microsoft.automation/automationaccounts/runbooks', 'microsoft.azurestackhci/logicalnetworks',
+  'microsoft.cache/redisenterprise', 'microsoft.cdn/profiles/afdendpoints',
+  'microsoft.cdn/profiles/endpoints', 'microsoft.cognitiveservices/accounts/projects',
+  'microsoft.containerregistry/registries/replications',
+  'microsoft.containerregistry/registries/tasks', 'microsoft.databricks/accessconnectors',
+  'microsoft.eventgrid/namespaces', 'microsoft.eventgrid/systemtopics',
+  'microsoft.machinelearningservices/workspaces/serverlessendpoints',
+  'microsoft.mysqldiscovery/mysqlsites', 'microsoft.netapp/netappaccounts',
+  'microsoft.netapp/netappaccounts/backuppolicies', 'microsoft.netapp/netappaccounts/backupvaults',
+  'microsoft.netapp/netappaccounts/capacitypools',
+  'microsoft.netapp/netappaccounts/capacitypools/volumes',
+  'microsoft.netapp/netappaccounts/snapshotpolicies',
+  'microsoft.network/applicationgatewaywebapplicationfirewallpolicies',
+  'microsoft.network/expressroutegateways', 'microsoft.network/firewallpolicies',
+  'microsoft.network/vpngateways', 'microsoft.purview/accounts', 'microsoft.relay/namespaces',
+  'microsoft.security/automations', 'microsoft.signalrservice/webpubsub',
+  'microsoft.streamanalytics/streamingjobs', 'microsoft.synapse/privatelinkhubs',
+  'microsoft.synapse/workspaces/bigdatapools', 'microsoft.synapse/workspaces/sqlpools',
 ];
 
 // Descoberta via ARM (plano de gerência — usa o token/acesso que a SP já tem hoje, sem
@@ -16925,22 +16954,53 @@ function _mesLabelPt(mesYYYYMM) {
 }
 // { inicio, fimExclusivo } como strings YYYY-MM-DD — mesmo par usado tanto pros 4 subselects de
 // custo (_logAnalyticsCustoSql) quanto pras janelas de GB ingerido (log_analytics_ingestao_diaria).
-function _janelaLogAnalytics(mes) {
+async function _janelaLogAnalytics(mes) {
   const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const hoje = new Date();
   const mesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
-  if (mes === mesAtual) {
-    const inicio = new Date(hoje); inicio.setDate(inicio.getDate() - 30);
-    const fimExclusivo = new Date(hoje); fimExclusivo.setDate(fimExclusivo.getDate() + 1);
-    return { inicio: ymd(inicio), fimExclusivo: ymd(fimExclusivo) };
-  }
   const [ano, mesNum] = mes.split('-').map(Number);
-  return { inicio: `${mes}-01`, fimExclusivo: ymd(new Date(ano, mesNum, 1)) };
+  // Sempre o mês civil: o mês escolhido no seletor é o que a tela mostra, ponto. Até 2026-10
+  // o mês corrente usava uma janela móvel de 30 dias pra contornar o atraso de publicação do
+  // billing da Azure — mas isso fazia "Outubro" exibir dados de setembro.
+  //
+  // O atraso continua existindo, e agora é tratado cortando a ponta em vez de mascarando: o
+  // mês corrente termina no último dia com custo fechado, não em hoje. Assim nenhum dia entra
+  // pela metade e os totais fecham. `custo_consolidado_ate` no resumo diz onde foi o corte.
+  if (mes !== mesAtual) {
+    return { inicio: `${mes}-01`, fimExclusivo: ymd(new Date(ano, mesNum, 1)) };
+  }
+  const fechadoAte = await _ultimoDiaCustoFechado();
+  const limiteHoje = ymd(new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() + 1));
+  // Sem custo nenhum ainda neste mês (primeiros dias), cai em hoje pra tela não ficar vazia.
+  if (!fechadoAte || fechadoAte < `${mes}-01`) return { inicio: `${mes}-01`, fimExclusivo: limiteHoje };
+  const d = new Date(`${fechadoAte}T00:00:00`); d.setDate(d.getDate() + 1);
+  return { inicio: `${mes}-01`, fimExclusivo: ymd(d) };
 }
 // Quantos dias a janela cobre — usado por _aplicarImpostoLogAnalytics pra exigir cobertura
 // mínima de histórico de ingestão antes de calcular economia_commitment_tier_periodo.
 function _diasJanelaLogAnalytics(janela) {
   return Math.round((new Date(janela.fimExclusivo) - new Date(janela.inicio)) / 86400000);
+}
+
+// Último dia cujo custo já está fechado. A Azure publica billing em levas: um dia só para de
+// crescer depois de ser revisitado por uma importação POSTERIOR à que o viu primeiro. Enquanto
+// aparece só na leva mais recente, ainda está sendo preenchido — foi o que fez 07/10 e 08/10
+// somarem R$ 64 mil e R$ 28 mil contra os ~R$ 330 mil dos dias fechados.
+//
+// Comparação por DATA (não timestamp): levas do mesmo dia são a mesma rodada de importação.
+// Lê do rollup diário, que já carrega esses carimbos — nada de varrer azure_costs.
+async function _ultimoDiaCustoFechado() {
+  const r = await pool.query(
+    `SELECT MAX(cost_date) AS dia FROM azure_custo_diario
+     WHERE DATE(primeiro_import) < (SELECT MAX(DATE(ultimo_import)) FROM azure_custo_diario)`
+  );
+  const d = r.rows[0]?.dia;
+  if (!d) return null;
+  return typeof d === 'string' ? d.slice(0, 10) : _ymdLocal(d);
+}
+
+function _ymdLocal(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function _logAnalyticsCustoSql(idxInicio, idxFim) {
@@ -17041,7 +17101,7 @@ app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (re
   try {
     await ensureLogAnalyticsTable();
     const impostoCfg = await _getImpostoConfig();
-    const janela = _janelaLogAnalytics(_mesLogAnalytics(req));
+    const janela = await _janelaLogAnalytics(_mesLogAnalytics(req));
     // JOINs pré-agregados (1 scan cada), não sub-select correlacionado por workspace — com
     // 100+ workspaces isso era 300+ execuções de subquery só pra montar essa lista.
     const r = await pool.query(`
@@ -17084,7 +17144,7 @@ app.get('/api/log-analytics/workspaces/:guid/consumo-diario', authMiddleware, db
     if (!w.rows.length) return res.status(404).json({ error: 'Workspace não encontrado' });
     const { resource_id, nome } = w.rows[0];
     const impostoCfg = await _getImpostoConfig();
-    const janela = _janelaLogAnalytics(_mesLogAnalytics(req));
+    const janela = await _janelaLogAnalytics(_mesLogAnalytics(req));
     const r = await pool.query(`
       WITH dias AS (
         SELECT generate_series($2::date, $3::date - INTERVAL '1 day', INTERVAL '1 day')::date AS dia
@@ -17166,7 +17226,7 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
     const resourceId = wsR.rows[0].resource_id;
     const auditoriaHabilitada = wsR.rows[0].auditoria_consultas_habilitada;
 
-    const janela = _janelaLogAnalytics(_mesLogAnalytics(req));
+    const janela = await _janelaLogAnalytics(_mesLogAnalytics(req));
     const [tabelasR, gbR, custoR, impostoCfg, consultasR] = await Promise.all([
       pool.query(`SELECT tabela, plano, retencao_dias, retencao_total_dias, retencao_arquivo_dias, retencao_e_padrao
                   FROM log_analytics_tabelas WHERE workspace_guid = $1`, [guid]),
@@ -17398,7 +17458,7 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
     const ExcelJS = require('exceljs');
     const impostoCfgExcel = await _getImpostoConfig();
     const mes = _mesLogAnalytics(req);
-    const janela = _janelaLogAnalytics(mes);
+    const janela = await _janelaLogAnalytics(mes);
     // Mesmo filtro de Tenant da tela — a planilha reflete o que está sendo visto.
     const subsFiltro = await _subsDaSp(req.query.sp_id);
     const wsFiltro = req.query.workspace_guid || null;
@@ -17599,7 +17659,7 @@ function _filtroLogAnalyticsSql(subsFiltro, wsFiltro, paramsBase) {
 }
 
 async function _coletarResumoLogAnalytics(mes, subsFiltro = null, wsFiltro = null) {
-  const janela = _janelaLogAnalytics(mes);
+  const janela = await _janelaLogAnalytics(mes);
   const impostoCfgResumo = await _getImpostoConfig();
   const comJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, [janela.inicio, janela.fimExclusivo]);
   const semJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, []);
@@ -17702,7 +17762,14 @@ app.get('/api/log-analytics/resumo', authMiddleware, dbMiddleware, async (req, r
     // `sp_id` vem do filtro de Tenant da tela — sem ele, o painel agrega todas as SPs.
     const resumo = await _coletarResumoLogAnalytics(mes, await _subsDaSp(req.query.sp_id), req.query.workspace_guid || null);
     const { wsRows, recRows, tabRows, diagRows, dcrRows, ...publico } = resumo; // linhas cruas só servem ao HTML/Excel
-    res.json({ ...publico, mes, mes_label: _mesLabelPt(mes) });
+    // Diz onde a janela do mês corrente foi cortada, pra ficar claro que o total ainda vai
+    // subir conforme a Azure publica o billing. Só faz sentido no mês corrente: um mês
+    // passado já está inteiro, e repetir a data de corte ali faria a tela afirmar que
+    // setembro "fecha em outubro".
+    const hojeMes = new Date();
+    const ehMesCorrente = mes === `${hojeMes.getFullYear()}-${String(hojeMes.getMonth() + 1).padStart(2, '0')}`;
+    const custoConsolidadoAte = ehMesCorrente ? await _ultimoDiaCustoFechado() : null;
+    res.json({ ...publico, mes, mes_label: _mesLabelPt(mes), custo_consolidado_ate: custoConsolidadoAte });
   } catch (e) { _dbErr(res, e); }
 });
 

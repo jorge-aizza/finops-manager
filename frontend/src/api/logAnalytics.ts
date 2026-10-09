@@ -142,6 +142,9 @@ export interface LogAnalyticsResumo {
     recursosComDiagSetting: number
     dcrsMapeadas: number
   }
+  /** Até que dia o custo da janela já está fechado — os dias seguintes ainda estão sendo
+   * publicados pela Azure e aparecem com valor parcial. null quando não dá pra determinar. */
+  custo_consolidado_ate: string | null
   custoPorWorkspace: LogAnalyticsRankingItem[]
   topTabelas: LogAnalyticsRankingItem[]
   fontes: LogAnalyticsRankingItem[]

@@ -112,6 +112,9 @@
   --accent-glow: rgba(147, 51, 234, 0.28);
   --danger: #ff4d6a;
   --red: #ff4d6a;
+  /* Cor do "maior dia" nos gráficos (CkBarChart). Vive no :root porque o gráfico é usado
+     fora de .ck-cotas, único escopo onde --ck-magenta existia — lá a barra saía preta. */
+  --ck-destaque: var(--red);
   --orange: #ff8c42;
   --green: #22c55e;
   --blue: #4da6ff;
@@ -2036,6 +2039,7 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   --ck-neutral: #8d7fae;
   --ck-teal: var(--accent);
   --ck-magenta: #ff4d9e;
+  --ck-destaque: var(--ck-magenta);
   --ck-ring: rgba(255, 255, 255, 0.05);
   /* paleta categorica do grafico "Consumo por produto" (v51) + rosa da cota
      de usuario -- no escuro, versoes mais claras para ler sobre #04000c */
@@ -2067,6 +2071,7 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   --ck-neutral: #9aa5a8;
   --ck-teal: #660099;
   --ck-magenta: #e6007e;
+  --ck-destaque: var(--ck-magenta);
   --ck-ring: #e7e9ee;
   /* valores verbatim do v51: productPalette + #f2b8de da Cota Usuario */
   --ck-rosa: #f2b8de;
@@ -2540,7 +2545,7 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 }
 .ck-chart-stack { display: grid; gap: 16px; align-content: start; min-width: 0; }
 @media (max-width: 1100px) { .ck-analise { grid-template-columns: 1fr; } }
-.ck-chart-pico { fill: var(--ck-magenta); font-size: 11px; font-weight: 800; }
+.ck-chart-pico { fill: var(--ck-destaque); font-size: 11px; font-weight: 800; }
 
 /* alinhamento do cockpit (.panel-flex): os semaforos ganham altura fixa para
    casar com a coluna dos graficos, rolando a lista por dentro */
