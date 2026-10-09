@@ -9583,8 +9583,14 @@ app.get('/api/azure-inventario/comparativo', authMiddleware, dbMiddleware, async
     }
 
     // Filtro de Tenant da tela, somado à assinatura que o usuário possa ter escolhido.
-    // Cada consulta já gasta $1 e $2, então a condição é montada a partir do índice seguinte.
     const subsSpComp = await _subsDaSp(req.query.sp_id);
+    // Os dois períodos são resolvidos numa varredura só por tabela, com FILTER por período,
+    // em vez de uma consulta por período. A tabela de inventário tem 950 mil linhas e nenhuma
+    // das condições de vigência é seletiva sozinha (`excluido_em` sozinha casa 85% das
+    // linhas), então não há índice que evite o seq scan — o que dá pra evitar é fazê-lo duas
+    // vezes. Medido: 3,4s em duas consultas contra 0,6s numa.
+    // Cada consulta leva só os parâmetros que de fato referencia — o Postgres recusa um
+    // parâmetro que nunca aparece no texto ("could not determine data type").
     const _comEscopo = (base) => {
       const params = [...base];
       let cond = '';
@@ -9592,46 +9598,53 @@ app.get('/api/azure-inventario/comparativo', authMiddleware, dbMiddleware, async
       if (subsSpComp) { params.push(subsSpComp); cond += ` AND LOWER(subscription_id) = ANY($${params.length})`; }
       return { cond, params };
     };
+    const qSnap = _comEscopo([a_fim, b_fim]);
+    const qPeriodos = _comEscopo([a_inicio, a_fim, b_inicio, b_fim]);
+    const vigente = (d) => `(criado_em IS NULL OR criado_em <= ${d}) AND (excluido_em IS NULL OR excluido_em > ${d})`;
+    const janela = (i, f) => `quando >= ${i} AND quando < ${f}::date + INTERVAL '1 day'`;
 
-    async function _snapshotPeriodo(inicio, fim) {
-      const qSnap = _comEscopo([fim, fim]);
-      const snap = await pool.query(
-        `SELECT COUNT(*) AS total FROM azure_recursos_inventario
-         WHERE (criado_em IS NULL OR criado_em <= $1) AND (excluido_em IS NULL OR excluido_em > $2)${qSnap.cond}`,
+    const [snap, ev, custo, impostoCfg] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*) FILTER (WHERE ${vigente('$1')}) AS a,
+                COUNT(*) FILTER (WHERE ${vigente('$2')}) AS b
+         FROM azure_recursos_inventario WHERE true${qSnap.cond}`,
         qSnap.params
-      );
-      const qEv = _comEscopo([inicio, fim]);
-      const ev = await pool.query(
-        `SELECT acao, COUNT(*) AS total FROM azure_recursos_auditoria_eventos
-         WHERE quando >= $1 AND quando < $2::date + INTERVAL '1 day'${qEv.cond}
+      ),
+      pool.query(
+        `SELECT acao,
+                COUNT(*) FILTER (WHERE ${janela('$1', '$2')}) AS a,
+                COUNT(*) FILTER (WHERE ${janela('$3', '$4')}) AS b
+         FROM azure_recursos_auditoria_eventos
+         WHERE (${janela('$1', '$2')} OR ${janela('$3', '$4')})${qPeriodos.cond}
          GROUP BY acao`,
-        qEv.params
-      );
+        qPeriodos.params
+      ),
+      // Rollup diário (4,9 mil linhas) em vez de somar azure_costs (9,1 milhões): a soma
+      // direta custava 74s por período, por seq scan dos 16 GB da tabela de billing.
+      pool.query(
+        `SELECT COALESCE(SUM(custo_microsoft) FILTER (WHERE cost_date >= $1 AND cost_date <= $2), 0) AS a_microsoft,
+                COALESCE(SUM(custo_marketplace) FILTER (WHERE cost_date >= $1 AND cost_date <= $2), 0) AS a_marketplace,
+                COALESCE(SUM(custo_microsoft) FILTER (WHERE cost_date >= $3 AND cost_date <= $4), 0) AS b_microsoft,
+                COALESCE(SUM(custo_marketplace) FILTER (WHERE cost_date >= $3 AND cost_date <= $4), 0) AS b_marketplace
+         FROM azure_custo_diario
+         WHERE ((cost_date >= $1 AND cost_date <= $2) OR (cost_date >= $3 AND cost_date <= $4))${qPeriodos.cond}`,
+        qPeriodos.params
+      ),
+      _getImpostoConfig(),
+    ]);
+
+    const montar = (inicio, fim, col) => {
       const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
-      for (const row of ev.rows) eventos[row.acao] = parseInt(row.total, 10);
-
-      // Lê do rollup diário (4,9 mil linhas) em vez de somar azure_costs (9,1 milhões): a
-      // soma direta custava 74s por período, por seq scan dos 16 GB da tabela de billing.
-      // Ver azure_custo_diario, preenchido pelo job de rollup.
-      const qCusto = _comEscopo([inicio, fim]);
-      const custo = await pool.query(
-        `SELECT COALESCE(SUM(custo_microsoft), 0) AS microsoft, COALESCE(SUM(custo_marketplace), 0) AS marketplace
-         FROM azure_custo_diario WHERE cost_date >= $1 AND cost_date <= $2${qCusto.cond}`,
-        qCusto.params
-      );
-
+      for (const row of ev.rows) eventos[row.acao] = parseInt(row[col], 10);
       return {
         inicio, fim,
-        total_recursos: parseInt(snap.rows[0].total, 10),
-        custo_total: _comImpostoSplit(custo.rows[0].microsoft, custo.rows[0].marketplace, await _getImpostoConfig()),
+        total_recursos: parseInt(snap.rows[0][col], 10),
+        custo_total: _comImpostoSplit(custo.rows[0][`${col}_microsoft`], custo.rows[0][`${col}_marketplace`], impostoCfg),
         criados: eventos.CRIACAO, atualizados: eventos.ATUALIZACAO, excluidos: eventos.EXCLUSAO,
       };
-    }
-
-    const [periodoA, periodoB] = await Promise.all([
-      _snapshotPeriodo(a_inicio, a_fim),
-      _snapshotPeriodo(b_inicio, b_fim),
-    ]);
+    };
+    const periodoA = montar(a_inicio, a_fim, 'a');
+    const periodoB = montar(b_inicio, b_fim, 'b');
     res.json({ periodo_a: periodoA, periodo_b: periodoB });
   } catch (e) { _dbErr(res, e); }
 });
