@@ -15937,6 +15937,11 @@ async function ensureLogAnalyticsTable() {
       atualizado_em TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Setting que exporta SÓ pra Storage/Event Hub não tem workspace de destino. Antes essas
+  // linhas eram descartadas na coleta, e com elas sumia o custo de "Platform Logs Data
+  // Processed" — export de log que não alimenta workspace nenhum, ou seja, paga sem entregar
+  // consulta. Medido neste tenant: R$ 22 mil/mês invisíveis.
+  await pool.query(`ALTER TABLE log_analytics_diagnostic_settings ALTER COLUMN workspace_guid DROP NOT NULL`).catch(() => {});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_diag_ws ON log_analytics_diagnostic_settings (workspace_guid)`);
   // DCR (Data Collection Rule) — a outra via de coleta (Azure Monitor Agent: Syslog, Windows
   // Event Log, Performance Counters, Custom Logs, extensões). 1 chamada por subscription, barato
@@ -16016,6 +16021,9 @@ const _LOG_ANALYTICS_TIPOS_MONITORAVEIS = [
   'microsoft.signalrservice/signalr', 'microsoft.keyvault/vaults', 'microsoft.aad/domainservices',
   'microsoft.recoveryservices/vaults', 'microsoft.storage/storageaccounts', 'microsoft.insights/components',
   'microsoft.machinelearningservices/workspaces', 'microsoft.cognitiveservices/accounts',
+  // Container Apps environment: sozinho paga R$ 18,8 mil/mês de Platform Logs neste tenant,
+  // o maior pagador isolado do balde. Entrou por medição, não por palpite.
+  'microsoft.app/managedenvironments',
   // Tipos presentes neste tenant que a lista de referência não cobria (2026-10-xx) — sem eles,
   // o "detalhe por recurso" omitia silenciosamente quem estivesse enviando log por aqui.
   //
@@ -16591,8 +16599,12 @@ async function _coletarDiagnosticSettingsTudo() {
       const data = await _safeRespJson(resp);
       for (const setting of (data.value || [])) {
         const p = setting.properties || {};
-        const wsGuid = workspaceByResourceId.get(String(p.workspaceId || '').toLowerCase());
-        if (!wsGuid) continue; // não aponta pra um workspace do nosso inventário
+        const wsGuid = workspaceByResourceId.get(String(p.workspaceId || '').toLowerCase()) || null;
+        // Sem workspace conhecido, o setting só interessa se exporta pra outro destino pago —
+        // aí ele É o custo de Platform Logs. Um setting que aponta pra workspace de FORA do
+        // nosso inventário e mais nada continua sendo descartado: não é custo nosso nem
+        // consulta nossa.
+        if (!wsGuid && !p.storageAccountId && !p.eventHubAuthorizationRuleId) continue;
         const logsCat = _categoriasDiagnostic(p.logs);
         const metricsCat = _categoriasDiagnostic(p.metrics);
         linhas.push({
@@ -17623,6 +17635,62 @@ const _OBS_BALDES = [
   { id: 'alertas',            rotulo: 'Alertas',                re: /^alerts /i },
   { id: 'agentes',            rotulo: 'Agentes',                re: /observability agent|agent credits/i },
 ];
+
+// Export de log que NÃO alimenta workspace — Diagnostic Setting apontando só pra Storage ou
+// Event Hub. Paga "Platform Logs Data Processed" e não entrega consulta nenhuma no Log
+// Analytics, então é a pergunta de FinOps mais direta desta tela: isso aqui é usado?
+//
+// O custo vem carimbado no recurso de ORIGEM, não no destino — por isso nunca apareceu no
+// custo dos workspaces.
+app.get('/api/log-analytics/export-sem-workspace', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureLogAnalyticsTable();
+    const dias = Math.max(1, Math.min(180, parseInt(req.query.dias, 10) || 30));
+    const subsSp = await _subsDaSp(req.query.sp_id);
+    const params = [dias];
+    let filtroSp = '';
+    if (subsSp) { params.push(subsSp); filtroSp = ` AND LOWER(ac.subscription_id) = ANY($${params.length})`; }
+
+    const r = await pool.query(
+      `WITH plat AS (
+         SELECT LOWER(ac.resource_id) AS rid, SUM(ac.cost_in_billing_currency) AS custo
+         FROM azure_costs ac
+         WHERE ac.cost_date >= CURRENT_DATE - $1::int
+           AND ac.meter_name ILIKE '%Platform Logs Data Processed%'${filtroSp}
+         GROUP BY 1
+       )
+       SELECT plat.rid AS recurso_id, plat.custo,
+              MAX(d.recurso_tipo) AS recurso_tipo,
+              BOOL_OR(d.workspace_guid IS NOT NULL) AS tem_workspace,
+              BOOL_OR(d.envia_storage) AS envia_storage,
+              BOOL_OR(d.envia_eventhub) AS envia_eventhub,
+              BOOL_OR(d.recurso_id IS NOT NULL) AS tem_setting
+       FROM plat
+       LEFT JOIN log_analytics_diagnostic_settings d ON LOWER(d.recurso_id) = plat.rid
+       GROUP BY plat.rid, plat.custo
+       ORDER BY plat.custo DESC
+       LIMIT 100`,
+      params,
+    );
+
+    const impostoCfg = await _getImpostoConfig();
+    const itens = r.rows.map((x) => ({
+      recurso_id: x.recurso_id,
+      recurso_tipo: x.recurso_tipo,
+      custo: _comImpostoSplit(x.custo, 0, impostoCfg),
+      envia_storage: !!x.envia_storage,
+      envia_eventhub: !!x.envia_eventhub,
+      // Sem workspace de destino, o export não vira consulta — é o caso que vale revisar.
+      alimenta_workspace: !!x.tem_workspace,
+      // Ainda não coletamos o setting deste recurso: o tipo pode estar fora da lista
+      // monitorada, ou a coleta falhou. Não é o mesmo que "não tem setting".
+      setting_desconhecido: !x.tem_setting,
+    }));
+    const total = itens.reduce((a, x) => a + x.custo, 0);
+    const semWorkspace = itens.filter((x) => !x.alimenta_workspace).reduce((a, x) => a + x.custo, 0);
+    res.json({ dias, total, sem_workspace: semWorkspace, itens });
+  } catch (e) { _dbErr(res, e); }
+});
 
 app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware, async (req, res) => {
   try {

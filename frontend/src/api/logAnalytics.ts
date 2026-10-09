@@ -281,6 +281,36 @@ export const getLogAnalyticsRecursosVolume = (workspaceGuid: string, dias?: numb
 export const forcarColetaIngestaoRecurso = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/ingestao-recurso/forcar')
 
+/** Um recurso que paga "Platform Logs Data Processed" — export de Diagnostic Setting. */
+export interface LogAnalyticsExportItem {
+  recurso_id: string
+  recurso_tipo: string | null
+  custo: number
+  envia_storage: boolean
+  envia_eventhub: boolean
+  /** false = o export não alimenta workspace nenhum: paga e não vira consulta. */
+  alimenta_workspace: boolean
+  /** O setting deste recurso ainda não foi coletado — tipo fora da lista ou falha na coleta.
+   * Diferente de "não tem setting". */
+  setting_desconhecido: boolean
+}
+
+export interface LogAnalyticsExportResposta {
+  dias: number
+  total: number
+  sem_workspace: number
+  itens: LogAnalyticsExportItem[]
+}
+
+// Custo de export de log (Storage/Event Hub). Vem carimbado no recurso de ORIGEM, por isso
+// nunca apareceu no custo dos workspaces.
+export const getLogAnalyticsExportSemWorkspace = (dias?: number, spId?: number | null) => {
+  const q = new URLSearchParams()
+  if (dias) q.set('dias', String(dias))
+  if (spId) q.set('sp_id', String(spId))
+  return apiFetch<LogAnalyticsExportResposta>('GET', '/log-analytics/export-sem-workspace' + (q.toString() ? '?' + q : ''))
+}
+
 export const forcarColetaLogAnalytics = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/coleta/forcar')
 

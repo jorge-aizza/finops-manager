@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getLogAnalyticsWorkspaces, getLogAnalyticsRecomendacoes, getLogAnalyticsTabelas, getLogAnalyticsFontes,
   getLogAnalyticsDiagnosticSettings, getLogAnalyticsResumo, getLogAnalyticsAppInsights,
-  getLogAnalyticsRecursosVolume,
+  getLogAnalyticsRecursosVolume, getLogAnalyticsExportSemWorkspace,
   forcarColetaLogAnalytics, forcarColetaDiagnosticSettings, detalharRecursoTabela,
   baixarLogAnalyticsExcel, baixarLogAnalyticsDashboardHtml, habilitarAuditoriaConsultas,
   type LogAnalyticsSeveridade, type LogAnalyticsWorkspace, type LogAnalyticsRecursoDetalhado,
@@ -153,6 +153,12 @@ export default function LogAnalyticsView() {
     queryKey: ['log-analytics-recursos-volume', workspaceSelecionado?.workspace_guid],
     queryFn: () => getLogAnalyticsRecursosVolume(workspaceSelecionado!.workspace_guid, 30),
     enabled: !!workspaceSelecionado,
+  })
+  // Custo de export de log (Storage/Event Hub) — nível tela, não de um workspace: a Azure
+  // carimba no recurso de origem, então nunca entrou no custo de workspace nenhum.
+  const exportQuery = useQuery({
+    queryKey: ['log-analytics-export-sem-ws', selectedTenantId],
+    queryFn: () => getLogAnalyticsExportSemWorkspace(30, selectedTenantId),
   })
   const diagSettingsQuery = useQuery({
     queryKey: ['log-analytics-diagnostic-settings', workspaceSelecionado?.workspace_guid],
@@ -629,6 +635,53 @@ export default function LogAnalyticsView() {
           </div>
         )}
       </div>
+
+      {(exportQuery.data?.sem_workspace || 0) > 0 && (
+        <div className="card" style={{ margin: '0 20px 18px' }}>
+          <div className="card-header">
+            <span className="card-title">Export de log sem workspace</span>
+            <span className="badge" style={{ background: 'var(--orange,#ff8c42)', color: '#fff' }}>
+              {fmtBRL(exportQuery.data!.sem_workspace)}/30d
+            </span>
+          </div>
+          <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
+            Diagnostic Settings que mandam para Storage ou Event Hub <strong>sem alimentar nenhum workspace</strong>:
+            pagam ingestão e não viram consulta no Log Analytics. A Azure cobra isso no recurso de origem
+            ("Platform Logs Data Processed"), por isso não aparece no custo de workspace nenhum.
+            De {fmtBRL(exportQuery.data!.total)} de export no período, {fmtBRL(exportQuery.data!.sem_workspace)} não
+            alimentam workspace.
+          </div>
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead><tr>
+                <th>Recurso</th><th>Tipo</th><th>Destino</th><th style={{ textAlign: 'right' }}>Custo (30d)</th>
+              </tr></thead>
+              <tbody>
+                {exportQuery.data!.itens.filter((x) => !x.alimenta_workspace).slice(0, 15).map((x) => (
+                  <tr key={x.recurso_id}>
+                    <td style={{ maxWidth: 330 }}>
+                      <div style={{ fontWeight: 600, fontSize: 12 }}>{x.recurso_id.split('/').pop()}</div>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>{x.recurso_id}</div>
+                    </td>
+                    <td style={{ fontSize: 10, color: 'var(--text-muted)' }}>{x.recurso_tipo || '—'}</td>
+                    <td style={{ fontSize: 11 }}>
+                      {x.setting_desconhecido ? (
+                        <span style={{ color: 'var(--text-muted)' }} title="O Diagnostic Setting deste recurso ainda não foi coletado — tipo fora da lista ou falha na coleta. Não é o mesmo que não ter setting.">
+                          não coletado
+                        </span>
+                      ) : (
+                        [x.envia_storage ? 'Storage' : null, x.envia_eventhub ? 'Event Hub' : null]
+                          .filter(Boolean).join(' + ') || '—'
+                      )}
+                    </td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtBRL(x.custo)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {workspaceSelecionado && (() => {
         const recursos = recursosVolumeQuery.data?.recursos || []
