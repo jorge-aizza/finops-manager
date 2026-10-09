@@ -16955,83 +16955,57 @@ async function _buscarPrecosCommitmentTier(regiao) {
 }
 
 async function _avaliarCommitmentTier(ws) {
-  const r = await pool.query(`
-    SELECT COUNT(*) AS dias, AVG(gb) AS media,
-           percentile_cont(0.25) WITHIN GROUP (ORDER BY gb) AS p25,
-           percentile_cont(0.75) WITHIN GROUP (ORDER BY gb) AS p75
-    FROM (
-      SELECT dia, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
-      WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - INTERVAL '60 days'
-      GROUP BY dia
-    ) diario
-  `, [ws.workspace_guid]);
-  const row = r.rows[0];
-  // Mínimo 14 dias de histórico — mesmo piso das outras regras de ingestão (ver acima). Com
-  // um lock-in mínimo de 31 dias no Azure, recomendar com menos dado que isso é adivinhação.
-  const dias = parseInt(row.dias, 10) || 0;
-  const p25 = Number(row.p25) || 0;
+  // Delega a decisão de tier pra _sugerirCommitmentTier, que é a mesma conta exibida na tela.
+  // Até 2026-10 esta função tinha regra própria — e ela errava de duas formas ao mesmo tempo:
+  // comparava preço de lista em dólar como se fosse real, e decidia subir de tier só porque o
+  // p25 passava do contratado, sem nunca calcular o custo dos dias abaixo do novo nível. Em
+  // LA-SharedServices-PROD isso recomendava subir pra 200 GB/dia, o que custaria R$ 5,3 mil A
+  // MAIS por mês: 19 dos 41 dias ficam abaixo de 200 GB e pagariam capacidade ociosa.
+  const impostoCfg = await _getImpostoConfig();
+  const janela = await _janelaLogAnalytics(_mesLogAnalytics({}));
+  const taxas = await _taxasPorGbWorkspace(ws.resource_id, janela, impostoCfg);
+  const sug = await _sugerirCommitmentTier(ws, janela, taxas, impostoCfg);
+
   const recos = [];
-  // Economia REALIZADA (não é recomendação) — só preenchida quando o workspace já está num
-  // tier reconhecido no catálogo, independente de precisar ou não de redimensionamento.
   let economiaCommitmentTierMes = null;
+  const rs = (v) => `R$ ${Number(v).toFixed(2)}`;
+  const pctDias = (o) => `${o.dias_ociosos} dos ${sug.dias} dias observados ficariam abaixo do contratado`;
 
-  if (dias >= 14 && p25 > 0) {
-    const precos = await _buscarPrecosCommitmentTier(ws.location);
-    if (precos) {
-      const p75 = Number(row.p75) || 0;
-      const media = Number(row.media) || 0;
-      const impostoCfg = await _getImpostoConfig();
-      // Log Analytics (PAYG/Commitment Tier) é billing direto da Microsoft, nunca Marketplace.
-      const comImposto = (v) => impostoCfg.microsoft.ativo ? v * (1 + impostoCfg.microsoft.taxa / 100) : v;
-      const custoMensalPayg = comImposto(precos.payg) * media * 30;
-
-      // Só considera tiers com piso (p25) >= tier — um tier que o workspace não sustenta com
-      // regularidade vira custo extra, não economia (ver nota de lock-in acima).
-      let melhor = null;
-      for (const t of precos.tiers.filter(t => p25 >= t.gbDia)) {
-        const custoMensal = comImposto(t.precoDiario) * 30;
-        if (!melhor || custoMensal < melhor.custoMensal) melhor = { ...t, custoMensal };
+  if (sug.suficiente) {
+    const ing = sug.ingestao;
+    if (ing) {
+      // Economia que o contrato ATUAL já entrega frente ao Pay-As-You-Go, no preço real.
+      if (sug.em_commitment && ing.payg_gb_estimado != null) {
+        economiaCommitmentTierMes = (sug.media * 30 * ing.payg_gb_estimado) - ing.custo_atual_mes;
       }
-
-      const skuAtual = (ws.sku || '').toLowerCase();
-      const nivelAtual = Number(ws.capacity_reservation_level) || 0;
-
-      if (skuAtual !== 'capacityreservation') {
-        if (melhor && melhor.custoMensal < custoMensalPayg) {
-          const economiaRs = custoMensalPayg - melhor.custoMensal;
-          const economiaPct = (economiaRs / custoMensalPayg) * 100;
+      if (ing.recomendado) {
+        const o = ing.recomendado;
+        const pctEconomia = ing.custo_atual_mes > 0 ? (o.economia_mes_estimada / ing.custo_atual_mes) * 100 : 0;
+        recos.push({
+          regra: 'commitment_tier', severidade: pctEconomia > 20 ? 'critico' : 'atencao',
+          detalhe: `Workspace ingere ${sug.media.toFixed(1)} GB/dia em média. ${sug.em_commitment ? `Mudar do tier de ${sug.tier_atual} GB/dia para o de ${o.gb_dia} GB/dia` : `Contratar o Commitment Tier de ${o.gb_dia} GB/dia`} economizaria ~${rs(o.economia_mes_estimada)}/mês (${pctEconomia.toFixed(0)}%) no preço que esta conta paga hoje — já descontando os dias ociosos (${pctDias(o)}). O Azure trava o nível por no mínimo 31 dias.`,
+        });
+      } else if (sug.em_commitment) {
+        // Silêncio seria pior: sem isso ninguém sabe se o tier foi conferido ou esquecido.
+        const subir = ing.opcoes.find((o) => o.gb_dia > (sug.tier_atual || 0));
+        if (subir) {
           recos.push({
-            regra: 'commitment_tier', severidade: economiaPct > 20 ? 'critico' : 'atencao',
-            detalhe: `Workspace ingere em média ${media.toFixed(1)} GB/dia (mínimo recente: ${p25.toFixed(1)} GB/dia) — migrar para o Commitment Tier de ${melhor.gbDia} GB/dia economizaria ~R$ ${economiaRs.toFixed(2)}/mês (${economiaPct.toFixed(0)}%) frente ao Pay-As-You-Go atual. O Commitment Tier trava o workspace nesse nível por no mínimo 31 dias no Azure.`,
+            regra: 'commitment_tier', severidade: 'info',
+            detalhe: `Tier de ${sug.tier_atual} GB/dia conferido: é o melhor para este volume. Subir para ${subir.gb_dia} GB/dia custaria ${rs(Math.abs(subir.economia_mes_estimada))}/mês A MAIS, porque ${pctDias(subir)} e pagaria capacidade ociosa.`,
           });
         }
-      } else if (nivelAtual > 0) {
-        const tierAtual = precos.tiers.find(t => t.gbDia === nivelAtual);
-        if (tierAtual) {
-          // Calculado sempre que o tier contratado é reconhecido no catálogo — independente de
-          // precisar ou não de redimensionamento, é o que o workspace já está economizando hoje
-          // comparado a estar em Pay-As-You-Go pelo mesmo volume real.
-          const custoMensalAtual = comImposto(tierAtual.precoDiario) * 30;
-          economiaCommitmentTierMes = custoMensalPayg - custoMensalAtual;
-          if (p75 < nivelAtual * 0.7) {
-            const alternativa = melhor && melhor.gbDia < nivelAtual ? melhor : null;
-            recos.push({
-              regra: 'commitment_tier', severidade: 'atencao',
-              detalhe: alternativa
-                ? `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — baixar para o tier de ${alternativa.gbDia} GB/dia economizaria ~R$ ${(custoMensalAtual - alternativa.custoMensal).toFixed(2)}/mês.`
-                : `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere só ${media.toFixed(1)} GB/dia em média (p75: ${p75.toFixed(1)} GB/dia) — mesmo o menor tier disponível não compensa nesse volume; considere voltar para Pay-As-You-Go.`,
-            });
-          } else if (p25 > nivelAtual) {
-            const proximo = precos.tiers.find(t => t.gbDia > nivelAtual);
-            if (proximo) {
-              recos.push({
-                regra: 'commitment_tier', severidade: 'atencao',
-                detalhe: `Workspace está no Commitment Tier de ${nivelAtual} GB/dia, mas ingere ${media.toFixed(1)} GB/dia em média (mínimo recente: ${p25.toFixed(1)} GB/dia) — já ultrapassa o contratado com regularidade. Considere subir para o tier de ${proximo.gbDia} GB/dia.`,
-              });
-            }
-          }
-        }
       }
+    }
+
+    // O Sentinel cobra os MESMOS GB num medidor próprio, com escada própria. Quem está em
+    // "Classic Pay-as-you-go Analysis" não negociou esse lado — e costuma ser o mais caro.
+    if (sug.sentinel?.recomendado) {
+      const o = sug.sentinel.recomendado;
+      const pctEconomia = sug.sentinel.custo_atual_mes > 0 ? (o.economia_mes_estimada / sug.sentinel.custo_atual_mes) * 100 : 0;
+      recos.push({
+        regra: 'commitment_tier_sentinel', severidade: pctEconomia > 20 ? 'critico' : 'atencao',
+        detalhe: `O Sentinel deste workspace está em Pay-As-You-Go (${rs(sug.sentinel.taxa_real_gb)}/GB) enquanto a ingestão já tem contrato. Contratar o Commitment Tier de Sentinel de ${o.gb_dia} GB/dia economizaria ~${rs(o.economia_mes_estimada)}/mês (${pctEconomia.toFixed(0)}%), já descontando os dias ociosos (${pctDias(o)}).`,
+      });
     }
   }
 
@@ -17275,13 +17249,11 @@ function _logAnalyticsCustoSql(idxInicio, idxFim) {
   -- no resto da feature). Valor vem do JOIN pré-agregado _LOG_ANALYTICS_PRECO_JOIN_SQL (ver
   -- abaixo), não de subquery correlacionada por linha.
   COALESCE(pl_loc.retail_price, pl_fallback.retail_price) AS _la_payg_price,
-  -- Cobertura de histórico de ingestão nessa janela (2026-10-xx) — se a coleta diária só
-  -- começou no meio do período (ex: mês em que o agendador foi ligado), ingestao_mes_gb fica
-  -- subestimado e a economia calculada ficaria enganosamente negativa. Não é o custo que
-  -- falta, é o dado de GB pra comparar contra o PAYG.
-  COALESCE((SELECT COUNT(DISTINCT lid.dia) FROM log_analytics_ingestao_diaria lid
-            WHERE lid.workspace_guid = w.workspace_guid
-              AND lid.dia >= $${idxInicio}::date AND lid.dia < $${idxFim}::date), 0) AS _la_dias_com_dados
+  -- Guarda de cobertura de GB: existia aqui uma contagem de dias com ingestão coletada, porque
+  -- a economia antiga multiplicava GB e ficava negativa quando a coleta diária cobria só parte
+  -- do período. A fórmula nova não usa GB — o volume se cancela —, então a contagem saiu com
+  -- ela, e uma subquery por workspace saiu junto.
+  CASE WHEN pl_tier.nivel > 0 THEN pl_tier.retail_price / pl_tier.nivel END AS _la_tier_price_gb
 `;
 }
 // JOIN pré-agregado do preço PAYG (Analytics Logs Data Ingestion) por região — some depois de
@@ -17304,6 +17276,22 @@ const _LOG_ANALYTICS_PRECO_JOIN_SQL = `
     WHERE product_name = 'Log Analytics' AND meter_name = 'Analytics Logs Data Ingestion'
       AND arm_region_name = 'brazilsouth' AND retail_price > 0
   ) pl_fallback ON true
+  -- Preço de lista do tier que o workspace tem contratado, já dividido por GB. Serve de ÂNCORA:
+  -- a razão entre o que a fatura cobra e este número é o desconto efetivo do contrato, câmbio
+  -- incluído. Sem isso a economia sai comparando real com dólar de tabela. Ver
+  -- _sugerirCommitmentTier, que usa a mesma calibragem.
+  LEFT JOIN (
+    SELECT arm_region_name,
+           -- POSIX, não PCRE: o operador ~ do Postgres trata \d como 'd' literal, então a
+           -- classe tem que ser explícita. Com \d esta junção casava zero linhas em silêncio.
+           (regexp_match(meter_name, '^([0-9]+) *GB'))[1]::numeric AS nivel,
+           MIN(retail_price) AS retail_price
+    FROM azure_price_list
+    WHERE product_name = 'Azure Monitor' AND meter_name ILIKE '%GB Commitment Tier Capacity%'
+      AND retail_price > 0 AND meter_name ~ '^[0-9]+ *GB'
+    GROUP BY 1, 2
+  ) pl_tier ON pl_tier.arm_region_name = COALESCE(w.location, 'brazilsouth')
+            AND pl_tier.nivel = w.capacity_reservation_level
 `;
 
 function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
@@ -17318,16 +17306,24 @@ function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
   // Billing de Commitment Tier é sempre Microsoft, nunca Marketplace.
   const comImpostoMs = (v) => impostoCfg.microsoft.ativo ? v * (1 + impostoCfg.microsoft.taxa / 100) : v;
   const custoCommitReal = comImpostoMs(Number(row._la_commit_real) || 0);
-  // Cobertura insuficiente de log_analytics_ingestao_diaria nessa janela (ex: coleta diária
-  // começou no meio do mês) = não temos GB real suficiente pra comparar contra o PAYG —
-  // mostrar economia aqui seria um número fabricado, não "real do período" como pedido.
-  const coberturaOk = !diasJanela || (Number(row._la_dias_com_dados) || 0) >= diasJanela * 0.9;
-  const economia_commitment_tier_periodo = (custoCommitReal > 0 && coberturaOk)
-    ? comImpostoMs(Number(row._la_payg_price) || 0) * (Number(row.ingestao_mes_gb) || 0) - custoCommitReal
+  // O catálogo da Azure está todo em USD (retail_price_brl é NULL nas 546 mil linhas) e esta
+  // conta não paga preço de lista. Até 2026-10 esta linha subtraía um custo real em reais de um
+  // preço de tabela em dólar — duas moedas na mesma conta, sem o desconto do contrato. Agora a
+  // lista entra só como RAZÃO entre PAYG e o tier contratado, e a escala vem da fatura: o preço
+  // por GB que o workspace comprovadamente paga.
+  //
+  // A conta se reduz a uma linha: o que se pagaria em PAYG é o que se paga hoje multiplicado
+  // pela razão entre os dois preços de catálogo, então o volume aparece dos dois lados e se
+  // cancela. Com isso o número deixa de depender da coleta diária de GB — sobrevive a mês com
+  // cobertura parcial, que é justamente quando a comparação importa.
+  const tierPrecoGb = Number(row._la_tier_price_gb) || 0;
+  const paygLista = Number(row._la_payg_price) || 0;
+  const economia_commitment_tier_periodo = (custoCommitReal > 0 && tierPrecoGb > 0 && paygLista > 0)
+    ? custoCommitReal * (paygLista / tierPrecoGb - 1)
     : null;
   delete row._la_ing_ms; delete row._la_ing_mp; delete row._la_ret_ms; delete row._la_ret_mp;
   delete row._la_sentinel; delete row._la_commit_custo;
-  delete row._la_commit_real; delete row._la_payg_price; delete row._la_dias_com_dados;
+  delete row._la_commit_real; delete row._la_payg_price; delete row._la_tier_price_gb;
   // economia_commitment_tier_mes (coluna crua, snapshot diário usado só internamente por
   // _avaliarCommitmentTier pra gerar recomendações) não é mais exposta ao cliente — substituída
   // por economia_commitment_tier_periodo (real, varia por mês selecionado) pra evitar os dois
@@ -17558,6 +17554,159 @@ async function _taxasPorGbWorkspace(resourceId, janela, impostoCfg) {
   };
 }
 
+// Sugestão de Commitment Tier CALIBRADA pela fatura, não pela tabela de preço pública.
+//
+// O catálogo da Azure está inteiro em USD (retail_price_brl é NULL nas 546 mil linhas), e o
+// preço de lista não é o preço que esta empresa paga: no medidor de ingestão ela paga cerca de
+// 1/4 da lista, no de Sentinel cerca de 1/9. Comparar fatura com lista, ou pior, tratar o número
+// em dólar como se fosse real, dá uma recomendação errada por um fator grande.
+//
+// O que funciona é usar a lista só pela FORMA da escada — quanto o preço por GB cai de um tier
+// pro outro — e ancorar essa escada no preço que a empresa comprovadamente paga hoje. O fator de
+// calibragem absorve câmbio e desconto de contrato de uma vez só. A premissa, que a tela declara,
+// é que o desconto negociado vale igual entre tiers do mesmo medidor.
+async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
+  // A série dia a dia, não só a média: um Commitment Tier cobra o nível contratado mesmo nos
+  // dias em que se ingere menos. Decidir pela média (ou pelo p25) ignora exatamente o risco que
+  // define a escolha — o dia fraco, em que se paga por capacidade não usada.
+  const vol = await pool.query(
+    `SELECT dia, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
+      WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - INTERVAL '60 days'
+      GROUP BY dia ORDER BY dia`,
+    [ws.workspace_guid],
+  );
+  const serie = vol.rows.map((r) => Number(r.gb) || 0).filter((g) => g > 0);
+  const dias = serie.length;
+  const media = dias ? serie.reduce((a, g) => a + g, 0) / dias : 0;
+  const ordenada = [...serie].sort((a, b) => a - b);
+  const pct = (q) => (dias ? ordenada[Math.min(dias - 1, Math.floor(q * dias))] : 0);
+  const p25 = pct(0.25);
+  const p75 = pct(0.75);
+  // Mesmo piso de 14 dias das outras regras: o Azure trava o tier por 31 dias, recomendar com
+  // menos histórico que isso é adivinhação cara.
+  if (dias < 14 || media <= 0) {
+    return { suficiente: false, dias, motivo: 'Menos de 14 dias de histórico de ingestão — insuficiente para sugerir um tier que trava por 31 dias.' };
+  }
+
+  const regiao = ws.location || _LA_COMMITMENT_FALLBACK_REGIAO;
+  const listaDe = async (produto) => {
+    for (const reg of [regiao, _LA_COMMITMENT_FALLBACK_REGIAO]) {
+      const r = await pool.query(
+        `SELECT meter_name, retail_price FROM azure_price_list
+          WHERE product_name = $1 AND meter_name ILIKE '%GB Commitment Tier Capacity%'
+            AND arm_region_name = $2 AND retail_price > 0`,
+        [produto, reg],
+      );
+      const tiers = r.rows
+        .map((x) => { const m = x.meter_name.match(/^(\d+)\s*GB/i); return m ? { gb_dia: parseInt(m[1], 10), lista_gb: Number(x.retail_price) / parseInt(m[1], 10) } : null; })
+        .filter(Boolean).sort((a, b) => a.gb_dia - b.gb_dia);
+      if (tiers.length) return tiers;
+    }
+    return [];
+  };
+
+  // Custo mensal de um tier pelo que a Azure realmente cobra: em cada dia paga-se o MAIOR entre
+  // o contratado e o ingerido, na tarifa daquele tier. Dia fraco custa o tier cheio; dia forte
+  // custa o excedente na mesma tarifa — é o que a fatura deste workspace comprova, cobrando
+  // 2,28 blocos de 100 GB num dia de 228 GB. Normalizado para 30 dias.
+  const custoMensalNoTier = (gbDia, precoGb) =>
+    (serie.reduce((a, g) => a + Math.max(gbDia, g) * precoGb, 0) / dias) * 30;
+
+  const montar = (tiers, taxaRealGb, nivelAtual, ancoraPayg) => {
+    const atual = nivelAtual ? tiers.find((t) => t.gb_dia === nivelAtual) : null;
+    // Âncora: o item de catálogo que corresponde ao que a empresa paga HOJE. Já num tier, é o
+    // preço de lista daquele tier; em PAYG, é o preço de lista do PAYG. Dividir o real pela
+    // âncora dá o desconto efetivo do contrato, câmbio incluído.
+    const ancora = atual ? atual.lista_gb : ancoraPayg;
+    const fator = ancora && taxaRealGb ? taxaRealGb / ancora : null;
+    if (!fator) return null;
+    // Hoje: em commitment paga-se o piso do tier contratado; em PAYG, só o que se ingere.
+    const custoAtualMes = nivelAtual
+      ? custoMensalNoTier(nivelAtual, taxaRealGb)
+      : (media * 30 * taxaRealGb);
+    const opcoes = tiers.map((t) => {
+      const preco_gb = t.lista_gb * fator;
+      const custo_mes = custoMensalNoTier(t.gb_dia, preco_gb);
+      return {
+        gb_dia: t.gb_dia,
+        preco_gb_estimado: preco_gb,
+        custo_mes_estimado: custo_mes,
+        atual: t.gb_dia === nivelAtual,
+        // Quantos dos dias observados ficariam ABAIXO do contratado, pagando capacidade ociosa.
+        // É o custo do erro, e vai para a tela junto da economia — tier que economiza na média
+        // mas desperdiça em 40% dos dias é uma decisão diferente de um que nunca desperdiça.
+        dias_ociosos: serie.filter((g) => g < t.gb_dia).length,
+        economia_mes_estimada: custoAtualMes - custo_mes,
+      };
+    });
+    const recomendado = opcoes
+      .filter((o) => !o.atual && o.economia_mes_estimada > 0)
+      .sort((a, b) => b.economia_mes_estimada - a.economia_mes_estimada)[0] || null;
+    return {
+      fator_calibragem: fator, taxa_real_gb: taxaRealGb, custo_atual_mes: custoAtualMes,
+      // O que a empresa pagaria em Pay-As-You-Go, na mesma calibragem — base da "economia já
+      // realizada" por estar no contrato atual.
+      payg_gb_estimado: ancoraPayg != null ? ancoraPayg * fator : null,
+      opcoes, recomendado,
+    };
+  };
+
+  const nivelAtual = Number(ws.capacity_reservation_level) || null;
+  const paygIngR = await pool.query(
+    `SELECT retail_price FROM azure_price_list
+      WHERE product_name = 'Log Analytics' AND meter_name = 'Analytics Logs Data Ingestion'
+        AND arm_region_name = ANY($1) AND retail_price > 0
+      ORDER BY retail_price ASC LIMIT 1`,
+    [[regiao, _LA_COMMITMENT_FALLBACK_REGIAO]],
+  );
+  const listaPaygIngestao = paygIngR.rows.length ? Number(paygIngR.rows[0].retail_price) : null;
+  const ingestao = taxas.analytics != null
+    ? montar(await listaDe('Azure Monitor'), taxas.analytics, nivelAtual, listaPaygIngestao)
+    : null;
+
+  // O Sentinel tem escada PRÓPRIA e é cobrado à parte sobre os mesmos GB. Quem está em
+  // "Classic Pay-as-you-go Analysis" não tem commitment nenhum desse lado — costuma ser a
+  // metade mais cara da conta, e a que ninguém negociou.
+  let sentinel = null;
+  if (taxas.sentinel_analytics != null) {
+    const tiersSentinel = await listaDe('Sentinel');
+    const paygR = await pool.query(
+      `SELECT retail_price FROM azure_price_list
+        WHERE product_name = 'Sentinel' AND meter_name ILIKE '%Pay-as-you-go Analysis%'
+          AND arm_region_name = ANY($1) AND retail_price > 0
+        ORDER BY retail_price ASC LIMIT 1`,
+      [[regiao, _LA_COMMITMENT_FALLBACK_REGIAO]],
+    );
+    const listaPayg = paygR.rows.length ? Number(paygR.rows[0].retail_price) : null;
+    if (listaPayg && tiersSentinel.length) {
+      const fator = taxas.sentinel_analytics / listaPayg;
+      const custoAtualMes = media * 30 * taxas.sentinel_analytics;
+      const opcoes = tiersSentinel.map((t) => {
+        const preco_gb = t.lista_gb * fator;
+        const custo_mes = custoMensalNoTier(t.gb_dia, preco_gb);
+        return {
+          gb_dia: t.gb_dia, preco_gb_estimado: preco_gb, custo_mes_estimado: custo_mes, atual: false,
+          dias_ociosos: serie.filter((g) => g < t.gb_dia).length,
+          economia_mes_estimada: custoAtualMes - custo_mes,
+        };
+      });
+      const recomendado = opcoes.filter((o) => o.economia_mes_estimada > 0)
+        .sort((a, b) => b.economia_mes_estimada - a.economia_mes_estimada)[0] || null;
+      sentinel = { em_commitment: false, fator_calibragem: fator, taxa_real_gb: taxas.sentinel_analytics,
+        custo_atual_mes: custoAtualMes, opcoes, recomendado };
+    }
+  }
+
+  return {
+    suficiente: true,
+    dias, media, p25, p75,
+    tier_atual: nivelAtual,
+    em_commitment: (ws.sku || '').toLowerCase() === 'capacityreservation',
+    ingestao,
+    sentinel,
+  };
+}
+
 app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { guid } = req.params;
@@ -17585,6 +17734,9 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
     ]);
 
     const taxas = await _taxasPorGbWorkspace(resourceId, janela, impostoCfg);
+    const wsCompleto = await pool.query(
+      `SELECT workspace_guid, sku, capacity_reservation_level, location FROM log_analytics_workspaces WHERE workspace_guid = $1`, [guid]);
+    const commitment = await _sugerirCommitmentTier(wsCompleto.rows[0], janela, taxas, impostoCfg);
 
     const consultasPorTabela = {};
     for (const r of consultasR.rows) consultasPorTabela[r.tabela] = r;
@@ -17630,7 +17782,7 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
       };
     }).sort((a, b) => (b.custo_ingestao_estimado + b.custo_retencao_estimado) - (a.custo_ingestao_estimado + a.custo_retencao_estimado));
 
-    res.json({ auditoria_consultas_habilitada: auditoriaHabilitada, taxas, tabelas: resultado });
+    res.json({ auditoria_consultas_habilitada: auditoriaHabilitada, taxas, commitment, tabelas: resultado });
   } catch (e) { _dbErr(res, e); }
 });
 

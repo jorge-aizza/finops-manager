@@ -91,9 +91,47 @@ export interface LogAnalyticsTaxasGb {
   fator: number | null
 }
 
+/** Um nível de Commitment Tier avaliado contra a série diária real de ingestão. */
+export interface LogAnalyticsTierOpcao {
+  gb_dia: number
+  /** Preço de lista do tier ajustado pelo desconto que a fatura comprova. */
+  preco_gb_estimado: number
+  custo_mes_estimado: number
+  /** Quantos dos dias observados ficariam abaixo do contratado, pagando capacidade ociosa. */
+  dias_ociosos: number
+  atual: boolean
+  /** Negativa quando o tier custaria MAIS que o arranjo atual. */
+  economia_mes_estimada: number
+}
+
+export interface LogAnalyticsTierBloco {
+  fator_calibragem: number
+  taxa_real_gb: number
+  custo_atual_mes: number
+  payg_gb_estimado?: number | null
+  opcoes: LogAnalyticsTierOpcao[]
+  recomendado: LogAnalyticsTierOpcao | null
+}
+
+export interface LogAnalyticsCommitment {
+  suficiente: boolean
+  /** Preenchido só quando `suficiente` é false. */
+  motivo?: string
+  dias: number
+  media?: number
+  p25?: number
+  p75?: number
+  tier_atual?: number | null
+  em_commitment?: boolean
+  ingestao?: LogAnalyticsTierBloco | null
+  /** null quando o Sentinel não está ligado neste workspace. */
+  sentinel?: (LogAnalyticsTierBloco & { em_commitment: boolean }) | null
+}
+
 export interface LogAnalyticsTabelasResposta {
   auditoria_consultas_habilitada: boolean
   taxas: LogAnalyticsTaxasGb
+  commitment: LogAnalyticsCommitment
   tabelas: LogAnalyticsTabela[]
 }
 

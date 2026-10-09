@@ -263,6 +263,7 @@ export default function LogAnalyticsView() {
   const tabelas = tabelasQuery.data?.tabelas || []
   const auditoriaConsultasHabilitada = tabelasQuery.data?.auditoria_consultas_habilitada ?? false
   const taxas = tabelasQuery.data?.taxas
+  const commitment = tabelasQuery.data?.commitment
 
   // Atribuição por assinatura: as SPs cadastradas não compartilham subscriptions,
   // então `subscription_id` já identifica a dona do workspace. Ver TenantFilterContext.
@@ -382,18 +383,24 @@ export default function LogAnalyticsView() {
         </div>
         {custoSentinel > 0 && (
           <div className="stat-card">
-            <div className="stat-label" title="Análise do Sentinel, cobrada por cima da ingestão num medidor próprio">
+            <div className="stat-label" title="Taxa de análise do Sentinel, cobrada por cima da ingestão: os MESMOS GB pagam duas vezes, uma no medidor de ingestão e outra aqui. Num workspace com Sentinel, cada GB custa cerca do dobro.">
               Custo Sentinel ({mesLabel})
             </div>
             <div className="stat-value">{fmtBRL(custoSentinel)}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.35 }}>
+              Cobrado por cima da ingestão, sobre os mesmos GB
+            </div>
           </div>
         )}
         {custoCommitment > 0 && (
           <div className="stat-card">
-            <div className="stat-label" title="Capacidade pré-paga: quando contratada, substitui a cobrança por GB">
+            <div className="stat-label" title="Não é uma taxa extra: É a conta de ingestão de quem tem capacidade pré-paga (Capacity Reservation). Nesses workspaces a Azure para de emitir o medidor Analytics Logs Data Ingestion e emite o de Commitment Tier no lugar — por isso esse dinheiro não aparece no card de ingestão.">
               Commitment Tier ({mesLabel})
             </div>
             <div className="stat-value">{fmtBRL(custoCommitment)}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.35 }}>
+              É a ingestão de quem tem capacidade pré-paga — não um custo a mais
+            </div>
           </div>
         )}
         <div className="stat-card yellow-card">
@@ -892,6 +899,93 @@ export default function LogAnalyticsView() {
               )}
             </div>
           )}
+        </div>
+        )
+      })()}
+
+      {workspaceSelecionado && commitment?.suficiente && (commitment.ingestao || commitment.sentinel) && (() => {
+        const bloco = (rotulo: string, b: NonNullable<typeof commitment.ingestao>, emContrato: boolean) => {
+          // Mostra o atual, o recomendado e os vizinhos — a escada inteira vira ruído, e os
+          // tiers muito acima do volume só repetem "custaria muito mais".
+          const relevantes = b.opcoes.filter(
+            (o) => o.atual || o.economia_mes_estimada > 0 || o.dias_ociosos < commitment.dias!,
+          ).slice(0, 5)
+          return (
+            <div style={{ marginBottom: 18 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                {rotulo}
+                <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>
+                  {' — '}paga {fmtBRL(b.taxa_real_gb)}/GB hoje
+                  {emContrato ? `, em contrato de ${commitment.tier_atual} GB/dia` : ', sem contrato (Pay-As-You-Go)'}
+                </span>
+              </div>
+              <div className="table-wrapper">
+                <table className="data-table">
+                  <thead><tr>
+                    <th>Nível</th>
+                    <th style={{ textAlign: 'right' }}>Preço/GB estimado</th>
+                    <th style={{ textAlign: 'right' }}>Custo/mês</th>
+                    <th style={{ textAlign: 'right' }}>Diferença/mês</th>
+                    <th style={{ textAlign: 'right' }}>Dias ociosos</th>
+                  </tr></thead>
+                  <tbody>
+                    {relevantes.map((o) => {
+                      const ganho = o.economia_mes_estimada > 0
+                      return (
+                        <tr key={o.gb_dia} style={o.atual ? { fontWeight: 600 } : undefined}>
+                          <td>
+                            {o.gb_dia} GB/dia
+                            {o.atual && <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--text-muted)' }}>atual</span>}
+                          </td>
+                          <td style={{ textAlign: 'right' }}>{fmtBRL(o.preco_gb_estimado)}</td>
+                          <td style={{ textAlign: 'right' }}>{fmtBRL(o.custo_mes_estimado)}</td>
+                          <td style={{ textAlign: 'right', fontWeight: 700,
+                            color: o.atual ? 'var(--text-muted)' : ganho ? 'var(--green,#22c55e)' : 'var(--red,#ff4d6a)' }}>
+                            {o.atual ? '—' : (ganho ? '+' : '') + fmtBRL(o.economia_mes_estimada)}
+                          </td>
+                          <td style={{ textAlign: 'right', fontSize: 11,
+                            color: o.dias_ociosos > commitment.dias! / 2 ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}>
+                            {o.dias_ociosos} de {commitment.dias}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ fontSize: 11, marginTop: 6, color: b.recomendado ? 'var(--green,#22c55e)' : 'var(--text-muted)' }}>
+                {b.recomendado
+                  ? `Melhor nível: ${b.recomendado.gb_dia} GB/dia — ${fmtBRL(b.recomendado.economia_mes_estimada)}/mês, com ${b.recomendado.dias_ociosos} dos ${commitment.dias} dias abaixo do contratado.`
+                  : emContrato
+                    ? 'O nível contratado já é o melhor para este volume — subir pagaria capacidade ociosa nos dias fracos.'
+                    : 'Nenhum nível compensa neste volume: o contrato cobra o nível cheio mesmo nos dias fracos.'}
+              </div>
+            </div>
+          )
+        }
+        return (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 18 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>
+            Commitment Tier — sugestão de nível
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 14, lineHeight: 1.5 }}>
+            Ingestão de {commitment.media!.toFixed(1)} GB/dia em média nos últimos {commitment.dias} dias
+            (p25 {commitment.p25!.toFixed(0)} · p75 {commitment.p75!.toFixed(0)} GB). Cada nível é avaliado
+            contra a série dia a dia, não contra a média: num Commitment Tier paga-se o nível contratado
+            mesmo no dia em que se ingere menos, e é esse dia fraco que decide a escolha.
+          </div>
+
+          {commitment.ingestao && bloco('Ingestão', commitment.ingestao, !!commitment.em_commitment)}
+          {commitment.sentinel && bloco('Sentinel (escada própria, sobre os mesmos GB)', commitment.sentinel, false)}
+
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+            <strong>Como o preço foi estimado.</strong> O catálogo público da Azure está em dólar e esta conta
+            não paga preço de lista. A lista entra só pela forma da escada — quanto o preço por GB cai de um
+            nível para o outro — e a escala vem da fatura: o preço por GB que este workspace comprovadamente
+            paga hoje. A premissa é que o desconto negociado vale igual entre níveis do mesmo medidor; se não
+            valer, o valor absoluto muda, mas o nível indicado continua sendo o mesmo. O Azure trava o nível
+            por no mínimo 31 dias, então confirme com a Microsoft antes de contratar.
+          </div>
         </div>
         )
       })()}
