@@ -17462,6 +17462,102 @@ app.get('/api/log-analytics/workspaces/:guid/ingestao', authMiddleware, dbMiddle
 // rateio de retenção pelo peso GB × dias de retenção além do período grátis (31d), porque uma
 // tabela pequena com retenção de 2 anos pesa mais no custo de retenção do que uma tabela
 // grande com retenção padrão.
+// Preço REAL por GB de cada caminho de ingestão deste workspace, derivado do que a Azure
+// cobrou — não de tabela de preço. É o que permite comparar "ficar no Analytics" contra "mover
+// pro Basic" com o número da própria fatura.
+//
+// O caminho Analytics tem duas formas possíveis de cobrança, e só uma aparece por workspace:
+// PAYG emite "Analytics Logs Data Ingestion"; quem está em Capacity Reservation não emite esse
+// medidor nenhum — emite "<N> GB Commitment Tier Capacity Reservation", cuja quantidade está em
+// blocos de N GB, não em GB. Ignorar isso faz o workspace mais caro do parque parecer gratuito.
+//
+// Sentinel é uma SEGUNDA cobrança sobre os MESMOS GB, com tarifa própria por plano. Onde ele
+// está ligado, mover uma tabela de plano muda as duas pontas de uma vez.
+const _LA_TAXA_RE = {
+  analytics: /analytics logs data ingestion/i,
+  basic: /basic logs data ingestion/i,
+  commit: /^(\d+)\s*GB Commitment Tier/i,
+  sentinelAnalytics: /^classic pay-as-you-go analysis$/i,
+  sentinelBasic: /^classic basic logs analysis$/i,
+};
+async function _taxasPorGbWorkspace(resourceId, janela, impostoCfg) {
+  const r = await pool.query(
+    `SELECT meter_name,
+            SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS ms,
+            SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace') AS mp,
+            SUM(quantity) AS qtd
+       FROM azure_costs
+      WHERE UPPER(resource_id) = UPPER($1) AND cost_date >= $2::date AND cost_date < $3::date
+      GROUP BY 1`,
+    [resourceId, janela.inicio, janela.fimExclusivo],
+  );
+
+  const taxa = { analytics: null, basic: null, sentinel_analytics: null, sentinel_basic: null };
+  let viaCommitment = false;
+  for (const row of r.rows) {
+    const nome = row.meter_name || '';
+    const custo = _comImpostoSplit(row.ms, row.mp, impostoCfg);
+    const qtd = Number(row.qtd) || 0;
+    if (qtd <= 0 || custo <= 0) continue;
+    const mCommit = nome.match(_LA_TAXA_RE.commit);
+    if (mCommit) {
+      // quantidade vem em blocos do tamanho do tier: 2,28 blocos de 100 GB = 228 GB.
+      const gb = qtd * Number(mCommit[1]);
+      if (gb > 0) { taxa.analytics = custo / gb; viaCommitment = true; }
+    } else if (_LA_TAXA_RE.analytics.test(nome)) {
+      if (!viaCommitment) taxa.analytics = custo / qtd;
+    } else if (_LA_TAXA_RE.basic.test(nome)) {
+      taxa.basic = custo / qtd;
+    } else if (_LA_TAXA_RE.sentinelAnalytics.test(nome)) {
+      taxa.sentinel_analytics = custo / qtd;
+    } else if (_LA_TAXA_RE.sentinelBasic.test(nome)) {
+      taxa.sentinel_basic = custo / qtd;
+    }
+  }
+
+  // Um workspace sem nenhuma tabela em Basic nunca emitiu o medidor Basic, então não há tarifa
+  // própria pra comparar. Nesse caso vale a mediana do que OS OUTROS workspaces pagaram no mesmo
+  // período — mesma moeda, mesmo mês, mesma conta. Fica marcado como referência justamente
+  // porque não é a fatura deste workspace.
+  let origemBasic = taxa.basic != null ? 'workspace' : null;
+  if (taxa.basic == null) {
+    const ref = await pool.query(
+      `SELECT meter_name,
+              SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace') AS ms,
+              SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace') AS mp,
+              SUM(quantity) AS qtd
+         FROM azure_costs ac
+        WHERE ac.cost_date >= $1::date AND ac.cost_date < $2::date
+          AND (ac.meter_name ILIKE '%Basic Logs Data Ingestion%' OR ac.meter_name ILIKE 'Classic Basic Logs Analysis')
+        GROUP BY 1`,
+      [janela.inicio, janela.fimExclusivo],
+    );
+    for (const row of ref.rows) {
+      const custo = _comImpostoSplit(row.ms, row.mp, impostoCfg);
+      const qtd = Number(row.qtd) || 0;
+      if (qtd <= 0 || custo <= 0) continue;
+      if (_LA_TAXA_RE.basic.test(row.meter_name || '')) { taxa.basic = custo / qtd; origemBasic = 'referencia'; }
+      else if (taxa.sentinel_analytics != null && taxa.sentinel_basic == null) taxa.sentinel_basic = custo / qtd;
+    }
+  }
+
+  // Sentinel desligado neste workspace: nenhuma das duas pontas existe, e o comparativo é só
+  // ingestão contra ingestão.
+  const temSentinel = taxa.sentinel_analytics != null;
+  const atualAnalytics = taxa.analytics != null ? taxa.analytics + (taxa.sentinel_analytics || 0) : null;
+  const seBasic = taxa.basic != null ? taxa.basic + (temSentinel ? (taxa.sentinel_basic || 0) : 0) : null;
+  return {
+    ...taxa,
+    gb_analytics_total: atualAnalytics,
+    gb_basic_total: seBasic,
+    tem_sentinel: temSentinel,
+    cobranca_via_commitment: viaCommitment,
+    origem_taxa_basic: origemBasic,
+    // Quantas vezes o GB em Analytics custa o GB em Basic. É o número da conversa.
+    fator: atualAnalytics && seBasic ? atualAnalytics / seBasic : null,
+  };
+}
+
 app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { guid } = req.params;
@@ -17488,6 +17584,8 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
       pool.query(`SELECT tabela, consultas_30d, gb_escaneado_30d, ultima_consulta FROM log_analytics_consultas_tabela WHERE workspace_guid = $1`, [guid]),
     ]);
 
+    const taxas = await _taxasPorGbWorkspace(resourceId, janela, impostoCfg);
+
     const consultasPorTabela = {};
     for (const r of consultasR.rows) consultasPorTabela[r.tabela] = r;
     const gbPorTabela = {};
@@ -17507,6 +17605,7 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
 
     const resultado = linhas.map((l) => {
       const consulta = consultasPorTabela[l.tabela];
+      const emBasico = /^(basic|auxiliary)$/i.test(l.plano || '');
       return {
         tabela: l.tabela,
         plano: l.plano ?? null,
@@ -17520,10 +17619,18 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
         consultas_30d: consulta ? consulta.consultas_30d : null,
         gb_escaneado_30d: consulta ? Number(consulta.gb_escaneado_30d) : null,
         ultima_consulta: consulta ? consulta.ultima_consulta : null,
+        // O que ESTA tabela paga por GB hoje, pelo plano em que ela está — e o que pagaria no
+        // Basic. Tabela já em Basic/Auxiliary tem economia zero por definição: ela já está lá.
+        custo_gb_atual: emBasico ? taxas.gb_basic_total : taxas.gb_analytics_total,
+        custo_gb_se_basic: taxas.gb_basic_total,
+        economia_periodo_se_basic: (!emBasico && taxas.gb_analytics_total != null && taxas.gb_basic_total != null)
+          ? l.gb * (taxas.gb_analytics_total - taxas.gb_basic_total)
+          : 0,
+        ja_em_basico: emBasico,
       };
     }).sort((a, b) => (b.custo_ingestao_estimado + b.custo_retencao_estimado) - (a.custo_ingestao_estimado + a.custo_retencao_estimado));
 
-    res.json({ auditoria_consultas_habilitada: auditoriaHabilitada, tabelas: resultado });
+    res.json({ auditoria_consultas_habilitada: auditoriaHabilitada, taxas, tabelas: resultado });
   } catch (e) { _dbErr(res, e); }
 });
 

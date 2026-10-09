@@ -262,6 +262,7 @@ export default function LogAnalyticsView() {
   const recomendacoes = recomendacoesQuery.data || []
   const tabelas = tabelasQuery.data?.tabelas || []
   const auditoriaConsultasHabilitada = tabelasQuery.data?.auditoria_consultas_habilitada ?? false
+  const taxas = tabelasQuery.data?.taxas
 
   // Atribuição por assinatura: as SPs cadastradas não compartilham subscriptions,
   // então `subscription_id` já identifica a dona do workspace. Ver TenantFilterContext.
@@ -891,6 +892,96 @@ export default function LogAnalyticsView() {
               )}
             </div>
           )}
+        </div>
+        )
+      })()}
+
+      {workspaceSelecionado && taxas?.gb_analytics_total != null && taxas.gb_basic_total != null && (() => {
+        const candidatas = tabelas
+          .filter((t) => !t.ja_em_basico && t.economia_periodo_se_basic > 0)
+          .sort((a, b) => b.economia_periodo_se_basic - a.economia_periodo_se_basic)
+        const economiaTotal = candidatas.reduce((a, t) => a + t.economia_periodo_se_basic, 0)
+        if (!candidatas.length) return null
+        const linhaTaxa = (rotulo: string, ingestao: number | null, sentinel: number | null, total: number, destaque?: boolean) => (
+          <tr style={destaque ? { fontWeight: 600 } : undefined}>
+            <td>{rotulo}</td>
+            <td style={{ textAlign: 'right' }}>{ingestao != null ? fmtBRL(ingestao) : '—'}</td>
+            <td style={{ textAlign: 'right' }}>{sentinel != null ? fmtBRL(sentinel) : '—'}</td>
+            <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtBRL(total)}</td>
+          </tr>
+        )
+        return (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 18 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>
+            Custo por GB — Analytics vs Basic
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
+            Tarifas tiradas da fatura DESTE workspace no período, dividindo custo por quantidade de cada medidor —
+            não de tabela de preço.
+            {taxas.cobranca_via_commitment && ' A ingestão aqui é cobrada no medidor de Commitment Tier, cuja quantidade vem em blocos do tier, não em GB.'}
+            {taxas.tem_sentinel && ' O Sentinel cobra uma segunda vez os MESMOS GB, com tarifa própria por plano — por isso mudar o plano mexe nas duas pontas.'}
+            {taxas.origem_taxa_basic === 'referencia' && ' Este workspace não tem nenhuma tabela em Basic, então a tarifa Basic veio dos outros workspaces no mesmo período.'}
+          </div>
+
+          <div className="table-wrapper" style={{ marginBottom: 14 }}>
+            <table className="data-table">
+              <thead><tr>
+                <th>Caminho</th>
+                <th style={{ textAlign: 'right' }}>Ingestão/GB</th>
+                <th style={{ textAlign: 'right' }}>Sentinel/GB</th>
+                <th style={{ textAlign: 'right' }}>Total/GB</th>
+              </tr></thead>
+              <tbody>
+                {linhaTaxa('Analytics (plano atual destas tabelas)', taxas.analytics, taxas.sentinel_analytics, taxas.gb_analytics_total!, true)}
+                {linhaTaxa('Basic', taxas.basic, taxas.tem_sentinel ? taxas.sentinel_basic : null, taxas.gb_basic_total!)}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ fontSize: 12, marginBottom: 12 }}>
+            Um GB em Analytics custa <strong>{taxas.fator?.toFixed(1).replace('.', ',')}×</strong> o mesmo GB em Basic.
+            Movendo as {candidatas.length} tabela{candidatas.length === 1 ? '' : 's'} abaixo, a diferença no período seria{' '}
+            <strong style={{ color: 'var(--green,#22c55e)' }}>{fmtBRL(economiaTotal)}</strong>.
+          </div>
+
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead><tr>
+                <th>Tabela</th>
+                <th style={{ textAlign: 'right' }}>Ingestão do período</th>
+                <th style={{ textAlign: 'right' }}>Paga hoje</th>
+                <th style={{ textAlign: 'right' }}>Pagaria em Basic</th>
+                <th style={{ textAlign: 'right' }}>Diferença</th>
+                <th style={{ textAlign: 'right' }}>Consultas (30d)</th>
+              </tr></thead>
+              <tbody>
+                {candidatas.map((t) => (
+                  <tr key={t.tabela}>
+                    <td>{t.tabela}</td>
+                    <td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono', monospace" }}>{fmtGB(t.gb_mes)}</td>
+                    <td style={{ textAlign: 'right' }}>{fmtBRL(t.gb_mes * (t.custo_gb_atual || 0))}</td>
+                    <td style={{ textAlign: 'right' }}>{fmtBRL(t.gb_mes * (t.custo_gb_se_basic || 0))}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--green,#22c55e)' }}>
+                      {fmtBRL(t.economia_periodo_se_basic)}
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {!auditoriaConsultasHabilitada
+                        ? <span style={{ color: 'var(--text-muted)', fontFamily: 'inherit' }}>—</span>
+                        : t.consultas_30d ?? '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ fontSize: 11, color: 'var(--orange,#ff8c42)', marginTop: 12, lineHeight: 1.5 }}>
+            <strong>Isto é uma simulação de preço, não uma recomendação de mover.</strong> O plano Basic não aceita
+            regra de detecção agendada do Sentinel, tem retenção interativa curta e cobra por consulta — mover uma
+            tabela usada em detecção derruba a detecção. Nem toda tabela pode mudar de plano. A coluna de consultas
+            ajuda: tabela cara que ninguém consulta é a candidata óbvia; tabela de segurança é decisão do time de
+            segurança, não de custo.
+          </div>
         </div>
         )
       })()}

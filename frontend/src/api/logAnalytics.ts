@@ -66,10 +66,34 @@ export interface LogAnalyticsTabela {
   consultas_30d: number | null
   gb_escaneado_30d: number | null
   ultima_consulta: string | null
+  /** R$/GB que esta tabela paga hoje, pelo plano em que está (ingestão + análise do Sentinel). */
+  custo_gb_atual: number | null
+  custo_gb_se_basic: number | null
+  /** Zero para tabela já em Basic/Auxiliary — não há para onde mover. */
+  economia_periodo_se_basic: number
+  ja_em_basico: boolean
+}
+
+/** Preço por GB derivado da fatura deste workspace, não de tabela de preço. */
+export interface LogAnalyticsTaxasGb {
+  analytics: number | null
+  basic: number | null
+  sentinel_analytics: number | null
+  sentinel_basic: number | null
+  /** Ingestão + Sentinel somados: o que um GB custa de fato em cada caminho. */
+  gb_analytics_total: number | null
+  gb_basic_total: number | null
+  tem_sentinel: boolean
+  /** Workspace em Capacity Reservation: a ingestão é cobrada no medidor de Commitment Tier. */
+  cobranca_via_commitment: boolean
+  /** 'referencia' = o workspace não tem tabela em Basic, a tarifa veio dos outros workspaces. */
+  origem_taxa_basic: 'workspace' | 'referencia' | null
+  fator: number | null
 }
 
 export interface LogAnalyticsTabelasResposta {
   auditoria_consultas_habilitada: boolean
+  taxas: LogAnalyticsTaxasGb
   tabelas: LogAnalyticsTabela[]
 }
 
