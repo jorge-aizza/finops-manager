@@ -50,12 +50,6 @@ export interface LogAnalyticsConsumoDiarioResposta {
   pontos: LogAnalyticsConsumoDiarioPonto[]
 }
 
-export interface LogAnalyticsIngestaoDia {
-  dia: string
-  tabela: string
-  gb: number
-}
-
 export interface LogAnalyticsTabela {
   tabela: string
   plano: 'Analytics' | 'Basic' | 'Auxiliary' | null
@@ -183,9 +177,6 @@ export const getLogAnalyticsAppInsights = (spId?: number | null) => {
   if (spId) q.set('sp_id', String(spId))
   return apiFetch<LogAnalyticsAppInsights[]>('GET', '/log-analytics/app-insights' + (q.toString() ? '?' + q : ''))
 }
-
-export const getLogAnalyticsIngestao = (workspaceGuid: string) =>
-  apiFetch<LogAnalyticsIngestaoDia[]>('GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/ingestao')
 
 // Gráfico de detalhe "GB dia a dia + valor" de um workspace (2026-10-xx, pedido do usuário) —
 // `mes` no mesmo formato YYYY-MM do resto da tela; sem ele, o backend cai no mês corrente.

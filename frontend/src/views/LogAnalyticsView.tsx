@@ -4,7 +4,7 @@ import {
   getLogAnalyticsWorkspaces, getLogAnalyticsRecomendacoes, getLogAnalyticsTabelas, getLogAnalyticsFontes,
   getLogAnalyticsDiagnosticSettings, getLogAnalyticsResumo, getLogAnalyticsAppInsights,
   getLogAnalyticsRecursosVolume, getLogAnalyticsExportSemWorkspace, getLogAnalyticsCustoObservabilidade,
-  forcarColetaLogAnalytics, forcarColetaDiagnosticSettings, detalharRecursoTabela,
+  forcarColetaLogAnalytics, forcarColetaDiagnosticSettings, forcarColetaIngestaoRecurso, detalharRecursoTabela,
   baixarLogAnalyticsExcel, baixarLogAnalyticsDashboardHtml, habilitarAuditoriaConsultas,
   type LogAnalyticsSeveridade, type LogAnalyticsWorkspace, type LogAnalyticsRecursoDetalhado,
   type LogAnalyticsRankingItem,
@@ -202,6 +202,21 @@ export default function LogAnalyticsView() {
     onError: (e: Error) => window.showToast?.(e.message, 'error'),
   })
 
+  // A atribuição de GB por recurso é a etapa que alimenta "Recursos por volume" e a coluna
+  // de caminho de ingestão. Rodava só junto da coleta agendada, então quem acabava de ligar um
+  // Diagnostic Setting não tinha como ver o efeito sem esperar o próximo ciclo.
+  const coletaIngestaoRecursoMutation = useMutation({
+    mutationFn: forcarColetaIngestaoRecurso,
+    onSuccess: (r) => {
+      window.showToast?.(r.message, 'success')
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-recursos-volume'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-tabelas'] })
+      }, 30_000)
+    },
+    onError: (e: Error) => window.showToast?.(e.message, 'error'),
+  })
+
   const detalharMutation = useMutation({
     mutationFn: ({ tabela, limite }: { tabela: string; limite: number }) =>
       detalharRecursoTabela(workspaceSelecionado!.workspace_guid, tabela, limite),
@@ -336,6 +351,11 @@ export default function LogAnalyticsView() {
           disabled={coletaDiagMutation.isPending} onClick={() => coletaDiagMutation.mutate()}
           title="Etapa separada e mais cara (1 chamada por recurso monitorável do tenant) — pode levar vários minutos em tenants grandes">
           {coletaDiagMutation.isPending ? 'Coletando...' : '🔎 Atualizar Diagnostic Settings'}
+        </button>
+        <button className="btn-ghost" style={{ padding: '7px 14px', fontSize: 12 }}
+          disabled={coletaIngestaoRecursoMutation.isPending} onClick={() => coletaIngestaoRecursoMutation.mutate()}
+          title="Recalcula quais recursos geraram os GB de cada workspace (consulta KQL por tabela) — alimenta 'Recursos por volume'">
+          {coletaIngestaoRecursoMutation.isPending ? 'Coletando...' : '📍 Atualizar atribuição por recurso'}
         </button>
         <button className="btn-export" disabled={exportando} onClick={exportar}>
           <svg viewBox="0 0 16 16" fill="none" width={14} height={14}><path d="M2 12v2h12v-2M8 2v8M5 7l3 3 3-3" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" /></svg>
