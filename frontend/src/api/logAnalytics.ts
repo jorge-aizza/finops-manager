@@ -266,7 +266,20 @@ export interface LogAnalyticsRecursoVolume {
 // Ranking de recursos por volume no workspace. Diferente de `detalharRecursoTabela`, que é uma
 // consulta ao vivo de 3 dias numa tabela só, este lê o histórico acumulado e cobre todas as
 // tabelas grandes de uma vez.
+/** Tabela cujo volume não pôde ser atribuído a recursos, com o motivo. */
+export interface LogAnalyticsTabelaSemAtribuicao {
+  tabela: string
+  /** 'vazio' = consulta ok, ninguém carimba `_ResourceId` (limite do dado, típico de agente).
+   *  'erro' = a consulta falhou; `detalhe` traz a resposta da Azure. */
+  desfecho: 'vazio' | 'erro'
+  detalhe: string | null
+  gb: number
+}
+
 export interface LogAnalyticsRecursosVolumeResposta {
+  /** O que ficou de fora da atribuição e por quê — sem isso a cobertura é um número sem
+   * explicação, e "falhou" se confunde com "não tem recurso carimbado". */
+  tabelas_sem_atribuicao: LogAnalyticsTabelaSemAtribuicao[]
   /** % do volume das mesmas tabelas/dias que tem recurso identificado. Linha de agente (DCR)
    * costuma vir sem `_ResourceId` e fica de fora — sem isso o ranking passaria por total. */
   cobertura_pct: number | null

@@ -706,6 +706,20 @@ export default function LogAnalyticsView() {
               </strong> — o restante chega por agente (DCR), que não carimba o recurso de origem, então não entra
               neste ranking.</>
             )}
+            {(recursosVolumeQuery.data?.tabelas_sem_atribuicao?.length ?? 0) > 0 && (
+              <div style={{ marginTop: 6 }}>
+                Fora da atribuição:{' '}
+                {recursosVolumeQuery.data!.tabelas_sem_atribuicao.slice(0, 6).map((t, i) => (
+                  <span key={t.tabela}>
+                    {i > 0 && ' · '}
+                    <strong style={{ color: 'var(--text)' }}>{t.tabela}</strong>{' '}
+                    <span title={t.detalhe || ''}>
+                      ({fmtGB(t.gb)}, {t.desfecho === 'vazio' ? 'sem recurso carimbado' : 'erro na consulta'})
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           {recursosVolumeQuery.isLoading ? (
             <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>

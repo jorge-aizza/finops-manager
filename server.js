@@ -15992,6 +15992,23 @@ async function ensureLogAnalyticsTable() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_la_ing_recurso_ws_dia ON log_analytics_ingestao_recurso (workspace_guid, dia)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_la_ing_recurso_rec ON log_analytics_ingestao_recurso (recurso_id)`);
+
+  // Desfecho da coleta POR TABELA. Sem isto, "falhou", "não tem recurso carimbado" e "não
+  // tentamos" eram a mesma ausência de linhas — e a cobertura ficava sem explicação. Em
+  // LA-SharedServices-PROD, 5 das 10 maiores tabelas não produzem atribuição, somando 617 GB;
+  // saber QUAL dos três motivos é o que separa bug de limitação da tabela.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_ingestao_recurso_status (
+      workspace_guid TEXT NOT NULL,
+      tabela         VARCHAR(200) NOT NULL,
+      desfecho       VARCHAR(20) NOT NULL,
+      detalhe        TEXT,
+      linhas         INTEGER NOT NULL DEFAULT 0,
+      gb_tabela      NUMERIC(14,4) NOT NULL DEFAULT 0,
+      atualizado_em  TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (workspace_guid, tabela)
+    )
+  `);
   _logAnalyticsTableReady = true;
   } finally { _logAnalyticsTablePromise = null; }
   })();
@@ -16126,19 +16143,30 @@ const _LA_RECURSO_TOP_TABELAS = 10;
 async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
   // As maiores tabelas saem do que já foi coletado — nada de descobrir isso com KQL.
   const r = await pool.query(
-    `SELECT tabela FROM log_analytics_ingestao_diaria
+    `SELECT tabela, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
      WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - 30
      GROUP BY tabela ORDER BY SUM(gb) DESC LIMIT $2`,
     [ws.workspace_guid, _LA_RECURSO_TOP_TABELAS],
   );
-  const tabelas = r.rows.map((x) => x.tabela).filter((t) => /^[A-Za-z0-9_]+$/.test(t));
+  const tabelas = r.rows.filter((x) => /^[A-Za-z0-9_]+$/.test(x.tabela));
   if (!tabelas.length) return { tabelas: 0, linhas: 0 };
+
+  // Desfecho por tabela — 'ok', 'vazio' (consulta passou, nenhum recurso carimbado) ou 'erro'.
+  // Os três eram indistinguíveis antes: todos resultavam em nenhuma linha gravada.
+  const anotar = (tabela, desfecho, detalhe, linhas, gb) => pool.query(
+    `INSERT INTO log_analytics_ingestao_recurso_status (workspace_guid, tabela, desfecho, detalhe, linhas, gb_tabela, atualizado_em)
+     VALUES ($1,$2,$3,$4,$5,$6,NOW())
+     ON CONFLICT (workspace_guid, tabela) DO UPDATE
+       SET desfecho = EXCLUDED.desfecho, detalhe = EXCLUDED.detalhe, linhas = EXCLUDED.linhas,
+           gb_tabela = EXCLUDED.gb_tabela, atualizado_em = NOW()`,
+    [ws.workspace_guid, tabela, desfecho, detalhe ? String(detalhe).slice(0, 400) : null, linhas, gb],
+  ).catch(() => {});
 
   const token = await getLogAnalyticsToken();
   const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
   let totalLinhas = 0;
 
-  for (const tabela of tabelas) {
+  for (const { tabela, gb: gbTabela } of tabelas) {
     // `_ResourceId` vem vazio em tabela alimentada por agente (Syslog de VM fora do ARM, por
     // exemplo) — essas linhas são descartadas em vez de virarem um recurso "" no ranking.
     const kql = `${tabela} | where TimeGenerated > ago(${_LA_RECURSO_JANELA_DIAS}d) | where isnotempty(_ResourceId)`
@@ -16153,6 +16181,7 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
     } catch (e) {
       // Uma tabela que falha não derruba as outras do mesmo workspace.
       console.warn(`[LogAnalytics] ingestão por recurso falhou em ${ws.nome}/${tabela}:`, e.message);
+      await anotar(tabela, 'erro', `rede: ${e.message}`, 0, gbTabela);
       continue;
     }
     if (!resp.ok) {
@@ -16161,14 +16190,23 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
       // Azure no log não dá pra distinguir isso de um problema de permissão ou sintaxe.
       const corpo = await resp.text().catch(() => '');
       console.warn(`[LogAnalytics] ingestão por recurso: ${ws.nome}/${tabela} devolveu ${resp.status} — ${corpo.slice(0, 180)}`);
+      await anotar(tabela, 'erro', `HTTP ${resp.status}: ${corpo}`, 0, gbTabela);
       continue;
     }
     const data = await _safeRespJson(resp);
     const t = data.tables?.[0];
-    if (!t?.rows?.length) continue;
+    if (!t?.rows?.length) {
+      // Consulta passou e não veio nada: a tabela existe mas ninguém carimba `_ResourceId`
+      // nela, tipicamente dado de agente. Não é erro, é limite do dado.
+      await anotar(tabela, 'vazio', 'consulta ok, nenhuma linha com _ResourceId', 0, gbTabela);
+      continue;
+    }
     const cols = t.columns.map((c) => c.name);
     const iGB = cols.indexOf('GB'), iRec = cols.indexOf('_ResourceId'), iDia = cols.indexOf('dia');
-    if (iGB < 0 || iRec < 0 || iDia < 0) continue;
+    if (iGB < 0 || iRec < 0 || iDia < 0) {
+      await anotar(tabela, 'erro', `colunas ausentes na resposta: ${cols.join(',')}`, 0, gbTabela);
+      continue;
+    }
 
     const c = await pool.connect();
     try {
@@ -16185,9 +16223,11 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
         totalLinhas++;
       }
       await c.query('COMMIT');
+      await anotar(tabela, 'ok', null, t.rows.length, gbTabela);
     } catch (e) {
       await c.query('ROLLBACK').catch(() => {});
       console.warn(`[LogAnalytics] gravação da ingestão por recurso falhou em ${ws.nome}/${tabela}:`, e.message);
+      await anotar(tabela, 'erro', `gravação: ${e.message}`, 0, gbTabela);
     } finally { c.release(); }
   }
   return { tabelas: tabelas.length, linhas: totalLinhas };
@@ -17807,8 +17847,24 @@ app.get('/api/log-analytics/workspaces/:guid/recursos-volume', authMiddleware, d
     const atribuido = Number(cob.rows[0]?.atribuido) || 0;
     const totalTabelas = Number(cob.rows[0]?.total) || 0;
 
+    // Desfecho por tabela — é o que transforma "87,7% de cobertura" em algo explicável:
+    // qual tabela ficou de fora, com quanto volume, e se foi erro ou limite do dado.
+    const st = await pool.query(
+      `SELECT tabela, desfecho, detalhe, linhas, gb_tabela
+       FROM log_analytics_ingestao_recurso_status
+       WHERE workspace_guid = $1 AND desfecho <> 'ok'
+       ORDER BY gb_tabela DESC LIMIT 20`,
+      [req.params.guid],
+    );
+
     res.json({
       cobertura_pct: totalTabelas > 0 ? Number(((atribuido / totalTabelas) * 100).toFixed(1)) : null,
+      tabelas_sem_atribuicao: st.rows.map((x) => ({
+        tabela: x.tabela,
+        desfecho: x.desfecho,
+        detalhe: x.detalhe,
+        gb: Number(x.gb_tabela) || 0,
+      })),
       recursos: r.rows.map((x) => ({
         recurso_id: x.recurso_id,
         gb: Number(x.gb) || 0,
