@@ -17382,9 +17382,14 @@ app.post('/api/log-analytics/workspaces/:guid/tabelas/:tabela/detalhar-recurso',
   try {
     const { guid, tabela } = req.params;
     if (!/^[A-Za-z0-9_]+$/.test(tabela)) return res.status(400).json({ error: 'Nome de tabela inválido' });
+    // `limite` entra no texto do KQL, então é forçado a inteiro — nunca interpolar o valor
+    // cru, mesmo vindo de um campo nosso (mesma disciplina do nome da tabela acima).
+    // O `top` só trunca a saída: o scan dos 3 dias e o summarize acontecem de qualquer jeito,
+    // então subir o teto não custa consulta a mais, só payload.
+    const limite = Math.max(1, Math.min(5000, parseInt(req.query.limite, 10) || 20));
     const { getLogAnalyticsToken } = await _getEscopoDoWorkspace(guid);
     const token = await getLogAnalyticsToken();
-    const kql = `${tabela} | where TimeGenerated > ago(3d) | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId | top 20 by GB desc`;
+    const kql = `${tabela} | where TimeGenerated > ago(3d) | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId | top ${limite} by GB desc`;
     const url = `https://api.loganalytics.io/v1/workspaces/${guid}/query`;
     // 45s, não 30s: é uma query de verdade contra a tabela de log (não a Usage, leve) — uma
     // tabela grande/verbosa pode legitimamente demorar. O timeout do apiFetch no frontend pra

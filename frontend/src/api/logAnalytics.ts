@@ -233,9 +233,12 @@ export const getLogAnalyticsDiagnosticSettings = (workspaceGuid: string) =>
 // (maior que os 45s do backend pra Azure) — do contrário o front abortava antes do backend
 // terminar numa tabela grande/verbosa, e o usuário só via "servidor não respondeu" sem saber
 // que a query ainda estava rodando do lado de lá.
-export const detalharRecursoTabela = (workspaceGuid: string, tabela: string) =>
+// `limite` controla quantos recursos voltam (padrão 20 no backend, teto 5000). Subir não custa
+// consulta a mais: o summarize já agrega tudo e o `top` só trunca a saída.
+export const detalharRecursoTabela = (workspaceGuid: string, tabela: string, limite?: number) =>
   apiFetch<{ recursos: LogAnalyticsRecursoDetalhado[]; janela_dias: number }>(
-    'POST', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/tabelas/' + encodeURIComponent(tabela) + '/detalhar-recurso',
+    'POST', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/tabelas/' + encodeURIComponent(tabela)
+      + '/detalhar-recurso' + (limite ? '?limite=' + limite : ''),
     undefined, 60_000,
   )
 

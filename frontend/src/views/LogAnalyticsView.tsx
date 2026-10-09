@@ -108,7 +108,10 @@ export default function LogAnalyticsView() {
   const [gerandoDashboard, setGerandoDashboard] = useState(false)
   const [workspaceClicado, setWorkspaceClicado] = useState<LogAnalyticsWorkspace | null>(null)
 
-  const [detalheRecurso, setDetalheRecurso] = useState<{ tabela: string; recursos: LogAnalyticsRecursoDetalhado[]; janelaDias: number } | null>(null)
+  const [detalheRecurso, setDetalheRecurso] = useState<{ tabela: string; recursos: LogAnalyticsRecursoDetalhado[]; janelaDias: number; limite: number } | null>(null)
+  // Recurso cujo Diagnostic Setting está aberto no modal. Guarda o id (não o setting) porque
+  // o "não encontrado" também precisa ser mostrado, e aí não há setting pra guardar.
+  const [diagDoRecurso, setDiagDoRecurso] = useState<string | null>(null)
   const [somenteWorkspacesComCusto, setSomenteWorkspacesComCusto] = useState(false)
   const [somenteTabelasComCusto, setSomenteTabelasComCusto] = useState(false)
   const [appInsightsMostrarTodos, setAppInsightsMostrarTodos] = useState(false)
@@ -182,8 +185,9 @@ export default function LogAnalyticsView() {
   })
 
   const detalharMutation = useMutation({
-    mutationFn: (tabela: string) => detalharRecursoTabela(workspaceSelecionado!.workspace_guid, tabela),
-    onSuccess: (r, tabela) => setDetalheRecurso({ tabela, recursos: r.recursos, janelaDias: r.janela_dias }),
+    mutationFn: ({ tabela, limite }: { tabela: string; limite: number }) =>
+      detalharRecursoTabela(workspaceSelecionado!.workspace_guid, tabela, limite),
+    onSuccess: (r, { tabela, limite }) => setDetalheRecurso({ tabela, recursos: r.recursos, janelaDias: r.janela_dias, limite }),
     onError: (e: Error) => window.showToast?.(e.message, 'error'),
   })
 
@@ -641,7 +645,7 @@ export default function LogAnalyticsView() {
                 </thead>
                 <tbody>
                   {tabelasExibidas.map((t) => {
-                    const detalhando = detalharMutation.isPending && detalharMutation.variables === t.tabela
+                    const detalhando = detalharMutation.isPending && detalharMutation.variables?.tabela === t.tabela
                     return (
                     <Fragment key={t.tabela}>
                       <tr>
@@ -675,7 +679,7 @@ export default function LogAnalyticsView() {
                         </td>
                         <td>
                           <button className="btn-ghost" style={{ padding: '2px 8px', fontSize: 10 }}
-                            disabled={detalhando} onClick={() => detalharMutation.mutate(t.tabela)}
+                            disabled={detalhando} onClick={() => detalharMutation.mutate({ tabela: t.tabela, limite: 20 })}
                             title="Roda uma query KQL pontual (janela de 3 dias) contra a tabela de log real — diferente do resto da tela, isso consome uma query de verdade">
                             {detalhando ? '...' : 'Detalhar por recurso'}
                           </button>
@@ -684,8 +688,22 @@ export default function LogAnalyticsView() {
                       {detalheRecurso?.tabela === t.tabela && (
                         <tr>
                           <td colSpan={9} style={{ padding: '4px 8px 12px 24px', background: 'var(--bg)' }}>
-                            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginBottom: 6 }}>
-                              Top recursos por volume em {t.tabela} — últimos {detalheRecurso.janelaDias} dias (query pontual, não é dado pré-coletado)
+                            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                              <span>
+                                {detalheRecurso.recursos.length} recurso(s) em {t.tabela} — últimos {detalheRecurso.janelaDias} dias
+                                (query pontual, não é dado pré-coletado)
+                              </span>
+                              {/* O `top N` só trunca a saída: o scan dos 3 dias já aconteceu, então pedir
+                                  todos não custa uma consulta mais cara, só um payload maior. O botão só
+                                  aparece quando a lista encostou no limite — sinal de que há mais. */}
+                              {detalheRecurso.recursos.length >= detalheRecurso.limite && (
+                                <button className="btn-ghost" style={{ padding: '1px 8px', fontSize: 10 }}
+                                  disabled={detalhando}
+                                  onClick={() => detalharMutation.mutate({ tabela: t.tabela, limite: 5000 })}
+                                  title="Refaz a consulta sem o corte dos 20 primeiros">
+                                  {detalhando ? '...' : 'Ver todos os recursos'}
+                                </button>
+                              )}
                             </div>
                             {detalheRecurso.recursos.length === 0 ? (
                               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Nenhum recurso identificado na janela consultada.</div>
@@ -696,6 +714,13 @@ export default function LogAnalyticsView() {
                                     <tr key={r.resource_id}>
                                       <td style={{ padding: '2px 8px', wordBreak: 'break-all' }}>{r.resource_id}</td>
                                       <td style={{ padding: '2px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGB(r.gb)}</td>
+                                      <td style={{ padding: '2px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                        <button className="btn-ghost" style={{ padding: '1px 6px', fontSize: 10 }}
+                                          onClick={() => setDiagDoRecurso(r.resource_id)}
+                                          title="Ver o Diagnostic Setting configurado neste recurso">
+                                          ⚙ Diagnostic Setting
+                                        </button>
+                                      </td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -907,6 +932,77 @@ export default function LogAnalyticsView() {
         )}
       </div>
       </div>
+      {diagDoRecurso && (() => {
+        // O workspace selecionado já teve seus Diagnostic Settings carregados (diagSettingsQuery),
+        // então a busca é local — nada de ida nova ao servidor. Um recurso pode ter mais de uma
+        // configuração, por isso filtra em vez de procurar a primeira.
+        const achados = (diagSettingsQuery.data || []).filter(
+          (d) => d.recurso_id.toUpperCase() === diagDoRecurso.toUpperCase(),
+        )
+        const nome = diagDoRecurso.split('/').pop()
+        return (
+          <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && setDiagDoRecurso(null)}>
+            <div className="modal modal-wide" style={{ maxWidth: 820 }}>
+              <div className="modal-header">
+                <span>⚙ Diagnostic Setting — {nome}</span>
+                <button className="modal-close" aria-label="Fechar" onClick={() => setDiagDoRecurso(null)}>✕</button>
+              </div>
+              <div className="modal-body" style={{ padding: 20 }}>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)', wordBreak: 'break-all', marginBottom: 14 }}>{diagDoRecurso}</div>
+                {achados.length === 0 ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                    Nenhum Diagnostic Setting deste recurso apontando para <strong>{workspaceSelecionado?.nome}</strong>.
+                    <br />Isso não significa erro: o recurso pode estar enviando por uma <strong>Data Collection Rule</strong>
+                    {' '}(agente), que é outro caminho e não aparece aqui. Também pode ser um tipo fora da lista coletada, ou
+                    ter sido configurado depois da última coleta — ela roda semanalmente.
+                  </div>
+                ) : achados.map((d, i) => (
+                  <div key={i} style={{ marginBottom: i < achados.length - 1 ? 18 : 0, paddingBottom: i < achados.length - 1 ? 18 : 0, borderBottom: i < achados.length - 1 ? '1px solid var(--border)' : undefined }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+                      <strong style={{ fontSize: 13 }}>{d.nome_config || '(sem nome)'}</strong>
+                      {d.recurso_tipo && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{d.recurso_tipo}</span>}
+                      {d.outros_workspaces?.length ? (
+                        <span title={'Também envia para: ' + d.outros_workspaces.join(', ')}
+                          style={{ fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 10, color: 'var(--orange,#ff8c42)', background: 'rgba(255,140,66,.12)' }}>
+                          fan-out: +{d.outros_workspaces.length} workspace(s)
+                        </span>
+                      ) : null}
+                    </div>
+                    <table className="data-table" style={{ fontSize: 11.5 }}>
+                      <tbody>
+                        {[
+                          ['Categorias habilitadas', d.categorias_habilitadas],
+                          ['Categorias desabilitadas', d.categorias_desabilitadas],
+                          ['Grupos de categoria', d.grupos_categoria],
+                          ['Métricas habilitadas', d.metricas_habilitadas],
+                          ['Métricas desabilitadas', d.metricas_desabilitadas],
+                        ].map(([rot, val]) => (
+                          <tr key={rot as string}>
+                            <td style={{ width: 200, color: 'var(--text-muted)' }}>{rot}</td>
+                            <td style={{ wordBreak: 'break-word' }}>{val || '—'}</td>
+                          </tr>
+                        ))}
+                        <tr>
+                          <td style={{ color: 'var(--text-muted)' }}>Outros destinos</td>
+                          <td>
+                            {d.envia_storage || d.envia_eventhub
+                              ? [d.envia_storage && 'Storage', d.envia_eventhub && 'Event Hub'].filter(Boolean).join(' + ')
+                              : 'só Log Analytics'}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td style={{ color: 'var(--text-muted)' }}>Coletado em</td>
+                          <td>{new Date(d.atualizado_em).toLocaleString('pt-BR')}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
       {consumoModalWorkspace && (
         <LogAnalyticsConsumoModal
           workspaceGuid={consumoModalWorkspace.workspace_guid}
