@@ -17580,6 +17580,86 @@ app.post('/api/log-analytics/coleta/forcar', authMiddleware, dbMiddleware, async
 
 // Separado da coleta principal de propósito — é uma chamada de API por recurso monitorável do
 // tenant inteiro (ver comentário de _coletarDiagnosticSettingsTudo), pode levar minutos.
+// Gasto de observabilidade por balde — a tela de Log Analytics cobre ingestão e retenção DE
+// WORKSPACE, que neste tenant é menos da metade do que a Azure cobra de monitoramento. O resto
+// (Sentinel, Commitment Tier, Platform Logs para Storage/Event Hub, alertas) não aparecia em
+// lugar nenhum.
+//
+// Classificação por `meter_name`, não por tipo de recurso: o mesmo recurso pode gerar medidores
+// de baldes diferentes, e é o medidor que diz o que está sendo cobrado. HDInsight e Logic Apps
+// entram num filtro ingênuo por nome e são excluídos de propósito — não são observabilidade.
+const _OBS_BALDES = [
+  { id: 'ingestao_workspace', rotulo: 'Ingestão de workspace', re: /analytics logs data ingestion|basic logs data ingestion|auxiliary logs/i },
+  { id: 'retencao',           rotulo: 'Retenção',               re: /data retention|archive/i },
+  { id: 'commitment_tier',    rotulo: 'Commitment Tier',        re: /commitment tier/i },
+  { id: 'sentinel',           rotulo: 'Sentinel',               re: /^$/ },
+  { id: 'platform_logs',      rotulo: 'Platform Logs (Storage/Event Hub)', re: /platform logs data processed/i },
+  { id: 'alertas',            rotulo: 'Alertas',                re: /^alerts /i },
+  { id: 'agentes',            rotulo: 'Agentes',                re: /observability agent|agent credits/i },
+];
+
+app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const dias = Math.max(1, Math.min(180, parseInt(req.query.dias, 10) || 30));
+    const subsSp = await _subsDaSp(req.query.sp_id);
+    const params = [dias];
+    let filtroSp = '';
+    if (subsSp) { params.push(subsSp); filtroSp = ` AND LOWER(subscription_id) = ANY($${params.length})`; }
+
+    const r = await pool.query(
+      // `em_workspace` é o que decide a cobertura, não o balde: a tela soma TUDO que está
+      // carimbado no resource_id de um workspace conhecido (menos retenção), então Sentinel e
+      // Commitment Tier já entram no número dela — rotulados como ingestão, o que é outro
+      // problema. O que ela não vê é o que a Azure carimba no recurso de ORIGEM, como
+      // Platform Logs.
+      `SELECT ac.meter_category, ac.meter_name,
+              (w.resource_id IS NOT NULL) AS em_workspace,
+              COUNT(DISTINCT ac.resource_id) AS recursos,
+              SUM(ac.cost_in_billing_currency) FILTER (WHERE ac.publisher_type IS DISTINCT FROM 'Marketplace') AS ms,
+              SUM(ac.cost_in_billing_currency) FILTER (WHERE ac.publisher_type = 'Marketplace') AS mp
+       FROM azure_costs ac
+       LEFT JOIN log_analytics_workspaces w ON UPPER(w.resource_id) = UPPER(ac.resource_id)
+       WHERE ac.cost_date >= CURRENT_DATE - $1::int
+         AND ac.meter_category IN ('Log Analytics', 'Azure Monitor', 'Sentinel')${filtroSp}
+       GROUP BY 1, 2, 3`,
+      params,
+    );
+
+    const impostoCfg = await _getImpostoConfig();
+    const porBalde = new Map();
+    for (const row of r.rows) {
+      const custo = _comImpostoSplit(row.ms, row.mp, impostoCfg);
+      // Sentinel é balde pela categoria; os demais pelo nome do medidor.
+      const balde = row.meter_category === 'Sentinel'
+        ? _OBS_BALDES.find((b) => b.id === 'sentinel')
+        : _OBS_BALDES.find((b) => b.id !== 'sentinel' && b.re.test(row.meter_name || ''));
+      const chave = balde?.id || 'outros';
+      const rotulo = balde?.rotulo || 'Outros';
+      const acc = porBalde.get(chave) || { id: chave, rotulo, custo: 0, custo_em_workspace: 0, recursos: 0, medidores: [] };
+      acc.custo += custo;
+      if (row.em_workspace) acc.custo_em_workspace += custo;
+      acc.recursos += Number(row.recursos) || 0;
+      acc.medidores.push({ nome: row.meter_name, custo, em_workspace: row.em_workspace });
+      porBalde.set(chave, acc);
+    }
+
+    const baldes = [...porBalde.values()]
+      .map((b) => ({ ...b, medidores: b.medidores.sort((a, c) => c.custo - a.custo).slice(0, 5) }))
+      .sort((a, b) => b.custo - a.custo);
+    const total = baldes.reduce((a, b) => a + b.custo, 0);
+    const naTela = baldes.reduce((a, b) => a + b.custo_em_workspace, 0);
+
+    res.json({
+      dias,
+      total,
+      // Quanto do gasto de observabilidade a tela de Log Analytics de fato representa.
+      coberto_pela_tela: naTela,
+      coberto_pct: total > 0 ? Number(((naTela / total) * 100).toFixed(1)) : null,
+      baldes: baldes.map((b) => ({ ...b, pct: total > 0 ? Number(((b.custo / total) * 100).toFixed(1)) : 0 })),
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
 // Ranking de recursos por volume dentro de um workspace — a resposta pro "quem mais me custa",
 // que a consulta ao vivo por tabela não dava (ela é de 3 dias, de uma tabela por vez, e não
 // guarda nada). Lê do acumulado `log_analytics_ingestao_recurso`.
