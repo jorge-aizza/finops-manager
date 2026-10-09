@@ -138,10 +138,11 @@ export const getAzureCrescimento = (data_inicio?: string, data_fim?: string, sub
 }
 
 // Crescimento líquido (2026-09-02) — ver AzureCrescimentoLiquidoDia.
-export const getAzureCrescimentoLiquido = (data_inicio?: string, data_fim?: string) => {
+export const getAzureCrescimentoLiquido = (data_inicio?: string, data_fim?: string, spId?: number | null) => {
   const q = new URLSearchParams()
   if (data_inicio) q.set('data_inicio', data_inicio)
   if (data_fim) q.set('data_fim', data_fim)
+  if (spId) q.set('sp_id', String(spId))
   const qs = q.toString()
   return apiFetch<{ periodo: { inicio: string; fim: string }; dias: AzureCrescimentoLiquidoDia[] }>(
     'GET', '/azure-inventario/crescimento-liquido' + (qs ? '?' + qs : '')
@@ -163,10 +164,13 @@ export interface AzureComparativoParams {
   b_inicio: string
   b_fim: string
   subscription_id?: string
+  /** Filtro de Tenant: o backend recorta por `subscription_id` das assinaturas da SP. */
+  sp_id?: number | null
 }
 export const getAzureInventarioComparativo = (params: AzureComparativoParams) => {
   const q = new URLSearchParams({ a_inicio: params.a_inicio, a_fim: params.a_fim, b_inicio: params.b_inicio, b_fim: params.b_fim })
   if (params.subscription_id) q.set('subscription_id', params.subscription_id)
+  if (params.sp_id) q.set('sp_id', String(params.sp_id))
   return apiFetch<AzureComparativoResposta>('GET', '/azure-inventario/comparativo?' + q.toString()).then((r) => ({
     periodo_a: normalizeComparativoPeriodo(r.periodo_a),
     periodo_b: normalizeComparativoPeriodo(r.periodo_b),
@@ -200,10 +204,11 @@ export const getAzureResumoPorAssinatura = (subscriptionId?: string, spId?: numb
 }
 
 // Detalhe do Crescimento Líquido (2026-09-04) — por Tipo/Resource Group + Top Criadores.
-export const getAzureCrescimentoDetalhe = (data_inicio?: string, data_fim?: string) => {
+export const getAzureCrescimentoDetalhe = (data_inicio?: string, data_fim?: string, spId?: number | null) => {
   const q = new URLSearchParams()
   if (data_inicio) q.set('data_inicio', data_inicio)
   if (data_fim) q.set('data_fim', data_fim)
+  if (spId) q.set('sp_id', String(spId))
   const qs = q.toString()
   return apiFetch<AzureCrescimentoDetalheResposta>('GET', '/azure-inventario/crescimento-detalhe' + (qs ? '?' + qs : '')).then((r) => ({
     ...r,
@@ -215,15 +220,15 @@ export const getAzureCrescimentoDetalhe = (data_inicio?: string, data_fim?: stri
 
 // Governança de crescimento — anomalias (Z-score), orçamentos/teto por escopo, tags obrigatórias.
 
-export const getAzureAnomaliasCrescimento = () =>
-  apiFetch<AzureAnomaliaCrescimento[]>('GET', '/azure-inventario/anomalias').then((rows) =>
+export const getAzureAnomaliasCrescimento = (spId?: number | null) =>
+  apiFetch<AzureAnomaliaCrescimento[]>('GET', '/azure-inventario/anomalias' + (spId ? '?sp_id=' + spId : '')).then((rows) =>
     rows.map((r) => numFields(r, ['criacoes', 'custo', 'media_criacoes', 'desvio_criacoes', 'media_custo', 'desvio_custo', 'zscore_criacoes', 'zscore_custo']))
   )
 
 // Crescimento de Recursos Persistentes (Phase 1, 2026-09-17)
 // Rastreia apenas recursos criados há 7+ dias que continuam ativos
-export const getAzureInventarioCrescimentoPersistente = () =>
-  apiFetch<any[]>('GET', '/azure-inventario/crescimento-persistente').then((rows) =>
+export const getAzureInventarioCrescimentoPersistente = (spId?: number | null) =>
+  apiFetch<any[]>('GET', '/azure-inventario/crescimento-persistente' + (spId ? '?sp_id=' + spId : '')).then((rows) =>
     rows.map((r) => numFields(r, ['recursos_persistentes', 'novos_persistentes', 'media', 'desvio', 'zscore']))
   )
 

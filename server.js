@@ -9237,6 +9237,8 @@ app.get('/api/azure-inventario/crescimento-liquido', authMiddleware, dbMiddlewar
     // "Ativo no dia D" = criado até D (ou criado_em desconhecido — recurso que já existia
     // antes da 1ª coleta, mesma convenção já usada no Comparativo) E ainda não excluído (ou
     // excluído depois de D).
+    // Filtro de Tenant da tela — entra como $4, as três primeiras posições já estão em uso.
+    const subsSpCresc = await _subsDaSp(req.query.sp_id);
     const r = await pool.query(
       `WITH dias AS (SELECT generate_series($1::date, $2::date, '1 day')::date AS dia)
        SELECT d.dia,
@@ -9247,8 +9249,9 @@ app.get('/api/azure-inventario/crescimento-liquido', authMiddleware, dbMiddlewar
        FROM dias d
        CROSS JOIN azure_recursos_inventario ri
        WHERE NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($3::text[]))
+         ${subsSpCresc ? 'AND LOWER(ri.subscription_id) = ANY($4)' : ''}
        GROUP BY d.dia ORDER BY d.dia`,
-      [data_inicio, data_fim, rgsGerenciados]
+      subsSpCresc ? [data_inicio, data_fim, rgsGerenciados, subsSpCresc] : [data_inicio, data_fim, rgsGerenciados]
     );
     res.json({
       periodo: { inicio: data_inicio, fim: data_fim },
@@ -9266,15 +9269,16 @@ app.get('/api/azure-inventario/crescimento-liquido', authMiddleware, dbMiddlewar
 // de posse (quem criou) são o que torna possível rotear e agir sobre um desvio, não só
 // visualizá-lo. Mesma exclusão de RGs gerenciados por Databricks/AKS de sempre — um recurso
 // efêmero de cluster não é "crescimento fixo".
-async function _computeCrescimentoDetalheRaw(data_inicio, data_fim) {
+async function _computeCrescimentoDetalheRaw(data_inicio, data_fim, subsFiltro = null) {
   const rgsGerenciados = await _getRgsGerenciados();
 
   async function snapshot(dia) {
     const r = await pool.query(
       `SELECT resource_type, resource_group FROM azure_recursos_inventario ri
        WHERE (ri.criado_em IS NULL OR ri.criado_em::date <= $1) AND (ri.excluido_em IS NULL OR ri.excluido_em::date > $1)
-         AND NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($2::text[]))`,
-      [dia, rgsGerenciados]
+         AND NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($2::text[]))
+         ${subsFiltro ? 'AND LOWER(ri.subscription_id) = ANY($3)' : ''}`,
+      subsFiltro ? [dia, rgsGerenciados, subsFiltro] : [dia, rgsGerenciados]
     );
     return r.rows;
   }
@@ -9294,8 +9298,9 @@ async function _computeCrescimentoDetalheRaw(data_inicio, data_fim) {
        LEFT JOIN azure_autores_cache ac ON ac.guid = ri.criado_por
        WHERE ri.ativo = true AND ri.criado_em >= $1 AND ri.criado_em < $2::date + INTERVAL '1 day'
          AND NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($3::text[]))
+         ${subsFiltro ? 'AND LOWER(ri.subscription_id) = ANY($4)' : ''}
        GROUP BY 1 ORDER BY total DESC LIMIT 10`,
-      [data_inicio, data_fim, rgsGerenciados]
+      subsFiltro ? [data_inicio, data_fim, rgsGerenciados, subsFiltro] : [data_inicio, data_fim, rgsGerenciados]
     ),
   ]);
 
@@ -9347,14 +9352,16 @@ const _CRESCIMENTO_DETALHE_TTL = 5 * 60 * 1000;
 const _CRESCIMENTO_DETALHE_CACHE_MAX = 50;
 const _crescimentoDetalheCache = new Map(); // `${inicio}:${fim}` -> { dados, ts }
 const _crescimentoDetalhePromises = new Map();
-async function _getCrescimentoDetalheCached(dataInicio, dataFim) {
-  const chave = `${dataInicio}:${dataFim}`;
+// O recorte por SP entra na CHAVE do cache — sem isso, a primeira SP consultada serviria
+// sua resposta a todas as outras durante o TTL.
+async function _getCrescimentoDetalheCached(dataInicio, dataFim, subsFiltro = null) {
+  const chave = `${dataInicio}:${dataFim}:${subsFiltro ? [...subsFiltro].sort().join(',') : 'todas'}`;
   const cached = _crescimentoDetalheCache.get(chave);
   if (cached && (Date.now() - cached.ts) < _CRESCIMENTO_DETALHE_TTL) return cached.dados;
   if (_crescimentoDetalhePromises.has(chave)) return _crescimentoDetalhePromises.get(chave);
   const p = (async () => {
     try {
-      const dados = await _computeCrescimentoDetalheRaw(dataInicio, dataFim);
+      const dados = await _computeCrescimentoDetalheRaw(dataInicio, dataFim, subsFiltro);
       if (_crescimentoDetalheCache.size >= _CRESCIMENTO_DETALHE_CACHE_MAX) _crescimentoDetalheCache.clear();
       _crescimentoDetalheCache.set(chave, { dados, ts: Date.now() });
       return dados;
@@ -9377,7 +9384,7 @@ app.get('/api/azure-inventario/crescimento-detalhe', authMiddleware, dbMiddlewar
       data_fim = fim.toISOString().slice(0, 10);
       data_inicio = ini.toISOString().slice(0, 10);
     }
-    res.json(await _getCrescimentoDetalheCached(data_inicio, data_fim));
+    res.json(await _getCrescimentoDetalheCached(data_inicio, data_fim, await _subsDaSp(req.query.sp_id)));
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -9535,32 +9542,40 @@ app.get('/api/azure-inventario/comparativo', authMiddleware, dbMiddleware, async
       return res.status(400).json({ error: 'a_inicio, a_fim, b_inicio e b_fim são obrigatórios (formato YYYY-MM-DD)' });
     }
 
+    // Filtro de Tenant da tela, somado à assinatura que o usuário possa ter escolhido.
+    // Cada consulta já gasta $1 e $2, então a condição é montada a partir do índice seguinte.
+    const subsSpComp = await _subsDaSp(req.query.sp_id);
+    const _comEscopo = (base) => {
+      const params = [...base];
+      let cond = '';
+      if (subscription_id) { params.push(subscription_id); cond += ` AND subscription_id = $${params.length}`; }
+      if (subsSpComp) { params.push(subsSpComp); cond += ` AND LOWER(subscription_id) = ANY($${params.length})`; }
+      return { cond, params };
+    };
+
     async function _snapshotPeriodo(inicio, fim) {
-      const subCond = subscription_id ? ` AND subscription_id = $3` : '';
-      const paramsSnap = subscription_id ? [fim, fim, subscription_id] : [fim, fim];
+      const qSnap = _comEscopo([fim, fim]);
       const snap = await pool.query(
         `SELECT COUNT(*) AS total FROM azure_recursos_inventario
-         WHERE (criado_em IS NULL OR criado_em <= $1) AND (excluido_em IS NULL OR excluido_em > $2)${subCond}`,
-        paramsSnap
+         WHERE (criado_em IS NULL OR criado_em <= $1) AND (excluido_em IS NULL OR excluido_em > $2)${qSnap.cond}`,
+        qSnap.params
       );
-      const evCond = subscription_id ? ` AND subscription_id = $3` : '';
-      const evParams = subscription_id ? [inicio, fim, subscription_id] : [inicio, fim];
+      const qEv = _comEscopo([inicio, fim]);
       const ev = await pool.query(
         `SELECT acao, COUNT(*) AS total FROM azure_recursos_auditoria_eventos
-         WHERE quando >= $1 AND quando < $2::date + INTERVAL '1 day'${evCond}
+         WHERE quando >= $1 AND quando < $2::date + INTERVAL '1 day'${qEv.cond}
          GROUP BY acao`,
-        evParams
+        qEv.params
       );
       const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
       for (const row of ev.rows) eventos[row.acao] = parseInt(row.total, 10);
 
-      const custoCond = subscription_id ? ` AND subscription_id = $3` : '';
-      const custoParams = subscription_id ? [inicio, fim, subscription_id] : [inicio, fim];
+      const qCusto = _comEscopo([inicio, fim]);
       const custo = await pool.query(
         `SELECT COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS microsoft,
                 COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'), 0)                AS marketplace
-         FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2${custoCond}`,
-        custoParams
+         FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2${qCusto.cond}`,
+        qCusto.params
       );
 
       return {
@@ -9995,18 +10010,27 @@ async function _computeAnomaliasCrescimento() {
   return _anomaliasCrescimentoPromise;
 }
 
-app.get('/api/azure-inventario/anomalias', authMiddleware, dbMiddleware, async (_req, res) => {
+// O recorte por SP acontece sobre o RESULTADO, não dentro do cálculo: cada anomalia já é de
+// uma assinatura, e o Z-score é caro e tem cache global — refazê-lo por SP trocaria uma
+// execução que serve todos por uma execução por filtro, sem mudar uma linha do que sai.
+function _recortarAnomaliasPorSp(anomalias, subsFiltro) {
+  if (!subsFiltro) return anomalias;
+  const permitidas = new Set(subsFiltro);
+  return anomalias.filter((a) => permitidas.has(String(a.subscription_id || '').toLowerCase()));
+}
+
+app.get('/api/azure-inventario/anomalias', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    res.json(await _computeAnomaliasCrescimento());
+    res.json(_recortarAnomaliasPorSp(await _computeAnomaliasCrescimento(), await _subsDaSp(req.query.sp_id)));
   } catch (e) { _dbErr(res, e); }
 });
 
 // Crescimento persistente — recursos criados há 7+ dias e ainda ativos, Z-score anômalo
-app.get('/api/azure-inventario/crescimento-persistente', authMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/azure-inventario/crescimento-persistente', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const todas = await _computeAnomaliasCrescimento();
     const persistentes = todas.filter(a => a.escopo_tipo === 'persistente');
-    res.json(persistentes);
+    res.json(_recortarAnomaliasPorSp(persistentes, await _subsDaSp(req.query.sp_id)));
   } catch (e) { _dbErr(res, e); }
 });
 

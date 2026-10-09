@@ -516,16 +516,16 @@ export default function InventarioView() {
 
   const configQuery = useQuery({ queryKey: ['azure-inv-config'], queryFn: getAzureInventarioConfig })
   const crescimentoQuery = useQuery({
-    queryKey: ['azure-inv-crescimento-liquido', periodoCrescimento.inicio, periodoCrescimento.fim],
-    queryFn: () => getAzureCrescimentoLiquido(periodoCrescimento.inicio, periodoCrescimento.fim),
+    queryKey: ['azure-inv-crescimento-liquido', periodoCrescimento.inicio, periodoCrescimento.fim, selectedTenantId],
+    queryFn: () => getAzureCrescimentoLiquido(periodoCrescimento.inicio, periodoCrescimento.fim, selectedTenantId),
     placeholderData: keepPreviousData,
     enabled: tab === 'crescimento',
   })
   // Mesmo período do gráfico acima — "detalhe" é sempre sobre a mesma janela que está sendo
   // olhada, não um filtro à parte.
   const crescimentoDetalheQuery = useQuery({
-    queryKey: ['azure-inv-crescimento-detalhe', periodoCrescimento.inicio, periodoCrescimento.fim],
-    queryFn: () => getAzureCrescimentoDetalhe(periodoCrescimento.inicio, periodoCrescimento.fim),
+    queryKey: ['azure-inv-crescimento-detalhe', periodoCrescimento.inicio, periodoCrescimento.fim, selectedTenantId],
+    queryFn: () => getAzureCrescimentoDetalhe(periodoCrescimento.inicio, periodoCrescimento.fim, selectedTenantId),
     placeholderData: keepPreviousData,
     enabled: tab === 'crescimento',
   })
@@ -534,15 +534,15 @@ export default function InventarioView() {
   // ~50s a frio no servidor (cache de 20 min). Antes disparava a TODA entrada
   // no Inventario, mesmo para quem so queria ver Recursos ou Advisor.
   const anomaliasQuery = useQuery({
-    queryKey: ['azure-inv-anomalias'],
-    queryFn: getAzureAnomaliasCrescimento,
+    queryKey: ['azure-inv-anomalias', selectedTenantId],
+    queryFn: () => getAzureAnomaliasCrescimento(selectedTenantId),
     enabled: tab === 'crescimento',
   })
   // Crescimento de recursos persistentes (Fase 1.4): recursos que criaram há 7+ dias e ainda
   // ativos — diferencia crescimento real do churn efêmero de Databricks/AKS.
   const crescimentoPersistenteQuery = useQuery({
-    queryKey: ['azure-inv-crescimento-persistente'],
-    queryFn: getAzureInventarioCrescimentoPersistente,
+    queryKey: ['azure-inv-crescimento-persistente', selectedTenantId],
+    queryFn: () => getAzureInventarioCrescimentoPersistente(selectedTenantId),
     enabled: tab === 'crescimento',
   })
   // Conformidade de tags obrigatórias por subscription (Fase 1.4) — recursos persistentes
@@ -682,8 +682,8 @@ export default function InventarioView() {
     enabled: tab === 'porAssinatura' && !!paSub && !!paRg,
   })
   const comparativoQuery = useQuery({
-    queryKey: ['azure-inv-comparativo', periodoA.inicio, periodoA.fim, periodoB.inicio, periodoB.fim],
-    queryFn: () => getAzureInventarioComparativo({ a_inicio: periodoA.inicio, a_fim: periodoA.fim, b_inicio: periodoB.inicio, b_fim: periodoB.fim }),
+    queryKey: ['azure-inv-comparativo', periodoA.inicio, periodoA.fim, periodoB.inicio, periodoB.fim, selectedTenantId],
+    queryFn: () => getAzureInventarioComparativo({ a_inicio: periodoA.inicio, a_fim: periodoA.fim, b_inicio: periodoB.inicio, b_fim: periodoB.fim, sp_id: selectedTenantId }),
     placeholderData: keepPreviousData,
     enabled: tab === 'comparativo',
   })
