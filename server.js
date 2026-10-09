@@ -7350,6 +7350,22 @@ async function ensureAzureColetaTable() {
     )
   `);
 
+  // Custo por dia e assinatura — 4.9 mil linhas contra os 9,1 milhões de `azure_costs`.
+  // Existe porque somar o custo de um período direto da tabela de billing custava 74s: o
+  // planner descarta o índice de data (precisa de valor e publisher_type, que só estão no
+  // heap) e varre os 16 GB inteiros, contra 128 MB de shared_buffers. Preenchido pelo mesmo
+  // job que já varre azure_costs mês a mês (_rebuildAlocacaoTagsMes), então não custa uma
+  // leitura a mais.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_custo_diario (
+      cost_date         DATE NOT NULL,
+      subscription_id   TEXT NOT NULL,
+      custo_microsoft   NUMERIC(18,6) NOT NULL DEFAULT 0,
+      custo_marketplace NUMERIC(18,6) NOT NULL DEFAULT 0,
+      PRIMARY KEY (cost_date, subscription_id)
+    )
+  `);
+
   _coletaTableReady = true;
 }
 
@@ -7524,6 +7540,25 @@ async function _rebuildAlocacaoTagsMes(mes, origem = 'agendado') {
     [mes, ini]
   );
 
+  // Custo por dia/assinatura do mesmo mês — a varredura de azure_costs já está paga por este
+  // job, então agregar mais uma saída aqui é de graça perto de somar 9,1 milhões de linhas no
+  // caminho de cada requisição (era o que a aba Comparativo fazia, a 74s por período).
+  await client.query(
+    `DELETE FROM azure_custo_diario WHERE cost_date >= $1::date AND cost_date < ($1::date + INTERVAL '1 month')`,
+    [ini]
+  );
+  await client.query(
+    `INSERT INTO azure_custo_diario (cost_date, subscription_id, custo_microsoft, custo_marketplace)
+     SELECT cost_date, subscription_id::text,
+            COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'),0),
+            COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'),0)
+     FROM azure_costs
+     WHERE cost_date >= $1::date AND cost_date < ($1::date + INTERVAL '1 month')
+       AND subscription_id IS NOT NULL
+     GROUP BY 1, 2`,
+    [ini]
+  );
+
   const seg = Number(((Date.now() - t0) / 1000).toFixed(1));
   await client.query(
     `INSERT INTO azure_tag_rollup_status (mes, construido_em, linhas_lidas, segundos)
@@ -7562,11 +7597,16 @@ async function _rebuildAlocacaoTags(origem = 'agendado', forcar = false) {
     // o rebuild manual não fazia nada e a tabela de cobertura ficava em zero).
     const cob = await pool.query(`SELECT DISTINCT mes FROM azure_commitment_cobertura`);
     const temCobertura = new Set(cob.rows.map(x => x.mes.trim()));
+    // Mesma armadilha da cobertura, agora pro custo diário: sem esta checagem, os meses já
+    // construídos antes desta saída existir seriam pulados pelo incremental e a tabela nunca
+    // encheria pra eles.
+    const cd = await pool.query(`SELECT DISTINCT to_char(cost_date,'YYYY-MM') AS mes FROM azure_custo_diario`);
+    const temCustoDiario = new Set(cd.rows.map(x => x.mes.trim()));
     const feitos = [];
     for (const row of r.rows) {
       const anterior = construido.get(row.mes);
       const atualizado = anterior && row.ultimo_import && new Date(row.ultimo_import) <= new Date(anterior);
-      if (!forcar && atualizado && temCobertura.has(row.mes)) continue;
+      if (!forcar && atualizado && temCobertura.has(row.mes) && temCustoDiario.has(row.mes)) continue;
       feitos.push(await _rebuildAlocacaoTagsMes(row.mes, origem));
     }
     return { ok: true, meses: feitos };
@@ -9570,11 +9610,13 @@ app.get('/api/azure-inventario/comparativo', authMiddleware, dbMiddleware, async
       const eventos = { CRIACAO: 0, ATUALIZACAO: 0, EXCLUSAO: 0 };
       for (const row of ev.rows) eventos[row.acao] = parseInt(row.total, 10);
 
+      // Lê do rollup diário (4,9 mil linhas) em vez de somar azure_costs (9,1 milhões): a
+      // soma direta custava 74s por período, por seq scan dos 16 GB da tabela de billing.
+      // Ver azure_custo_diario, preenchido pelo job de rollup.
       const qCusto = _comEscopo([inicio, fim]);
       const custo = await pool.query(
-        `SELECT COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS microsoft,
-                COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'), 0)                AS marketplace
-         FROM azure_costs WHERE cost_date >= $1 AND cost_date <= $2${qCusto.cond}`,
+        `SELECT COALESCE(SUM(custo_microsoft), 0) AS microsoft, COALESCE(SUM(custo_marketplace), 0) AS marketplace
+         FROM azure_custo_diario WHERE cost_date >= $1 AND cost_date <= $2${qCusto.cond}`,
         qCusto.params
       );
 
