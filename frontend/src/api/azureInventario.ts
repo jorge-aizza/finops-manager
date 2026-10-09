@@ -107,6 +107,8 @@ export interface AzurePropriedadeHistoricoFiltros {
   data_fim?: string
   resource_id?: string
   subscription_id?: string
+  /** Filtro de Tenant: o backend recorta por `subscription_id` das assinaturas da SP. */
+  sp_id?: number | null
 }
 export const getAzurePropriedadeHistorico = (filtros?: AzurePropriedadeHistoricoFiltros) => {
   const q = new URLSearchParams()
@@ -114,14 +116,15 @@ export const getAzurePropriedadeHistorico = (filtros?: AzurePropriedadeHistorico
   if (filtros?.data_fim) q.set('data_fim', filtros.data_fim)
   if (filtros?.resource_id) q.set('resource_id', filtros.resource_id)
   if (filtros?.subscription_id) q.set('subscription_id', filtros.subscription_id)
+  if (filtros?.sp_id) q.set('sp_id', String(filtros.sp_id))
   const qs = q.toString()
   return apiFetch<{ periodo: { inicio: string; fim: string }; total: number; mudancas: AzurePropriedadeMudanca[] }>(
     'GET', '/azure-inventario/mudancas-propriedade' + (qs ? '?' + qs : '')
   )
 }
 
-export const getAzureRelatorioDiario = () =>
-  apiFetch<AzureRelatorioDiario>('GET', '/azure-inventario/relatorio-diario')
+export const getAzureRelatorioDiario = (spId?: number | null) =>
+  apiFetch<AzureRelatorioDiario>('GET', '/azure-inventario/relatorio-diario' + (spId ? '?sp_id=' + spId : ''))
 
 export const getAzureCrescimento = (data_inicio?: string, data_fim?: string, subscription_id?: string) => {
   const q = new URLSearchParams()

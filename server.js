@@ -8054,7 +8054,9 @@ async function _checkRelatorioSemanalInventario() {
 // com dedup/SMTP) quanto por `GET /relatorio-diario` (card na aba Auditoria, sempre disponível,
 // sem depender de SMTP configurado) — mesmo dado, dois consumidores, sem duplicar a query nem o
 // filtro de RG gerenciado.
-async function _computeRelatorioDiarioInventario() {
+// `subsFiltro` (ou null) é o filtro de Tenant da tela. O alerta diário por e-mail chama sem
+// ele de propósito: é um resumo do ambiente inteiro, não da SP que alguém deixou selecionada.
+async function _computeRelatorioDiarioInventario(subsFiltro = null) {
   // Dia corrido em UTC — mesma convenção já usada pra `criado_em`/`quando` (sempre gravados
   // em UTC, ver comentário da migração TIMESTAMPTZ na criação das tabelas de Inventário).
   const ontemFim = new Date(); ontemFim.setUTCHours(0, 0, 0, 0); // meia-noite de hoje = fim de ontem
@@ -8076,24 +8078,27 @@ async function _computeRelatorioDiarioInventario() {
     .filter((rg) => _detectManagedRg(rg).managed_type)
     .map((rg) => rg.toUpperCase());
 
+  // As três consultas já gastam $1..$3, então o recorte por assinatura entra como $4.
+  const filtroSub = subsFiltro ? ` AND LOWER(subscription_id) = ANY($4)` : '';
+  const comSub = (base) => (subsFiltro ? [...base, subsFiltro] : base);
   const [ontemR, criadosAnteontemR, topRgR] = await Promise.all([
     pool.query(
       `SELECT acao, COUNT(*) AS total FROM azure_recursos_auditoria_eventos
-       WHERE quando >= $1 AND quando < $2 AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))
+       WHERE quando >= $1 AND quando < $2 AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))${filtroSub}
        GROUP BY acao`,
-      [ontemInicio.toISOString(), ontemFim.toISOString(), rgsGerenciados]
+      comSub([ontemInicio.toISOString(), ontemFim.toISOString(), rgsGerenciados])
     ),
     pool.query(
       `SELECT COUNT(*) AS total FROM azure_recursos_auditoria_eventos
-       WHERE acao='CRIACAO' AND quando >= $1 AND quando < $2 AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))`,
-      [anteontemInicio.toISOString(), ontemInicio.toISOString(), rgsGerenciados]
+       WHERE acao='CRIACAO' AND quando >= $1 AND quando < $2 AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))${filtroSub}`,
+      comSub([anteontemInicio.toISOString(), ontemInicio.toISOString(), rgsGerenciados])
     ),
     pool.query(
       `SELECT resource_group, COUNT(*) AS criacoes FROM azure_recursos_auditoria_eventos
        WHERE acao='CRIACAO' AND quando >= $1 AND quando < $2 AND resource_group IS NOT NULL
-         AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))
+         AND NOT (UPPER(COALESCE(resource_group,'')) = ANY($3::text[]))${filtroSub}
        GROUP BY resource_group ORDER BY criacoes DESC LIMIT 5`,
-      [ontemInicio.toISOString(), ontemFim.toISOString(), rgsGerenciados]
+      comSub([ontemInicio.toISOString(), ontemFim.toISOString(), rgsGerenciados])
     ),
   ]);
 
@@ -9464,6 +9469,9 @@ app.get('/api/azure-inventario/mudancas-propriedade', authMiddleware, dbMiddlewa
     const params = [data_inicio, data_fim];
     if (resource_id) { params.push(resource_id); where += ` AND LOWER(h.resource_id) = LOWER($${params.length})`; }
     if (subscription_id) { params.push(subscription_id); where += ` AND h.subscription_id = $${params.length}`; }
+    // Filtro de Tenant da tela (ver _getInventarioEscopos).
+    const subsSpProp = await _subsDaSp(req.query.sp_id);
+    if (subsSpProp) { params.push(subsSpProp); where += ` AND LOWER(h.subscription_id) = ANY($${params.length})`; }
     const r = await pool.query(
       `SELECT h.*, ri.nome, cac.nome AS evento_autor_nome
        FROM azure_recursos_mudancas_propriedade h
@@ -9483,7 +9491,7 @@ app.get('/api/azure-inventario/mudancas-propriedade', authMiddleware, dbMiddlewa
 app.get('/api/azure-inventario/relatorio-diario', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureAzureColetaTable();
-    res.json(await _computeRelatorioDiarioInventario());
+    res.json(await _computeRelatorioDiarioInventario(await _subsDaSp(req.query.sp_id)));
   } catch (e) { _dbErr(res, e); }
 });
 

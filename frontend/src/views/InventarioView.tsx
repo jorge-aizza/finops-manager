@@ -656,14 +656,14 @@ export default function InventarioView() {
     enabled: tab === 'auditoria',
   })
   const propriedadeHistoricoQuery = useQuery({
-    queryKey: ['azure-inv-mudancas-propriedade', periodo.inicio, periodo.fim],
-    queryFn: () => getAzurePropriedadeHistorico({ data_inicio: periodo.inicio, data_fim: periodo.fim }),
+    queryKey: ['azure-inv-mudancas-propriedade', periodo.inicio, periodo.fim, selectedTenantId],
+    queryFn: () => getAzurePropriedadeHistorico({ data_inicio: periodo.inicio, data_fim: periodo.fim, sp_id: selectedTenantId }),
     placeholderData: keepPreviousData,
     enabled: tab === 'auditoria',
   })
   const relatorioDiarioQuery = useQuery({
-    queryKey: ['azure-inv-relatorio-diario'],
-    queryFn: () => getAzureRelatorioDiario(),
+    queryKey: ['azure-inv-relatorio-diario', selectedTenantId],
+    queryFn: () => getAzureRelatorioDiario(selectedTenantId),
     enabled: tab === 'auditoria',
   })
   const paNivel1Query = useQuery({
