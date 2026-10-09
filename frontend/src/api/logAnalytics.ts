@@ -249,6 +249,9 @@ export interface LogAnalyticsRecursoVolume {
   /** Em quantas tabelas diferentes esse recurso aparece. */
   tabelas: number
   maior_tabela: string | null
+  /** Por onde o dado chega. 'desconhecido' não é erro: DCR guarda a regra, não os recursos
+   * associados a ela, então quem vem por agente cai aqui. É o grupo que vale investigar. */
+  origem: 'diagnostic_setting' | 'app_insights' | 'desconhecido'
   primeiro_dia: string | null
   ultimo_dia: string | null
 }

@@ -633,7 +633,7 @@ export default function LogAnalyticsView() {
             <div className="table-wrapper">
               <table className="data-table">
                 <thead><tr>
-                  <th>Recurso</th><th>Maior tabela</th><th style={{ textAlign: 'right' }}>Tabelas</th>
+                  <th>Recurso</th><th>Chega por</th><th>Maior tabela</th><th style={{ textAlign: 'right' }}>Tabelas</th>
                   <th style={{ textAlign: 'right' }}>GB (30d)</th><th style={{ textAlign: 'right' }}>% do total</th>
                   <th style={{ textAlign: 'right' }}>Custo (estim.)</th><th></th>
                 </tr></thead>
@@ -645,6 +645,18 @@ export default function LogAnalyticsView() {
                         <td style={{ maxWidth: 330 }}>
                           <div style={{ fontWeight: 600, fontSize: 12 }}>{r.recurso_id.split('/').pop()}</div>
                           <div style={{ fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>{r.recurso_id}</div>
+                        </td>
+                        <td>
+                          {r.origem === 'diagnostic_setting' ? (
+                            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Diagnostic Setting</span>
+                          ) : r.origem === 'app_insights' ? (
+                            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>App Insights</span>
+                          ) : (
+                            <span style={{ fontSize: 10, color: 'var(--orange,#ff8c42)' }}
+                              title="Envia, mas não achamos como: normalmente agente via DCR, cuja associação a recursos não é coletada">
+                              não mapeado
+                            </span>
+                          )}
                         </td>
                         <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{r.maior_tabela || '—'}</td>
                         <td style={{ textAlign: 'right', fontSize: 11 }}>{r.tabelas}</td>

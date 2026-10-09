@@ -17588,15 +17588,29 @@ app.get('/api/log-analytics/workspaces/:guid/recursos-volume', authMiddleware, d
     await ensureLogAnalyticsTable();
     const dias = Math.max(1, Math.min(90, parseInt(req.query.dias, 10) || 30));
     const r = await pool.query(
-      `SELECT recurso_id,
-              SUM(gb) AS gb,
-              COUNT(DISTINCT tabela) AS tabelas,
-              MIN(dia) AS primeiro_dia,
-              MAX(dia) AS ultimo_dia,
-              (ARRAY_AGG(tabela ORDER BY gb DESC))[1] AS maior_tabela
-       FROM log_analytics_ingestao_recurso
-       WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - $2::int
-       GROUP BY recurso_id
+      // `origem` cruza o volume observado com as duas formas de envio que são rastreáveis por
+      // recurso. DCR fica de fora porque `log_analytics_dcrs` guarda a REGRA (assinatura, RG,
+      // nome, destino), não os recursos associados a ela — a associação não é coletada. Por
+      // isso 'desconhecido' não quer dizer erro: é "chega por um caminho que não mapeamos",
+      // tipicamente agente via DCR. Esse é justamente o grupo que vale investigar.
+      `SELECT ir.recurso_id,
+              SUM(ir.gb) AS gb,
+              COUNT(DISTINCT ir.tabela) AS tabelas,
+              MIN(ir.dia) AS primeiro_dia,
+              MAX(ir.dia) AS ultimo_dia,
+              (ARRAY_AGG(ir.tabela ORDER BY ir.gb DESC))[1] AS maior_tabela,
+              CASE
+                WHEN BOOL_OR(ds.recurso_id IS NOT NULL) THEN 'diagnostic_setting'
+                WHEN BOOL_OR(ai.resource_id IS NOT NULL) THEN 'app_insights'
+                ELSE 'desconhecido'
+              END AS origem
+       FROM log_analytics_ingestao_recurso ir
+       LEFT JOIN log_analytics_diagnostic_settings ds
+              ON UPPER(ds.recurso_id) = UPPER(ir.recurso_id) AND ds.workspace_guid = ir.workspace_guid
+       LEFT JOIN log_analytics_app_insights ai
+              ON UPPER(ai.resource_id) = UPPER(ir.recurso_id)
+       WHERE ir.workspace_guid = $1 AND ir.dia >= CURRENT_DATE - $2::int
+       GROUP BY ir.recurso_id
        ORDER BY gb DESC
        LIMIT 200`,
       [req.params.guid, dias],
@@ -17626,6 +17640,7 @@ app.get('/api/log-analytics/workspaces/:guid/recursos-volume', authMiddleware, d
         gb: Number(x.gb) || 0,
         tabelas: Number(x.tabelas) || 0,
         maior_tabela: x.maior_tabela,
+        origem: x.origem,
         primeiro_dia: x.primeiro_dia ? String(x.primeiro_dia).slice(0, 10) : null,
         ultimo_dia: x.ultimo_dia ? String(x.ultimo_dia).slice(0, 10) : null,
       })),
