@@ -324,6 +324,35 @@ export const getLogAnalyticsExportSemWorkspace = (dias?: number, spId?: number |
   return apiFetch<LogAnalyticsExportResposta>('GET', '/log-analytics/export-sem-workspace' + (q.toString() ? '?' + q : ''))
 }
 
+/** Um balde do gasto de observabilidade (ingestão, Sentinel, Commitment Tier, etc.). */
+export interface LogAnalyticsBaldeCusto {
+  id: string
+  rotulo: string
+  custo: number
+  /** Parte carimbada no resource_id de um workspace — o que o custo da tela já soma. */
+  custo_em_workspace: number
+  pct: number
+  recursos: number
+  medidores: { nome: string; custo: number }[]
+}
+
+export interface LogAnalyticsCustoObservabilidade {
+  dias: number
+  total: number
+  coberto_pela_tela: number
+  coberto_pct: number | null
+  baldes: LogAnalyticsBaldeCusto[]
+}
+
+// Gasto de observabilidade inteiro, não só o dos workspaces: Sentinel, Commitment Tier,
+// Platform Logs e alertas vivem em medidores próprios e somem quando se olha só o workspace.
+export const getLogAnalyticsCustoObservabilidade = (dias?: number, spId?: number | null) => {
+  const q = new URLSearchParams()
+  if (dias) q.set('dias', String(dias))
+  if (spId) q.set('sp_id', String(spId))
+  return apiFetch<LogAnalyticsCustoObservabilidade>('GET', '/log-analytics/custo-observabilidade' + (q.toString() ? '?' + q : ''))
+}
+
 export const forcarColetaLogAnalytics = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/coleta/forcar')
 

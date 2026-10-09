@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getLogAnalyticsWorkspaces, getLogAnalyticsRecomendacoes, getLogAnalyticsTabelas, getLogAnalyticsFontes,
   getLogAnalyticsDiagnosticSettings, getLogAnalyticsResumo, getLogAnalyticsAppInsights,
-  getLogAnalyticsRecursosVolume, getLogAnalyticsExportSemWorkspace,
+  getLogAnalyticsRecursosVolume, getLogAnalyticsExportSemWorkspace, getLogAnalyticsCustoObservabilidade,
   forcarColetaLogAnalytics, forcarColetaDiagnosticSettings, detalharRecursoTabela,
   baixarLogAnalyticsExcel, baixarLogAnalyticsDashboardHtml, habilitarAuditoriaConsultas,
   type LogAnalyticsSeveridade, type LogAnalyticsWorkspace, type LogAnalyticsRecursoDetalhado,
@@ -156,6 +156,10 @@ export default function LogAnalyticsView() {
   })
   // Custo de export de log (Storage/Event Hub) — nível tela, não de um workspace: a Azure
   // carimba no recurso de origem, então nunca entrou no custo de workspace nenhum.
+  const observabilidadeQuery = useQuery({
+    queryKey: ['log-analytics-custo-observabilidade', selectedTenantId],
+    queryFn: () => getLogAnalyticsCustoObservabilidade(30, selectedTenantId),
+  })
   const exportQuery = useQuery({
     queryKey: ['log-analytics-export-sem-ws', selectedTenantId],
     queryFn: () => getLogAnalyticsExportSemWorkspace(30, selectedTenantId),
@@ -635,6 +639,46 @@ export default function LogAnalyticsView() {
           </div>
         )}
       </div>
+
+      {observabilidadeQuery.data && observabilidadeQuery.data.total > 0 && (() => {
+        const o = observabilidadeQuery.data
+        const fora = o.total - o.coberto_pela_tela
+        return (
+        <div className="card" style={{ margin: '0 20px 18px' }}>
+          <div className="card-header">
+            <span className="card-title">Gasto de observabilidade — todos os medidores (30d)</span>
+            <span className="badge">{fmtBRL(o.total)}</span>
+          </div>
+          <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
+            Esta tela soma o que a Azure carimba no recurso do workspace — {fmtBRL(o.coberto_pela_tela)}, {o.coberto_pct}%
+            do gasto de observabilidade. Os {fmtBRL(fora)} restantes são cobrados no recurso de ORIGEM (export para
+            Storage/Event Hub, alertas, agentes) e não entram no custo de workspace nenhum.
+          </div>
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead><tr>
+                <th>Balde</th><th style={{ textAlign: 'right' }}>Custo</th><th style={{ textAlign: 'right' }}>%</th>
+                <th style={{ textAlign: 'right' }}>Nesta tela</th><th>Maior medidor</th>
+              </tr></thead>
+              <tbody>
+                {o.baldes.map((b) => (
+                  <tr key={b.id}>
+                    <td style={{ fontWeight: 600 }}>{b.rotulo}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtBRL(b.custo)}</td>
+                    <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--text-muted)' }}>{b.pct}%</td>
+                    <td style={{ textAlign: 'right', fontSize: 11,
+                      color: b.custo_em_workspace > 0 ? undefined : 'var(--orange,#ff8c42)' }}>
+                      {b.custo_em_workspace > 0 ? fmtBRL(b.custo_em_workspace) : 'fora'}
+                    </td>
+                    <td style={{ fontSize: 10, color: 'var(--text-muted)' }}>{b.medidores[0]?.nome || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        )
+      })()}
 
       {(exportQuery.data?.sem_workspace || 0) > 0 && (
         <div className="card" style={{ margin: '0 20px 18px' }}>
