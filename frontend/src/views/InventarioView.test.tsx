@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { TenantFilterProvider } from '../contexts/TenantFilterContext'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import InventarioView from './InventarioView'
 import * as azureInventarioApi from '../api/azureInventario'
@@ -16,7 +17,9 @@ function renderWithClient() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
-      <InventarioView />
+      <TenantFilterProvider>
+        <InventarioView />
+      </TenantFilterProvider>
     </QueryClientProvider>,
   )
 }
@@ -33,6 +36,9 @@ const mockStatus: AzureInventarioStatus = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // O TenantFilterProvider busca as SPs ao montar; sem esse mock a query rejeita
+  // e polui o teste com um erro que nada tem a ver com o que ele verifica.
+  vi.mocked(coletaApi.listSPs).mockResolvedValue([])
   window.showToast = vi.fn()
   vi.mocked(azureInventarioApi.getAzureInventarioConfig).mockResolvedValue(mockConfig)
   vi.mocked(azureInventarioApi.getAzureInventarioStatus).mockResolvedValue(mockStatus)
@@ -482,13 +488,14 @@ describe('InventarioView', () => {
     ))
   })
 
-  it('as assinaturas vêm do Service Principal: não há seletor e o salvar envia subscription_ids nulo', async () => {
+  it('as assinaturas vêm das Service Principals ativas: não há seletor e o salvar envia subscription_ids nulo', async () => {
     vi.mocked(azureInventarioApi.salvarAzureInventarioConfig).mockResolvedValue({ ok: true })
     const user = userEvent.setup()
     renderWithClient()
     await user.click(await screen.findByRole('tab', { name: 'Configuração' }))
 
-    expect(await screen.findByText(/assinaturas coletadas são as selecionadas no Service Principal/)).toBeInTheDocument()
+    expect(await screen.findByText(/todas as Service Principals ativas/)).toBeInTheDocument()
+    expect(screen.getByText('Service Principals coletadas')).toBeInTheDocument()
     expect(screen.queryByPlaceholderText('Buscar assinatura...')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
@@ -578,11 +585,11 @@ describe('InventarioView', () => {
     await waitFor(() => expect(azureInventarioApi.reconciliarAzureInventario).toHaveBeenCalled())
   })
 
-  it('botão "Exportar Excel" dispara o download com o filtro de ativo atual', async () => {
+  it('botão "Exportar Excel" dispara o download com o filtro de ativo e a SP selecionada', async () => {
     const user = userEvent.setup()
     renderWithClient()
     await user.click(await screen.findByRole('button', { name: '📊 Exportar Excel' }))
-    await waitFor(() => expect(azureInventarioApi.baixarAzureInventarioExcel).toHaveBeenCalledWith({ ativo: true }))
+    await waitFor(() => expect(azureInventarioApi.baixarAzureInventarioExcel).toHaveBeenCalledWith({ ativo: true, sp_id: null }))
     expect(window.showToast).toHaveBeenCalledWith('Inventário exportado.', 'success')
   })
 

@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { TenantFilterProvider } from '../contexts/TenantFilterContext'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import ColetaMonitor from './ColetaMonitor'
 import * as coletaApi from '../api/coleta'
@@ -21,13 +22,18 @@ function renderWithClient() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, refetchInterval: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
-      <ColetaMonitor />
+      <TenantFilterProvider>
+        <ColetaMonitor />
+      </TenantFilterProvider>
     </QueryClientProvider>,
   )
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // O TenantFilterProvider busca as SPs ao montar; sem esse mock a query rejeita
+  // e polui o teste com um erro que nada tem a ver com o que ele verifica.
+  vi.mocked(coletaApi.listSPs).mockResolvedValue([])
   localStorage.clear()
   window.showToast = vi.fn()
 })

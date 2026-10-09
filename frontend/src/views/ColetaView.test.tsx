@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { TenantFilterProvider } from '../contexts/TenantFilterContext'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import ColetaView from './ColetaView'
 import * as coletaApi from '../api/coleta'
@@ -62,7 +63,9 @@ function renderWithClient() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
-      <ColetaView />
+      <TenantFilterProvider>
+        <ColetaView />
+      </TenantFilterProvider>
     </QueryClientProvider>,
   )
 }
