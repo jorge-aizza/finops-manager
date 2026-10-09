@@ -17,8 +17,15 @@ export interface LogAnalyticsWorkspace {
   tabelas_retencao_customizada: number
   /** Custo real do mês (JOIN com azure_costs por resource_id) — não é estimativa. */
   custo_mes_total: number
+  /** Só ingestão de dados. Até 2026-10 este campo somava Sentinel e Commitment Tier junto, e a
+   * tela rotulava o conjunto como "ingestão" — em workspace com Sentinel o número era ~75x o
+   * valor real da ingestão. */
   custo_mes_ingestao: number
   custo_mes_retencao: number
+  /** Análise do Sentinel, cobrada por cima da ingestão num medidor próprio. */
+  custo_mes_sentinel: number
+  /** Capacidade pré-paga (Commitment Tier). Quando contratada, substitui a cobrança por GB. */
+  custo_mes_commitment: number
   /** Economia REAL do período selecionado (billing de `azure_costs`, não um snapshot do "agora")
    * — vs Pay-As-You-Go pelo mesmo volume real ingerido nesse período. null = não houve cobrança
    * de Commitment Tier nesse período (não estava contratado então, mesmo que esteja hoje) —

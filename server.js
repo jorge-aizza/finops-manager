@@ -17131,17 +17131,37 @@ function _ymdLocal(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Predicados dos baldes de custo do workspace, num lugar só pra ingestão e seus irmãos nunca
+// divergirem: o que sai de um tem que entrar em outro, senão o total deixa de fechar.
+const _LA_NAO_RETENCAO = `(ac.meter_name NOT ILIKE '%retention%' AND ac.meter_name NOT ILIKE '%retenção%')`;
+const _LA_NAO_COMMIT = `ac.meter_name NOT ILIKE '%Commitment Tier%'`;
+const _LA_NAO_SENTINEL = `ac.meter_category IS DISTINCT FROM 'Sentinel'`;
+
 function _logAnalyticsCustoSql(idxInicio, idxFim) {
   const janela = `ac.cost_date >= $${idxInicio}::date AND ac.cost_date < $${idxFim}::date`;
   return `
+  -- Ingestão PURA: tudo que não é retenção, Commitment Tier nem Sentinel. Antes este campo
+  -- somava os três e a tela rotulava o conjunto como "Custo ingestão" — em
+  -- LA-SharedServices-PROD isso exibia R$ 189 mil de Sentinel e capacidade pré-paga sob o
+  -- nome de ingestão, sem haver uma única linha da categoria "Log Analytics" no recurso.
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
-              AND ac.meter_name NOT ILIKE '%retention%' AND ac.meter_name NOT ILIKE '%retenção%'), 0) AS _la_ing_ms,
+              AND ${_LA_NAO_RETENCAO} AND ${_LA_NAO_COMMIT} AND ${_LA_NAO_SENTINEL}), 0) AS _la_ing_ms,
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type = 'Marketplace'
-              AND ac.meter_name NOT ILIKE '%retention%' AND ac.meter_name NOT ILIKE '%retenção%'), 0) AS _la_ing_mp,
+              AND ${_LA_NAO_RETENCAO} AND ${_LA_NAO_COMMIT} AND ${_LA_NAO_SENTINEL}), 0) AS _la_ing_mp,
+  -- Sentinel cobra análise POR CIMA da ingestão, num medidor próprio — é custo do workspace,
+  -- mas não é ingestão, e some do radar quando os dois viram um número só.
+  COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
+              AND ac.meter_category = 'Sentinel'), 0) AS _la_sentinel,
+  -- Capacidade pré-paga: quando contratada, substitui a cobrança por GB. Somar junto com a
+  -- ingestão dá a impressão de que o workspace custa os dois.
+  COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
+              AND ac.meter_name ILIKE '%Commitment Tier%'), 0) AS _la_commit_custo,
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
@@ -17199,6 +17219,10 @@ const _LOG_ANALYTICS_PRECO_JOIN_SQL = `
 function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
   const custo_mes_ingestao = _comImpostoSplit(row._la_ing_ms, row._la_ing_mp, impostoCfg);
   const custo_mes_retencao = _comImpostoSplit(row._la_ret_ms, row._la_ret_mp, impostoCfg);
+  // Sentinel e capacidade pré-paga são sempre Microsoft, nunca Marketplace (mesma premissa já
+  // assumida pelo cálculo de economia de Commitment Tier logo abaixo).
+  const custo_mes_sentinel = _comImpostoSplit(row._la_sentinel, 0, impostoCfg);
+  const custo_mes_commitment = _comImpostoSplit(row._la_commit_custo, 0, impostoCfg);
   // Economia REAL do período selecionado — null (não zero) quando não houve cobrança de
   // Commitment Tier nesse período: "não estava contratado" não é o mesmo que "economia zero".
   // Billing de Commitment Tier é sempre Microsoft, nunca Marketplace.
@@ -17212,6 +17236,7 @@ function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
     ? comImpostoMs(Number(row._la_payg_price) || 0) * (Number(row.ingestao_mes_gb) || 0) - custoCommitReal
     : null;
   delete row._la_ing_ms; delete row._la_ing_mp; delete row._la_ret_ms; delete row._la_ret_mp;
+  delete row._la_sentinel; delete row._la_commit_custo;
   delete row._la_commit_real; delete row._la_payg_price; delete row._la_dias_com_dados;
   // economia_commitment_tier_mes (coluna crua, snapshot diário usado só internamente por
   // _avaliarCommitmentTier pra gerar recomendações) não é mais exposta ao cliente — substituída
@@ -17222,7 +17247,8 @@ function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
   // (diasJanela) já usado pela cobertura acima, não um /30 fixo: mês corrente é janela móvel,
   // meses passados são mês civil completo (ver _janelaLogAnalytics).
   const ingestao_media_gb_dia = diasJanela ? (Number(row.ingestao_mes_gb) || 0) / diasJanela : null;
-  return { ...row, custo_mes_ingestao, custo_mes_retencao, custo_mes_total: custo_mes_ingestao + custo_mes_retencao, economia_commitment_tier_periodo, ingestao_media_gb_dia };
+  return { ...row, custo_mes_ingestao, custo_mes_retencao, custo_mes_sentinel, custo_mes_commitment,
+    custo_mes_total: custo_mes_ingestao + custo_mes_retencao + custo_mes_sentinel + custo_mes_commitment, economia_commitment_tier_periodo, ingestao_media_gb_dia };
 }
 
 app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (req, res) => {

@@ -275,6 +275,9 @@ export default function LogAnalyticsView() {
   const custoTotal = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0)
   const custoIngestao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_ingestao) || 0), 0)
   const custoRetencao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_retencao) || 0), 0)
+  // Sentinel e capacidade pré-paga vinham somados dentro de "ingestão" e sumiam do radar.
+  const custoSentinel = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_sentinel) || 0), 0)
+  const custoCommitment = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_commitment) || 0), 0)
   const tabelasCustomizadas = workspacesExibidos.reduce((a, w) => a + (Number(w.tabelas_retencao_customizada) || 0), 0)
   const economiaCommitmentTier = workspacesExibidos.reduce((a, w) => a + (Number(w.economia_commitment_tier_periodo) || 0), 0)
   const mesLabel = resumoQuery.data?.mes_label || mesOpcoes().find((o) => o.value === mes)?.label || mes
@@ -345,6 +348,22 @@ export default function LogAnalyticsView() {
           <div className="stat-label">Custo ingestão ({mesLabel})</div>
           <div className="stat-value">{fmtBRL(custoIngestao)}</div>
         </div>
+        {custoSentinel > 0 && (
+          <div className="stat-card">
+            <div className="stat-label" title="Análise do Sentinel, cobrada por cima da ingestão num medidor próprio">
+              Custo Sentinel ({mesLabel})
+            </div>
+            <div className="stat-value">{fmtBRL(custoSentinel)}</div>
+          </div>
+        )}
+        {custoCommitment > 0 && (
+          <div className="stat-card">
+            <div className="stat-label" title="Capacidade pré-paga: quando contratada, substitui a cobrança por GB">
+              Commitment Tier ({mesLabel})
+            </div>
+            <div className="stat-value">{fmtBRL(custoCommitment)}</div>
+          </div>
+        )}
         <div className="stat-card yellow-card">
           <div className="stat-label">Custo retenção ({mesLabel})</div>
           <div className="stat-value" style={{ color: 'var(--orange,#ff8c42)' }}>{fmtBRL(custoRetencao)}</div>
@@ -482,7 +501,20 @@ export default function LogAnalyticsView() {
                         }}
                       >📊</button>
                     </td>
-                    <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtBRL(w.custo_mes_total)}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 700 }}
+                      title={[
+                        `Ingestão: ${fmtBRL(w.custo_mes_ingestao)}`,
+                        w.custo_mes_sentinel > 0 ? `Sentinel: ${fmtBRL(w.custo_mes_sentinel)}` : null,
+                        w.custo_mes_commitment > 0 ? `Commitment Tier: ${fmtBRL(w.custo_mes_commitment)}` : null,
+                        w.custo_mes_retencao > 0 ? `Retenção: ${fmtBRL(w.custo_mes_retencao)}` : null,
+                      ].filter(Boolean).join(' · ')}>
+                      {fmtBRL(w.custo_mes_total)}
+                      {/* Sentinel e capacidade pré-paga costumam dominar o total e não são
+                          ingestão — sem a marca, o número passa por custo de volume. */}
+                      {(w.custo_mes_sentinel > 0 || w.custo_mes_commitment > 0) && (
+                        <span style={{ marginLeft: 4, fontSize: 9, color: 'var(--text-muted)', fontWeight: 400 }}>✦</span>
+                      )}
+                    </td>
                     <td style={{ textAlign: 'right' }}>
                       {w.tabelas_retencao_customizada > 0 ? (
                         <span style={{ color: '#ff8c42', fontWeight: 600 }}>{w.tabelas_retencao_customizada}</span>
