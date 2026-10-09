@@ -16140,6 +16140,20 @@ async function _descobrirLogAnalyticsWorkspaces() {
 const _LA_RECURSO_JANELA_DIAS = 3;
 const _LA_RECURSO_TOP_TABELAS = 10;
 
+// Traduz a recusa da Azure pro motivo que importa pra quem lê a cobertura. Os dois primeiros
+// não têm conserto mudando a consulta — foi testado: três variantes progressivamente mais
+// simples, todas recusadas igual.
+function _motivoFalhaIngestao(status, corpo) {
+  const txt = String(corpo || '');
+  if (/Failed to resolve scalar expression named '_ResourceId'/i.test(txt)) {
+    return 'sem _ResourceId: a tabela não associa linha a recurso Azure (dado de tenant, não de recurso)';
+  }
+  if (/UnsupportedApiQuery/i.test(txt)) {
+    return 'plano Basic: a API de consulta recusa agregação nessas tabelas';
+  }
+  return `HTTP ${status}: ${txt.slice(0, 300)}`;
+}
+
 async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
   // As maiores tabelas saem do que já foi coletado — nada de descobrir isso com KQL.
   const r = await pool.query(
@@ -16159,7 +16173,7 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
      ON CONFLICT (workspace_guid, tabela) DO UPDATE
        SET desfecho = EXCLUDED.desfecho, detalhe = EXCLUDED.detalhe, linhas = EXCLUDED.linhas,
            gb_tabela = EXCLUDED.gb_tabela, atualizado_em = NOW()`,
-    [ws.workspace_guid, tabela, desfecho, detalhe ? String(detalhe).slice(0, 400) : null, linhas, gb],
+    [ws.workspace_guid, tabela, desfecho, detalhe ? String(detalhe).slice(0, 600) : null, linhas, gb],
   ).catch(() => {});
 
   const token = await getLogAnalyticsToken();
@@ -16169,8 +16183,15 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
   for (const { tabela, gb: gbTabela } of tabelas) {
     // `_ResourceId` vem vazio em tabela alimentada por agente (Syslog de VM fora do ARM, por
     // exemplo) — essas linhas são descartadas em vez de virarem um recurso "" no ranking.
+    // Consulta única. Cheguei a tentar uma cadeia de variantes mais simples, supondo que a
+    // forma do KQL fosse o problema — nenhuma passou, e cada tabela que falha custava 3
+    // chamadas em vez de 1. A Azure deu a resposta definitiva, e são dois casos sem conserto
+    // pela consulta (ver `_motivoFalhaIngestao`): coluna `_ResourceId` inexistente na tabela,
+    // e tabela em plano Basic, cuja API recusa agregação.
+    //
+    // `bin()` e não `startofday()`: é a forma que a coleta por tabela já usa em produção.
     const kql = `${tabela} | where TimeGenerated > ago(${_LA_RECURSO_JANELA_DIAS}d) | where isnotempty(_ResourceId)`
-      + ` | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId, dia = startofday(TimeGenerated)`;
+      + ` | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId, dia = bin(TimeGenerated, 1d)`;
     let resp;
     try {
       resp = await _cbFetch(url, {
@@ -16179,21 +16200,16 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
         body: JSON.stringify({ query: kql }),
       }, { timeoutMs: 60_000 });
     } catch (e) {
-      // Uma tabela que falha não derruba as outras do mesmo workspace.
       console.warn(`[LogAnalytics] ingestão por recurso falhou em ${ws.nome}/${tabela}:`, e.message);
       await anotar(tabela, 'erro', `rede: ${e.message}`, 0, gbTabela);
       continue;
     }
     if (!resp.ok) {
-      // O motivo importa: nem toda tabela tem `_ResourceId`/`_BilledSize` (as de Security e
-      // Network Analytics, por exemplo), e aí a consulta falha inteira. Sem a mensagem da
-      // Azure no log não dá pra distinguir isso de um problema de permissão ou sintaxe.
       const corpo = await resp.text().catch(() => '');
-      console.warn(`[LogAnalytics] ingestão por recurso: ${ws.nome}/${tabela} devolveu ${resp.status} — ${corpo.slice(0, 180)}`);
-      await anotar(tabela, 'erro', `HTTP ${resp.status}: ${corpo}`, 0, gbTabela);
+      await anotar(tabela, 'erro', _motivoFalhaIngestao(resp.status, corpo), 0, gbTabela);
       continue;
     }
-    const data = await _safeRespJson(resp);
+    data = await _safeRespJson(resp);
     const t = data.tables?.[0];
     if (!t?.rows?.length) {
       // Consulta passou e não veio nada: a tabela existe mas ninguém carimba `_ResourceId`
