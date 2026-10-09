@@ -17723,9 +17723,11 @@ const _OBS_BALDES = [
 app.get('/api/log-analytics/export-sem-workspace', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureLogAnalyticsTable();
-    const dias = Math.max(1, Math.min(180, parseInt(req.query.dias, 10) || 30));
+    // Mesma janela do seletor de mês do resto da tela — ver a nota em custo-observabilidade.
+    const mes = _mesLogAnalytics(req);
+    const janela = await _janelaLogAnalytics(mes);
     const subsSp = await _subsDaSp(req.query.sp_id);
-    const params = [dias];
+    const params = [janela.inicio, janela.fimExclusivo];
     let filtroSp = '';
     if (subsSp) { params.push(subsSp); filtroSp = ` AND LOWER(ac.subscription_id) = ANY($${params.length})`; }
 
@@ -17733,7 +17735,7 @@ app.get('/api/log-analytics/export-sem-workspace', authMiddleware, dbMiddleware,
       `WITH plat AS (
          SELECT LOWER(ac.resource_id) AS rid, SUM(ac.cost_in_billing_currency) AS custo
          FROM azure_costs ac
-         WHERE ac.cost_date >= CURRENT_DATE - $1::int
+         WHERE ac.cost_date >= $1 AND ac.cost_date < $2
            AND ac.meter_name ILIKE '%Platform Logs Data Processed%'${filtroSp}
          GROUP BY 1
        )
@@ -17766,17 +17768,21 @@ app.get('/api/log-analytics/export-sem-workspace', authMiddleware, dbMiddleware,
     }));
     const total = itens.reduce((a, x) => a + x.custo, 0);
     const semWorkspace = itens.filter((x) => !x.alimenta_workspace).reduce((a, x) => a + x.custo, 0);
-    res.json({ dias, total, sem_workspace: semWorkspace, itens });
+    res.json({ mes, mes_label: _mesLabelPt(mes), janela, total, sem_workspace: semWorkspace, itens });
   } catch (e) { _dbErr(res, e); }
 });
 
 app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const dias = Math.max(1, Math.min(180, parseInt(req.query.dias, 10) || 30));
+    // Segue o seletor de mês da tela, igual a todo o resto dela. Antes era uma janela fixa de
+    // 30 dias corridos, o que fazia os baldes não fecharem com os cards do topo: o usuário
+    // escolhia Outubro e este card respondia sobre os últimos 30 dias, atravessando setembro.
+    const mes = _mesLogAnalytics(req);
+    const janela = await _janelaLogAnalytics(mes);
     const subsSp = await _subsDaSp(req.query.sp_id);
-    const params = [dias];
+    const params = [janela.inicio, janela.fimExclusivo];
     let filtroSp = '';
-    if (subsSp) { params.push(subsSp); filtroSp = ` AND LOWER(subscription_id) = ANY($${params.length})`; }
+    if (subsSp) { params.push(subsSp); filtroSp = ` AND LOWER(ac.subscription_id) = ANY($${params.length})`; }
 
     const r = await pool.query(
       // `em_workspace` é o que decide a cobertura, não o balde: a tela soma TUDO que está
@@ -17784,16 +17790,20 @@ app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware
       // Commitment Tier já entram no número dela — rotulados como ingestão, o que é outro
       // problema. O que ela não vê é o que a Azure carimba no recurso de ORIGEM, como
       // Platform Logs.
-      `SELECT ac.meter_category, ac.meter_name,
+      // `w.nome` entra no GROUP BY pra responder "quais workspaces compõem este balde" sem
+      // estourar cardinalidade: agrupar por resource_id traria milhares de linhas no balde de
+      // Platform Logs (carimbado no recurso de origem, não num workspace). Como o nome é NULL
+      // pra tudo que não é workspace, essas linhas continuam colapsando numa só.
+      `SELECT ac.meter_category, ac.meter_name, w.nome AS workspace_nome,
               (w.resource_id IS NOT NULL) AS em_workspace,
               COUNT(DISTINCT ac.resource_id) AS recursos,
               SUM(ac.cost_in_billing_currency) FILTER (WHERE ac.publisher_type IS DISTINCT FROM 'Marketplace') AS ms,
               SUM(ac.cost_in_billing_currency) FILTER (WHERE ac.publisher_type = 'Marketplace') AS mp
        FROM azure_costs ac
        LEFT JOIN log_analytics_workspaces w ON UPPER(w.resource_id) = UPPER(ac.resource_id)
-       WHERE ac.cost_date >= CURRENT_DATE - $1::int
+       WHERE ac.cost_date >= $1 AND ac.cost_date < $2
          AND ac.meter_category IN ('Log Analytics', 'Azure Monitor', 'Sentinel')${filtroSp}
-       GROUP BY 1, 2, 3`,
+       GROUP BY 1, 2, 3, 4`,
       params,
     );
 
@@ -17807,22 +17817,42 @@ app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware
         : _OBS_BALDES.find((b) => b.id !== 'sentinel' && b.re.test(row.meter_name || ''));
       const chave = balde?.id || 'outros';
       const rotulo = balde?.rotulo || 'Outros';
-      const acc = porBalde.get(chave) || { id: chave, rotulo, custo: 0, custo_em_workspace: 0, recursos: 0, medidores: [] };
+      const acc = porBalde.get(chave)
+        || { id: chave, rotulo, custo: 0, custo_em_workspace: 0, recursos: 0, _medidores: new Map(), _workspaces: new Map() };
       acc.custo += custo;
       if (row.em_workspace) acc.custo_em_workspace += custo;
       acc.recursos += Number(row.recursos) || 0;
-      acc.medidores.push({ nome: row.meter_name, custo, em_workspace: row.em_workspace });
+      // A mesma linha de medidor volta uma vez por workspace agora que `nome` está no GROUP BY;
+      // somar num Map evita repetir o medidor N vezes no detalhe.
+      const med = acc._medidores.get(row.meter_name) || { nome: row.meter_name, custo: 0, em_workspace: false };
+      med.custo += custo;
+      med.em_workspace = med.em_workspace || !!row.em_workspace;
+      acc._medidores.set(row.meter_name, med);
+      if (row.workspace_nome) {
+        const ws = acc._workspaces.get(row.workspace_nome) || { nome: row.workspace_nome, custo: 0 };
+        ws.custo += custo;
+        acc._workspaces.set(row.workspace_nome, ws);
+      }
       porBalde.set(chave, acc);
     }
 
+    const porCusto = (a, c) => c.custo - a.custo;
     const baldes = [...porBalde.values()]
-      .map((b) => ({ ...b, medidores: b.medidores.sort((a, c) => c.custo - a.custo).slice(0, 5) }))
-      .sort((a, b) => b.custo - a.custo);
+      .map(({ _medidores, _workspaces, ...b }) => ({
+        ...b,
+        medidores: [..._medidores.values()].sort(porCusto),
+        // Quem carrega o balde. Vazio no que é cobrado no recurso de origem (Platform Logs,
+        // alertas, agentes) — ali não existe workspace a nomear, e é esse o ponto.
+        workspaces: [..._workspaces.values()].sort(porCusto).slice(0, 15),
+      }))
+      .sort(porCusto);
     const total = baldes.reduce((a, b) => a + b.custo, 0);
     const naTela = baldes.reduce((a, b) => a + b.custo_em_workspace, 0);
 
     res.json({
-      dias,
+      mes,
+      mes_label: _mesLabelPt(mes),
+      janela,
       total,
       // Quanto do gasto de observabilidade a tela de Log Analytics de fato representa.
       coberto_pela_tela: naTela,

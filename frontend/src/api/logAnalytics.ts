@@ -300,7 +300,8 @@ export interface LogAnalyticsExportItem {
 }
 
 export interface LogAnalyticsExportResposta {
-  dias: number
+  mes: string
+  mes_label: string
   total: number
   sem_workspace: number
   itens: LogAnalyticsExportItem[]
@@ -308,9 +309,9 @@ export interface LogAnalyticsExportResposta {
 
 // Custo de export de log (Storage/Event Hub). Vem carimbado no recurso de ORIGEM, por isso
 // nunca apareceu no custo dos workspaces.
-export const getLogAnalyticsExportSemWorkspace = (dias?: number, spId?: number | null) => {
+export const getLogAnalyticsExportSemWorkspace = (mes?: string, spId?: number | null) => {
   const q = new URLSearchParams()
-  if (dias) q.set('dias', String(dias))
+  if (mes) q.set('mes', mes)
   if (spId) q.set('sp_id', String(spId))
   return apiFetch<LogAnalyticsExportResposta>('GET', '/log-analytics/export-sem-workspace' + (q.toString() ? '?' + q : ''))
 }
@@ -324,11 +325,15 @@ export interface LogAnalyticsBaldeCusto {
   custo_em_workspace: number
   pct: number
   recursos: number
-  medidores: { nome: string; custo: number }[]
+  medidores: { nome: string; custo: number; em_workspace: boolean }[]
+  /** Workspaces que compõem o balde, do maior pro menor. Vazio quando a Azure cobra o
+   *  medidor no recurso de origem (Platform Logs, alertas, agentes) — não há workspace. */
+  workspaces: { nome: string; custo: number }[]
 }
 
 export interface LogAnalyticsCustoObservabilidade {
-  dias: number
+  mes: string
+  mes_label: string
   total: number
   coberto_pela_tela: number
   coberto_pct: number | null
@@ -337,9 +342,9 @@ export interface LogAnalyticsCustoObservabilidade {
 
 // Gasto de observabilidade inteiro, não só o dos workspaces: Sentinel, Commitment Tier,
 // Platform Logs e alertas vivem em medidores próprios e somem quando se olha só o workspace.
-export const getLogAnalyticsCustoObservabilidade = (dias?: number, spId?: number | null) => {
+export const getLogAnalyticsCustoObservabilidade = (mes?: string, spId?: number | null) => {
   const q = new URLSearchParams()
-  if (dias) q.set('dias', String(dias))
+  if (mes) q.set('mes', mes)
   if (spId) q.set('sp_id', String(spId))
   return apiFetch<LogAnalyticsCustoObservabilidade>('GET', '/log-analytics/custo-observabilidade' + (q.toString() ? '?' + q : ''))
 }

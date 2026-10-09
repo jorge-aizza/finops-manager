@@ -42,5 +42,10 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/setupTests.ts',
+    // Os 5s padrão não dão conta: com 49 arquivos em paralelo num Windows carregado, testes que
+    // passam isolados estouram por fila de CPU, não por defeito. Isso tornava a suíte não
+    // determinística — a mesma árvore dava 0, 2 ou 5 falhas em execuções seguidas, e uma suíte
+    // em que a falha não significa nada não protege de nada.
+    testTimeout: 20000,
   },
 })
