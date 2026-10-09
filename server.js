@@ -16156,10 +16156,32 @@ function _motivoFalhaIngestao(status, corpo) {
 
 async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
   // As maiores tabelas saem do que já foi coletado — nada de descobrir isso com KQL.
+  // Tabela que já se provou inatribuível não ocupa vaga: são 10 por workspace, e em
+  // LA-SharedServices-PROD metade ia pra tabela que nunca produz linha. Pular libera as vagas
+  // pras que funcionam e evita a chamada condenada.
+  //
+  // Os dois motivos têm alcance diferente, e tratar igual erraria nos dois sentidos:
+  // falta de `_ResourceId` é propriedade da TABELA (não existe em lugar nenhum, então vale
+  // globalmente, por nome); plano Basic é propriedade do WORKSPACE (a mesma tabela pode ser
+  // Analytics em outro), então só exclui ali.
+  //
+  // Ordenar por GB e não por custo estimado é deliberado: depois de tirar as Basic, o que
+  // sobra é tudo Analytics, onde o custo é proporcional ao volume — ponderar por plano não
+  // mudaria a ordem e só acrescentaria uma junção.
   const r = await pool.query(
-    `SELECT tabela, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
-     WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - 30
-     GROUP BY tabela ORDER BY SUM(gb) DESC LIMIT $2`,
+    `WITH sem_resource_id AS (
+       SELECT DISTINCT tabela FROM log_analytics_ingestao_recurso_status
+       WHERE desfecho = 'erro' AND detalhe LIKE 'sem _ResourceId%'
+     ),
+     basic_aqui AS (
+       SELECT DISTINCT tabela FROM log_analytics_ingestao_recurso_status
+       WHERE desfecho = 'erro' AND detalhe LIKE 'plano Basic%' AND workspace_guid = $1
+     )
+     SELECT d.tabela, SUM(d.gb) AS gb FROM log_analytics_ingestao_diaria d
+     WHERE d.workspace_guid = $1 AND d.dia >= CURRENT_DATE - 30
+       AND d.tabela NOT IN (SELECT tabela FROM sem_resource_id)
+       AND d.tabela NOT IN (SELECT tabela FROM basic_aqui)
+     GROUP BY d.tabela ORDER BY SUM(d.gb) DESC LIMIT $2`,
     [ws.workspace_guid, _LA_RECURSO_TOP_TABELAS],
   );
   const tabelas = r.rows.filter((x) => /^[A-Za-z0-9_]+$/.test(x.tabela));
@@ -17845,6 +17867,9 @@ app.get('/api/log-analytics/workspaces/:guid/recursos-volume', authMiddleware, d
        LIMIT 200`,
       [req.params.guid, dias],
     );
+    // Cobertura APROXIMADA: o numerador é medido na hora da coleta (`_BilledSize`), e o
+    // denominador vem da `Usage`, que a Azure revisa pra cima nos dias recentes — os dois lados
+    // têm maturidade diferente, então o número oscila alguns pontos entre execuções.
     // Cobertura: quanto do volume das MESMAS tabelas e dias tem recurso identificado. Linha de
     // agente (DCR) costuma vir sem `_ResourceId` e é descartada na coleta — sem esse número, o
     // ranking pareceria o total da tabela quando na verdade é só a parte atribuível. Em

@@ -703,8 +703,8 @@ export default function LogAnalyticsView() {
             {cobertura != null && (
               <> <strong style={{ color: cobertura >= 80 ? 'var(--text)' : 'var(--orange,#ff8c42)' }}>
                 {cobertura}% do volume dessas tabelas tem recurso identificado
-              </strong> — o restante chega por agente (DCR), que não carimba o recurso de origem, então não entra
-              neste ranking.</>
+              </strong> — aproximado: o restante chega por agente (DCR), que não carimba o recurso de origem, e a
+              Azure ainda revisa o volume por tabela dos dias recentes, então o denominador cresce depois da medição.</>
             )}
             {(recursosVolumeQuery.data?.tabelas_sem_atribuicao?.length ?? 0) > 0 && (
               <div style={{ marginTop: 6 }}>
