@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getLogAnalyticsWorkspaces, getLogAnalyticsRecomendacoes, getLogAnalyticsTabelas, getLogAnalyticsFontes,
   getLogAnalyticsDiagnosticSettings, getLogAnalyticsResumo, getLogAnalyticsAppInsights,
+  getLogAnalyticsRecursosVolume,
   forcarColetaLogAnalytics, forcarColetaDiagnosticSettings, detalharRecursoTabela,
   baixarLogAnalyticsExcel, baixarLogAnalyticsDashboardHtml, habilitarAuditoriaConsultas,
   type LogAnalyticsSeveridade, type LogAnalyticsWorkspace, type LogAnalyticsRecursoDetalhado,
@@ -144,6 +145,13 @@ export default function LogAnalyticsView() {
   const fontesQuery = useQuery({
     queryKey: ['log-analytics-fontes', workspaceSelecionado?.workspace_guid],
     queryFn: () => getLogAnalyticsFontes(workspaceSelecionado!.workspace_guid),
+    enabled: !!workspaceSelecionado,
+  })
+  // Ranking de recursos por volume — vem do acumulado (log_analytics_ingestao_recurso), não da
+  // consulta ao vivo: cobre todas as tabelas grandes de uma vez e tem histórico.
+  const recursosVolumeQuery = useQuery({
+    queryKey: ['log-analytics-recursos-volume', workspaceSelecionado?.workspace_guid],
+    queryFn: () => getLogAnalyticsRecursosVolume(workspaceSelecionado!.workspace_guid, 30),
     enabled: !!workspaceSelecionado,
   })
   const diagSettingsQuery = useQuery({
@@ -589,6 +597,75 @@ export default function LogAnalyticsView() {
           </div>
         )}
       </div>
+
+      {workspaceSelecionado && (() => {
+        const recursos = recursosVolumeQuery.data || []
+        const totalGb = recursos.reduce((a, r) => a + r.gb, 0)
+        // Custo por recurso é rateio do custo real do workspace pela participação em GB — mesma
+        // lógica já usada por tabela. Não é fatura por recurso: a Azure não cobra nesse nível.
+        const custoWs = Number(workspaceSelecionado.custo_mes_ingestao) || 0
+        return (
+        <div className="card" style={{ margin: '0 20px 18px' }}>
+          <div className="card-header">
+            <span className="card-title">Recursos por volume — {workspaceSelecionado.nome}</span>
+            {recursos.length > 0 && <span className="badge">{recursos.length}</span>}
+          </div>
+          <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
+            Quem gerou a ingestão nos últimos 30 dias, somando todas as tabelas grandes do workspace — histórico
+            acumulado, diferente do "Detalhar por recurso" acima, que é uma consulta ao vivo de 3 dias numa tabela só.
+            O custo é rateio da participação em GB, não fatura por recurso: a Azure não cobra nesse nível.
+          </div>
+          {recursosVolumeQuery.isLoading ? (
+            <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>
+          ) : recursos.length === 0 ? (
+            <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>
+              Nada acumulado ainda para este workspace — a coleta de ingestão por recurso roda junto com a coleta
+              diária do Log Analytics.
+            </div>
+          ) : (
+            <div className="table-wrapper">
+              <table className="data-table">
+                <thead><tr>
+                  <th>Recurso</th><th>Maior tabela</th><th style={{ textAlign: 'right' }}>Tabelas</th>
+                  <th style={{ textAlign: 'right' }}>GB (30d)</th><th style={{ textAlign: 'right' }}>% do total</th>
+                  <th style={{ textAlign: 'right' }}>Custo (estim.)</th><th></th>
+                </tr></thead>
+                <tbody>
+                  {recursos.slice(0, 50).map((r) => {
+                    const pct = totalGb > 0 ? (r.gb / totalGb) * 100 : 0
+                    return (
+                      <tr key={r.recurso_id}>
+                        <td style={{ maxWidth: 330 }}>
+                          <div style={{ fontWeight: 600, fontSize: 12 }}>{r.recurso_id.split('/').pop()}</div>
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>{r.recurso_id}</div>
+                        </td>
+                        <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{r.maior_tabela || '—'}</td>
+                        <td style={{ textAlign: 'right', fontSize: 11 }}>{r.tabelas}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtGB(r.gb)}</td>
+                        <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--text-muted)' }}>{pct.toFixed(1)}%</td>
+                        <td style={{ textAlign: 'right' }}>{totalGb > 0 ? fmtBRL(custoWs * (r.gb / totalGb)) : '—'}</td>
+                        <td style={{ textAlign: 'right' }}>
+                          <button className="btn-ghost" style={{ padding: '1px 6px', fontSize: 10 }}
+                            onClick={() => setDiagDoRecurso(r.recurso_id)}
+                            title="Ver o Diagnostic Setting configurado neste recurso">
+                            ⚙ Diagnostic Setting
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              {recursos.length > 50 && (
+                <div style={{ padding: '8px 20px', fontSize: 11, color: 'var(--text-muted)' }}>
+                  Mostrando os 50 maiores de {recursos.length}.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        )
+      })()}
 
       {workspaceSelecionado && (
         <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16 }}>

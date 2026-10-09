@@ -16148,7 +16148,11 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
       continue;
     }
     if (!resp.ok) {
-      console.warn(`[LogAnalytics] ingestão por recurso: ${ws.nome}/${tabela} devolveu ${resp.status}`);
+      // O motivo importa: nem toda tabela tem `_ResourceId`/`_BilledSize` (as de Security e
+      // Network Analytics, por exemplo), e aí a consulta falha inteira. Sem a mensagem da
+      // Azure no log não dá pra distinguir isso de um problema de permissão ou sintaxe.
+      const corpo = await resp.text().catch(() => '');
+      console.warn(`[LogAnalytics] ingestão por recurso: ${ws.nome}/${tabela} devolveu ${resp.status} — ${corpo.slice(0, 180)}`);
       continue;
     }
     const data = await _safeRespJson(resp);
