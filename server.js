@@ -17601,14 +17601,35 @@ app.get('/api/log-analytics/workspaces/:guid/recursos-volume', authMiddleware, d
        LIMIT 200`,
       [req.params.guid, dias],
     );
-    res.json(r.rows.map((x) => ({
-      recurso_id: x.recurso_id,
-      gb: Number(x.gb) || 0,
-      tabelas: Number(x.tabelas) || 0,
-      maior_tabela: x.maior_tabela,
-      primeiro_dia: x.primeiro_dia ? String(x.primeiro_dia).slice(0, 10) : null,
-      ultimo_dia: x.ultimo_dia ? String(x.ultimo_dia).slice(0, 10) : null,
-    })));
+    // Cobertura: quanto do volume das MESMAS tabelas e dias tem recurso identificado. Linha de
+    // agente (DCR) costuma vir sem `_ResourceId` e é descartada na coleta — sem esse número, o
+    // ranking pareceria o total da tabela quando na verdade é só a parte atribuível. Em
+    // SecurityEvent deste tenant isso é 9%.
+    const cob = await pool.query(
+      `SELECT COALESCE(SUM(ir.gb), 0) AS atribuido,
+              COALESCE((SELECT SUM(id2.gb) FROM log_analytics_ingestao_diaria id2
+                        WHERE id2.workspace_guid = $1
+                          AND id2.tabela IN (SELECT DISTINCT tabela FROM log_analytics_ingestao_recurso WHERE workspace_guid = $1)
+                          AND id2.dia BETWEEN (SELECT MIN(dia) FROM log_analytics_ingestao_recurso WHERE workspace_guid = $1)
+                                          AND (SELECT MAX(dia) FROM log_analytics_ingestao_recurso WHERE workspace_guid = $1)), 0) AS total
+       FROM log_analytics_ingestao_recurso ir
+       WHERE ir.workspace_guid = $1`,
+      [req.params.guid],
+    );
+    const atribuido = Number(cob.rows[0]?.atribuido) || 0;
+    const totalTabelas = Number(cob.rows[0]?.total) || 0;
+
+    res.json({
+      cobertura_pct: totalTabelas > 0 ? Number(((atribuido / totalTabelas) * 100).toFixed(1)) : null,
+      recursos: r.rows.map((x) => ({
+        recurso_id: x.recurso_id,
+        gb: Number(x.gb) || 0,
+        tabelas: Number(x.tabelas) || 0,
+        maior_tabela: x.maior_tabela,
+        primeiro_dia: x.primeiro_dia ? String(x.primeiro_dia).slice(0, 10) : null,
+        ultimo_dia: x.ultimo_dia ? String(x.ultimo_dia).slice(0, 10) : null,
+      })),
+    });
   } catch (e) { _dbErr(res, e); }
 });
 

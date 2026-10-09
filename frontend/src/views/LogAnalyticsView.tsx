@@ -599,7 +599,8 @@ export default function LogAnalyticsView() {
       </div>
 
       {workspaceSelecionado && (() => {
-        const recursos = recursosVolumeQuery.data || []
+        const recursos = recursosVolumeQuery.data?.recursos || []
+        const cobertura = recursosVolumeQuery.data?.cobertura_pct ?? null
         const totalGb = recursos.reduce((a, r) => a + r.gb, 0)
         // Custo por recurso é rateio do custo real do workspace pela participação em GB — mesma
         // lógica já usada por tabela. Não é fatura por recurso: a Azure não cobra nesse nível.
@@ -614,6 +615,12 @@ export default function LogAnalyticsView() {
             Quem gerou a ingestão nos últimos 30 dias, somando todas as tabelas grandes do workspace — histórico
             acumulado, diferente do "Detalhar por recurso" acima, que é uma consulta ao vivo de 3 dias numa tabela só.
             O custo é rateio da participação em GB, não fatura por recurso: a Azure não cobra nesse nível.
+            {cobertura != null && (
+              <> <strong style={{ color: cobertura >= 80 ? 'var(--text)' : 'var(--orange,#ff8c42)' }}>
+                {cobertura}% do volume dessas tabelas tem recurso identificado
+              </strong> — o restante chega por agente (DCR), que não carimba o recurso de origem, então não entra
+              neste ranking.</>
+            )}
           </div>
           {recursosVolumeQuery.isLoading ? (
             <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>
