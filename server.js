@@ -15965,6 +15965,28 @@ async function ensureLogAnalyticsTable() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_analytics_ai_ws ON log_analytics_app_insights (workspace_resource_id)`);
+
+  // Ingestão por RECURSO (não só por tabela). A tabela `log_analytics_ingestao_diaria` vem da
+  // `Usage`, que é barata mas só quebra por DataType — não diz QUEM gerou o volume. Esta aqui
+  // custa uma consulta KQL de verdade por tabela, então é alimentada só para as maiores de
+  // cada workspace (ver _coletarIngestaoPorRecurso): no maior workspace daqui, as 10 maiores
+  // tabelas concentram 97,5% do volume.
+  //
+  // Acumula histórico: cada execução reescreve só a janela recente, e os dias anteriores
+  // permanecem — é o que permite responder "esse recurso cresceu?", impossível com a consulta
+  // ao vivo de 3 dias que a tela usa hoje.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_ingestao_recurso (
+      workspace_guid TEXT NOT NULL,
+      tabela         VARCHAR(200) NOT NULL,
+      recurso_id     TEXT NOT NULL,
+      dia            DATE NOT NULL,
+      gb             NUMERIC(14,6) NOT NULL DEFAULT 0,
+      PRIMARY KEY (workspace_guid, tabela, recurso_id, dia)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_la_ing_recurso_ws_dia ON log_analytics_ingestao_recurso (workspace_guid, dia)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_la_ing_recurso_rec ON log_analytics_ingestao_recurso (recurso_id)`);
   _logAnalyticsTableReady = true;
   } finally { _logAnalyticsTablePromise = null; }
   })();
@@ -15996,28 +16018,27 @@ const _LOG_ANALYTICS_TIPOS_MONITORAVEIS = [
   'microsoft.machinelearningservices/workspaces', 'microsoft.cognitiveservices/accounts',
   // Tipos presentes neste tenant que a lista de referência não cobria (2026-10-xx) — sem eles,
   // o "detalhe por recurso" omitia silenciosamente quem estivesse enviando log por aqui.
-  // Um tipo que não suporte Diagnostic Setting só devolve 404, contabilizado como
-  // `naoEncontrados` e sem efeito no resultado.
+  //
+  // A primeira versão desta lista trouxe 32 tipos de uma vez e rendeu só 4 configurações novas,
+  // ao custo de ~480 chamadas que a Azure recusava com 400 ResourceTypeNotSupported. Os que ela
+  // recusa foram removidos: não é falta de dado, é tipo que não suporta Diagnostic Setting.
+  // Ficaram os que respondem 404/vazio — esses PODEM vir a ter um, e aí aparecem sozinhos.
   'microsoft.automation/automationaccounts/configurations',
-  'microsoft.automation/automationaccounts/runbooks', 'microsoft.azurestackhci/logicalnetworks',
   'microsoft.cache/redisenterprise', 'microsoft.cdn/profiles/afdendpoints',
   'microsoft.cdn/profiles/endpoints', 'microsoft.cognitiveservices/accounts/projects',
   'microsoft.containerregistry/registries/replications',
-  'microsoft.containerregistry/registries/tasks', 'microsoft.databricks/accessconnectors',
+  'microsoft.containerregistry/registries/tasks', 
   'microsoft.eventgrid/namespaces', 'microsoft.eventgrid/systemtopics',
-  'microsoft.machinelearningservices/workspaces/serverlessendpoints',
   'microsoft.mysqldiscovery/mysqlsites', 'microsoft.netapp/netappaccounts',
   'microsoft.netapp/netappaccounts/backuppolicies', 'microsoft.netapp/netappaccounts/backupvaults',
   'microsoft.netapp/netappaccounts/capacitypools',
   'microsoft.netapp/netappaccounts/capacitypools/volumes',
   'microsoft.netapp/netappaccounts/snapshotpolicies',
-  'microsoft.network/applicationgatewaywebapplicationfirewallpolicies',
-  'microsoft.network/expressroutegateways', 'microsoft.network/firewallpolicies',
+  'microsoft.network/expressroutegateways', 
   'microsoft.network/vpngateways', 'microsoft.purview/accounts', 'microsoft.relay/namespaces',
-  'microsoft.security/automations', 'microsoft.signalrservice/webpubsub',
+  'microsoft.signalrservice/webpubsub',
   'microsoft.streamanalytics/streamingjobs', 'microsoft.synapse/privatelinkhubs',
-  'microsoft.synapse/workspaces/bigdatapools', 'microsoft.synapse/workspaces/sqlpools',
-];
+  'microsoft.synapse/workspaces/bigdatapools', 'microsoft.synapse/workspaces/sqlpools',];
 
 // Descoberta via ARM (plano de gerência — usa o token/acesso que a SP já tem hoje, sem
 // precisar da permissão nova). Upsert em log_analytics_workspaces.
@@ -16082,6 +16103,82 @@ async function _descobrirLogAnalyticsWorkspaces() {
     await c.query('COMMIT');
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
   return todos;
+}
+
+// Ingestão por recurso, para as maiores tabelas de um workspace. Diferente de
+// _coletarIngestaoWorkspace (que lê a `Usage`, barata e pré-agregada), aqui a consulta toca a
+// tabela de log de verdade — por isso é limitada às maiores, onde está o volume que importa.
+//
+// Janela curta (3 dias) de propósito: a execução é diária e cada uma reescreve só a ponta, do
+// mesmo jeito que a coleta de Inventário usa watermark. O histórico vem da acumulação, não de
+// reconsultar 30 dias toda noite.
+const _LA_RECURSO_JANELA_DIAS = 3;
+const _LA_RECURSO_TOP_TABELAS = 10;
+
+async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
+  // As maiores tabelas saem do que já foi coletado — nada de descobrir isso com KQL.
+  const r = await pool.query(
+    `SELECT tabela FROM log_analytics_ingestao_diaria
+     WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - 30
+     GROUP BY tabela ORDER BY SUM(gb) DESC LIMIT $2`,
+    [ws.workspace_guid, _LA_RECURSO_TOP_TABELAS],
+  );
+  const tabelas = r.rows.map((x) => x.tabela).filter((t) => /^[A-Za-z0-9_]+$/.test(t));
+  if (!tabelas.length) return { tabelas: 0, linhas: 0 };
+
+  const token = await getLogAnalyticsToken();
+  const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
+  let totalLinhas = 0;
+
+  for (const tabela of tabelas) {
+    // `_ResourceId` vem vazio em tabela alimentada por agente (Syslog de VM fora do ARM, por
+    // exemplo) — essas linhas são descartadas em vez de virarem um recurso "" no ranking.
+    const kql = `${tabela} | where TimeGenerated > ago(${_LA_RECURSO_JANELA_DIAS}d) | where isnotempty(_ResourceId)`
+      + ` | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId, dia = startofday(TimeGenerated)`;
+    let resp;
+    try {
+      resp = await _cbFetch(url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: kql }),
+      }, { timeoutMs: 60_000 });
+    } catch (e) {
+      // Uma tabela que falha não derruba as outras do mesmo workspace.
+      console.warn(`[LogAnalytics] ingestão por recurso falhou em ${ws.nome}/${tabela}:`, e.message);
+      continue;
+    }
+    if (!resp.ok) {
+      console.warn(`[LogAnalytics] ingestão por recurso: ${ws.nome}/${tabela} devolveu ${resp.status}`);
+      continue;
+    }
+    const data = await _safeRespJson(resp);
+    const t = data.tables?.[0];
+    if (!t?.rows?.length) continue;
+    const cols = t.columns.map((c) => c.name);
+    const iGB = cols.indexOf('GB'), iRec = cols.indexOf('_ResourceId'), iDia = cols.indexOf('dia');
+    if (iGB < 0 || iRec < 0 || iDia < 0) continue;
+
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      for (const row of t.rows) {
+        const recurso = String(row[iRec] || '').trim();
+        if (!recurso) continue;
+        await c.query(
+          `INSERT INTO log_analytics_ingestao_recurso (workspace_guid, tabela, recurso_id, dia, gb)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (workspace_guid, tabela, recurso_id, dia) DO UPDATE SET gb = EXCLUDED.gb`,
+          [ws.workspace_guid, tabela, recurso, String(row[iDia]).slice(0, 10), Number(row[iGB]) || 0],
+        );
+        totalLinhas++;
+      }
+      await c.query('COMMIT');
+    } catch (e) {
+      await c.query('ROLLBACK').catch(() => {});
+      console.warn(`[LogAnalytics] gravação da ingestão por recurso falhou em ${ws.nome}/${tabela}:`, e.message);
+    } finally { c.release(); }
+  }
+  return { tabelas: tabelas.length, linhas: totalLinhas };
 }
 
 // UMA query KQL por workspace cobre as 5 regras (ingestão por tabela × dia, 30d) — ver
@@ -16461,19 +16558,32 @@ async function _coletarDiagnosticSettingsTudo() {
 
     const linhas = [];
     let checados = 0, naoEncontrados = 0, outrasFalhas = 0;
+    // Três caminhos diferentes caíam todos em `outrasFalhas`, então o número sozinho não dizia
+    // se era permissão faltando (acionável), tipo que não suporta a API (ruído esperado) ou
+    // rede. Sem essa quebra não dá pra saber se há cobertura travada atrás de um role grant.
+    const motivosFalha = new Map();
+    const anotar = (motivo) => motivosFalha.set(motivo, (motivosFalha.get(motivo) || 0) + 1);
     await _mapLimit(candidatos, 8, async (recurso) => {
       // Credencial da SP dona da assinatura do recurso (ver _getInventarioEscopos).
       const escopo = escopoPorSub.get(String(recurso.subscriptionId || '').toLowerCase());
-      if (!escopo) { outrasFalhas++; return; }
+      if (!escopo) { outrasFalhas++; anotar('assinatura fora das SPs ativas'); return; }
       const url = `https://management.azure.com${recurso.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`;
       let resp;
       try {
         const token = await escopo.getToken();
         resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 20_000 });
-      } catch (e) { outrasFalhas++; return; }
+      } catch (e) { outrasFalhas++; anotar(`rede: ${e.message}`.slice(0, 60)); return; }
       checados++;
       if (resp.status === 404) { naoEncontrados++; return; } // recurso efêmero (ex.: VM de cluster auto-scaling), já não existe
-      if (!resp.ok) { outrasFalhas++; return; }
+      if (!resp.ok) {
+        outrasFalhas++;
+        // O corpo traz o código da Azure (ex.: AuthorizationFailed, ResourceTypeNotSupported),
+        // que é o que separa "falta permissão" de "esse tipo não tem Diagnostic Setting".
+        const corpo = await _safeRespJson(resp).catch(() => null);
+        const codigo = corpo?.error?.code || corpo?.code || '(sem código)';
+        anotar(`HTTP ${resp.status} · ${codigo} · ${recurso.type}`);
+        return;
+      }
       const data = await _safeRespJson(resp);
       for (const setting of (data.value || [])) {
         const p = setting.properties || {};
@@ -16519,6 +16629,16 @@ async function _coletarDiagnosticSettingsTudo() {
     catch (e) { console.warn('[LogAnalytics] Falha ao avaliar fan-out de Diagnostic Settings:', e.message); }
 
     console.log(`[LogAnalytics] Diagnostic Settings: ${checados} recurso(s) consultado(s) (${naoEncontrados} não encontrados, ${outrasFalhas} outras falhas), ${linhas.length} configuração(ões) casada(s), ${fanout} recurso(s) com fan-out em ${Math.round((Date.now() - t0) / 1000)}s.`);
+    // Quebra das falhas por causa — ordenada, só as 8 maiores, pra não poluir o log quando a
+    // cauda é longa. É o que diz se vale pedir permissão ou se é só tipo sem suporte.
+    if (motivosFalha.size) {
+      // 30, não 8: com 8 a cauda ficava escondida atrás de "mais N causas" justamente quando
+      // ela é o que interessa — é lá que mora um 403 isolado de permissão.
+      const top = [...motivosFalha.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30);
+      console.log('[LogAnalytics] Diagnostic Settings — falhas por causa:');
+      for (const [motivo, n] of top) console.log(`    ${String(n).padStart(5)}  ${motivo}`);
+      if (motivosFalha.size > 30) console.log(`    ... mais ${motivosFalha.size - 30} causa(s) distinta(s)`);
+    }
     return { ok: true, candidatos: candidatos.length, checados, configuracoes: linhas.length, fanout };
   } catch (e) {
     console.warn('[LogAnalytics] Falha geral na coleta de Diagnostic Settings:', e.message);
@@ -16869,6 +16989,10 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
       await _avaliarRegrasLogAnalytics(ws);
       try { await _avaliarCommitmentTier(ws); }
       catch (e) { console.warn(`[LogAnalytics] Falha ao avaliar Commitment Tier de ${ws.nome}:`, e.message); }
+      // Quem gerou o volume, não só quanto cada tabela ingeriu. É a etapa mais cara da coleta
+      // (uma consulta KQL por tabela grande), por isso vem por último e nunca derruba o resto.
+      try { await _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken); }
+      catch (e) { console.warn(`[LogAnalytics] Falha na ingestão por recurso de ${ws.nome}:`, e.message); }
     });
     // DCR é barato (1 chamada por subscription, não por recurso) — entra na coleta diária.
     // Diagnostic Settings NÃO entra aqui (etapa cara, 1 chamada por recurso do tenant inteiro)
@@ -17452,6 +17576,66 @@ app.post('/api/log-analytics/coleta/forcar', authMiddleware, dbMiddleware, async
 
 // Separado da coleta principal de propósito — é uma chamada de API por recurso monitorável do
 // tenant inteiro (ver comentário de _coletarDiagnosticSettingsTudo), pode levar minutos.
+// Ranking de recursos por volume dentro de um workspace — a resposta pro "quem mais me custa",
+// que a consulta ao vivo por tabela não dava (ela é de 3 dias, de uma tabela por vez, e não
+// guarda nada). Lê do acumulado `log_analytics_ingestao_recurso`.
+app.get('/api/log-analytics/workspaces/:guid/recursos-volume', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureLogAnalyticsTable();
+    const dias = Math.max(1, Math.min(90, parseInt(req.query.dias, 10) || 30));
+    const r = await pool.query(
+      `SELECT recurso_id,
+              SUM(gb) AS gb,
+              COUNT(DISTINCT tabela) AS tabelas,
+              MIN(dia) AS primeiro_dia,
+              MAX(dia) AS ultimo_dia,
+              (ARRAY_AGG(tabela ORDER BY gb DESC))[1] AS maior_tabela
+       FROM log_analytics_ingestao_recurso
+       WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - $2::int
+       GROUP BY recurso_id
+       ORDER BY gb DESC
+       LIMIT 200`,
+      [req.params.guid, dias],
+    );
+    res.json(r.rows.map((x) => ({
+      recurso_id: x.recurso_id,
+      gb: Number(x.gb) || 0,
+      tabelas: Number(x.tabelas) || 0,
+      maior_tabela: x.maior_tabela,
+      primeiro_dia: x.primeiro_dia ? String(x.primeiro_dia).slice(0, 10) : null,
+      ultimo_dia: x.ultimo_dia ? String(x.ultimo_dia).slice(0, 10) : null,
+    })));
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Disparo manual da coleta de ingestão por recurso — mesma ideia do botão de Diagnostic
+// Settings: é cara demais pra rodar no caminho de uma requisição.
+let _laIngRecursoEmExecucao = false;
+app.post('/api/log-analytics/ingestao-recurso/forcar', authMiddleware, dbMiddleware, async (_req, res) => {
+  if (_laIngRecursoEmExecucao) return res.status(409).json({ error: 'Coleta de ingestão por recurso já em execução' });
+  res.status(202).json({ ok: true, message: 'Coleta de ingestão por recurso iniciada — leva vários minutos' });
+  _laIngRecursoEmExecucao = true;
+  (async () => {
+    const t0 = Date.now();
+    try {
+      const workspaces = await _descobrirLogAnalyticsWorkspaces();
+      const { escopos } = await _getInventarioEscopos();
+      const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
+      let tabelas = 0, linhas = 0;
+      const r = await _mapLimitSettled(workspaces, 4, async (ws) => {
+        const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+        if (!escopo) return;
+        const x = await _coletarIngestaoPorRecurso(ws, escopo.getLogAnalyticsToken);
+        tabelas += x.tabelas; linhas += x.linhas;
+      });
+      const falhas = r.filter((x) => x.status === 'rejected').length;
+      console.log(`[LogAnalytics] Ingestão por recurso: ${workspaces.length} workspace(s), ${tabelas} tabela(s), ${linhas} linha(s), ${falhas} falha(s) em ${Math.round((Date.now() - t0) / 1000)}s`);
+    } catch (e) {
+      console.warn('[LogAnalytics] Ingestão por recurso falhou:', e.message);
+    } finally { _laIngRecursoEmExecucao = false; }
+  })();
+});
+
 app.post('/api/log-analytics/diagnostic-settings/forcar', authMiddleware, dbMiddleware, async (_req, res) => {
   if (_logAnalyticsDiagEmExecucao) return res.status(409).json({ error: 'Coleta de Diagnostic Settings já em execução' });
   res.status(202).json({ ok: true, message: 'Coleta de Diagnostic Settings iniciada — em tenants grandes pode levar vários minutos' });

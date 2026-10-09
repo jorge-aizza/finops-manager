@@ -242,6 +242,28 @@ export const detalharRecursoTabela = (workspaceGuid: string, tabela: string, lim
     undefined, 60_000,
   )
 
+/** Um recurso no ranking de volume do workspace — vem do acumulado, não da consulta ao vivo. */
+export interface LogAnalyticsRecursoVolume {
+  recurso_id: string
+  gb: number
+  /** Em quantas tabelas diferentes esse recurso aparece. */
+  tabelas: number
+  maior_tabela: string | null
+  primeiro_dia: string | null
+  ultimo_dia: string | null
+}
+
+// Ranking de recursos por volume no workspace. Diferente de `detalharRecursoTabela`, que é uma
+// consulta ao vivo de 3 dias numa tabela só, este lê o histórico acumulado e cobre todas as
+// tabelas grandes de uma vez.
+export const getLogAnalyticsRecursosVolume = (workspaceGuid: string, dias?: number) =>
+  apiFetch<LogAnalyticsRecursoVolume[]>(
+    'GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/recursos-volume' + (dias ? '?dias=' + dias : ''),
+  )
+
+export const forcarColetaIngestaoRecurso = () =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/ingestao-recurso/forcar')
+
 export const forcarColetaLogAnalytics = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/coleta/forcar')
 
