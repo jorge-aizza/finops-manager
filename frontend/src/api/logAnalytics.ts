@@ -167,8 +167,12 @@ export interface LogAnalyticsRecomendacao {
 export const getLogAnalyticsWorkspaces = (mes?: string) =>
   apiFetch<LogAnalyticsWorkspace[]>('GET', '/log-analytics/workspaces' + (mes ? '?mes=' + mes : ''))
 
-export const getLogAnalyticsAppInsights = () =>
-  apiFetch<LogAnalyticsAppInsights[]>('GET', '/log-analytics/app-insights')
+// Só o filtro de Tenant: o recorte por workspace é feito na tela, que tem o "mostrar todos".
+export const getLogAnalyticsAppInsights = (spId?: number | null) => {
+  const q = new URLSearchParams()
+  if (spId) q.set('sp_id', String(spId))
+  return apiFetch<LogAnalyticsAppInsights[]>('GET', '/log-analytics/app-insights' + (q.toString() ? '?' + q : ''))
+}
 
 export const getLogAnalyticsIngestao = (workspaceGuid: string) =>
   apiFetch<LogAnalyticsIngestaoDia[]>('GET', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/ingestao')
@@ -192,8 +196,12 @@ export const habilitarAuditoriaConsultas = (workspaceGuid: string) =>
     'POST', '/log-analytics/workspaces/' + encodeURIComponent(workspaceGuid) + '/auditoria-consultas/habilitar',
   )
 
-export const getLogAnalyticsRecomendacoes = (severidade?: LogAnalyticsSeveridade) =>
-  apiFetch<LogAnalyticsRecomendacao[]>('GET', '/log-analytics/recomendacoes' + (severidade ? '?severidade=' + severidade : ''))
+export const getLogAnalyticsRecomendacoes = (severidade?: LogAnalyticsSeveridade, spId?: number | null) => {
+  const q = new URLSearchParams()
+  if (severidade) q.set('severidade', severidade)
+  if (spId) q.set('sp_id', String(spId))
+  return apiFetch<LogAnalyticsRecomendacao[]>('GET', '/log-analytics/recomendacoes' + (q.toString() ? '?' + q : ''))
+}
 
 // Mesmos dados do "📊 Gerar Dashboard" (HTML p/ download), só que como JSON — pro painel
 // nativo dentro da tela (ver _coletarResumoLogAnalytics em server.js, reaproveitado pelos dois).

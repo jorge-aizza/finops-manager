@@ -106,7 +106,7 @@ export default function LogAnalyticsView() {
   const [filtroSeveridade, setFiltroSeveridade] = useState<LogAnalyticsSeveridade | undefined>(undefined)
   const [exportando, setExportando] = useState(false)
   const [gerandoDashboard, setGerandoDashboard] = useState(false)
-  const [workspaceSelecionado, setWorkspaceSelecionado] = useState<LogAnalyticsWorkspace | null>(null)
+  const [workspaceClicado, setWorkspaceClicado] = useState<LogAnalyticsWorkspace | null>(null)
 
   const [detalheRecurso, setDetalheRecurso] = useState<{ tabela: string; recursos: LogAnalyticsRecursoDetalhado[]; janelaDias: number } | null>(null)
   const [somenteWorkspacesComCusto, setSomenteWorkspacesComCusto] = useState(false)
@@ -126,7 +126,12 @@ export default function LogAnalyticsView() {
     && (workspacesQuery.data || []).some((w) => w.workspace_guid === workspaceFiltro && matchSubscription(w.subscription_id))
     ? workspaceFiltro
     : ''
-  const appInsightsQuery = useQuery({ queryKey: ['log-analytics-app-insights'], queryFn: getLogAnalyticsAppInsights })
+  // Clicar numa linha da tabela abre o detalhe, como sempre; escolher no filtro faz o mesmo
+  // sem exigir o clique — "selecionar um workspace" passa a valer pra tela inteira (tabelas,
+  // fontes, Diagnostic Settings, App Insights e recomendações).
+  const workspaceSelecionado = workspaceClicado
+    ?? (workspaceAtivo ? (workspacesQuery.data || []).find((w) => w.workspace_guid === workspaceAtivo) ?? null : null)
+  const appInsightsQuery = useQuery({ queryKey: ['log-analytics-app-insights', selectedTenantId], queryFn: () => getLogAnalyticsAppInsights(selectedTenantId) })
   const resumoQuery = useQuery({ queryKey: ['log-analytics-resumo', mes, selectedTenantId, workspaceAtivo], queryFn: () => getLogAnalyticsResumo(mes, selectedTenantId, workspaceAtivo || null) })
   const tabelasQuery = useQuery({
     queryKey: ['log-analytics-tabelas', workspaceSelecionado?.workspace_guid, mes],
@@ -144,8 +149,8 @@ export default function LogAnalyticsView() {
     enabled: !!workspaceSelecionado,
   })
   const recomendacoesQuery = useQuery({
-    queryKey: ['log-analytics-recomendacoes', filtroSeveridade],
-    queryFn: () => getLogAnalyticsRecomendacoes(filtroSeveridade),
+    queryKey: ['log-analytics-recomendacoes', filtroSeveridade, selectedTenantId],
+    queryFn: () => getLogAnalyticsRecomendacoes(filtroSeveridade, selectedTenantId),
   })
 
   const coletaMutation = useMutation({
@@ -241,7 +246,7 @@ export default function LogAnalyticsView() {
   const appInsights = appInsightsQuery.data || []
 
   function selecionarWorkspace(w: LogAnalyticsWorkspace | null) {
-    setWorkspaceSelecionado(w)
+    setWorkspaceClicado(w)
     setDetalheRecurso(null)
     setAppInsightsMostrarTodos(false) // trocar/selecionar workspace volta a filtrar por ele
     setRecomendacoesMostrarTodas(false)
@@ -280,7 +285,7 @@ export default function LogAnalyticsView() {
             <select
               className="filter-select"
               value={workspaceAtivo}
-              onChange={(e) => setWorkspaceFiltro(e.target.value)}
+              onChange={(e) => { setWorkspaceFiltro(e.target.value); setWorkspaceClicado(null) }}
               style={{ flex: 1, maxWidth: 360 }}
             >
               <option value="">Todos os workspaces ({workspacesFiltroPorTenant.length})</option>

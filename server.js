@@ -17121,15 +17121,23 @@ app.get('/api/log-analytics/workspaces/:guid/consumo-diario', authMiddleware, db
 // já que nem todo componente é workspace-based). LEFT JOIN só pra trazer o nome do workspace
 // vinculado quando existir, sem repetir a lógica de custo (App Insights workspace-based já
 // fatura através do workspace, que aparece no card de Workspaces).
-app.get('/api/log-analytics/app-insights', authMiddleware, dbMiddleware, async (_req, res) => {
+app.get('/api/log-analytics/app-insights', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureLogAnalyticsTable();
+    // Filtro de Tenant da tela, checado pela assinatura do PRÓPRIO componente e não pela do
+    // workspace: um App Insights pode morar numa assinatura e mandar telemetria pra outra.
+    // O recorte por workspace NÃO entra aqui de propósito — a tela já o faz no cliente, com um
+    // "mostrar todos" ao lado; filtrar no banco deixaria esse botão sem nada pra mostrar.
+    const params = []; let where = '1=1';
+    const subsSp = await _subsDaSp(req.query.sp_id);
+    if (subsSp) { params.push(subsSp); where += ` AND LOWER(ai.subscription_id) = ANY($${params.length})`; }
     const r = await pool.query(`
       SELECT ai.*, w.nome AS workspace_nome
       FROM log_analytics_app_insights ai
       LEFT JOIN log_analytics_workspaces w ON UPPER(w.resource_id) = UPPER(ai.workspace_resource_id)
+      WHERE ${where}
       ORDER BY ai.nome
-    `);
+    `, params);
     res.json(r.rows);
   } catch (e) { _dbErr(res, e); }
 });
@@ -17356,6 +17364,10 @@ app.get('/api/log-analytics/recomendacoes', authMiddleware, dbMiddleware, async 
     const { severidade } = req.query;
     const params = []; let where = '1=1';
     if (severidade) { params.push(severidade); where += ` AND rec.severidade = $${params.length}`; }
+    // Filtro de Tenant da tela. Como em App Insights, o recorte por workspace fica no cliente,
+    // que oferece o "mostrar todas" ao lado.
+    const subsSpRec = await _subsDaSp(req.query.sp_id);
+    if (subsSpRec) { params.push(subsSpRec); where += ` AND LOWER(w.subscription_id) = ANY($${params.length})`; }
     const r = await pool.query(
       `SELECT rec.*, w.nome AS workspace_nome, w.subscription_id
        FROM log_analytics_recomendacoes rec
