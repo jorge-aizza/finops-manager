@@ -127,8 +127,26 @@ export interface LogAnalyticsTierBloco {
   tendencia?: LogAnalyticsTierTendencia | null
 }
 
+/** Conclusão gravada num dia. Uma linha por workspace por dia — é o que permite perguntar
+ *  "a tendência se manteve?", que a análise calculada na hora não consegue responder. */
+export interface LogAnalyticsCommitmentSnapshot {
+  dia: string
+  media_gb_dia: number | null
+  media_curta_gb_dia: number | null
+  tier_recomendado: number | null
+  economia_mes: number | null
+  tendencia_tier: number | null
+  tendencia_economia_mes: number | null
+  sentinel_tier_recomendado: number | null
+  sentinel_economia_mes: number | null
+  sentinel_tendencia_tier: number | null
+  sentinel_tendencia_economia_mes: number | null
+}
+
 export interface LogAnalyticsCommitment {
   suficiente: boolean
+  /** Até 60 dias de conclusões anteriores, do mais recente para o mais antigo. */
+  historico?: LogAnalyticsCommitmentSnapshot[]
   /** Preenchido só quando `suficiente` é false. */
   motivo?: string
   dias: number

@@ -15886,6 +15886,30 @@ async function ensureLogAnalyticsTable() {
     )
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_analytics_commitment_snapshot (
+      workspace_guid TEXT NOT NULL,
+      dia DATE NOT NULL,
+      -- Volume que sustentou a conclusão daquele dia. Guardado junto porque sem ele a
+      -- conclusão não é auditável depois: "recomendava 200 GB" não diz nada sem o volume.
+      dias_serie INT, media_gb_dia NUMERIC(14,4), media_curta_gb_dia NUMERIC(14,4),
+      tier_atual NUMERIC(14,4), em_commitment BOOLEAN,
+      taxa_real_gb NUMERIC(14,6), custo_atual_mes NUMERIC(16,4),
+      tier_recomendado INT, economia_mes NUMERIC(16,4),
+      tendencia_tier INT, tendencia_economia_mes NUMERIC(16,4),
+      sentinel_taxa_gb NUMERIC(14,6), sentinel_custo_mes NUMERIC(16,4),
+      sentinel_tier_recomendado INT, sentinel_economia_mes NUMERIC(16,4),
+      sentinel_tendencia_tier INT, sentinel_tendencia_economia_mes NUMERIC(16,4),
+      criado_em TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (workspace_guid, dia)
+    )
+  `);
+  // Snapshot diário das CONCLUSÕES de Commitment Tier (2026-10-10). Todo o resto da análise é
+  // calculado a cada request e não deixa rastro — o que é bom (corrigir uma fórmula conserta o
+  // passado inteiro na hora) mas apaga a única coisa que a decisão precisa saber: se a
+  // tendência se manteve. "Nos últimos 14 dias este workspace justifica o tier de 200 GB" só
+  // vira decisão se ontem e anteontem diziam o mesmo. A chave é (workspace, dia), então rodar a
+  // coleta duas vezes no mesmo dia sobrescreve em vez de duplicar.
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS log_analytics_recomendacoes (
       id SERIAL PRIMARY KEY,
       workspace_guid TEXT NOT NULL, regra VARCHAR(50) NOT NULL, severidade VARCHAR(20) NOT NULL,
@@ -17039,6 +17063,45 @@ async function _avaliarCommitmentTier(ws) {
     // Sempre grava (inclusive NULL) — reconcilia a cada coleta, nunca deixa um valor velho morto
     // se o workspace sair do Commitment Tier ou ficar sem histórico suficiente.
     await c.query(`UPDATE log_analytics_workspaces SET economia_commitment_tier_mes = $1 WHERE workspace_guid = $2`, [economiaCommitmentTierMes, ws.workspace_guid]);
+
+    // Snapshot do dia. Só grava quando houve avaliação de verdade: um workspace sem histórico
+    // suficiente não tem conclusão nenhuma, e gravar zeros ali criaria uma série falsa de
+    // "nunca compensou" indistinguível de "nunca foi avaliado".
+    if (sug.suficiente) {
+      const ing = sug.ingestao, sen = sug.sentinel;
+      await c.query(
+        `INSERT INTO log_analytics_commitment_snapshot (
+           workspace_guid, dia, dias_serie, media_gb_dia, media_curta_gb_dia,
+           tier_atual, em_commitment, taxa_real_gb, custo_atual_mes,
+           tier_recomendado, economia_mes, tendencia_tier, tendencia_economia_mes,
+           sentinel_taxa_gb, sentinel_custo_mes, sentinel_tier_recomendado, sentinel_economia_mes,
+           sentinel_tendencia_tier, sentinel_tendencia_economia_mes)
+         VALUES ($1, (NOW() AT TIME ZONE 'UTC')::date, $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         ON CONFLICT (workspace_guid, dia) DO UPDATE SET
+           dias_serie = EXCLUDED.dias_serie, media_gb_dia = EXCLUDED.media_gb_dia,
+           media_curta_gb_dia = EXCLUDED.media_curta_gb_dia, tier_atual = EXCLUDED.tier_atual,
+           em_commitment = EXCLUDED.em_commitment, taxa_real_gb = EXCLUDED.taxa_real_gb,
+           custo_atual_mes = EXCLUDED.custo_atual_mes, tier_recomendado = EXCLUDED.tier_recomendado,
+           economia_mes = EXCLUDED.economia_mes, tendencia_tier = EXCLUDED.tendencia_tier,
+           tendencia_economia_mes = EXCLUDED.tendencia_economia_mes,
+           sentinel_taxa_gb = EXCLUDED.sentinel_taxa_gb, sentinel_custo_mes = EXCLUDED.sentinel_custo_mes,
+           sentinel_tier_recomendado = EXCLUDED.sentinel_tier_recomendado,
+           sentinel_economia_mes = EXCLUDED.sentinel_economia_mes,
+           sentinel_tendencia_tier = EXCLUDED.sentinel_tendencia_tier,
+           sentinel_tendencia_economia_mes = EXCLUDED.sentinel_tendencia_economia_mes,
+           criado_em = NOW()`,
+        [
+          ws.workspace_guid, sug.dias, sug.media, sug.media_curta,
+          sug.tier_atual, sug.em_commitment,
+          ing?.taxa_real_gb ?? null, ing?.custo_atual_mes ?? null,
+          ing?.recomendado?.gb_dia ?? null, ing?.recomendado?.economia_mes_estimada ?? null,
+          ing?.tendencia?.recomendado?.gb_dia ?? null, ing?.tendencia?.recomendado?.economia_mes_estimada ?? null,
+          sen?.taxa_real_gb ?? null, sen?.custo_atual_mes ?? null,
+          sen?.recomendado?.gb_dia ?? null, sen?.recomendado?.economia_mes_estimada ?? null,
+          sen?.tendencia?.recomendado?.gb_dia ?? null, sen?.tendencia?.recomendado?.economia_mes_estimada ?? null,
+        ],
+      );
+    }
     await c.query('COMMIT');
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
   return recos;
@@ -17766,13 +17829,45 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
     }
   }
 
+  // Histórico das conclusões anteriores. Sem isto a tendência é uma foto: "nos últimos 14 dias
+  // justifica o tier de 200" só vira decisão se ontem e anteontem diziam o mesmo. Vem da mesma
+  // chamada para a tela não precisar de um request a mais.
+  const hist = await pool.query(
+    `SELECT dia, media_gb_dia, media_curta_gb_dia, tier_recomendado, economia_mes,
+            tendencia_tier, tendencia_economia_mes,
+            sentinel_tier_recomendado, sentinel_economia_mes,
+            sentinel_tendencia_tier, sentinel_tendencia_economia_mes
+       FROM log_analytics_commitment_snapshot
+      WHERE workspace_guid = $1 ORDER BY dia DESC LIMIT 60`,
+    [ws.workspace_guid],
+  );
+  const historico = hist.rows.map((h) => ({
+    dia: h.dia instanceof Date ? h.dia.toISOString().slice(0, 10) : String(h.dia).slice(0, 10),
+    media_gb_dia: h.media_gb_dia == null ? null : Number(h.media_gb_dia),
+    media_curta_gb_dia: h.media_curta_gb_dia == null ? null : Number(h.media_curta_gb_dia),
+    tier_recomendado: h.tier_recomendado,
+    economia_mes: h.economia_mes == null ? null : Number(h.economia_mes),
+    tendencia_tier: h.tendencia_tier,
+    tendencia_economia_mes: h.tendencia_economia_mes == null ? null : Number(h.tendencia_economia_mes),
+    sentinel_tier_recomendado: h.sentinel_tier_recomendado,
+    sentinel_economia_mes: h.sentinel_economia_mes == null ? null : Number(h.sentinel_economia_mes),
+    sentinel_tendencia_tier: h.sentinel_tendencia_tier,
+    sentinel_tendencia_economia_mes: h.sentinel_tendencia_economia_mes == null ? null : Number(h.sentinel_tendencia_economia_mes),
+  }));
+
   return {
     suficiente: true,
     dias, media, p25, p75,
+    // Sempre presente, com ou sem tendência: é a série curta que mostra o volume se movendo, e
+    // guardá-la só quando a tendência acende deixaria a coluna vazia justamente nos dias em que
+    // o patamar está subindo mas ainda não cruzou o limiar.
+    media_curta: temJanelaCurta ? mediaCurta : null,
+    janela_curta_dias: temJanelaCurta ? serieCurta.length : null,
     tier_atual: nivelAtual,
     em_commitment: (ws.sku || '').toLowerCase() === 'capacityreservation',
     ingestao,
     sentinel,
+    historico,
   };
 }
 

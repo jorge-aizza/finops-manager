@@ -1001,6 +1001,71 @@ export default function LogAnalyticsView() {
           {commitment.ingestao && bloco('Ingestão', commitment.ingestao, !!commitment.em_commitment)}
           {commitment.sentinel && bloco('Sentinel (escada própria, sobre os mesmos GB)', commitment.sentinel, false)}
 
+          {(() => {
+            const h = commitment.historico || []
+            if (h.length < 2) {
+              return (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+                  Histórico de conclusões: {h.length === 0 ? 'nenhum registro ainda' : '1 registro'}. A cada coleta
+                  diária uma linha é gravada; com alguns dias dá para ver se a tendência se manteve, que é o que
+                  justifica contratar — o Azure trava o nível por 31 dias.
+                </div>
+              )
+            }
+            const comTend = h.filter((x) => x.tendencia_tier != null || x.sentinel_tendencia_tier != null).length
+            const comRec = h.filter((x) => x.tier_recomendado != null || x.sentinel_tier_recomendado != null).length
+            return (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                  Histórico das conclusões
+                  <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>
+                    {' — '}{h.length} dias registrados · recomendação firme em {comRec} · tendência acesa em {comTend}
+                  </span>
+                </div>
+                <div className="table-wrapper">
+                  <table className="data-table">
+                    <thead><tr>
+                      <th>Dia</th>
+                      <th style={{ textAlign: 'right' }}>Média 60d</th>
+                      <th style={{ textAlign: 'right' }}>Média 14d</th>
+                      <th style={{ textAlign: 'right' }}>Recomendava</th>
+                      <th style={{ textAlign: 'right' }}>Tendência</th>
+                      <th style={{ textAlign: 'right' }}>Sentinel</th>
+                    </tr></thead>
+                    <tbody>
+                      {h.slice(0, 10).map((x) => (
+                        <tr key={x.dia}>
+                          <td style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>{x.dia}</td>
+                          <td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono', monospace" }}>
+                            {x.media_gb_dia != null ? x.media_gb_dia.toFixed(1) : '—'}
+                          </td>
+                          <td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono', monospace" }}>
+                            {x.media_curta_gb_dia != null ? x.media_curta_gb_dia.toFixed(1) : '—'}
+                          </td>
+                          <td style={{ textAlign: 'right', fontSize: 11 }}>
+                            {x.tier_recomendado != null
+                              ? `${x.tier_recomendado} GB · ${fmtBRL(x.economia_mes || 0)}`
+                              : <span style={{ color: 'var(--text-muted)' }}>manter</span>}
+                          </td>
+                          <td style={{ textAlign: 'right', fontSize: 11, color: x.tendencia_tier != null ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}>
+                            {x.tendencia_tier != null
+                              ? `${x.tendencia_tier} GB · ${fmtBRL(x.tendencia_economia_mes || 0)}`
+                              : '—'}
+                          </td>
+                          <td style={{ textAlign: 'right', fontSize: 11 }}>
+                            {x.sentinel_tier_recomendado != null
+                              ? `${x.sentinel_tier_recomendado} GB · ${fmtBRL(x.sentinel_economia_mes || 0)}`
+                              : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )
+          })()}
+
           <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
             <strong>Como o preço foi estimado.</strong> O catálogo público da Azure está em dólar e esta conta
             não paga preço de lista. A lista entra só pela forma da escada — quanto o preço por GB cai de um
