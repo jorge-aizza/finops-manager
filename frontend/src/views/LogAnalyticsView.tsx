@@ -1,4 +1,4 @@
-import { Fragment, useState, useMemo } from 'react'
+import { Fragment, useState, useMemo, useRef, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getLogAnalyticsWorkspaces, getLogAnalyticsRecomendacoes, getLogAnalyticsTabelas, getLogAnalyticsFontes,
@@ -123,6 +123,7 @@ export default function LogAnalyticsView() {
   // banco (painel, rankings e exports), não sobre a resposta já agregada.
   const [workspaceFiltro, setWorkspaceFiltro] = useState('')
   const [baldeAberto, setBaldeAberto] = useState<string | null>(null)
+  const detalheRef = useRef<HTMLDivElement>(null)
 
   const workspacesQuery = useQuery({ queryKey: ['log-analytics-workspaces', mes], queryFn: () => getLogAnalyticsWorkspaces(mes) })
   // Trocar de SP pode tirar da lista o workspace escolhido; nesse caso o recorte cai pra
@@ -284,6 +285,14 @@ export default function LogAnalyticsView() {
   const fontes = fontesQuery.data?.fontes || []
   const diagSettings = diagSettingsQuery.data || []
   const appInsights = appInsightsQuery.data || []
+
+  // A tabela de workspaces tem uma linha por workspace (191 hoje) e NÃO colapsa ao selecionar:
+  // o detalhe nasce abaixo dela, fora da tela. Sem isso, clicar numa linha parecia não fazer
+  // nada — a única pista era o realce da própria linha, que o usuário já estava olhando.
+  useEffect(() => {
+    if (!workspaceSelecionado) return
+    detalheRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [workspaceSelecionado?.workspace_guid])
 
   function selecionarWorkspace(w: LogAnalyticsWorkspace | null) {
     setWorkspaceClicado(w)
@@ -800,6 +809,8 @@ export default function LogAnalyticsView() {
           </div>
         </div>
       )}
+
+      <div ref={detalheRef} />
 
       {workspaceSelecionado && (() => {
         const recursos = recursosVolumeQuery.data?.recursos || []
