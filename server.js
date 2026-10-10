@@ -16985,6 +16985,15 @@ async function _avaliarCommitmentTier(ws) {
           regra: 'commitment_tier', severidade: pctEconomia > 20 ? 'critico' : 'atencao',
           detalhe: `Workspace ingere ${sug.media.toFixed(1)} GB/dia em média. ${sug.em_commitment ? `Mudar do tier de ${sug.tier_atual} GB/dia para o de ${o.gb_dia} GB/dia` : `Contratar o Commitment Tier de ${o.gb_dia} GB/dia`} economizaria ~${rs(o.economia_mes_estimada)}/mês (${pctEconomia.toFixed(0)}%) no preço que esta conta paga hoje — já descontando os dias ociosos (${pctDias(o)}). O Azure trava o nível por no mínimo 31 dias.`,
         });
+      } else if (ing.tendencia) {
+        // A janela longa ainda não fecha a conta, mas a curta já fecha. Dizer isso cedo é o
+        // ponto: esperar a média de 60 dias alcançar um patamar novo custa semanas de tarifa
+        // cheia, e quem lê precisa saber que a luz está amarela, não verde.
+        const t = ing.tendencia;
+        recos.push({
+          regra: 'commitment_tier_tendencia', severidade: 'atencao',
+          detalhe: `Tendência: nos últimos ${t.janela_dias} dias este workspace ingeriu ${t.media.toFixed(1)} GB/dia (média de ${sug.dias} dias: ${t.media_longa.toFixed(1)} GB/dia) e nesse patamar o Commitment Tier de ${t.recomendado.gb_dia} GB/dia já valeria ~${rs(t.recomendado.economia_mes_estimada)}/mês. A recomendação firme ainda não disparou porque a janela longa inclui o volume antigo. Se o patamar se mantiver, vale contratar antes de a média alcançar.`,
+        });
       } else if (sug.em_commitment) {
         // Silêncio seria pior: sem isso ninguém sabe se o tier foi conferido ou esquecido.
         const subir = ing.opcoes.find((o) => o.gb_dia > (sug.tier_atual || 0));
@@ -16999,6 +17008,14 @@ async function _avaliarCommitmentTier(ws) {
 
     // O Sentinel cobra os MESMOS GB num medidor próprio, com escada própria. Quem está em
     // "Classic Pay-as-you-go Analysis" não negociou esse lado — e costuma ser o mais caro.
+    if (sug.sentinel?.tendencia && !sug.sentinel.recomendado) {
+      const t = sug.sentinel.tendencia;
+      recos.push({
+        regra: 'commitment_tier_sentinel_tendencia', severidade: 'atencao',
+        detalhe: `Tendência no Sentinel: nos últimos ${t.janela_dias} dias o workspace ingeriu ${t.media.toFixed(1)} GB/dia e nesse patamar o Commitment Tier de Sentinel de ${t.recomendado.gb_dia} GB/dia já valeria ~${rs(t.recomendado.economia_mes_estimada)}/mês. A média de ${sug.dias} dias (${t.media_longa.toFixed(1)} GB/dia) ainda não alcançou.`,
+      });
+    }
+
     if (sug.sentinel?.recomendado) {
       const o = sug.sentinel.recomendado;
       const pctEconomia = sug.sentinel.custo_atual_mes > 0 ? (o.economia_mes_estimada / sug.sentinel.custo_atual_mes) * 100 : 0;
@@ -17574,9 +17591,17 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
   // A série dia a dia, não só a média: um Commitment Tier cobra o nível contratado mesmo nos
   // dias em que se ingere menos. Decidir pela média (ou pelo p25) ignora exatamente o risco que
   // define a escolha — o dia fraco, em que se paga por capacidade não usada.
+  //
+  // O dia corrente fica DE FORA. A coleta usa `bin(TimeGenerated, 1d)` com `ago(30d)`, que
+  // bina por dia UTC e sempre devolve o dia em curso pela metade — num caso real, 15,4 GB
+  // contra ~220 GB dos dias fechados do mesmo workspace. Esse dia pela metade derrubava a
+  // média E contava como "dia ocioso" em todos os tiers, então a recomendação encolhia e
+  // oscilava conforme a hora em que alguém abria a tela. O corte é pela data UTC, que é como
+  // o bin foi montado, não pelo fuso do servidor.
   const vol = await pool.query(
     `SELECT dia, SUM(gb) AS gb FROM log_analytics_ingestao_diaria
       WHERE workspace_guid = $1 AND dia >= CURRENT_DATE - INTERVAL '60 days'
+        AND dia < (NOW() AT TIME ZONE 'UTC')::date
       GROUP BY dia ORDER BY dia`,
     [ws.workspace_guid],
   );
@@ -17614,10 +17639,20 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
   // o contratado e o ingerido, na tarifa daquele tier. Dia fraco custa o tier cheio; dia forte
   // custa o excedente na mesma tarifa — é o que a fatura deste workspace comprova, cobrando
   // 2,28 blocos de 100 GB num dia de 228 GB. Normalizado para 30 dias.
-  const custoMensalNoTier = (gbDia, precoGb) =>
-    (serie.reduce((a, g) => a + Math.max(gbDia, g) * precoGb, 0) / dias) * 30;
+  const custoMensalNoTier = (serieAlvo, gbDia, precoGb) =>
+    (serieAlvo.reduce((a, g) => a + Math.max(gbDia, g) * precoGb, 0) / serieAlvo.length) * 30;
 
-  const montar = (tiers, taxaRealGb, nivelAtual, ancoraPayg) => {
+  // Janela curta, avaliada em paralelo à de 60 dias. A longa é conservadora de propósito — o
+  // Azure trava o tier por 31 dias e contratar demais custa caro —, mas num crescimento em
+  // degrau os dias antigos de volume baixo seguram a conta por semanas. Medido na fórmula: um
+  // salto de 20 para 150 GB/dia só dispara a recomendação firme no 45º dia no patamar novo, e
+  // essa espera vale uns R$ 17 mil. A janela curta não substitui a decisão, acende a luz antes.
+  const JANELA_CURTA = 14;
+  const serieCurta = serie.slice(-JANELA_CURTA);
+  const temJanelaCurta = serie.length > serieCurta.length && serieCurta.length >= 7;
+  const mediaCurta = serieCurta.length ? serieCurta.reduce((a, g) => a + g, 0) / serieCurta.length : 0;
+
+  const montar = (serieAlvo, mediaAlvo, tiers, taxaRealGb, nivelAtual, ancoraPayg) => {
     const atual = nivelAtual ? tiers.find((t) => t.gb_dia === nivelAtual) : null;
     // Âncora: o item de catálogo que corresponde ao que a empresa paga HOJE. Já num tier, é o
     // preço de lista daquele tier; em PAYG, é o preço de lista do PAYG. Dividir o real pela
@@ -17627,11 +17662,11 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
     if (!fator) return null;
     // Hoje: em commitment paga-se o piso do tier contratado; em PAYG, só o que se ingere.
     const custoAtualMes = nivelAtual
-      ? custoMensalNoTier(nivelAtual, taxaRealGb)
-      : (media * 30 * taxaRealGb);
+      ? custoMensalNoTier(serieAlvo, nivelAtual, taxaRealGb)
+      : (mediaAlvo * 30 * taxaRealGb);
     const opcoes = tiers.map((t) => {
       const preco_gb = t.lista_gb * fator;
-      const custo_mes = custoMensalNoTier(t.gb_dia, preco_gb);
+      const custo_mes = custoMensalNoTier(serieAlvo, t.gb_dia, preco_gb);
       return {
         gb_dia: t.gb_dia,
         preco_gb_estimado: preco_gb,
@@ -17640,7 +17675,7 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
         // Quantos dos dias observados ficariam ABAIXO do contratado, pagando capacidade ociosa.
         // É o custo do erro, e vai para a tela junto da economia — tier que economiza na média
         // mas desperdiça em 40% dos dias é uma decisão diferente de um que nunca desperdiça.
-        dias_ociosos: serie.filter((g) => g < t.gb_dia).length,
+        dias_ociosos: serieAlvo.filter((g) => g < t.gb_dia).length,
         economia_mes_estimada: custoAtualMes - custo_mes,
       };
     });
@@ -17656,6 +17691,19 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
     };
   };
 
+  // Só vira tendência o que a janela curta recomenda E a longa ainda não — mesmo tier nas duas
+  // não é notícia, é a recomendação firme que já existe.
+  const tendenciaDe = (longa, curta) => {
+    if (!temJanelaCurta || !curta?.recomendado) return null;
+    if (longa?.recomendado && longa.recomendado.gb_dia === curta.recomendado.gb_dia) return null;
+    return {
+      janela_dias: serieCurta.length,
+      media: mediaCurta,
+      media_longa: media,
+      recomendado: curta.recomendado,
+    };
+  };
+
   const nivelAtual = Number(ws.capacity_reservation_level) || null;
   const paygIngR = await pool.query(
     `SELECT retail_price FROM azure_price_list
@@ -17665,9 +17713,16 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
     [[regiao, _LA_COMMITMENT_FALLBACK_REGIAO]],
   );
   const listaPaygIngestao = paygIngR.rows.length ? Number(paygIngR.rows[0].retail_price) : null;
+  const tiersMonitor = taxas.analytics != null ? await listaDe('Azure Monitor') : [];
   const ingestao = taxas.analytics != null
-    ? montar(await listaDe('Azure Monitor'), taxas.analytics, nivelAtual, listaPaygIngestao)
+    ? montar(serie, media, tiersMonitor, taxas.analytics, nivelAtual, listaPaygIngestao)
     : null;
+  if (ingestao) {
+    ingestao.tendencia = tendenciaDe(
+      ingestao,
+      montar(serieCurta, mediaCurta, tiersMonitor, taxas.analytics, nivelAtual, listaPaygIngestao),
+    );
+  }
 
   // O Sentinel tem escada PRÓPRIA e é cobrado à parte sobre os mesmos GB. Quem está em
   // "Classic Pay-as-you-go Analysis" não tem commitment nenhum desse lado — costuma ser a
@@ -17685,20 +17740,29 @@ async function _sugerirCommitmentTier(ws, janela, taxas, impostoCfg) {
     const listaPayg = paygR.rows.length ? Number(paygR.rows[0].retail_price) : null;
     if (listaPayg && tiersSentinel.length) {
       const fator = taxas.sentinel_analytics / listaPayg;
-      const custoAtualMes = media * 30 * taxas.sentinel_analytics;
-      const opcoes = tiersSentinel.map((t) => {
-        const preco_gb = t.lista_gb * fator;
-        const custo_mes = custoMensalNoTier(t.gb_dia, preco_gb);
-        return {
-          gb_dia: t.gb_dia, preco_gb_estimado: preco_gb, custo_mes_estimado: custo_mes, atual: false,
-          dias_ociosos: serie.filter((g) => g < t.gb_dia).length,
-          economia_mes_estimada: custoAtualMes - custo_mes,
-        };
-      });
-      const recomendado = opcoes.filter((o) => o.economia_mes_estimada > 0)
-        .sort((a, b) => b.economia_mes_estimada - a.economia_mes_estimada)[0] || null;
-      sentinel = { em_commitment: false, fator_calibragem: fator, taxa_real_gb: taxas.sentinel_analytics,
-        custo_atual_mes: custoAtualMes, opcoes, recomendado };
+      // O Sentinel nunca está em commitment aqui (se estivesse, o medidor não seria
+      // "Classic Pay-as-you-go Analysis"), então não há tier atual e a âncora é sempre o PAYG.
+      const avaliar = (serieAlvo, mediaAlvo) => {
+        const custoAtualMes = mediaAlvo * 30 * taxas.sentinel_analytics;
+        const opcoes = tiersSentinel.map((t) => {
+          const preco_gb = t.lista_gb * fator;
+          const custo_mes = custoMensalNoTier(serieAlvo, t.gb_dia, preco_gb);
+          return {
+            gb_dia: t.gb_dia, preco_gb_estimado: preco_gb, custo_mes_estimado: custo_mes, atual: false,
+            dias_ociosos: serieAlvo.filter((g) => g < t.gb_dia).length,
+            economia_mes_estimada: custoAtualMes - custo_mes,
+          };
+        });
+        const recomendado = opcoes.filter((o) => o.economia_mes_estimada > 0)
+          .sort((a, b) => b.economia_mes_estimada - a.economia_mes_estimada)[0] || null;
+        return { custo_atual_mes: custoAtualMes, opcoes, recomendado };
+      };
+      const longa = avaliar(serie, media);
+      sentinel = {
+        em_commitment: false, fator_calibragem: fator, taxa_real_gb: taxas.sentinel_analytics,
+        ...longa,
+        tendencia: tendenciaDe(longa, temJanelaCurta ? avaliar(serieCurta, mediaCurta) : null),
+      };
     }
   }
 

@@ -971,6 +971,18 @@ export default function LogAnalyticsView() {
                     ? 'O nível contratado já é o melhor para este volume — subir pagaria capacidade ociosa nos dias fracos.'
                     : 'Nenhum nível compensa neste volume: o contrato cobra o nível cheio mesmo nos dias fracos.'}
               </div>
+              {b.tendencia && (
+                <div style={{ fontSize: 11, marginTop: 8, padding: '8px 12px', borderRadius: 6, lineHeight: 1.5,
+                  background: '#ff8c4218', border: '1px solid #ff8c4240' }}>
+                  <strong style={{ color: 'var(--orange,#ff8c42)' }}>Tendência — o volume recente discorda da média.</strong>{' '}
+                  Nos últimos {b.tendencia.janela_dias} dias foram {b.tendencia.media.toFixed(1)} GB/dia, contra
+                  {' '}{b.tendencia.media_longa.toFixed(1)} GB/dia na janela de {commitment.dias} dias. Nesse patamar, o nível de{' '}
+                  <strong>{b.tendencia.recomendado.gb_dia} GB/dia</strong> já valeria{' '}
+                  <strong>{fmtBRL(b.tendencia.recomendado.economia_mes_estimada)}/mês</strong>. A recomendação acima
+                  continua conservadora de propósito; esta linha existe para você não esperar a média alcançar,
+                  o que leva semanas de tarifa cheia.
+                </div>
+              )}
             </div>
           )
         }

@@ -108,6 +108,15 @@ export interface LogAnalyticsTierOpcao {
   economia_mes_estimada: number
 }
 
+/** Janela curta discordando da longa: o patamar recente já justifica um tier que a média
+ *  de 60 dias ainda não alcançou. Luz amarela, não recomendação firme. */
+export interface LogAnalyticsTierTendencia {
+  janela_dias: number
+  media: number
+  media_longa: number
+  recomendado: LogAnalyticsTierOpcao
+}
+
 export interface LogAnalyticsTierBloco {
   fator_calibragem: number
   taxa_real_gb: number
@@ -115,6 +124,7 @@ export interface LogAnalyticsTierBloco {
   payg_gb_estimado?: number | null
   opcoes: LogAnalyticsTierOpcao[]
   recomendado: LogAnalyticsTierOpcao | null
+  tendencia?: LogAnalyticsTierTendencia | null
 }
 
 export interface LogAnalyticsCommitment {
