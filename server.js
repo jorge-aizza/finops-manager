@@ -17469,6 +17469,11 @@ app.get('/api/log-analytics/workspaces/:guid/ingestao', authMiddleware, dbMiddle
 //
 // Sentinel é uma SEGUNDA cobrança sobre os MESMOS GB, com tarifa própria por plano. Onde ele
 // está ligado, mover uma tabela de plano muda as duas pontas de uma vez.
+// Tabelas que a própria solução cria: a presença delas é a evidência de que o Sentinel está
+// ligado no workspace. Serve para separar o que é da solução do que só compartilha o workspace
+// — não para afirmar o que alimenta detecção, que depende das regras e não é coletado aqui.
+const _LA_TABELAS_SENTINEL = /^(SecurityAlert|SecurityIncident|SecurityNestedRecommendation|SecurityBaseline|SecurityBaselineSummary|SecurityDetection|SecurityRecommendation|SecurityRegulatoryCompliance|Watchlist|ConfidentialWatchlist|Anomalies|AggregatedSecurityAlert|ThreatIntel|ThreatIntelligenceIndicator|ThreatIntelIndicators|ThreatIntelObjects|ThreatIntelExportOperation|UserPeerAnalytics|UserAccessAnalytics|BehaviorAnalytics|IdentityInfo|SentinelAudit|SentinelHealth)$/i;
+
 const _LA_TAXA_RE = {
   analytics: /analytics logs data ingestion/i,
   basic: /basic logs data ingestion/i,
@@ -17758,6 +17763,7 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
     const resultado = linhas.map((l) => {
       const consulta = consultasPorTabela[l.tabela];
       const emBasico = /^(basic|auxiliary)$/i.test(l.plano || '');
+      const nome = l.tabela;
       return {
         tabela: l.tabela,
         plano: l.plano ?? null,
@@ -17771,6 +17777,17 @@ app.get('/api/log-analytics/workspaces/:guid/tabelas', authMiddleware, dbMiddlew
         consultas_30d: consulta ? consulta.consultas_30d : null,
         gb_escaneado_30d: consulta ? Number(consulta.gb_escaneado_30d) : null,
         ultima_consulta: consulta ? consulta.ultima_consulta : null,
+        // Quanto desta tabela é taxa de ANÁLISE do Sentinel. O Sentinel cobra sobre todo GB do
+        // workspace, não só sobre tabela de segurança — então a conta dele é decidida por quem
+        // tem volume, que raramente é quem tem relevância para detecção. Sem esta coluna o custo
+        // aparecia só como um total do workspace, sem dono.
+        custo_sentinel_estimado: taxas.tem_sentinel
+          ? l.gb * (emBasico ? (taxas.sentinel_basic || 0) : (taxas.sentinel_analytics || 0))
+          : null,
+        // Tabela que só existe porque o Sentinel está ligado. Não é o mesmo que "usada em
+        // detecção" — isso dependeria das regras, que não coletamos —, mas separa o que é nativo
+        // da solução do que só está de passagem pelo workspace.
+        nativa_sentinel: _LA_TABELAS_SENTINEL.test(nome),
         // O que ESTA tabela paga por GB hoje, pelo plano em que ela está — e o que pagaria no
         // Basic. Tabela já em Basic/Auxiliary tem economia zero por definição: ela já está lá.
         custo_gb_atual: emBasico ? taxas.gb_basic_total : taxas.gb_analytics_total,

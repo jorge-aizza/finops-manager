@@ -1001,6 +1001,84 @@ export default function LogAnalyticsView() {
         )
       })()}
 
+      {workspaceSelecionado && taxas?.tem_sentinel && (() => {
+        const comSentinel = tabelas
+          .filter((t) => (t.custo_sentinel_estimado || 0) > 0)
+          .sort((a, b) => (b.custo_sentinel_estimado || 0) - (a.custo_sentinel_estimado || 0))
+        if (!comSentinel.length) return null
+        const total = comSentinel.reduce((a, t) => a + (t.custo_sentinel_estimado || 0), 0)
+        const nativas = comSentinel.filter((t) => t.nativa_sentinel)
+          .reduce((a, t) => a + (t.custo_sentinel_estimado || 0), 0)
+        const pctNativas = total > 0 ? (nativas / total) * 100 : 0
+        return (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 18 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>
+            Análise do Sentinel — quem está pagando
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+            O Sentinel cobra análise sobre <strong>todo</strong> GB do workspace, não só sobre tabela de
+            segurança. Quem decide essa conta é quem tem volume — que raramente é quem tem relevância para
+            detecção. Atribuição por GB da tabela × tarifa do plano dela ({fmtBRL(taxas.sentinel_analytics || 0)}/GB
+            no Analytics, {fmtBRL(taxas.sentinel_basic || 0)}/GB no Basic).
+          </div>
+
+          <div style={{ fontSize: 12, marginBottom: 12, padding: '8px 12px', borderRadius: 6,
+            background: pctNativas < 20 ? '#ff8c4218' : 'var(--bg-subtle,rgba(127,127,127,0.06))',
+            border: pctNativas < 20 ? '1px solid #ff8c4240' : '1px solid transparent' }}>
+            Tabelas nativas do Sentinel respondem por <strong>{pctNativas.toFixed(2)}%</strong> desta conta
+            ({fmtBRL(nativas)} de {fmtBRL(total)}).
+            {pctNativas < 20 && ' O resto é log que apenas divide o workspace com a solução — e paga análise de segurança por isso.'}
+          </div>
+
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead><tr>
+                <th>Tabela</th>
+                <th>Plano</th>
+                <th style={{ textAlign: 'right' }}>Ingestão do período</th>
+                <th style={{ textAlign: 'right' }}>Análise Sentinel</th>
+                <th style={{ textAlign: 'right' }}>% da conta</th>
+                <th style={{ textAlign: 'right' }}>Consultas (30d)</th>
+              </tr></thead>
+              <tbody>
+                {comSentinel.slice(0, 15).map((t) => (
+                  <tr key={t.tabela}>
+                    <td>
+                      {t.tabela}
+                      {t.nativa_sentinel && (
+                        <span style={{ marginLeft: 6, fontSize: 9.5, padding: '1px 6px', borderRadius: 8, fontWeight: 600,
+                          background: '#7B2FBE22', color: '#7B2FBE', border: '1px solid #7B2FBE44' }}>nativa</span>
+                      )}
+                    </td>
+                    <td style={{ color: 'var(--text-muted)' }}>{t.plano || '—'}</td>
+                    <td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono', monospace" }}>{fmtGB(t.gb_mes)}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtBRL(t.custo_sentinel_estimado || 0)}</td>
+                    <td style={{ textAlign: 'right', fontSize: 11,
+                      color: (t.custo_sentinel_estimado || 0) / total > 0.5 ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}>
+                      {(((t.custo_sentinel_estimado || 0) / total) * 100).toFixed(1)}%
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {!auditoriaConsultasHabilitada
+                        ? <span style={{ color: 'var(--text-muted)', fontFamily: 'inherit' }}>—</span>
+                        : t.consultas_30d ?? '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, lineHeight: 1.5 }}>
+            <strong>"Nativa" não quer dizer "usada em detecção".</strong> A marca diz apenas que a tabela é
+            criada pela própria solução — o que alimenta as suas regras depende das regras, que esta tela não
+            coleta. Uma tabela com volume alto fora da segurança levanta a pergunta de por que ela divide o
+            workspace com o Sentinel; tirá-la daqui, ou mudar o plano dela, derruba qualquer detecção que
+            dependa dela. É decisão do time de segurança, com o custo à vista.
+          </div>
+        </div>
+        )
+      })()}
+
       {workspaceSelecionado && taxas?.gb_analytics_total != null && taxas.gb_basic_total != null && (() => {
         const candidatas = tabelas
           .filter((t) => !t.ja_em_basico && t.economia_periodo_se_basic > 0)

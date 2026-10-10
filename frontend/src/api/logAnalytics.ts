@@ -72,6 +72,10 @@ export interface LogAnalyticsTabela {
   /** Zero para tabela já em Basic/Auxiliary — não há para onde mover. */
   economia_periodo_se_basic: number
   ja_em_basico: boolean
+  /** Taxa de análise do Sentinel atribuída a esta tabela. null = Sentinel desligado aqui. */
+  custo_sentinel_estimado: number | null
+  /** Tabela criada pela própria solução Sentinel. Não significa "usada em detecção". */
+  nativa_sentinel: boolean
 }
 
 /** Preço por GB derivado da fatura deste workspace, não de tabela de preço. */
