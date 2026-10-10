@@ -17314,6 +17314,20 @@ function _logAnalyticsCustoSql(idxInicio, idxFim) {
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type = 'Marketplace'
               AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_mp,
+  -- Volume de retenção pela QUANTIDADE que a Azure faturou, não por modelo nosso.
+  --
+  -- A primeira versão disto calculava GB × dias além de 31 e estava errada: o período incluído
+  -- não é 31 dias para todo mundo. Workspace com Sentinel tem 90 dias inclusos, e o modelo
+  -- acusava 97.759 GB·dia "estendidos" no LA-SharedServices-PROD, que paga R$ 0,00 de retenção
+  -- justamente por isso. Um card com esse número somaria quem paga com quem não paga.
+  --
+  -- A segunda versão era um LEFT JOIN pré-agregado sobre azure_costs. Correto e inviável:
+  -- 75 segundos, varrendo 897 mil linhas do mês com bitmap scan lossy. Aqui a quantidade entra
+  -- no subselect de retenção que JÁ roda por workspace, filtrado por resource_id — o mesmo
+  -- predicado, o mesmo índice, custo marginal perto de zero.
+  COALESCE((SELECT SUM(ac.quantity) FROM azure_costs ac
+            WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
+              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS retencao_gb_faturado,
   -- Economia com Commitment Tier (2026-10-xx, pedido do usuário) — REAL por período, não um
   -- snapshot do "agora": se não houve cobrança de meter Commitment Tier nesse período
   -- específico, o workspace não estava contratado NESSE mês (independente do SKU atual), e a

@@ -35,6 +35,10 @@ export interface LogAnalyticsWorkspace {
    * móvel/mês civil de `_janelaLogAnalytics` no backend, null só se a janela não puder ser
    * determinada (não deveria acontecer em uso normal). */
   ingestao_media_gb_dia: number | null
+  /** GB que a Azure FATUROU no medidor de retenção no período. Não é o volume configurado para
+   *  retenção: o período incluído sem cobrança varia (90 dias com Sentinel, 31 sem), então só a
+   *  quantidade da fatura separa quem paga de quem não paga. */
+  retencao_gb_faturado: number
 }
 
 /** Um ponto do gráfico de consumo diário (ver `getLogAnalyticsConsumoDiario`). */

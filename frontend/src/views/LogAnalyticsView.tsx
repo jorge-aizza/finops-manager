@@ -309,6 +309,15 @@ export default function LogAnalyticsView() {
     ? recomendacoes.filter((r) => r.workspace_guid === workspaceSelecionado.workspace_guid)
     : recomendacoes
 
+  // Volume, no mesmo recorte dos cards de custo: `workspacesExibidos` já vem filtrado por mês,
+  // Service Principal e workspace selecionado, então estes números seguem os dois seletores sem
+  // precisar de request próprio.
+  const gbIngerido = workspacesExibidos.reduce((a, w) => a + (Number(w.ingestao_mes_gb) || 0), 0)
+  // Somar as médias por workspace dá o GB/dia do conjunto: cada uma já é o GB daquele workspace
+  // dividido pelos mesmos dias de janela.
+  const gbMediaDia = workspacesExibidos.reduce((a, w) => a + (Number(w.ingestao_media_gb_dia) || 0), 0)
+  const gbRetencao = workspacesExibidos.reduce((a, w) => a + (Number(w.retencao_gb_faturado) || 0), 0)
+
   const custoTotal = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0)
   const custoIngestao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_ingestao) || 0), 0)
   const custoRetencao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_retencao) || 0), 0)
@@ -415,6 +424,27 @@ export default function LogAnalyticsView() {
         <div className="stat-card yellow-card">
           <div className="stat-label">Custo retenção ({mesLabel})</div>
           <div className="stat-value" style={{ color: 'var(--orange,#ff8c42)' }}>{fmtBRL(custoRetencao)}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label" title="GB que entraram nos workspaces do recorte, somados dia a dia pela nossa própria coleta (consulta KQL na tabela Usage), não pela fatura.">
+            Ingestão total ({mesLabel})
+          </div>
+          <div className="stat-value">{fmtGB(gbIngerido)}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label" title="GB ingeridos divididos pelos dias da janela do mês selecionado. No mês corrente a janela termina no último dia com custo fechado, então o denominador não conta dias que ainda não existem.">
+            Média de ingestão ({mesLabel})
+          </div>
+          <div className="stat-value">{fmtGB(gbMediaDia)}<span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text-muted)' }}>/dia</span></div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label" title="Quantidade que a Azure FATUROU no medidor de retenção — não um cálculo nosso. O período incluído sem cobrança varia (90 dias em workspace com Sentinel, 31 nos demais), então estimar pelo tempo configurado somaria quem paga com quem não paga.">
+            Retenção faturada ({mesLabel})
+          </div>
+          <div className="stat-value">{fmtGB(gbRetencao)}</div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.35 }}>
+            Volume que a fatura cobra, não o configurado
+          </div>
         </div>
         <div className="stat-card danger">
           <div className="stat-label">Tabelas c/ retenção customizada</div>
