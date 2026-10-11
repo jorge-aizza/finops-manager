@@ -14993,7 +14993,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       const _coletarSubId = async (subId) => {
         const subScope = `/subscriptions/${subId}`;
         const chunks = _splitDateRange(startDate, endDate);
-        if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+        if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`, _coletaProgresso);
         for (const chunk of chunks) {
           if (isCancelada()) throw new Error('Cancelado pelo usuário');
           const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
@@ -15015,7 +15015,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         try {
           await _comRetentativa(() => _coletarSubId(subId), subId, 3, _coletaProgresso, isCancelada);
         } catch (e) {
-          _logColeta(`  ✗ Falha após tentativas — ${subId}: ${e.message}`);
+          _logColeta(`  ✗ Falha após tentativas — ${subId}: ${e.message}`, _coletaProgresso);
           _subsFalhou.push(subId);
         }
       }
@@ -15033,16 +15033,16 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.fase      = `[Passe ${passe}] ${subId}`;
           try {
             await _comRetentativa(() => _coletarSubId(subId), subId, 3, _coletaProgresso, isCancelada);
-            _logColeta(`  ✓ ${subId} coletada com sucesso no passe ${passe}`);
+            _logColeta(`  ✓ ${subId} coletada com sucesso no passe ${passe}`, _coletaProgresso);
           } catch (e) {
-            _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${subId}`);
+            _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${subId}`, _coletaProgresso);
             aindaFalhou.push(subId);
           }
         }
         aRetentar = aindaFalhou;
       }
       if (aRetentar.length > 0) {
-        _logColeta(`⚠ ${aRetentar.length} sub(s) não coletada(s) após todos os passes: ${aRetentar.join(', ')}`);
+        _logColeta(`⚠ ${aRetentar.length} sub(s) não coletada(s) após todos os passes: ${aRetentar.join(', ')}`, _coletaProgresso);
         totalErr += aRetentar.length;
       }
 
@@ -15052,16 +15052,16 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       let subs = [];
       try {
         subs = await _listarSubsBillingProfile(await getToken(), billingAccountId, billingProfileId);
-        _logColeta(`${subs.length} subscription(s) encontrada(s)`);
+        _logColeta(`${subs.length} subscription(s) encontrada(s)`, _coletaProgresso);
       } catch (e) {
-        _logColeta(`Aviso: não foi possível listar subscriptions (${e.message})`);
+        _logColeta(`Aviso: não foi possível listar subscriptions (${e.message})`, _coletaProgresso);
       }
 
       // Filtrar subs selecionadas pelo wizard (se lista não vazia)
       if (subscriptionIds.length > 0) {
         const subFilterSet = new Set(subscriptionIds.map(s => s.toLowerCase()));
         subs = subs.filter(s => subFilterSet.has(s.subscriptionId.toLowerCase()));
-        _logColeta(`Filtro wizard: ${subs.length} subscription(s) selecionada(s)`);
+        _logColeta(`Filtro wizard: ${subs.length} subscription(s) selecionada(s)`, _coletaProgresso);
       }
 
       const bpScope = `/providers/Microsoft.Billing/billingAccounts/${encodeURIComponent(billingAccountId)}/billingProfiles/${encodeURIComponent(billingProfileId)}`;
@@ -15074,7 +15074,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         const _coletarSubBP = async (sub) => {
           const subScope = `/subscriptions/${sub.subscriptionId}`;
           const chunks = _splitDateRange(startDate, endDate);
-          if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`);
+          if (chunks.length > 1) _logColeta(`  Período fatiado em ${chunks.length} chunk(s) de até 30 dias`, _coletaProgresso);
           for (const chunk of chunks) {
             if (isCancelada()) throw new Error('Cancelado pelo usuário');
             const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
@@ -15095,7 +15095,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           try {
             await _comRetentativa(() => _coletarSubBP(sub), sub.nome, 3, _coletaProgresso, isCancelada);
           } catch (e) {
-            _logColeta(`  ✗ Falha após tentativas — ${sub.nome}: ${e.message}`);
+            _logColeta(`  ✗ Falha após tentativas — ${sub.nome}: ${e.message}`, _coletaProgresso);
             _subsBPFalhou.push(sub);
           }
         }
@@ -15113,16 +15113,16 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
             _coletaProgresso.fase      = `[Passe ${passe}] ${sub.nome}`;
             try {
               await _comRetentativa(() => _coletarSubBP(sub), sub.nome, 3, _coletaProgresso, isCancelada);
-              _logColeta(`  ✓ ${sub.nome} coletada com sucesso no passe ${passe}`);
+              _logColeta(`  ✓ ${sub.nome} coletada com sucesso no passe ${passe}`, _coletaProgresso);
             } catch (e) {
-              _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${sub.nome}`);
+              _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${sub.nome}`, _coletaProgresso);
               aindaFalhoBP.push(sub);
             }
           }
           aRetentarBP = aindaFalhoBP;
         }
         if (aRetentarBP.length > 0) {
-          _logColeta(`⚠ ${aRetentarBP.length} sub(s) não coletada(s) após todos os passes: ${aRetentarBP.map(s => s.nome).join(', ')}`);
+          _logColeta(`⚠ ${aRetentarBP.length} sub(s) não coletada(s) após todos os passes: ${aRetentarBP.map(s => s.nome).join(', ')}`, _coletaProgresso);
           totalErr += aRetentarBP.length;
         }
 
@@ -15131,7 +15131,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.sub_idx   = subs.length + 1;
           _coletaProgresso.sub_atual = 'Billing Profile (Tax/Fiscal)';
           _coletaProgresso.fase      = 'Coletando impostos fiscais (Tax) do Billing Profile...';
-          _logColeta('Passagem Billing Profile — Tax/Purchase/Refund...');
+          _logColeta('Passagem Billing Profile — Tax/Purchase/Refund...', _coletaProgresso);
           try {
             await _comRetentativa(async () => {
               const chunks = _splitDateRange(startDate, endDate);
@@ -15144,7 +15144,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
               }
             }, 'Billing Profile (Tax)', 3, _coletaProgresso, isCancelada);
           } catch (e) {
-            _logColeta(`Aviso: passagem Billing Profile falhou definitivamente — ${e.message}`);
+            _logColeta(`Aviso: passagem Billing Profile falhou definitivamente — ${e.message}`, _coletaProgresso);
           }
         }
       } else {
@@ -15170,10 +15170,10 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     // Resumo final
     try {
       const rCT = await pool.query(`SELECT COALESCE(charge_type,'(sem tipo)') AS ct, COUNT(*) AS n FROM azure_costs GROUP BY charge_type ORDER BY n DESC LIMIT 20`);
-      _logColeta('Charge types: ' + rCT.rows.map(r => `${r.ct}:${r.n}`).join(', '));
+      _logColeta('Charge types: ' + rCT.rows.map(r => `${r.ct}:${r.n}`).join(', '), _coletaProgresso);
     } catch (_) {}
 
-    _logColeta(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err / ${totalLinhas} linhas`);
+    _logColeta(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err / ${totalLinhas} linhas`, _coletaProgresso);
     // Marca registros desta coleta como fonte='api' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='api' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
@@ -15319,15 +15319,15 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     ).catch(() => {});
 
     _coletaProgresso.fase = 'Autenticando no Azure Storage...';
-    _logColeta('Obtendo token de Storage...');
+    _logColeta('Obtendo token de Storage...', _coletaProgresso);
     const getStorageToken = _makeStorageTokenGetter(tenantId, clientId, secret);
     await getStorageToken(); // valida credenciais logo no início
 
     _coletaProgresso.fase = 'Listando arquivos no container...';
-    _logColeta(`Listando em ${storageAccount}/${container}/${prefix || '*'}`);
+    _logColeta(`Listando em ${storageAccount}/${container}/${prefix || '*'}`, _coletaProgresso);
     let blobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, prefix);
     blobs = blobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
-    _logColeta(`${blobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`);
+    _logColeta(`${blobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`, _coletaProgresso);
     if (!blobs.length) throw new Error('Nenhum arquivo CSV/Parquet/ZIP encontrado no caminho configurado');
     _coletaProgresso.sub_total = blobs.length;
 
@@ -15352,7 +15352,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       _coletaProgresso.sub_idx   = bi + 1;
       _coletaProgresso.sub_atual = blob.name.split('/').pop();
       _coletaProgresso.fase      = `Importando: ${blob.name.split('/').pop()}`;
-      _logColeta(`→ ${blob.name} (${(blob.size / 1048576).toFixed(1)} MB)`);
+      _logColeta(`→ ${blob.name} (${(blob.size / 1048576).toFixed(1)} MB)`, _coletaProgresso);
 
       let tmpFile;
       try {
@@ -15361,13 +15361,13 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
           tmpFile = await _storageDownloadBlob(dlToken, storageAccount, container, blob.name);
         } catch (e401) {
           if (e401.message.includes('(401)')) {
-            _logColeta(`  [Token Storage] 401 no download — renovando token...`);
+            _logColeta(`  [Token Storage] 401 no download — renovando token...`, _coletaProgresso);
             dlToken = await getStorageToken(true);
             tmpFile = await _storageDownloadBlob(dlToken, storageAccount, container, blob.name);
           } else throw e401;
         }
         const rows = await _lerArquivoRows(tmpFile, blob.name);
-        _logColeta(`  ${rows.length} linhas`);
+        _logColeta(`  ${rows.length} linhas`, _coletaProgresso);
 
         const client = await pool.connect();
         let ins = 0, upd = 0, err = 0;
@@ -15394,12 +15394,12 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
         } catch (e) { await client.query('ROLLBACK'); throw e; }
         finally { client.release(); }
         totalIns += ins; totalUpd += upd; totalErr += err;
-        _logColeta(`  ins:${ins} upd:${upd} err:${err}`);
+        _logColeta(`  ins:${ins} upd:${upd} err:${err}`, _coletaProgresso);
         _coletaProgresso.ins = totalIns;
         _coletaProgresso.upd = totalUpd;
         _coletaProgresso.err = totalErr;
       } catch (blobErr) {
-        _logColeta(`ERRO ${blob.name.split('/').pop()}: ${blobErr.message.slice(0, 60)}`);
+        _logColeta(`ERRO ${blob.name.split('/').pop()}: ${blobErr.message.slice(0, 60)}`, _coletaProgresso);
         totalErr++;
         _coletaProgresso.err = totalErr;
       } finally {
@@ -15419,7 +15419,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     if (stg.price_list_prefix?.trim()) {
       const plPrefix = stg.price_list_prefix.trim();
       let plHistId, plLog = [];
-      const _logPl = msg => { _logColeta(`[PL] ${msg}`); plLog.push(msg); };
+      const _logPl = msg => { _logColeta(`[PL] ${msg}`, _coletaProgresso); plLog.push(msg); };
       try {
         const plHistR = await pool.query(
           `INSERT INTO azure_coleta_historico (status,tipo,sp_id,origem) VALUES ('executando','price_list',$1,$2) RETURNING id`,
