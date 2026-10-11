@@ -8323,19 +8323,16 @@ function _computeProximaColeta(horaExecucao, diasSemanaStr) {
 function _iniciarAgendador() {
   if (_agendadorTimer) return;
   const _tickAgendador = async () => {
-    // Safety valve: resetar coleta travada há mais de 6h
-    if (_coletaEmExecucao && _coletaIniciadaEm) {
-      const elapsedMs = Date.now() - _coletaIniciadaEm.getTime();
-      if (elapsedMs > 6 * 60 * 60 * 1000) {
-        console.warn('[Agendador] SAFETY VALVE: coleta travada >6h — resetando');
-        _logColeta('[CB] Safety valve: coleta travada ' + Math.round(elapsedMs / 60000) + 'min (>6h) — resetando flags');
-        _coletaEmExecucao = false;
-        _coletaIniciadaEm = null;
-        _cbCore.reset();
-      }
-    }
+    // Multi-SP (v4.2): não existe mais `_coletaEmExecucao` global, só a compatibilidade
+    // somente-leitura (ver Object.defineProperty acima, sem setter). Até 2026-10-11 este tick
+    // abria com um safety valve ESCRITO para o mundo antigo — `_coletaEmExecucao = false` — que
+    // virou atribuição a uma propriedade só-de-leitura. Com 'use strict' no topo do arquivo isso
+    // lança TypeError, não silencia: bastava UMA coleta travada há mais de 6h pra essa linha
+    // interromper o tick inteiro ANTES do safety valve de verdade (o de baixo, por entrada do
+    // Map) rodar — a proteção quebrava exatamente no caso em que mais precisava funcionar.
+    // Nunca apareceu em produção porque nenhuma coleta travou por 6h ainda, não porque estava
+    // certo. O bloco por entrada do Map, logo abaixo, já cobre o mesmo caso sem o global.
     if (!pool) return;
-    // v4.2: Já não há `_coletaEmExecucao` global — cada SP/Storage tem sua própria chave no Map
     // Safety valve: resetar execuções travadas há mais de 6h
     const agora = Date.now();
     for (const [chave, entry] of _coletasEmExecucao.entries()) {
@@ -14726,7 +14723,15 @@ async function _listarSubsBillingProfile(token, billingAccountId, billingProfile
 
 // Gera relatório, faz polling com limite de 60 tentativas (~6 min), baixa blobs e retorna caminhos locais
 // metric: 'ActualCost' (padrão) ou 'AmortizedCost' (reservas distribuídas mensalmente como no portal)
-async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label, metric = 'ActualCost') {
+// `progresso`/`isCancelada` vêm da execução que chamou isto (ver _executarColetaAPI) — função
+// top-level não enxerga o `const _coletaProgresso` que _executarColetaAPI sombreia no seu
+// próprio escopo, então sem passar explícito ela caía nos getters globais de compatibilidade
+// (`_coletaProgresso`/`_coletaCancelada`, que resolvem pra "primeira entrada do Map"). Com duas
+// SPs coletando ao mesmo tempo isso significava: todo progresso/log gerado AQUI DENTRO ia pro
+// card de qualquer SP que tivesse entrado primeiro no Map, nunca necessariamente a SP dona desta
+// chamada — e cancelar uma SP cancelava o polling de relatório de outra também. Corrigido em
+// 2026-10-11, junto com o mesmo problema em _importarArquivosAPI e _comRetentativa.
+async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label, metric, progresso, isCancelada) {
   const fs     = require('fs');
   const os     = require('os');
   const path   = require('path');
@@ -14735,7 +14740,7 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
   const MAX_POLL_ATTEMPTS = 60; // 60 × 6s = 360s máximo por subscription
 
   const genUrl  = `https://management.azure.com${scopeUrl}/providers/Microsoft.CostManagement/generateCostDetailsReport?api-version=2023-08-01`;
-  _logColeta(`→ Solicitando relatório: ${label}`);
+  _logColeta(`→ Solicitando relatório: ${label}`, progresso);
 
   let token = await getToken();
   let genResp = await _cbFetch(
@@ -14750,7 +14755,7 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
 
   // Token expirado → renova e tenta uma vez mais
   if (genResp.status === 401) {
-    _logColeta(`  Token expirado, renovando para ${label}...`);
+    _logColeta(`  Token expirado, renovando para ${label}...`, progresso);
     token = await getToken(true);
     genResp = await _cbFetch(
       genUrl,
@@ -14760,7 +14765,7 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
     );
   }
 
-  if (genResp.status === 404) { _logColeta(`  Sem dados: ${label}`); return []; }
+  if (genResp.status === 404) { _logColeta(`  Sem dados: ${label}`, progresso); return []; }
   if (genResp.status >= 500) {
     _cbRecordFailure();
     const e = await genResp.text();
@@ -14774,14 +14779,14 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
   if (!pollUrl && genResp.status === 200) {
     const d = await _safeRespJson(genResp);
     if (d.status === 'Completed' || d.manifest) manifest = d.manifest || d;
-    else if (d.status === 'NoDataFound') { _logColeta(`  Sem dados: ${label}`); return []; }
+    else if (d.status === 'NoDataFound') { _logColeta(`  Sem dados: ${label}`, progresso); return []; }
   }
-  if (genResp.status === 204) { _logColeta(`  Sem dados (204): ${label}`); return []; }
+  if (genResp.status === 204) { _logColeta(`  Sem dados (204): ${label}`, progresso); return []; }
 
   // Polling com limite máximo de tentativas
   let tentativas = 0;
   while (pollUrl && !manifest) {
-    if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+    if (isCancelada()) throw new Error('Cancelado pelo usuário');
     if (tentativas >= MAX_POLL_ATTEMPTS) {
       throw new Error(`Timeout de polling: Azure não entregou o relatório de '${label}' em ${MAX_POLL_ATTEMPTS * 6}s`);
     }
@@ -14795,18 +14800,18 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
       throw new Error(`Poll (${pr.status}): ${e}`);
     }
     if (!pr.ok) { const e = await pr.text(); throw new Error(`Poll (${pr.status}): ${e}`); }
-    if (pr.status === 204) { _logColeta(`  Sem dados (204): ${label}`); return []; }
+    if (pr.status === 204) { _logColeta(`  Sem dados (204): ${label}`, progresso); return []; }
     const pd = await _safeRespJson(pr);
 
-    if (tentativas % 5 === 0) _logColeta(`  ${label}: aguardando Azure... ${tentativas * 6}s`);
-    _coletaProgresso.fase = `${label} — gerando relatório (${tentativas * 6}s)`;
+    if (tentativas % 5 === 0) _logColeta(`  ${label}: aguardando Azure... ${tentativas * 6}s`, progresso);
+    progresso.fase = `${label} — gerando relatório (${tentativas * 6}s)`;
 
     if (pd.status === 'Completed')   { manifest = pd.manifest || pd; break; }
     if (pd.status === 'Failed')      {
       _cbRecordFailure();
       throw new Error(`Relatório falhou no Azure: ${JSON.stringify(pd.error || {})}`);
     }
-    if (pd.status === 'NoDataFound') { _logColeta(`  Sem dados: ${label}`); return []; }
+    if (pd.status === 'NoDataFound') { _logColeta(`  Sem dados: ${label}`, progresso); return []; }
   }
   if (!manifest) throw new Error(`Sem manifest após polling: ${label}`);
 
@@ -14833,11 +14838,13 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
     }
     tmpFiles.push(dest);
   }
-  _logColeta(`  ${label}: ${tmpFiles.length} blob(s) baixado(s)`);
+  _logColeta(`  ${label}: ${tmpFiles.length} blob(s) baixado(s)`, progresso);
   return tmpFiles;
 }
 
-async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null) {
+// `progresso` — mesma razão de _gerarRelatorioAPI logo acima: sem passar explícito, as
+// contagens ins/upd/err de uma SP sobrescreviam o card de progresso de outra.
+async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progresso) {
   const fs = require('fs');
   let ins = 0, upd = 0, err = 0, linhas = 0;
   for (const dest of tmpFiles) {
@@ -14865,7 +14872,7 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null)
             }
           }
           await client.query('COMMIT');
-          _coletaProgresso.ins = ins; _coletaProgresso.upd = upd; _coletaProgresso.err = err;
+          progresso.ins = ins; progresso.upd = upd; progresso.err = err;
         } catch (e) {
           await client.query('ROLLBACK').catch(() => {});
           throw e;
@@ -14873,7 +14880,7 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter = null)
           client.release();
         }
       });
-      _logColeta(`  ${label}: ${linhas} linhas importadas${rgFilter ? ` (filtro: ${rgFilter.size} RGs)` : ''}`);
+      _logColeta(`  ${label}: ${linhas} linhas importadas${rgFilter ? ` (filtro: ${rgFilter.size} RGs)` : ''}`, progresso);
     } finally {
       try { fs.unlinkSync(dest); } catch (_) {}
     }
@@ -14903,7 +14910,8 @@ function _splitDateRange(startDate, endDate) {
 
 // Executa fn com até `tentativas` tentativas totais, aguardando entre falhas.
 // Lança na última tentativa ou se o usuário cancelar.
-async function _comRetentativa(fn, label, tentativas = 3) {
+// `progresso`/`isCancelada` — mesma razão das duas funções acima.
+async function _comRetentativa(fn, label, tentativas, progresso, isCancelada) {
   for (let t = 1; t <= tentativas; t++) {
     try {
       return await fn();
@@ -14911,10 +14919,10 @@ async function _comRetentativa(fn, label, tentativas = 3) {
       if (e.message === 'Cancelado pelo usuário') throw e;
       if (t === tentativas) throw e;
       const esperaSeg = t * 30; // 30s na 1ª falha, 60s na 2ª
-      _logColeta(`  ✗ ${label} — tentativa ${t}/${tentativas}: ${e.message}`);
-      _logColeta(`  ↻ Aguardando ${esperaSeg}s antes de nova tentativa...`);
+      _logColeta(`  ✗ ${label} — tentativa ${t}/${tentativas}: ${e.message}`, progresso);
+      _logColeta(`  ↻ Aguardando ${esperaSeg}s antes de nova tentativa...`, progresso);
       for (let s = 0; s < esperaSeg; s++) {
-        if (_coletaCancelada) throw new Error('Cancelado pelo usuário');
+        if (isCancelada()) throw new Error('Cancelado pelo usuário');
         await new Promise(r => setTimeout(r, 1000));
       }
     }
@@ -14989,8 +14997,8 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         for (const chunk of chunks) {
           if (isCancelada()) throw new Error('Cancelado pelo usuário');
           const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
-          const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
-          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter);
+          const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
+          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter, _coletaProgresso);
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
       };
@@ -15005,7 +15013,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         _coletaProgresso.sub_atual = subId;
         _coletaProgresso.fase      = `[${i + 1}/${subscriptionIds.length}] ${subId}`;
         try {
-          await _comRetentativa(() => _coletarSubId(subId), subId);
+          await _comRetentativa(() => _coletarSubId(subId), subId, 3, _coletaProgresso, isCancelada);
         } catch (e) {
           _logColeta(`  ✗ Falha após tentativas — ${subId}: ${e.message}`);
           _subsFalhou.push(subId);
@@ -15024,7 +15032,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.sub_atual = subId;
           _coletaProgresso.fase      = `[Passe ${passe}] ${subId}`;
           try {
-            await _comRetentativa(() => _coletarSubId(subId), subId);
+            await _comRetentativa(() => _coletarSubId(subId), subId, 3, _coletaProgresso, isCancelada);
             _logColeta(`  ✓ ${subId} coletada com sucesso no passe ${passe}`);
           } catch (e) {
             _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${subId}`);
@@ -15070,8 +15078,8 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           for (const chunk of chunks) {
             if (isCancelada()) throw new Error('Cancelado pelo usuário');
             const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
-            const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric);
-            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter);
+            const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
+            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter, _coletaProgresso);
             totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
           }
         };
@@ -15085,7 +15093,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           _coletaProgresso.sub_atual = sub.nome;
           _coletaProgresso.fase      = `[${i + 1}/${subs.length}] ${sub.nome}`;
           try {
-            await _comRetentativa(() => _coletarSubBP(sub), sub.nome);
+            await _comRetentativa(() => _coletarSubBP(sub), sub.nome, 3, _coletaProgresso, isCancelada);
           } catch (e) {
             _logColeta(`  ✗ Falha após tentativas — ${sub.nome}: ${e.message}`);
             _subsBPFalhou.push(sub);
@@ -15104,7 +15112,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
             _coletaProgresso.sub_atual = sub.nome;
             _coletaProgresso.fase      = `[Passe ${passe}] ${sub.nome}`;
             try {
-              await _comRetentativa(() => _coletarSubBP(sub), sub.nome);
+              await _comRetentativa(() => _coletarSubBP(sub), sub.nome, 3, _coletaProgresso, isCancelada);
               _logColeta(`  ✓ ${sub.nome} coletada com sucesso no passe ${passe}`);
             } catch (e) {
               _logColeta(`  ✗ Passe ${passe} — ainda falhou: ${sub.nome}`);
@@ -15130,11 +15138,11 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
               for (const chunk of chunks) {
                 if (isCancelada()) throw new Error('Cancelado pelo usuário');
                 const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
-                const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric);
-                const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
+                const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
+                const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso);
                 totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
               }
-            }, 'Billing Profile (Tax)');
+            }, 'Billing Profile (Tax)', 3, _coletaProgresso, isCancelada);
           } catch (e) {
             _logColeta(`Aviso: passagem Billing Profile falhou definitivamente — ${e.message}`);
           }
@@ -15146,10 +15154,14 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         _coletaProgresso.sub_atual = 'Billing Profile';
         const chunks = _splitDateRange(startDate, endDate);
         for (const chunk of chunks) {
-          if (_coletaCancelada) break;
+          // Era `_coletaCancelada` (o getter global de compatibilidade, que é true se QUALQUER
+          // SP do Map estiver cancelada) — com duas coletas rodando ao mesmo tempo, cancelar a
+          // de uma SP também interrompia esta passagem da outra. `isCancelada()` lê só a entrada
+          // desta execução.
+          if (isCancelada()) break;
           const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
-          const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric);
-          const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter);
+          const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
+          const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso);
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
       }
@@ -15258,12 +15270,18 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     throw e;
   }
 
-  // Criar entrada no Map — storageId pode ser null (pega a primeira ativa), então salvamos na chave quando souber
-  // Por enquanto, usar um placeholder; será atualizado após descobrir qual storage rodou
-  let coletaChave = `storage:${storageId || 'auto'}`;
+  // Hoje os dois call sites (_tickAgendador e o endpoint manual) sempre passam um storageId —
+  // o fallback -999 nunca dispara na prática. Existia mesmo assim, só que com DUAS grafias
+  // diferentes da mesma chave: `_iniciarColetaEntry`/`_finalizarColetaEntry` usavam -999
+  // (numérico), e `coletaChave` (só usada no .delete() final) usava a string 'auto'. Se esse
+  // fallback chegasse a disparar, o entry ficaria órfão pra sempre — criado em "storage:-999",
+  // nunca removido de lá porque o delete mirava em "storage:auto". Uma única variável evita a
+  // divergência.
+  const idChave = storageId || -999;
+  const coletaChave = `storage:${idChave}`;
 
   // v4.2: Criar entry e sombrear identificadores localmente
-  const coletaEntry = _iniciarColetaEntry('storage', storageId || -999, histId); // -999 = chave temp pra "primeira ativa"
+  const coletaEntry = _iniciarColetaEntry('storage', idChave, histId);
   const _coletaProgresso = coletaEntry.progresso;
   const _coletaStartEm = coletaEntry.iniciadoEm;
   const isCancelada = () => coletaEntry.cancelada;
@@ -15463,7 +15481,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros${plMsg}`;
     _coletaProgresso.fase = 'Concluída';
     _logColeta('Concluída: ' + msg, _coletaProgresso);
-    _finalizarColetaEntry('storage', storageId || -999, 'concluido');
+    _finalizarColetaEntry('storage', idChave, 'concluido');
     await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, msg, JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] }), histId]);
     _validarColeta(histId, null, null, null).catch(() => {});
@@ -15479,7 +15497,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     const detStgErr = JSON.stringify({ tipo: 'storage', modo, log: [..._coletaProgresso.log] });
     if (histId) await pool.query(`UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
       [totalIns, totalUpd, totalErr, err.message, detStgErr, histId]).catch(() => {});
-    _finalizarColetaEntry('storage', storageId || -999, 'erro');
+    _finalizarColetaEntry('storage', idChave, 'erro');
     _registrarNotificacaoColeta(
       `Coleta Storage com erro`,
       err.message,
