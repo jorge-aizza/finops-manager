@@ -16951,32 +16951,13 @@ async function _avaliarRegrasLogAnalytics(ws) {
 // plano "Recomendação de Commitment Tier".
 const _LA_COMMITMENT_FALLBACK_REGIAO = 'brazilsouth';
 
-async function _buscarPrecosCommitmentTier(regiao) {
-  const regioes = regiao && regiao !== _LA_COMMITMENT_FALLBACK_REGIAO
-    ? [regiao, _LA_COMMITMENT_FALLBACK_REGIAO] : [_LA_COMMITMENT_FALLBACK_REGIAO];
-  for (const reg of regioes) {
-    const paygR = await pool.query(
-      `SELECT retail_price FROM azure_price_list
-       WHERE product_name = 'Log Analytics' AND meter_name = 'Analytics Logs Data Ingestion'
-         AND arm_region_name = $1 AND retail_price > 0
-       ORDER BY retail_price ASC LIMIT 1`,
-      [reg]
-    );
-    if (!paygR.rows.length) continue;
-    const tiersR = await pool.query(
-      `SELECT meter_name, retail_price FROM azure_price_list
-       WHERE product_name = 'Azure Monitor' AND meter_name ILIKE '%GB Commitment Tier Capacity%'
-         AND arm_region_name = $1 AND retail_price > 0`,
-      [reg]
-    );
-    const tiers = tiersR.rows
-      .map(r => { const m = r.meter_name.match(/^(\d+)\s*GB/i); return m ? { gbDia: parseInt(m[1], 10), precoDiario: Number(r.retail_price) } : null; })
-      .filter(Boolean).sort((a, b) => a.gbDia - b.gbDia);
-    if (!tiers.length) continue;
-    return { payg: Number(paygR.rows[0].retail_price), tiers };
-  }
-  return null; // price list não sincronizado (ou sem essa região/fallback) — fica em silêncio, não é erro
-}
+// _buscarPrecosCommitmentTier (payg + tiers em preço de LISTA, sem calibragem) foi removida em
+// 2026-10-11 — órfã desde que _avaliarCommitmentTier passou a delegar pra _sugerirCommitmentTier
+// (ver comentário lá). Ela era a origem do bug "dólar tratado como real": devolvia preço em USD
+// puro, e quem chamava escrevia "R$" na frente do número sem converter nem descontar o contrato.
+// Deixá-la no arquivo, mesmo sem call site, era convite a alguém reusar o mesmo bug — ela
+// parecia pronta pra uso e compilava sem erro. _taxasPorGbWorkspace e _sugerirCommitmentTier
+// cobrem o mesmo papel calibrando pela fatura real.
 
 async function _avaliarCommitmentTier(ws) {
   // Delega a decisão de tier pra _sugerirCommitmentTier, que é a mesma conta exibida na tela.
@@ -17338,7 +17319,7 @@ function _logAnalyticsCustoSql(idxInicio, idxFim) {
               AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
               AND ac.meter_name ILIKE '%Commitment Tier%'), 0) AS _la_commit_real,
   -- Preço PAYG atual do catálogo (região do workspace, fallback brazilsouth) — mesma limitação
-  -- documentada em _buscarPrecosCommitmentTier: o catálogo não é historizado por mês, então
+  -- documentada em _sugerirCommitmentTier: o catálogo não é historizado por mês, então
   -- mesmo pra um mês passado usamos o preço vigente hoje (aproximação aceitável e já assumida
   -- no resto da feature). Valor vem do JOIN pré-agregado _LOG_ANALYTICS_PRECO_JOIN_SQL (ver
   -- abaixo), não de subquery correlacionada por linha.

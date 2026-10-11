@@ -29,6 +29,11 @@ Element.prototype.getBoundingClientRect = () => ({
   width: 1000, height: 800, top: 0, left: 0, right: 1000, bottom: 800, x: 0, y: 0, toJSON() {},
 })
 
+// jsdom não implementa scrollIntoView — chamar sem o stub lança "is not a
+// function". Usado por LogAnalyticsView (rolar até o detalhe do workspace
+// selecionado); stub vazio é suficiente pros testes só confirmarem a chamada.
+Element.prototype.scrollIntoView = () => {}
+
 // jsdom's built-in `localStorage` colide com o global do Node 20+ e vira um
 // stub sem métodos ("localStorage.getItem is not a function") — troca por um
 // polyfill in-memory simples só pros testes.
