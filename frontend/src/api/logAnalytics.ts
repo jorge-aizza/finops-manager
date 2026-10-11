@@ -39,6 +39,11 @@ export interface LogAnalyticsWorkspace {
    *  retenção: o período incluído sem cobrança varia (90 dias com Sentinel, 31 sem), então só a
    *  quantidade da fatura separa quem paga de quem não paga. */
   retencao_gb_faturado: number
+  /** Quantos dias da janela têm coleta própria de GB. Menor que `dias_janela` significa que o
+   *  total de ingestão é parcial — não que o workspace ingeriu pouco. */
+  dias_com_gb: number
+  /** Dias que a janela do mês cobre. No mês corrente termina no último dia com custo fechado. */
+  dias_janela: number
 }
 
 /** Um ponto do gráfico de consumo diário (ver `getLogAnalyticsConsumoDiario`). */

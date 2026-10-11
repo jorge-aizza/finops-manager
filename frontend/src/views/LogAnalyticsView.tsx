@@ -318,6 +318,19 @@ export default function LogAnalyticsView() {
   const gbMediaDia = workspacesExibidos.reduce((a, w) => a + (Number(w.ingestao_media_gb_dia) || 0), 0)
   const gbRetencao = workspacesExibidos.reduce((a, w) => a + (Number(w.retencao_gb_faturado) || 0), 0)
 
+  // Cobertura da coleta própria de GB no mês selecionado. A coleta começou em 30/08, então
+  // meses anteriores têm poucos dias medidos — e o total de ingestão de agosto sai 30× menor
+  // que o real, com cara de número fechado. O MAIOR dias_com_gb do recorte é o teto honesto:
+  // nenhum workspace foi medido em mais dias que esse.
+  const diasJanela = workspacesExibidos[0]?.dias_janela || 0
+  const diasComGb = workspacesExibidos.reduce((a, w) => Math.max(a, Number(w.dias_com_gb) || 0), 0)
+  const coberturaGb = diasJanela > 0 ? diasComGb / diasJanela : 1
+  const gbParcial = diasJanela > 0 && coberturaGb < 0.8
+  // Com cobertura baixa o TOTAL é insalvável (o dado não existe), mas a média ainda é
+  // recuperável: dividir pelos dias realmente medidos dá um GB/dia correto, só apurado sobre
+  // menos dias. É a diferença entre não poder responder e responder com menos confiança.
+  const gbMediaExibida = gbParcial && diasComGb > 0 ? gbIngerido / diasComGb : gbMediaDia
+
   const custoTotal = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0)
   const custoIngestao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_ingestao) || 0), 0)
   const custoRetencao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_retencao) || 0), 0)
@@ -429,13 +442,28 @@ export default function LogAnalyticsView() {
           <div className="stat-label" title="GB que entraram nos workspaces do recorte, somados dia a dia pela nossa própria coleta (consulta KQL na tabela Usage), não pela fatura.">
             Ingestão total ({mesLabel})
           </div>
-          <div className="stat-value">{fmtGB(gbIngerido)}</div>
+          <div className="stat-value" style={gbParcial ? { color: 'var(--orange,#ff8c42)' } : undefined}>
+            {fmtGB(gbIngerido)}
+            {gbParcial && <span style={{ fontSize: 13, fontWeight: 400 }}> parcial</span>}
+          </div>
+          {gbParcial && (
+            <div style={{ fontSize: 10, color: 'var(--orange,#ff8c42)', marginTop: 2, lineHeight: 1.35 }}>
+              Só {diasComGb} de {diasJanela} dias foram medidos — o mês real foi maior
+            </div>
+          )}
         </div>
         <div className="stat-card">
-          <div className="stat-label" title="GB ingeridos divididos pelos dias da janela do mês selecionado. No mês corrente a janela termina no último dia com custo fechado, então o denominador não conta dias que ainda não existem.">
+          <div className="stat-label" title={gbParcial
+            ? 'Com a coleta cobrindo só parte do mês, a média é apurada sobre os dias realmente medidos — assim ela continua certa, só com menos dias por trás.'
+            : 'GB ingeridos divididos pelos dias da janela do mês selecionado. No mês corrente a janela termina no último dia com custo fechado, então o denominador não conta dias que ainda não existem.'}>
             Média de ingestão ({mesLabel})
           </div>
-          <div className="stat-value">{fmtGB(gbMediaDia)}<span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text-muted)' }}>/dia</span></div>
+          <div className="stat-value">{fmtGB(gbMediaExibida)}<span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text-muted)' }}>/dia</span></div>
+          {gbParcial && (
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.35 }}>
+              Apurada sobre os {diasComGb} dias medidos, não sobre {diasJanela}
+            </div>
+          )}
         </div>
         <div className="stat-card">
           <div className="stat-label" title="Quantidade que a Azure FATUROU no medidor de retenção — não um cálculo nosso. O período incluído sem cobrança varia (90 dias em workspace com Sentinel, 31 nos demais), então estimar pelo tempo configurado somaria quem paga com quem não paga.">

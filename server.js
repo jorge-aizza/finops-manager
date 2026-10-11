@@ -17441,13 +17441,18 @@ app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (re
     const r = await pool.query(`
       SELECT w.*,
         COALESCE(ing.gb_mes, 0) AS ingestao_mes_gb,
+        COALESCE(ing.dias_com_gb, 0) AS dias_com_gb,
         COALESCE(rec.n, 0) AS recomendacoes_abertas,
         COALESCE(tc.n, 0) AS tabelas_retencao_customizada,
         ${_logAnalyticsCustoSql(1, 2)}
       FROM log_analytics_workspaces w
+      -- dias_com_gb sai do agregado que ja roda, e e o que separa "ingeriu pouco" de "foi
+      -- medido pouco". A coleta propria de GB comecou em 30/08: agosto tem 2 dias dos 31, e sem
+      -- este contador a tela afirma 549 GB para um mes que fez uns 17 mil.
       LEFT JOIN (
-        SELECT workspace_guid, SUM(gb) AS gb_mes FROM log_analytics_ingestao_diaria
-        WHERE dia >= $1::date AND dia < $2::date GROUP BY workspace_guid
+        SELECT workspace_guid, SUM(gb) AS gb_mes, COUNT(DISTINCT dia) AS dias_com_gb
+          FROM log_analytics_ingestao_diaria
+         WHERE dia >= $1::date AND dia < $2::date GROUP BY workspace_guid
       ) ing ON ing.workspace_guid = w.workspace_guid
       LEFT JOIN (
         SELECT workspace_guid, COUNT(*) AS n FROM log_analytics_recomendacoes GROUP BY workspace_guid
@@ -17458,7 +17463,7 @@ app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (re
       ${_LOG_ANALYTICS_PRECO_JOIN_SQL}
     `, [janela.inicio, janela.fimExclusivo]);
     const diasJanela = _diasJanelaLogAnalytics(janela);
-    const linhas = r.rows.map(w => _aplicarImpostoLogAnalytics(w, impostoCfg, diasJanela))
+    const linhas = r.rows.map(w => ({ ..._aplicarImpostoLogAnalytics(w, impostoCfg, diasJanela), dias_janela: diasJanela }))
       .sort((a, b) => (b.custo_mes_total || 0) - (a.custo_mes_total || 0));
     res.json(linhas);
   } catch (e) { _dbErr(res, e); }
