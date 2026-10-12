@@ -4993,6 +4993,24 @@ app.get('/api/calculadora/subscriptions', authMiddleware, dbMiddleware, async (_
       `);
       rows = rd.rows;
     }
+    // Dona de cada assinatura (2026-10-11, achado pelo usuário: o seletor de assinaturas do
+    // Portal Público — usado pra montar a allowlist de "Recursos Órfãos" que o link público
+    // expõe — listava todas as assinaturas de TODAS as SPs juntas, sem indicar qual é de
+    // qual. Multi-SP normalmente significa multi-CLIENTE, então montar essa lista sem ver a
+    // dona é o tipo de tela onde o admin marca sem querer a assinatura de um cliente errado e
+    // vaza o inventário dele pro link público de outro. `sp_nome: null` = assinatura sem SP
+    // ativa dona dela hoje (ficou no cache de um cadastro antigo/desativado) — mostrado, não
+    // escondido, porque pode estar com órfão real ainda marcado, e esconder tornaria esse
+    // órfão impossível de desmarcar da allowlist pelo admin.
+    let porSub = new Map();
+    try {
+      const { escopos } = await _getInventarioEscopos();
+      porSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
+    } catch (_) { /* nenhuma SP ativa — todas as linhas ficam sem dona, tela ainda funciona */ }
+    rows = rows.map((r) => {
+      const dona = porSub.get(String(r.subscription_id || '').toLowerCase());
+      return { ...r, sp_id: dona?.spId ?? null, sp_nome: dona?.spNome || null };
+    });
     console.log(`[Subscriptions] ${rows.length} subs — ${Date.now()-_t0}ms`);
     res.json(rows);
   } catch (err) { _dbErr(res, err); }

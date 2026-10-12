@@ -3011,6 +3011,29 @@ async function _checarEntraAtivoPortal() {
   } catch (e) { console.warn('[Portal Config] _checarEntraAtivoPortal:', e.message); }
 }
 
+// Agrupa assinaturas por SP antes de desenhar os checkboxes — achado pelo usuário: o seletor
+// de assinaturas do Portal Público (órfãos e calculadora) listava todas as assinaturas de
+// TODAS as SPs juntas, sem indicar qual é de qual. Multi-SP normalmente é multi-CLIENTE: sem
+// a separação visual, o admin marca a assinatura errada sem perceber e o link público de um
+// cliente passa a expor o inventário de outro. `s.sp_nome` vem do backend (GET
+// /api/calculadora/subscriptions, 2026-10-11) via _getInventarioEscopos — a mesma fonte usada
+// pelo resto do app pra saber de qual SP é cada assinatura.
+function _htmlSubsAgrupadasPorSp(subs, checkboxHtmlFn) {
+  const porSp = new Map();
+  for (const s of subs) {
+    const chave = s.sp_nome || '￿'; // ordena "sem SP ativa" por último
+    if (!porSp.has(chave)) porSp.set(chave, { nome: s.sp_nome, itens: [] });
+    porSp.get(chave).itens.push(s);
+  }
+  const grupos = Array.from(porSp.values()).sort((a, b) => (a.nome || '￿').localeCompare(b.nome || '￿', 'pt-BR'));
+  return grupos.map(g => `
+    <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);padding:8px 4px 3px;border-top:1px solid var(--border-light);margin-top:2px;">
+      ${g.nome ? escHtml(g.nome) : '⚠ Sem Service Principal ativa (assinatura antiga/desativada)'}
+    </div>
+    ${g.itens.map(checkboxHtmlFn).join('')}
+  `).join('');
+}
+
 function _checkboxOrfaosHtml(value, label, checked, kind, extra) {
   return `<label style="display:flex;align-items:center;gap:8px;padding:4px;border-radius:5px;cursor:pointer;font-size:12px;color:var(--text);">
     <input type="checkbox" value="${escHtml(value)}"${checked ? ' checked' : ''} onchange="portalOrfaosSel('${kind}', this.value, this.checked)"
@@ -3043,7 +3066,8 @@ async function _carregarSubsOrfaosPortal() {
       el.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">Nenhuma assinatura encontrada no banco.</span>';
       return;
     }
-    el.innerHTML = subs.map(s => _checkboxOrfaosHtml(s.subscription_id, s.subscription_name || s.subscription_id, _portalOrfaos.subs.has(s.subscription_id), 'subs')).join('');
+    el.innerHTML = _htmlSubsAgrupadasPorSp(subs, s =>
+      _checkboxOrfaosHtml(s.subscription_id, s.subscription_name || s.subscription_id, _portalOrfaos.subs.has(s.subscription_id), 'subs'));
   } catch (e) {
     el.innerHTML = '<span style="font-size:12px;color:var(--danger);">Erro ao carregar: ' + escHtml(e.message) + '</span>';
   }
@@ -3184,7 +3208,7 @@ async function _carregarSubsPortalList(selectedIds = []) {
       listEl.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">Nenhuma assinatura encontrada no banco.</span>';
       return;
     }
-    listEl.innerHTML = subs.map(s => {
+    listEl.innerHTML = _htmlSubsAgrupadasPorSp(subs, s => {
       const checked = selectedIds.includes(s.subscription_id) ? ' checked' : '';
       const nome    = s.subscription_name || s.subscription_id;
       return `<label style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-radius:5px;cursor:pointer;font-size:12px;color:var(--text);">
@@ -3192,7 +3216,7 @@ async function _carregarSubsPortalList(selectedIds = []) {
           style="width:14px;height:14px;accent-color:var(--accent);flex-shrink:0;">
         <span>${nome}</span>
       </label>`;
-    }).join('');
+    });
   } catch (e) {
     listEl.innerHTML = '<span style="font-size:12px;color:var(--danger);">Erro ao carregar: ' + e.message + '</span>';
   }
