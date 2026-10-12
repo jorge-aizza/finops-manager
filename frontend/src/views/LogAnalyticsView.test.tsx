@@ -84,7 +84,8 @@ const mockRecomendacoes: LogAnalyticsRecomendacao[] = [
 ]
 
 const mockObservabilidade: LogAnalyticsCustoObservabilidade = {
-  mes: '2026-10', mes_label: 'Outubro/2026', total: 0, coberto_pela_tela: 0, coberto_pct: null, baldes: [],
+  mes: '2026-10', mes_label: 'Outubro/2026', total: 0, coberto_pela_tela: 0, coberto_pct: null,
+  workspaces_no_recorte: null, baldes: [],
 }
 const mockExportSemWs: LogAnalyticsExportResposta = {
   mes: '2026-10', mes_label: 'Outubro/2026', total: 0, sem_workspace: 0, itens: [],

@@ -18264,6 +18264,19 @@ app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware
     let filtroSp = '';
     if (subsSp) { params.push(subsSp); filtroSp = ` AND LOWER(ac.subscription_id) = ANY($${params.length})`; }
 
+    // Recorte por workspace (2026-10-12, pedido do usuário) com um cuidado: ~20% do que este
+    // card mostra NÃO pertence a workspace nenhum — Platform Logs, alertas e agentes são
+    // cobrados no recurso de origem (`w.resource_id IS NULL` no LEFT JOIN). Filtrar só por
+    // workspace faria justamente esse dinheiro sumir, que é o que o card existe pra expor.
+    // Então o filtro vale pro que TEM workspace, e o que não tem continua aparecendo — a tela
+    // rotula essa parte como fora do recorte em vez de escondê-la.
+    const wsFiltro = _wsFiltroDaQuery(req.query.workspace_guid);
+    let filtroWs = '';
+    if (wsFiltro) {
+      params.push(wsFiltro);
+      filtroWs = ` AND (w.workspace_guid = ANY($${params.length}) OR w.resource_id IS NULL)`;
+    }
+
     const r = await pool.query(
       // `em_workspace` é o que decide a cobertura, não o balde: a tela soma TUDO que está
       // carimbado no resource_id de um workspace conhecido (menos retenção), então Sentinel e
@@ -18282,7 +18295,7 @@ app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware
        FROM azure_costs ac
        LEFT JOIN log_analytics_workspaces w ON UPPER(w.resource_id) = UPPER(ac.resource_id)
        WHERE ac.cost_date >= $1 AND ac.cost_date < $2
-         AND ac.meter_category IN ('Log Analytics', 'Azure Monitor', 'Sentinel')${filtroSp}
+         AND ac.meter_category IN ('Log Analytics', 'Azure Monitor', 'Sentinel')${filtroSp}${filtroWs}
        GROUP BY 1, 2, 3, 4`,
       params,
     );
@@ -18337,6 +18350,9 @@ app.get('/api/log-analytics/custo-observabilidade', authMiddleware, dbMiddleware
       // Quanto do gasto de observabilidade a tela de Log Analytics de fato representa.
       coberto_pela_tela: naTela,
       coberto_pct: total > 0 ? Number(((naTela / total) * 100).toFixed(1)) : null,
+      // Quantos workspaces o recorte pediu (null = nenhum recorte). A tela usa pra avisar que
+      // os baldes sem workspace continuam inteiros, porque não há como recortá-los.
+      workspaces_no_recorte: wsFiltro ? wsFiltro.length : null,
       baldes: baldes.map((b) => ({ ...b, pct: total > 0 ? Number(((b.custo / total) * 100).toFixed(1)) : 0 })),
     });
   } catch (e) { _dbErr(res, e); }

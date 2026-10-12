@@ -440,15 +440,20 @@ export interface LogAnalyticsCustoObservabilidade {
   total: number
   coberto_pela_tela: number
   coberto_pct: number | null
+  /** Quantos workspaces o recorte pediu. null = sem recorte. Os baldes cobrados no recurso de
+   *  origem (Platform Logs, alertas, agentes) NÃO são recortáveis e vêm inteiros mesmo com
+   *  filtro — a tela precisa disso pra avisar em vez de deixar o número confundir. */
+  workspaces_no_recorte: number | null
   baldes: LogAnalyticsBaldeCusto[]
 }
 
 // Gasto de observabilidade inteiro, não só o dos workspaces: Sentinel, Commitment Tier,
 // Platform Logs e alertas vivem em medidores próprios e somem quando se olha só o workspace.
-export const getLogAnalyticsCustoObservabilidade = (mes?: string, spId?: number | null) => {
+export const getLogAnalyticsCustoObservabilidade = (mes?: string, spId?: number | null, wsGuids?: string[] | null) => {
   const q = new URLSearchParams()
   if (mes) q.set('mes', mes)
   if (spId) q.set('sp_id', String(spId))
+  if (wsGuids && wsGuids.length) q.set('workspace_guid', wsGuids.join(','))
   return apiFetch<LogAnalyticsCustoObservabilidade>('GET', '/log-analytics/custo-observabilidade' + (q.toString() ? '?' + q : ''))
 }
 

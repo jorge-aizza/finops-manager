@@ -164,8 +164,8 @@ export default function LogAnalyticsView() {
   // Custo de export de log (Storage/Event Hub) — nível tela, não de um workspace: a Azure
   // carimba no recurso de origem, então nunca entrou no custo de workspace nenhum.
   const observabilidadeQuery = useQuery({
-    queryKey: ['log-analytics-custo-observabilidade', mes, selectedTenantId],
-    queryFn: () => getLogAnalyticsCustoObservabilidade(mes, selectedTenantId),
+    queryKey: ['log-analytics-custo-observabilidade', mes, selectedTenantId, workspacesAtivos.join(',')],
+    queryFn: () => getLogAnalyticsCustoObservabilidade(mes, selectedTenantId, workspacesAtivos),
   })
   const exportQuery = useQuery({
     queryKey: ['log-analytics-export-sem-ws', mes, selectedTenantId],
@@ -547,6 +547,24 @@ export default function LogAnalyticsView() {
               daquela SP. Sem dizer isso, a única forma de descobrir é comparar o total com
               outra tela — foi exatamente assim que o usuário notou um workspace de Sentinel
               faltando. O card não some nem muda de número: só declara o próprio recorte. */}
+          {/* Com recorte de workspace, os baldes que a Azure cobra no recurso de ORIGEM (Platform
+              Logs, alertas, agentes) vêm inteiros — não existe "a parte deste workspace" num
+              custo que nunca foi carimbado em workspace nenhum. Eles chegam a ser ~39% do total
+              filtrado, então o card precisa dizer, senão o número parece ser todo do recorte. */}
+          {(o.workspaces_no_recorte || 0) > 0 && (() => {
+            const semWs = o.baldes.filter((b) => b.workspaces.length === 0)
+            const valorSemWs = semWs.reduce((a, b) => a + b.custo, 0)
+            if (!semWs.length) return null
+            return (
+              <div style={{ margin: '0 20px 10px', padding: '7px 11px', borderRadius: 6, fontSize: 11, lineHeight: 1.5,
+                background: 'var(--bg-subtle,rgba(127,127,127,0.07))', border: '1px solid var(--border)', color: 'var(--text)' }}>
+                Recorte de {o.workspaces_no_recorte === 1 ? '1 workspace' : `${o.workspaces_no_recorte} workspaces`} aplicado
+                aos baldes que têm workspace. Os {fmtBRL(valorSemWs)} de{' '}
+                <strong>{semWs.map((b) => b.rotulo).join(', ')}</strong> aparecem inteiros: a Azure cobra esses
+                medidores no recurso de origem, então não existe "a parte deste workspace" neles.
+              </div>
+            )
+          })()}
           {selectedTenantId !== null && (
             <div style={{ margin: '0 20px 10px', padding: '7px 11px', borderRadius: 6, fontSize: 11, lineHeight: 1.5,
               background: '#ff8c4218', border: '1px solid #ff8c4240', color: 'var(--text)' }}>
