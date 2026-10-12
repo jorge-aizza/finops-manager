@@ -512,6 +512,138 @@ export default function LogAnalyticsView() {
         )}
       </div>
 
+      {observabilidadeQuery.data && observabilidadeQuery.data.total > 0 && (() => {
+        const o = observabilidadeQuery.data
+        const fora = o.total - o.coberto_pela_tela
+        return (
+        <div className="card" style={{ margin: '0 20px 18px' }}>
+          <div className="card-header">
+            <span className="card-title">Gasto de observabilidade — todos os medidores ({mesLabel})</span>
+            <span className="badge">{fmtBRL(o.total)}</span>
+          </div>
+          <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
+            Esta tela soma o que a Azure carimba no recurso do workspace — {fmtBRL(o.coberto_pela_tela)}, {o.coberto_pct}%
+            do gasto de observabilidade. Os {fmtBRL(fora)} restantes são cobrados no recurso de ORIGEM (export para
+            Storage/Event Hub, alertas, agentes) e não entram no custo de workspace nenhum.
+          </div>
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead><tr>
+                <th>Balde</th><th style={{ textAlign: 'right' }}>Custo</th><th style={{ textAlign: 'right' }}>%</th>
+                <th style={{ textAlign: 'right' }}>Nesta tela</th><th>Composição</th>
+              </tr></thead>
+              <tbody>
+                {o.baldes.map((b) => {
+                  const aberto = baldeAberto === b.id
+                  return (
+                  <Fragment key={b.id}>
+                    <tr onClick={() => setBaldeAberto(aberto ? null : b.id)} style={{ cursor: 'pointer' }}
+                      title="Abrir os medidores e os workspaces que compõem este balde">
+                      <td style={{ fontWeight: 600 }}>
+                        <span style={{ color: 'var(--text-muted)', fontSize: 10, marginRight: 6 }}>{aberto ? '▾' : '▸'}</span>
+                        {b.rotulo}
+                      </td>
+                      <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtBRL(b.custo)}</td>
+                      <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--text-muted)' }}>{b.pct}%</td>
+                      <td style={{ textAlign: 'right', fontSize: 11,
+                        color: b.custo_em_workspace > 0 ? undefined : 'var(--orange,#ff8c42)' }}>
+                        {b.custo_em_workspace > 0 ? fmtBRL(b.custo_em_workspace) : 'fora'}
+                      </td>
+                      <td style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                        {b.medidores.length} medidor{b.medidores.length === 1 ? '' : 'es'}
+                        {b.workspaces.length > 0 && ` · ${b.workspaces.length} workspace${b.workspaces.length === 1 ? '' : 's'}`}
+                      </td>
+                    </tr>
+                    {aberto && (
+                      <tr>
+                        <td colSpan={5} style={{ background: 'var(--bg-subtle,rgba(127,127,127,0.06))', padding: '10px 20px' }}>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 28 }}>
+                            <div style={{ minWidth: 280, flex: '1 1 300px' }}>
+                              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
+                                color: 'var(--text-muted)', marginBottom: 6 }}>Medidores</div>
+                              {b.medidores.map((m) => (
+                                <div key={m.nome} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11, padding: '2px 0' }}>
+                                  <span>{m.nome}</span>
+                                  <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{fmtBRL(m.custo)}</span>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ minWidth: 280, flex: '1 1 300px' }}>
+                              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
+                                color: 'var(--text-muted)', marginBottom: 6 }}>Workspaces</div>
+                              {b.workspaces.length === 0 ? (
+                                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                  Nenhum — a Azure cobra este medidor no recurso de origem, não num workspace.
+                                  É por isso que ele nunca apareceu no custo desta tela.
+                                </div>
+                              ) : b.workspaces.map((w) => (
+                                <div key={w.nome} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11, padding: '2px 0' }}>
+                                  <span>{w.nome}</span>
+                                  <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{fmtBRL(w.custo)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        )
+      })()}
+
+      {(exportQuery.data?.sem_workspace || 0) > 0 && (
+        <div className="card" style={{ margin: '0 20px 18px' }}>
+          <div className="card-header">
+            <span className="card-title">Export de log sem workspace</span>
+            <span className="badge" style={{ background: 'var(--orange,#ff8c42)', color: '#fff' }}>
+              {fmtBRL(exportQuery.data!.sem_workspace)} em {mesLabel}
+            </span>
+          </div>
+          <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
+            Diagnostic Settings que mandam para Storage ou Event Hub <strong>sem alimentar nenhum workspace</strong>:
+            pagam ingestão e não viram consulta no Log Analytics. A Azure cobra isso no recurso de origem
+            ("Platform Logs Data Processed"), por isso não aparece no custo de workspace nenhum.
+            De {fmtBRL(exportQuery.data!.total)} de export no período, {fmtBRL(exportQuery.data!.sem_workspace)} não
+            alimentam workspace.
+          </div>
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead><tr>
+                <th>Recurso</th><th>Tipo</th><th>Destino</th><th style={{ textAlign: 'right' }}>Custo ({mesLabel})</th>
+              </tr></thead>
+              <tbody>
+                {exportQuery.data!.itens.filter((x) => !x.alimenta_workspace).slice(0, 15).map((x) => (
+                  <tr key={x.recurso_id}>
+                    <td style={{ maxWidth: 330 }}>
+                      <div style={{ fontWeight: 600, fontSize: 12 }}>{x.recurso_id.split('/').pop()}</div>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>{x.recurso_id}</div>
+                    </td>
+                    <td style={{ fontSize: 10, color: 'var(--text-muted)' }}>{x.recurso_tipo || '—'}</td>
+                    <td style={{ fontSize: 11 }}>
+                      {x.setting_desconhecido ? (
+                        <span style={{ color: 'var(--text-muted)' }} title="O Diagnostic Setting deste recurso ainda não foi coletado — tipo fora da lista ou falha na coleta. Não é o mesmo que não ter setting.">
+                          não coletado
+                        </span>
+                      ) : (
+                        [x.envia_storage ? 'Storage' : null, x.envia_eventhub ? 'Event Hub' : null]
+                          .filter(Boolean).join(' + ') || '—'
+                      )}
+                    </td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtBRL(x.custo)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em' }}>
@@ -735,138 +867,6 @@ export default function LogAnalyticsView() {
           </div>
         )}
       </div>
-
-      {observabilidadeQuery.data && observabilidadeQuery.data.total > 0 && (() => {
-        const o = observabilidadeQuery.data
-        const fora = o.total - o.coberto_pela_tela
-        return (
-        <div className="card" style={{ margin: '0 20px 18px' }}>
-          <div className="card-header">
-            <span className="card-title">Gasto de observabilidade — todos os medidores ({mesLabel})</span>
-            <span className="badge">{fmtBRL(o.total)}</span>
-          </div>
-          <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
-            Esta tela soma o que a Azure carimba no recurso do workspace — {fmtBRL(o.coberto_pela_tela)}, {o.coberto_pct}%
-            do gasto de observabilidade. Os {fmtBRL(fora)} restantes são cobrados no recurso de ORIGEM (export para
-            Storage/Event Hub, alertas, agentes) e não entram no custo de workspace nenhum.
-          </div>
-          <div className="table-wrapper">
-            <table className="data-table">
-              <thead><tr>
-                <th>Balde</th><th style={{ textAlign: 'right' }}>Custo</th><th style={{ textAlign: 'right' }}>%</th>
-                <th style={{ textAlign: 'right' }}>Nesta tela</th><th>Composição</th>
-              </tr></thead>
-              <tbody>
-                {o.baldes.map((b) => {
-                  const aberto = baldeAberto === b.id
-                  return (
-                  <Fragment key={b.id}>
-                    <tr onClick={() => setBaldeAberto(aberto ? null : b.id)} style={{ cursor: 'pointer' }}
-                      title="Abrir os medidores e os workspaces que compõem este balde">
-                      <td style={{ fontWeight: 600 }}>
-                        <span style={{ color: 'var(--text-muted)', fontSize: 10, marginRight: 6 }}>{aberto ? '▾' : '▸'}</span>
-                        {b.rotulo}
-                      </td>
-                      <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtBRL(b.custo)}</td>
-                      <td style={{ textAlign: 'right', fontSize: 11, color: 'var(--text-muted)' }}>{b.pct}%</td>
-                      <td style={{ textAlign: 'right', fontSize: 11,
-                        color: b.custo_em_workspace > 0 ? undefined : 'var(--orange,#ff8c42)' }}>
-                        {b.custo_em_workspace > 0 ? fmtBRL(b.custo_em_workspace) : 'fora'}
-                      </td>
-                      <td style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                        {b.medidores.length} medidor{b.medidores.length === 1 ? '' : 'es'}
-                        {b.workspaces.length > 0 && ` · ${b.workspaces.length} workspace${b.workspaces.length === 1 ? '' : 's'}`}
-                      </td>
-                    </tr>
-                    {aberto && (
-                      <tr>
-                        <td colSpan={5} style={{ background: 'var(--bg-subtle,rgba(127,127,127,0.06))', padding: '10px 20px' }}>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 28 }}>
-                            <div style={{ minWidth: 280, flex: '1 1 300px' }}>
-                              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
-                                color: 'var(--text-muted)', marginBottom: 6 }}>Medidores</div>
-                              {b.medidores.map((m) => (
-                                <div key={m.nome} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11, padding: '2px 0' }}>
-                                  <span>{m.nome}</span>
-                                  <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{fmtBRL(m.custo)}</span>
-                                </div>
-                              ))}
-                            </div>
-                            <div style={{ minWidth: 280, flex: '1 1 300px' }}>
-                              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
-                                color: 'var(--text-muted)', marginBottom: 6 }}>Workspaces</div>
-                              {b.workspaces.length === 0 ? (
-                                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                                  Nenhum — a Azure cobra este medidor no recurso de origem, não num workspace.
-                                  É por isso que ele nunca apareceu no custo desta tela.
-                                </div>
-                              ) : b.workspaces.map((w) => (
-                                <div key={w.nome} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11, padding: '2px 0' }}>
-                                  <span>{w.nome}</span>
-                                  <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{fmtBRL(w.custo)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        )
-      })()}
-
-      {(exportQuery.data?.sem_workspace || 0) > 0 && (
-        <div className="card" style={{ margin: '0 20px 18px' }}>
-          <div className="card-header">
-            <span className="card-title">Export de log sem workspace</span>
-            <span className="badge" style={{ background: 'var(--orange,#ff8c42)', color: '#fff' }}>
-              {fmtBRL(exportQuery.data!.sem_workspace)} em {mesLabel}
-            </span>
-          </div>
-          <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
-            Diagnostic Settings que mandam para Storage ou Event Hub <strong>sem alimentar nenhum workspace</strong>:
-            pagam ingestão e não viram consulta no Log Analytics. A Azure cobra isso no recurso de origem
-            ("Platform Logs Data Processed"), por isso não aparece no custo de workspace nenhum.
-            De {fmtBRL(exportQuery.data!.total)} de export no período, {fmtBRL(exportQuery.data!.sem_workspace)} não
-            alimentam workspace.
-          </div>
-          <div className="table-wrapper">
-            <table className="data-table">
-              <thead><tr>
-                <th>Recurso</th><th>Tipo</th><th>Destino</th><th style={{ textAlign: 'right' }}>Custo ({mesLabel})</th>
-              </tr></thead>
-              <tbody>
-                {exportQuery.data!.itens.filter((x) => !x.alimenta_workspace).slice(0, 15).map((x) => (
-                  <tr key={x.recurso_id}>
-                    <td style={{ maxWidth: 330 }}>
-                      <div style={{ fontWeight: 600, fontSize: 12 }}>{x.recurso_id.split('/').pop()}</div>
-                      <div style={{ fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>{x.recurso_id}</div>
-                    </td>
-                    <td style={{ fontSize: 10, color: 'var(--text-muted)' }}>{x.recurso_tipo || '—'}</td>
-                    <td style={{ fontSize: 11 }}>
-                      {x.setting_desconhecido ? (
-                        <span style={{ color: 'var(--text-muted)' }} title="O Diagnostic Setting deste recurso ainda não foi coletado — tipo fora da lista ou falha na coleta. Não é o mesmo que não ter setting.">
-                          não coletado
-                        </span>
-                      ) : (
-                        [x.envia_storage ? 'Storage' : null, x.envia_eventhub ? 'Event Hub' : null]
-                          .filter(Boolean).join(' + ') || '—'
-                      )}
-                    </td>
-                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtBRL(x.custo)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
       <div ref={detalheRef} />
 
