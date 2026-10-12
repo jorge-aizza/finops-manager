@@ -2040,6 +2040,15 @@ async function ensureAzureCostsTable() {
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_date  ON azure_costs(subscription_id, UPPER(resource_group_name), cost_date)`, 'idx_azure_costs_sub_rg_date');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_charge_type   ON azure_costs(charge_type)`, 'idx_azure_costs_charge_type');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_pricing_model ON azure_costs(pricing_model)`, 'idx_azure_costs_pricing_model');
+      // 2026-10-12, achado medindo /log-analytics/custo-observabilidade: 202s numa chamada
+      // real. `meter_category` e `cost_date` já tinham índice CADA UM, mas separados — o
+      // planner junta os dois bitmaps (BitmapAnd) e, com work_mem padrão (4MB) sobre um bitmap
+      // que cobre 1,3M+ linhas candidatas só pelo cost_date, degrada pra modo "lossy" (rastreia
+      // só a PÁGINA, não a linha) e precisa reler e reconferir centenas de milhares de linhas
+      // na visita ao heap — 598.645 delas, medido. Um índice composto deixa o range de
+      // cost_date já restrito a um dos 3 meter_category, sem precisar combinar dois bitmaps
+      // grandes nem degradar.
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_cat_date      ON azure_costs(meter_category, cost_date)`, 'idx_azure_costs_cat_date');
       // GIN trgm — requer superuser em alguns ambientes
       try {
         if (!idxSet.has('idx_azure_costs_uom_trgm')) {
