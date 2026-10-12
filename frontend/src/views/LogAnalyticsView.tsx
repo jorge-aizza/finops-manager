@@ -10,6 +10,7 @@ import {
   type LogAnalyticsRankingItem,
 } from '../api/logAnalytics'
 import LogAnalyticsConsumoModal from '../components/LogAnalyticsConsumoModal'
+import CmsMultiSelect from '../components/CmsMultiSelect'
 import { TenantSelector } from '../components/TenantSelector'
 import { useTenantFilter } from '../contexts/TenantFilterContext'
 
@@ -121,24 +122,28 @@ export default function LogAnalyticsView() {
   const [consumoModalWorkspace, setConsumoModalWorkspace] = useState<LogAnalyticsWorkspace | null>(null)
   // Recorte por workspace, pra análise detalhada de um só. '' = todos. O recorte é aplicado no
   // banco (painel, rankings e exports), não sobre a resposta já agregada.
-  const [workspaceFiltro, setWorkspaceFiltro] = useState('')
+  const [workspaceFiltro, setWorkspaceFiltro] = useState<string[]>([])
   const [baldeAberto, setBaldeAberto] = useState<string | null>(null)
   const detalheRef = useRef<HTMLDivElement>(null)
 
   const workspacesQuery = useQuery({ queryKey: ['log-analytics-workspaces', mes], queryFn: () => getLogAnalyticsWorkspaces(mes) })
-  // Trocar de SP pode tirar da lista o workspace escolhido; nesse caso o recorte cai pra
-  // "todos" em vez de filtrar por um guid que não está mais à vista.
-  const workspaceAtivo = workspaceFiltro
-    && (workspacesQuery.data || []).some((w) => w.workspace_guid === workspaceFiltro && matchSubscription(w.subscription_id))
-    ? workspaceFiltro
-    : ''
-  // Clicar numa linha da tabela abre o detalhe, como sempre; escolher no filtro faz o mesmo
-  // sem exigir o clique — "selecionar um workspace" passa a valer pra tela inteira (tabelas,
-  // fontes, Diagnostic Settings, App Insights e recomendações).
+  // Trocar de SP pode tirar da lista um workspace escolhido; os que sumiram caem fora do
+  // recorte em vez de filtrar por um guid que não está mais à vista.
+  const workspacesAtivos = useMemo(
+    () => workspaceFiltro.filter((guid) =>
+      (workspacesQuery.data || []).some((w) => w.workspace_guid === guid && matchSubscription(w.subscription_id))),
+    [workspaceFiltro, workspacesQuery.data, matchSubscription],
+  )
+  // O DETALHE (tabelas, Commitment Tier, análise do Sentinel) é de um workspace só — as
+  // consultas são por guid. Então ele abre quando se clica numa linha ou quando o recorte tem
+  // exatamente um workspace. Com dois ou mais, a tela fica no modo comparação: KPIs, rankings,
+  // tabela e exports somam o conjunto, e o detalhe espera um clique pra saber de quem é.
   const workspaceSelecionado = workspaceClicado
-    ?? (workspaceAtivo ? (workspacesQuery.data || []).find((w) => w.workspace_guid === workspaceAtivo) ?? null : null)
+    ?? (workspacesAtivos.length === 1
+      ? (workspacesQuery.data || []).find((w) => w.workspace_guid === workspacesAtivos[0]) ?? null
+      : null)
   const appInsightsQuery = useQuery({ queryKey: ['log-analytics-app-insights', selectedTenantId], queryFn: () => getLogAnalyticsAppInsights(selectedTenantId) })
-  const resumoQuery = useQuery({ queryKey: ['log-analytics-resumo', mes, selectedTenantId, workspaceAtivo], queryFn: () => getLogAnalyticsResumo(mes, selectedTenantId, workspaceAtivo || null) })
+  const resumoQuery = useQuery({ queryKey: ['log-analytics-resumo', mes, selectedTenantId, workspacesAtivos.join(',')], queryFn: () => getLogAnalyticsResumo(mes, selectedTenantId, workspacesAtivos) })
   const tabelasQuery = useQuery({
     queryKey: ['log-analytics-tabelas', workspaceSelecionado?.workspace_guid, mes],
     queryFn: () => getLogAnalyticsTabelas(workspaceSelecionado!.workspace_guid, mes),
@@ -240,7 +245,7 @@ export default function LogAnalyticsView() {
   async function exportar() {
     setExportando(true)
     try {
-      await baixarLogAnalyticsExcel(mes, selectedTenantId, workspaceAtivo || null)
+      await baixarLogAnalyticsExcel(mes, selectedTenantId, workspacesAtivos)
     } catch (e) {
       window.showToast?.(e instanceof Error ? e.message : 'Erro ao exportar', 'error')
     } finally {
@@ -251,7 +256,7 @@ export default function LogAnalyticsView() {
   async function gerarDashboard() {
     setGerandoDashboard(true)
     try {
-      await baixarLogAnalyticsDashboardHtml(mes, selectedTenantId, workspaceAtivo || null)
+      await baixarLogAnalyticsDashboardHtml(mes, selectedTenantId, workspacesAtivos)
     } catch (e) {
       window.showToast?.(e instanceof Error ? e.message : 'Erro ao gerar dashboard', 'error')
     } finally {
@@ -273,8 +278,8 @@ export default function LogAnalyticsView() {
     [workspaces, matchSubscription],
   )
 
-  const workspacesDoRecorte = workspaceAtivo
-    ? workspacesFiltroPorTenant.filter((w) => w.workspace_guid === workspaceAtivo)
+  const workspacesDoRecorte = workspacesAtivos.length
+    ? workspacesFiltroPorTenant.filter((w) => workspacesAtivos.includes(w.workspace_guid))
     : workspacesFiltroPorTenant
   const workspacesExibidos = somenteWorkspacesComCusto
     ? workspacesDoRecorte.filter((w) => (Number(w.custo_mes_total) || 0) > 0)
@@ -356,17 +361,29 @@ export default function LogAnalyticsView() {
             <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
               Filtrar por Workspace:
             </label>
-            <select
-              className="filter-select"
-              value={workspaceAtivo}
-              onChange={(e) => { setWorkspaceFiltro(e.target.value); setWorkspaceClicado(null) }}
-              style={{ flex: 1, maxWidth: 360 }}
-            >
-              <option value="">Todos os workspaces ({workspacesFiltroPorTenant.length})</option>
-              {workspacesFiltroPorTenant.map((w) => (
-                <option key={w.workspace_guid} value={w.workspace_guid}>{w.nome || w.workspace_guid}</option>
-              ))}
-            </select>
+            <div style={{ flex: 1, maxWidth: 420 }}>
+              <CmsMultiSelect
+                values={workspacesAtivos}
+                options={workspacesFiltroPorTenant.map((w) => ({
+                  value: w.workspace_guid,
+                  label: w.nome || w.workspace_guid,
+                  sublabel: w.resource_group || undefined,
+                }))}
+                searchPlaceholder="Buscar workspace..."
+                triggerLabel={
+                  workspacesAtivos.length === 0 ? `Todos os workspaces (${workspacesFiltroPorTenant.length})`
+                  : workspacesAtivos.length === 1
+                    ? (workspacesFiltroPorTenant.find((w) => w.workspace_guid === workspacesAtivos[0])?.nome || workspacesAtivos[0])
+                    : `${workspacesAtivos.length} workspaces selecionados`
+                }
+                onChange={(vals) => { setWorkspaceFiltro(vals); setWorkspaceClicado(null) }}
+              />
+            </div>
+            {workspacesAtivos.length > 1 && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                comparando {workspacesAtivos.length} — clique numa linha pra abrir o detalhe de um
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -526,6 +543,18 @@ export default function LogAnalyticsView() {
             do gasto de observabilidade. Os {fmtBRL(fora)} restantes são cobrados no recurso de ORIGEM (export para
             Storage/Event Hub, alertas, agentes) e não entram no custo de workspace nenhum.
           </div>
+          {/* O título diz "todos os medidores", mas com filtro de SP ativo o universo é só o
+              daquela SP. Sem dizer isso, a única forma de descobrir é comparar o total com
+              outra tela — foi exatamente assim que o usuário notou um workspace de Sentinel
+              faltando. O card não some nem muda de número: só declara o próprio recorte. */}
+          {selectedTenantId !== null && (
+            <div style={{ margin: '0 20px 10px', padding: '7px 11px', borderRadius: 6, fontSize: 11, lineHeight: 1.5,
+              background: '#ff8c4218', border: '1px solid #ff8c4240', color: 'var(--text)' }}>
+              <strong style={{ color: 'var(--orange,#ff8c42)' }}>Filtrado por {tenantNome || 'uma Service Principal'}.</strong>{' '}
+              "Todos os medidores" vale dentro desse recorte — gasto de observabilidade das outras
+              Service Principals não entra nesta soma. Escolha <strong>🌐 Todas as SPs</strong> acima para ver o total do ambiente.
+            </div>
+          )}
           <div className="table-wrapper">
             <table className="data-table">
               <thead><tr>

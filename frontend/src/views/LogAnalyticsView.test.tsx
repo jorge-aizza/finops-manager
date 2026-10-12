@@ -232,7 +232,7 @@ describe('LogAnalyticsView', () => {
     await user.selectOptions(screen.getByLabelText('Período'), '2026-09')
 
     await waitFor(() => expect(logAnalyticsApi.getLogAnalyticsWorkspaces).toHaveBeenCalledWith('2026-09'))
-    expect(logAnalyticsApi.getLogAnalyticsResumo).toHaveBeenCalledWith('2026-09', null, null)
+    expect(logAnalyticsApi.getLogAnalyticsResumo).toHaveBeenCalledWith('2026-09', null, [])
   })
 
   it('"Mostrar só com custo" tira da tabela quem tem custo zero', async () => {
@@ -297,7 +297,7 @@ describe('LogAnalyticsView', () => {
     await waitFor(() => expect(window.showToast).toHaveBeenCalledWith('Coleta iniciada', 'success'))
   })
 
-  it('"Exportar Excel" baixa com o mês e o workspace do FILTRO — clicar na linha só abre o detalhe, não recorta o export', async () => {
+  it('"Exportar Excel" baixa com o mês e os workspaces do FILTRO — clicar na linha só abre o detalhe, não recorta o export', async () => {
     vi.mocked(logAnalyticsApi.baixarLogAnalyticsExcel).mockResolvedValue(undefined)
     const user = userEvent.setup()
     renderWithClient()
@@ -308,13 +308,31 @@ describe('LogAnalyticsView', () => {
     await user.click(linhaWorkspace('LA-SharedServices-PROD'))
     await screen.findByText('Tabelas — LA-SharedServices-PROD')
     await user.click(screen.getByRole('button', { name: /Exportar Excel/ }))
-    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith('2026-10', null, null))
+    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith('2026-10', null, []))
 
-    // Escolher no dropdown "Filtrar por Workspace" é o que de fato recorta o export.
-    const seletorWorkspace = screen.getByText('Filtrar por Workspace:').nextElementSibling as HTMLSelectElement
-    await user.selectOptions(seletorWorkspace, 'guid-shared')
+    // Escolher no multi-select "Filtrar por Workspace" é o que de fato recorta o export.
+    await user.click(screen.getByText('Todos os workspaces (2)'))
+    await user.click(await screen.findByText('LA-SharedServices-PROD', { selector: '.cms-option *, .cms-option' }))
+    await user.click(screen.getByRole('button', { name: /OK/ }))
     await user.click(screen.getByRole('button', { name: /Exportar Excel/ }))
-    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith('2026-10', null, 'guid-shared'))
+    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith('2026-10', null, ['guid-shared']))
+  })
+
+  it('o filtro de workspace aceita mais de um — a tela soma o conjunto e o detalhe espera um clique', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('rg-shared')
+
+    await user.click(screen.getByText('Todos os workspaces (2)'))
+    await user.click(await screen.findByText('LA-SharedServices-PROD', { selector: '.cms-option *, .cms-option' }))
+    await user.click(screen.getByText('ws-app-prod', { selector: '.cms-option *, .cms-option' }))
+    await user.click(screen.getByRole('button', { name: /OK/ }))
+
+    // Com dois no recorte a tela entra em modo comparação: nenhum detalhe abre sozinho.
+    expect(await screen.findByText(/comparando 2/)).toBeInTheDocument()
+    expect(screen.queryByText(/^Tabelas — /)).not.toBeInTheDocument()
+    await waitFor(() => expect(logAnalyticsApi.getLogAnalyticsResumo)
+      .toHaveBeenCalledWith('2026-10', null, ['guid-shared', 'guid-basic']))
   })
 
   it('mostra a sugestão de Commitment Tier avaliada dia a dia, não pela média', async () => {

@@ -311,13 +311,13 @@ export const getLogAnalyticsRecomendacoes = (severidade?: LogAnalyticsSeveridade
 // nativo dentro da tela (ver _coletarResumoLogAnalytics em server.js, reaproveitado pelos dois).
 // `spId` = filtro de Tenant da tela. Os rankings do painel são agregados no banco, então o
 // filtro precisa viajar até o backend — não dá pra aplicá-lo sobre a resposta.
-// `wsGuid` recorta num workspace só (análise detalhada). Como `spId`, viaja até o backend:
+// `wsGuids` recorta a tela num subconjunto de workspaces. Como `spId`, viaja até o backend:
 // os rankings são agregados em SQL e não teriam como ser filtrados sobre a resposta.
-export const getLogAnalyticsResumo = (mes?: string, spId?: number | null, wsGuid?: string | null) => {
+export const getLogAnalyticsResumo = (mes?: string, spId?: number | null, wsGuids?: string[] | null) => {
   const q = new URLSearchParams()
   if (mes) q.set('mes', mes)
   if (spId) q.set('sp_id', String(spId))
-  if (wsGuid) q.set('workspace_guid', wsGuid)
+  if (wsGuids && wsGuids.length) q.set('workspace_guid', wsGuids.join(','))
   return apiFetch<LogAnalyticsResumo>('GET', '/log-analytics/resumo' + (q.toString() ? '?' + q : ''))
 }
 
@@ -462,12 +462,12 @@ export const forcarColetaDiagnosticSettings = () =>
 
 // Mesmo padrão de baixarAzureInventarioExcel (api/azureInventario.ts) — resposta binária,
 // não passa por apiFetch (que espera JSON).
-export async function baixarLogAnalyticsExcel(mes?: string, spId?: number | null, wsGuid?: string | null) {
+export async function baixarLogAnalyticsExcel(mes?: string, spId?: number | null, wsGuids?: string[] | null) {
   const token = getToken()
   const q = new URLSearchParams()
   if (mes) q.set('mes', mes)
   if (spId) q.set('sp_id', String(spId))
-  if (wsGuid) q.set('workspace_guid', wsGuid)
+  if (wsGuids && wsGuids.length) q.set('workspace_guid', wsGuids.join(','))
   const resp = await fetch(API_BASE + '/log-analytics/export/excel' + (q.toString() ? '?' + q : ''), {
     headers: token ? { Authorization: 'Bearer ' + token } : {},
   })
@@ -486,12 +486,12 @@ export async function baixarLogAnalyticsExcel(mes?: string, spId?: number | null
 
 // Dashboard HTML autocontido (Chart.js embutido inline — abre sem servidor/internet). Mesmo
 // padrão binário do export Excel acima.
-export async function baixarLogAnalyticsDashboardHtml(mes?: string, spId?: number | null, wsGuid?: string | null) {
+export async function baixarLogAnalyticsDashboardHtml(mes?: string, spId?: number | null, wsGuids?: string[] | null) {
   const token = getToken()
   const q = new URLSearchParams()
   if (mes) q.set('mes', mes)
   if (spId) q.set('sp_id', String(spId))
-  if (wsGuid) q.set('workspace_guid', wsGuid)
+  if (wsGuids && wsGuids.length) q.set('workspace_guid', wsGuids.join(','))
   const resp = await fetch(API_BASE + '/log-analytics/export/dashboard' + (q.toString() ? '?' + q : ''), {
     headers: token ? { Authorization: 'Bearer ' + token } : {},
   })

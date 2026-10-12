@@ -18471,7 +18471,7 @@ app.get('/api/log-analytics/export/excel', authMiddleware, dbMiddleware, async (
     const janela = await _janelaLogAnalytics(mes);
     // Mesmo filtro de Tenant da tela — a planilha reflete o que está sendo visto.
     const subsFiltro = await _subsDaSp(req.query.sp_id);
-    const wsFiltro = req.query.workspace_guid || null;
+    const wsFiltro = _wsFiltroDaQuery(req.query.workspace_guid);
     const comJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, [janela.inicio, janela.fimExclusivo]);
     const semJanela = _filtroLogAnalyticsSql(subsFiltro, wsFiltro, []);
     const filtroSozinho = semJanela.where;
@@ -18657,14 +18657,28 @@ function _getLogAnalyticsChartJs() {
 // Dois recortes, ambos aplicados no banco porque os rankings são agregados em SQL e não
 // teriam como ser filtrados sobre a resposta já somada:
 //   `subsFiltro` — assinaturas de uma Service Principal (filtro de Tenant da tela)
-//   `wsFiltro`   — um workspace específico (análise detalhada)
+//   `wsFiltro`   — lista de workspaces (recorte da tela; null = todos)
 // Cada consulta tem sua própria numeração de parâmetro: as que usam a janela já gastam
 // $1 e $2, as demais começam do $1 — por isso o WHERE é montado por consulta, não global.
+// `workspace_guid` na query string aceita repetido (?workspace_guid=a&workspace_guid=b) ou
+// separado por vírgula — o front manda vírgula, mas aceitar os dois evita que um link colado
+// à mão devolva silenciosamente o filtro errado. Sempre devolve array ou null (null = sem
+// filtro, que é diferente de array vazio: array vazio não existe aqui).
+function _wsFiltroDaQuery(valor) {
+  if (!valor) return null;
+  const lista = (Array.isArray(valor) ? valor : String(valor).split(','))
+    .map((v) => String(v).trim()).filter(Boolean);
+  return lista.length ? lista : null;
+}
+
 function _filtroLogAnalyticsSql(subsFiltro, wsFiltro, paramsBase) {
   const cond = [];
   const params = [...paramsBase];
   if (subsFiltro) { params.push(subsFiltro); cond.push(`LOWER(w.subscription_id) = ANY($${params.length})`); }
-  if (wsFiltro) { params.push(wsFiltro); cond.push(`w.workspace_guid = $${params.length}`); }
+  // Lista, não um só (2026-10-12, pedido do usuário): comparar um workspace de cada vez
+  // obrigava a abrir a tela uma vez por workspace pra somar dois. Mesmo formato já usado por
+  // `subsFiltro` logo acima — ANY sobre array, com a normalização feita no endpoint.
+  if (wsFiltro && wsFiltro.length) { params.push(wsFiltro); cond.push(`w.workspace_guid = ANY($${params.length})`); }
   return { where: cond.length ? ' WHERE ' + cond.join(' AND ') : '', params };
 }
 
@@ -18770,7 +18784,7 @@ app.get('/api/log-analytics/resumo', authMiddleware, dbMiddleware, async (req, r
   try {
     const mes = _mesLogAnalytics(req);
     // `sp_id` vem do filtro de Tenant da tela — sem ele, o painel agrega todas as SPs.
-    const resumo = await _coletarResumoLogAnalytics(mes, await _subsDaSp(req.query.sp_id), req.query.workspace_guid || null);
+    const resumo = await _coletarResumoLogAnalytics(mes, await _subsDaSp(req.query.sp_id), _wsFiltroDaQuery(req.query.workspace_guid));
     const { wsRows, recRows, tabRows, diagRows, dcrRows, ...publico } = resumo; // linhas cruas só servem ao HTML/Excel
     // Diz onde a janela do mês corrente foi cortada, pra ficar claro que o total ainda vai
     // subir conforme a Azure publica o billing. Só faz sentido no mês corrente: um mês
@@ -18967,7 +18981,7 @@ app.get('/api/log-analytics/export/dashboard', authMiddleware, dbMiddleware, asy
   try {
     const mes = _mesLogAnalytics(req);
     // Mesmo filtro de Tenant da tela — o dashboard baixado reflete o que está sendo visto.
-    const html = await _gerarLogAnalyticsDashboardHtml(mes, await _subsDaSp(req.query.sp_id), req.query.workspace_guid || null);
+    const html = await _gerarLogAnalyticsDashboardHtml(mes, await _subsDaSp(req.query.sp_id), _wsFiltroDaQuery(req.query.workspace_guid));
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="log-analytics-dashboard-${mes}.html"`);
     res.send(html);
