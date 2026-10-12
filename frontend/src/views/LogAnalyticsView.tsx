@@ -516,7 +516,7 @@ export default function LogAnalyticsView() {
         const o = observabilidadeQuery.data
         const fora = o.total - o.coberto_pela_tela
         return (
-        <div className="card" style={{ margin: '0 20px 18px' }}>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">Gasto de observabilidade — todos os medidores ({mesLabel})</span>
             <span className="badge">{fmtBRL(o.total)}</span>
@@ -598,7 +598,7 @@ export default function LogAnalyticsView() {
       })()}
 
       {(exportQuery.data?.sem_workspace || 0) > 0 && (
-        <div className="card" style={{ margin: '0 20px 18px' }}>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">Export de log sem workspace</span>
             <span className="badge" style={{ background: 'var(--orange,#ff8c42)', color: '#fff' }}>
@@ -878,7 +878,7 @@ export default function LogAnalyticsView() {
         // lógica já usada por tabela. Não é fatura por recurso: a Azure não cobra nesse nível.
         const custoWs = Number(workspaceSelecionado.custo_mes_ingestao) || 0
         return (
-        <div className="card" style={{ margin: '0 20px 18px' }}>
+        <div className="card">
           <div className="card-header">
             <span className="card-title">Recursos por volume — {workspaceSelecionado.nome}</span>
             {recursos.length > 0 && <span className="badge">{recursos.length}</span>}
