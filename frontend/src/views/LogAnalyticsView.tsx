@@ -1045,7 +1045,7 @@ export default function LogAnalyticsView() {
           )
         }
         return (
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 18 }}>
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>
             Commitment Tier — sugestão de nível
           </div>
@@ -1146,7 +1146,7 @@ export default function LogAnalyticsView() {
           .reduce((a, t) => a + (t.custo_sentinel_estimado || 0), 0)
         const pctNativas = total > 0 ? (nativas / total) * 100 : 0
         return (
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 18 }}>
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>
             Análise do Sentinel — quem está pagando
           </div>
@@ -1229,7 +1229,7 @@ export default function LogAnalyticsView() {
           </tr>
         )
         return (
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 18 }}>
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 16 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>
             Custo por GB — Analytics vs Basic
           </div>
