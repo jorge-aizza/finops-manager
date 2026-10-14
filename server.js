@@ -10715,7 +10715,14 @@ const _KQL_DISCOS_ORFAOS = `
 // e do portal público sem necessidade (2026-10-xx, pedido do usuário).
 function _classificarDiscoValidacao(disco) {
   const nome = (disco.name || '').toLowerCase();
-  if (nome.startsWith('pvc-')) return 'aks_pvc';
+  // `includes`, não `startsWith` (2026-10-13, achado pelo usuário no portal público): o AKS
+  // nomeia PVC provisionado dinamicamente como `kubernetes-dynamic-pvc-<uuid>`, não `pvc-<uuid>`
+  // — só o CSI driver mais novo usa o prefixo puro. Com startsWith, oito volumes vivos de dois
+  // clusters (R$ 1.381,72/mês) estavam listados no portal público como órfãos seguros de
+  // apagar. O erro aqui é assimétrico: marcar demais só esconde um disco do portal público e
+  // o mantém visível na tela interna com o aviso; marcar de menos oferece um volume em uso
+  // como lixo.
+  if (nome.includes('pvc')) return 'aks_pvc';
   if (nome.includes('asr')) return 'asr';
   return null;
 }
