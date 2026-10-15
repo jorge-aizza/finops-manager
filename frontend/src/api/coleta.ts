@@ -2,6 +2,7 @@ import { API_BASE, ApiError, apiFetch, getToken } from './client'
 import { numFields } from './normalize'
 import type {
   AgendamentoSPInput, AgendamentoStorageInput, AzureResumo, ColetaStatus, ColetarAPIInput,
+  ColetarTodasPreview, ColetarTodasResponse,
   CoberturaMes, DiagAgendador, DiagnosticoLinha, HistoricoItem, ImportItem, ImportJob, Pendente, PurgeResult, RGPreview,
   ServicePrincipal, ServicePrincipalInput, StorageConfig, StorageConfigInput,
   SubscriptionPreview, TestarSPResponse, TestarStorageResponse,
@@ -41,6 +42,18 @@ export const executarStorage = (id: number) =>
 
 export const coletarAPI = (spId: number, input: ColetarAPIInput) =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/sps/' + spId + '/coletar-api', input, 20000)
+
+// Coleta em todas as SPs ativas de uma vez. O preview é o que a tela mostra na
+// confirmação — mesmo plano que o POST vai executar, resolvido no servidor pra não
+// divergir (ver _planoColetaTodas em server.js). Sem período, cada SP usa a própria
+// janela de granularidade, igual ao agendador.
+export const previewColetarTodas = (periodo?: { data_inicio: string; data_fim: string }) => {
+  const qs = periodo ? '?data_inicio=' + periodo.data_inicio + '&data_fim=' + periodo.data_fim : ''
+  return apiFetch<ColetarTodasPreview>('GET', '/azure-coleta/coletar-todas/preview' + qs, undefined, 20000)
+}
+
+export const coletarTodas = (input?: { data_inicio?: string; data_fim?: string; metric?: string }) =>
+  apiFetch<ColetarTodasResponse>('POST', '/azure-coleta/coletar-todas', input || {}, 20000)
 
 export const cancelarColeta = (tipo?: 'api' | 'storage', id?: number | null) => {
   const body = (tipo && id !== undefined) ? { tipo, id } : undefined

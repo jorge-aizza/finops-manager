@@ -11478,6 +11478,120 @@ app.post('/api/azure-coleta/sps/:id/coletar-api', authMiddleware, dbMiddleware, 
     .catch(e => console.error('[ColetaAPI] Erro:', e.message));
 });
 
+// Resolve o que uma coleta "forçada" rodaria pra uma SP: o MESMO que o agendador rodaria.
+// Fonte única pro preview (GET) e pra execução (POST) de /coletar-todas — se as duas
+// divergissem, o usuário confirmaria uma coisa e rodaria outra.
+//
+// Detecção de modo por credencial disponível (não pelo campo `modo_coleta`), igual ao
+// agendador: `modo_coleta` desatualizado no banco não deve bloquear a coleta.
+// Janela: últimos `granularidade_dias` terminando ONTEM — o custo de hoje na Azure ainda
+// está se formando. Override explícito de período vence a janela.
+function _planoColetaForcada(sp, override) {
+  const modo = (sp.billing_account_id && sp.billing_profile_id) ? 'billing_profile' : 'subscription';
+  const subIds = modo === 'subscription'
+    ? String(sp.subscription_ids || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
+    : [];
+  if (modo === 'subscription' && !subIds.length) {
+    return { apto: false, motivo: 'sem assinaturas configuradas e sem Billing Profile' };
+  }
+  let inicio, fim;
+  if (override && override.data_inicio && override.data_fim) {
+    inicio = override.data_inicio; fim = override.data_fim;
+  } else {
+    const gran = sp.granularidade_dias || 7;
+    const d2 = new Date(); d2.setDate(d2.getDate() - 1);
+    const d1 = new Date(d2); d1.setDate(d1.getDate() - (gran - 1));
+    const fmt = d => d.toISOString().slice(0, 10);
+    inicio = fmt(d1); fim = fmt(d2);
+  }
+  return { apto: true, modo, subIds, inicio, fim };
+}
+
+// Monta a lista de SPs ativas e o plano de cada uma. `incluirEmExecucao=false` marca como
+// inapta quem já está coletando (não se enfileira — a chave `api:<id>` é de uma execução
+// por vez; o resto das SPs roda em paralelo normalmente, que é o ponto da v4.2).
+async function _planoColetaTodas(override) {
+  const r = await pool.query(`
+    SELECT id, nome, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, granularidade_dias
+    FROM azure_coleta_config
+    WHERE ativo = true
+    ORDER BY is_padrao DESC, id ASC
+  `);
+  const aptas = [], inaptas = [];
+  for (const row of r.rows) {
+    const sp = {
+      ...row,
+      billing_account_id: row.billing_account_id ? _safeDecrypt(row.billing_account_id) : '',
+      billing_profile_id: row.billing_profile_id ? _safeDecrypt(row.billing_profile_id) : '',
+    };
+    if (_coletaAtiva('api', sp.id)) { inaptas.push({ id: sp.id, nome: sp.nome, motivo: 'já está coletando agora' }); continue; }
+    const plano = _planoColetaForcada(sp, override);
+    if (!plano.apto) { inaptas.push({ id: sp.id, nome: sp.nome, motivo: plano.motivo }); continue; }
+    aptas.push({
+      id: sp.id, nome: sp.nome, modo: plano.modo,
+      assinaturas: plano.subIds.length, data_inicio: plano.inicio, data_fim: plano.fim,
+      _ba: sp.billing_account_id, _bp: sp.billing_profile_id, _subIds: plano.subIds,
+    });
+  }
+  return { aptas, inaptas };
+}
+
+// Preview: o que o botão "Coletar Todas" vai rodar, sem rodar nada. A tela mostra isso
+// na confirmação — forçar coleta em várias SPs de uma vez custa chamadas de API na Azure,
+// então o usuário precisa ver o alcance antes de confirmar.
+app.get('/api/azure-coleta/coletar-todas/preview', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const override = (req.query.data_inicio && req.query.data_fim)
+      ? { data_inicio: String(req.query.data_inicio), data_fim: String(req.query.data_fim) } : null;
+    const { aptas, inaptas } = await _planoColetaTodas(override);
+    res.json({
+      periodo_customizado: !!override,
+      aptas: aptas.map(({ _ba, _bp, _subIds, ...pub }) => pub),
+      inaptas,
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Dispara coleta API em TODAS as SPs ativas de uma vez (v4.2 — só faz sentido agora que as
+// execuções são isoladas por SP; antes do Map de execuções isso enfileiraria e a segunda
+// SP morreria com "coleta já em execução").
+//
+// NÃO mexe em `proxima_coleta`: isto é execução manual, não pode deslocar o agendamento
+// configurado (diferente do agendador, que reagenda ao disparar).
+app.post('/api/azure-coleta/coletar-todas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { data_inicio, data_fim, metric } = req.body || {};
+    if ((data_inicio && !data_fim) || (!data_inicio && data_fim)) {
+      return res.status(400).json({ error: 'Informe data_inicio e data_fim juntos, ou nenhum dos dois (aí cada SP usa a própria janela).' });
+    }
+    if (data_inicio && data_fim && data_fim < data_inicio) {
+      return res.status(400).json({ error: 'data_fim deve ser posterior a data_inicio' });
+    }
+    const override = (data_inicio && data_fim) ? { data_inicio, data_fim } : null;
+    const metricEfetivo = ['ActualCost', 'AmortizedCost'].includes(metric) ? metric : 'ActualCost';
+    const { aptas, inaptas } = await _planoColetaTodas(override);
+    if (!aptas.length) {
+      return res.status(409).json({
+        error: 'Nenhuma Service Principal apta a coletar agora.',
+        inaptas,
+      });
+    }
+    // Responde ANTES de disparar (mesmo padrão do coletar-api individual): as coletas
+    // levam minutos, quem acompanha é o GET /status via `execucoes`.
+    res.json({
+      ok: true,
+      message: `Coleta iniciada em ${aptas.length} Service Principal(is)`,
+      iniciadas: aptas.map(({ _ba, _bp, _subIds, ...pub }) => pub),
+      inaptas,
+    });
+    for (const sp of aptas) {
+      console.log(`[ColetaTodas] Disparando SP #${sp.id} (${sp.nome}) modo=${sp.modo} ${sp.data_inicio}→${sp.data_fim}`);
+      _executarColetaAPI(sp.id, sp._ba || '', sp._bp || '', sp.data_inicio, sp.data_fim, sp.modo, sp._subIds, [], metricEfetivo, 'manual')
+        .catch(e => console.error(`[ColetaTodas] Erro SP #${sp.id}:`, e.message));
+    }
+  } catch (e) { _dbErr(res, e); }
+});
+
 // Ativa/desativa SP sem tocar nos outros campos
 app.patch('/api/azure-coleta/sps/:id/ativo', authMiddleware, dbMiddleware, async (req, res) => {
   try {

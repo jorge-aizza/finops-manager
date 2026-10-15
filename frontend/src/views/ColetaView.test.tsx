@@ -326,4 +326,110 @@ describe('ColetaView', () => {
       expect(coletaApi.deleteHistorico).not.toHaveBeenCalled()
     });
   });
+
+  // ── Coletar Todas (v4.2) ──
+  describe('Coletar Todas', () => {
+    const planoDuasSps = {
+      periodo_customizado: false,
+      aptas: [
+        { id: 1, nome: 'SP Produção', modo: 'billing_profile' as const, assinaturas: 0, data_inicio: '2026-10-08', data_fim: '2026-10-14' },
+        { id: 2, nome: 'SP BigData', modo: 'subscription' as const, assinaturas: 12, data_inicio: '2026-10-08', data_fim: '2026-10-14' },
+      ],
+      inaptas: [],
+    }
+
+    it('mostra o plano na confirmação antes de disparar nada', async () => {
+      const user = userEvent.setup()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      vi.mocked(coletaApi.previewColetarTodas).mockResolvedValue(planoDuasSps)
+      renderWithClient()
+      await screen.findByText('PADRÃO')
+
+      await user.click(screen.getByRole('button', { name: '⏩ Coletar Todas' }))
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
+      const msg = confirmSpy.mock.calls[0][0] as string
+      // O alcance precisa estar explícito: quantas SPs, quais, e o período de cada uma.
+      expect(msg).toContain('2 Service Principal')
+      expect(msg).toContain('SP Produção')
+      expect(msg).toContain('SP BigData')
+      expect(msg).toContain('12 assinatura(s)')
+      expect(msg).toContain('2026-10-08 → 2026-10-14')
+      // Recusou: não dispara.
+      expect(coletaApi.coletarTodas).not.toHaveBeenCalled()
+    });
+
+    it('dispara a coleta ao confirmar', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(coletaApi.previewColetarTodas).mockResolvedValue(planoDuasSps)
+      vi.mocked(coletaApi.coletarTodas).mockResolvedValue({
+        ok: true, message: 'Coleta iniciada em 2 Service Principal(is)',
+        iniciadas: planoDuasSps.aptas, inaptas: [],
+      })
+      renderWithClient()
+      await screen.findByText('PADRÃO')
+
+      await user.click(screen.getByRole('button', { name: '⏩ Coletar Todas' }))
+
+      await waitFor(() => expect(coletaApi.coletarTodas).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(
+        expect.stringContaining('2 Service Principal(is)'), 'success',
+      ))
+    });
+
+    it('avisa quais SPs foram ignoradas, sem esconder que as outras rodaram', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const inaptas = [{ id: 3, nome: 'SP Velha', motivo: 'já está coletando agora' }]
+      vi.mocked(coletaApi.previewColetarTodas).mockResolvedValue({ ...planoDuasSps, inaptas })
+      vi.mocked(coletaApi.coletarTodas).mockResolvedValue({
+        ok: true, message: 'Coleta iniciada em 2 Service Principal(is)',
+        iniciadas: planoDuasSps.aptas, inaptas,
+      })
+      renderWithClient()
+      await screen.findByText('PADRÃO')
+
+      await user.click(screen.getByRole('button', { name: '⏩ Coletar Todas' }))
+
+      await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(
+        expect.stringContaining('1 ignorada(s)'), 'success',
+      ))
+    });
+
+    it('não chama o POST quando nenhuma SP está apta', async () => {
+      const user = userEvent.setup()
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(coletaApi.previewColetarTodas).mockResolvedValue({
+        periodo_customizado: false, aptas: [],
+        inaptas: [{ id: 1, nome: 'SP Produção', motivo: 'sem assinaturas configuradas e sem Billing Profile' }],
+      })
+      renderWithClient()
+      await screen.findByText('PADRÃO')
+
+      await user.click(screen.getByRole('button', { name: '⏩ Coletar Todas' }))
+
+      await waitFor(() => expect(alertSpy).toHaveBeenCalled())
+      expect(alertSpy.mock.calls[0][0]).toContain('sem assinaturas configuradas')
+      expect(confirmSpy).not.toHaveBeenCalled() // não pede confirmação do que não dá pra fazer
+      expect(coletaApi.coletarTodas).not.toHaveBeenCalled()
+    });
+
+    it('não dispara se o preview falhar — o usuário não confirma o que não viu', async () => {
+      const user = userEvent.setup()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(coletaApi.previewColetarTodas).mockRejectedValue(new Error('500 banco fora'))
+      renderWithClient()
+      await screen.findByText('PADRÃO')
+
+      await user.click(screen.getByRole('button', { name: '⏩ Coletar Todas' }))
+
+      await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(
+        expect.stringContaining('500 banco fora'), 'error',
+      ))
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(coletaApi.coletarTodas).not.toHaveBeenCalled()
+    });
+  });
 });

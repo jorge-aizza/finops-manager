@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  coletarAPI, criarPendente, deleteHistorico, deletePendente, deleteSP, deleteStorage, executarStorage,
+  coletarAPI, coletarTodas, criarPendente, deleteHistorico, deletePendente, deleteSP, deleteStorage, executarStorage,
   getCoberturaMeses, getHistorico, getImports, listPendentes, listSPs, listStorages,
-  setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
+  previewColetarTodas, setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
 } from '../api/coleta'
 import {
   deleteDatabricksConfig, deleteDatabricksHistorico, getDatabricksHistorico, listDatabricksConfigs,
@@ -162,6 +162,49 @@ export default function ColetaView() {
   function handleDeleteSP(sp: ServicePrincipal) {
     if (!confirm(`Excluir o Service Principal "${sp.nome}"? Esta ação não pode ser desfeita.`)) return
     deleteSPMutation.mutate(sp.id)
+  }
+
+  // ── Coletar Todas (v4.2) ──
+  // Só existe porque as execuções passaram a ser isoladas por SP: antes isso enfileiraria
+  // e a segunda SP morreria com "coleta já em execução". Sem período escolhido, cada SP
+  // usa a própria janela de granularidade — o mesmo que o agendador faria.
+  const coletarTodasMutation = useMutation({
+    mutationFn: () => coletarTodas(),
+    onSuccess: (r) => {
+      const pulou = r.inaptas.length ? ` ${r.inaptas.length} ignorada(s).` : ''
+      window.showToast?.(`${r.message}.${pulou}`, 'success')
+      queryClient.invalidateQueries({ queryKey: ['coleta-status'] })
+      queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao iniciar coletas: ' + e.message, 'error'),
+  })
+
+  async function handleColetarTodas() {
+    let plano
+    try {
+      plano = await previewColetarTodas()
+    } catch (e) {
+      window.showToast?.('Não foi possível montar o plano de coleta: ' + (e as Error).message, 'error')
+      return
+    }
+    if (!plano.aptas.length) {
+      const motivos = plano.inaptas.map((i) => `• ${i.nome}: ${i.motivo}`).join('\n')
+      window.showToast?.('Nenhuma SP apta a coletar agora.', 'error')
+      if (motivos) alert(`Nenhuma Service Principal apta a coletar agora:\n\n${motivos}`)
+      return
+    }
+    const linhas = plano.aptas
+      .map((a) => `• ${a.nome} — ${a.modo === 'billing_profile' ? 'Billing Profile' : `${a.assinaturas} assinatura(s)`}\n  ${a.data_inicio} → ${a.data_fim}`)
+      .join('\n')
+    const ignoradas = plano.inaptas.length
+      ? `\n\nSerão ignoradas:\n${plano.inaptas.map((i) => `• ${i.nome}: ${i.motivo}`).join('\n')}`
+      : ''
+    const msg =
+      `Forçar coleta em ${plano.aptas.length} Service Principal(is) ao mesmo tempo?\n\n${linhas}${ignoradas}\n\n` +
+      `Cada SP usa a própria janela de granularidade (o mesmo período que o agendador coletaria).\n` +
+      `Isto consome chamadas de API na Azure e não altera os agendamentos configurados.`
+    if (!confirm(msg)) return
+    coletarTodasMutation.mutate()
   }
 
   const [wizardSP, setWizardSP] = useState<ServicePrincipal | null>(null)
@@ -349,6 +392,15 @@ export default function ColetaView() {
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginLeft: 'auto' }}>
             <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setDiagOpen(true)}>
               🔍 Diagnóstico do Agendador
+            </button>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 11, padding: '4px 10px', borderColor: 'var(--accent)', color: 'var(--accent)' }}
+              title="Dispara coleta em todas as Service Principals ativas ao mesmo tempo"
+              disabled={coletarTodasMutation.isPending || !(spsQuery.data || []).some((s) => s.ativo)}
+              onClick={handleColetarTodas}
+            >
+              {coletarTodasMutation.isPending ? 'Iniciando…' : '⏩ Coletar Todas'}
             </button>
             <button className="btn-primary" onClick={() => { setEditingSP(null); setSpModalOpen(true) }}>
               Novo SP

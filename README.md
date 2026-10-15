@@ -30,6 +30,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 
 ### 🏢 Multi-Service Principal (multi-tenant)
 - **Coletas simultâneas por SP** — o estado da coleta deixou de ser global e passou a ser por execução (`Map` com chave `tipo:id`, ex. `api:7`). Duas SPs agendadas para o mesmo horário agora rodam juntas, cada uma com seu próprio log e progresso, em vez de uma esperar a outra
+- **Botão "Coletar Todas"** — dispara coleta em todas as SPs ativas de uma vez, em paralelo. Só faz sentido a partir desta versão: com o estado global, a segunda SP morria com "coleta já em execução". A confirmação mostra o plano antes (quais SPs, modo, período de cada uma, e quais ficam de fora com o motivo), e a execução não desloca os agendamentos configurados
 - **Cancelamento seletivo** — `POST /api/azure-coleta/cancelar` aceita `{ tipo, id }`; sem corpo, mantém o comportamento antigo de cancelar tudo
 - `GET /api/azure-coleta/status` ganhou o array `execucoes[]` (uma entrada por coleta ativa); `em_execucao`/`progresso` continuam lá para não quebrar consumidores
 - **Filtro global de Tenant (SP)** — presente em todas as telas de monitoramento (Dashboard, Inventário, Log Analytics, Coleta, exports Excel). A atribuição é feita por `subscription_id`, nunca por `sp_id`, porque as tabelas de dados não carregam coluna de SP
@@ -1399,6 +1400,8 @@ Authorization: Bearer <jwt_token>
 | GET | `/api/azure-coleta/status` | Estado da coleta. Campos legados (`em_execucao`, `progresso`, `cancelando`) + array novo `execucoes[]` com uma entrada por execução ativa (`{tipo, id, nome, iniciado_em, cancelando, progresso}`) |
 | POST | `/api/azure-coleta/cancelar` | Corpo opcional `{ tipo, id }` cancela só aquela execução (ex. `{tipo:'api', id:7}`); sem corpo, cancela todas as ativas |
 | POST | `/api/azure-coleta/sps/:id/coletar-api` | Dispara coleta manual daquela SP — não bloqueia mais se outra SP estiver coletando |
+| GET | `/api/azure-coleta/coletar-todas/preview` | Plano do "Coletar Todas" sem executar: SPs aptas (modo, período, nº de assinaturas) e inaptas com o motivo. Aceita `data_inicio`/`data_fim` pra simular período customizado |
+| POST | `/api/azure-coleta/coletar-todas` | Dispara coleta em **todas** as SPs ativas em paralelo. Sem `data_inicio`/`data_fim`, cada SP usa a própria janela de granularidade (igual ao agendador). **Não** altera `proxima_coleta` — é execução manual, não desloca o agendamento |
 | POST | `/api/azure-coleta/storages/:id/executar` | Idem para coleta via Storage Account |
 | GET | `/api/azure-coleta/diag-agendador` | Diagnóstico: quais configs estão `due` e por quê |
 

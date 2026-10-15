@@ -173,6 +173,36 @@ export interface ColetarAPIInput {
   resource_groups?: string[]
 }
 
+// Plano de uma coleta forçada por SP — o servidor resolve modo, janela e nº de
+// assinaturas (ver _planoColetaForcada em server.js), a tela só exibe.
+export interface ColetarTodasItem {
+  id: number
+  nome: string
+  modo: ModoColeta
+  assinaturas: number
+  data_inicio: string
+  data_fim: string
+}
+
+export interface ColetarTodasInapta {
+  id: number
+  nome: string
+  motivo: string
+}
+
+export interface ColetarTodasPreview {
+  periodo_customizado: boolean
+  aptas: ColetarTodasItem[]
+  inaptas: ColetarTodasInapta[]
+}
+
+export interface ColetarTodasResponse {
+  ok: boolean
+  message: string
+  iniciadas: ColetarTodasItem[]
+  inaptas: ColetarTodasInapta[]
+}
+
 export interface ColetaProgresso {
   tipo: 'api' | 'storage'
   fase: string
