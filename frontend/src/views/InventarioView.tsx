@@ -570,7 +570,9 @@ export default function InventarioView() {
   const despItens = desperdicioQuery.data?.itens ?? []
   const despBuscaNorm = filtroDespBusca.trim().toLowerCase()
   const passaDias = (i: typeof despItens[number]) => filtroDesperdicioDias === 0 || (i.dias_orfao ?? 0) >= filtroDesperdicioDias
-  const passaBusca = (i: typeof despItens[number]) => !despBuscaNorm || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)
+  const passaBusca = (i: typeof despItens[number]) => !despBuscaNorm
+    || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)
+    || (i.subscription_name || '').toLowerCase().includes(despBuscaNorm)
   const passaRg = (i: typeof despItens[number]) => !filtroDespRgs.length || (!!i.resource_group && filtroDespRgs.includes(i.resource_group))
   // Base = todos os filtros menos o de tipo: os cartões por tipo mostram o que sobraria ao clicar em cada um.
   const despBase = despItens.filter((i) => passaRg(i) && passaDias(i) && passaBusca(i))
@@ -1505,7 +1507,7 @@ export default function InventarioView() {
                   </select>
                   <input
                     type="text" className="filter-input" style={{ minWidth: 220 }}
-                    placeholder="Buscar por nome do recurso..."
+                    placeholder="Buscar por recurso ou assinatura..."
                     value={filtroDespBusca} onChange={(e) => setFiltroDespBusca(e.target.value)}
                   />
                   {despTemFiltro && (
@@ -1590,7 +1592,7 @@ export default function InventarioView() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Recurso</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
+                      <th>Recurso</th><th>Assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
                       <th style={{ textAlign: 'right' }}>Tam.</th>
                       <th style={{ textAlign: 'right' }}>Custo/mês</th>
                       <th style={{ textAlign: 'right' }}>Dias Órfão</th>
@@ -1602,6 +1604,7 @@ export default function InventarioView() {
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
                           {it.nome || it.resource_id}
                         </td>
+                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.subscription_name || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{DESPERDICIO_LABEL[it.categoria] || it.categoria}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.resource_group || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.sku || '—'}</td>
@@ -1641,7 +1644,7 @@ export default function InventarioView() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Recurso</th><th>Motivo</th><th>Resource Group</th><th>SKU</th>
+                      <th>Recurso</th><th>Assinatura</th><th>Motivo</th><th>Resource Group</th><th>SKU</th>
                       <th style={{ textAlign: 'right' }}>Tam.</th>
                       <th style={{ textAlign: 'right' }}>Custo/mês</th>
                     </tr>
@@ -1654,6 +1657,7 @@ export default function InventarioView() {
                           <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
                             {it.nome || it.resource_id}
                           </td>
+                          <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.subscription_name || '—'}</td>
                           <td>
                             {motivo && (
                               <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 6, color: motivo.color, background: motivo.bg }}>

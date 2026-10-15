@@ -17,9 +17,9 @@ const resposta: OrfaosPublicaResposta = {
     { categoria: 'ip_solto', itens: 1, custo_mensal_estimado: 0 },
   ],
   itens: [
-    { nome: 'disco-a', categoria: 'disco_orfao', resource_group: 'RG-A', sku: 'Premium_LRS', tamanho_gb: 128, custo_mensal_estimado: 100, dias_orfao: 40 },
-    { nome: 'disco-b', categoria: 'disco_orfao', resource_group: 'RG-B', sku: 'Standard_LRS', tamanho_gb: 64, custo_mensal_estimado: 50, dias_orfao: 5 },
-    { nome: 'ip-x', categoria: 'ip_solto', resource_group: 'RG-A', sku: 'Standard', tamanho_gb: null, custo_mensal_estimado: null, dias_orfao: null },
+    { nome: 'disco-a', categoria: 'disco_orfao', subscription_name: 'Assinatura Produção', resource_group: 'RG-A', sku: 'Premium_LRS', tamanho_gb: 128, custo_mensal_estimado: 100, dias_orfao: 40 },
+    { nome: 'disco-b', categoria: 'disco_orfao', subscription_name: 'Assinatura Homolog', resource_group: 'RG-B', sku: 'Standard_LRS', tamanho_gb: 64, custo_mensal_estimado: 50, dias_orfao: 5 },
+    { nome: 'ip-x', categoria: 'ip_solto', subscription_name: 'Assinatura Produção', resource_group: 'RG-A', sku: 'Standard', tamanho_gb: null, custo_mensal_estimado: null, dias_orfao: null },
   ],
 }
 
@@ -59,7 +59,7 @@ describe('PublicOrfaosView', () => {
     expect(screen.getByText('disco-b')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Limpar filtros' }))
-    await user.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'ip-')
+    await user.type(screen.getByPlaceholderText('Buscar por recurso ou assinatura...'), 'ip-')
     expect(screen.getByText('ip-x')).toBeInTheDocument()
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
   })
@@ -87,7 +87,7 @@ describe('PublicOrfaosView', () => {
     renderView()
     await screen.findByText('disco-a')
 
-    await user.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'disco-')
+    await user.type(screen.getByPlaceholderText('Buscar por recurso ou assinatura...'), 'disco-')
     await user.click(screen.getByRole('button', { name: /Exportar Excel/ }))
 
     expect(orfaosApi.baixarOrfaosPublicaExcel).toHaveBeenCalledWith(
@@ -119,5 +119,19 @@ describe('PublicOrfaosView', () => {
     vi.mocked(orfaosApi.getOrfaosPublica).mockResolvedValue({ ...resposta, total_itens: 0, itens: [], por_categoria: [], custo_mensal_estimado_total: 0 })
     renderView()
     expect(await screen.findByText('Nenhum recurso órfão para exibir.')).toBeInTheDocument()
+  })
+
+  it('mostra o nome da assinatura na tabela e permite buscar por ele', async () => {
+    const user = userEvent.setup()
+    renderView()
+    await screen.findByText('disco-a')
+
+    expect(screen.getByRole('columnheader', { name: 'Assinatura' })).toBeInTheDocument()
+    expect(screen.getAllByText('Assinatura Produção').length).toBe(2) // disco-a e ip-x
+    expect(screen.getByText('Assinatura Homolog')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText(/[Bb]uscar/), 'homolog')
+    expect(screen.getByText('disco-b')).toBeInTheDocument()
+    expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
   })
 })

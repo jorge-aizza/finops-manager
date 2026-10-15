@@ -68,7 +68,7 @@ beforeEach(() => {
 
 describe('InventarioView', () => {
   it('aba Desperdício mostra dias órfão e filtra por tempo mínimo', async () => {
-    const base = { subscription_id: 's', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
+    const base = { subscription_id: 's', subscription_name: 'Assinatura Principal', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [],
       por_categoria: [],
@@ -95,7 +95,7 @@ describe('InventarioView', () => {
   })
 
   it('aba Desperdício filtra por tipo de recurso (cartões e seletor) e Resource Group', async () => {
-    const base = { subscription_id: 's', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 1 }
+    const base = { subscription_id: 's', subscription_name: 'Assinatura Principal', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 1 }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [],
       por_categoria: [
@@ -174,14 +174,14 @@ describe('InventarioView', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
 
     // Busca por nome continua disponível, combinada com os demais filtros
-    await userEvent.type(screen.getByPlaceholderText('Buscar por nome do recurso...'), 'disco-a')
+    await userEvent.type(screen.getByPlaceholderText('Buscar por recurso ou assinatura...'), 'disco-a')
     expect(screen.getByText('disco-a')).toBeInTheDocument()
     expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
   }, 30000) // muitos cliques simulados: passa de 5s com a máquina ocupada
 
   it('aba Desperdício separa discos de PVC do AKS e de ASR numa seção própria de validação', async () => {
-    const base = { subscription_id: 's', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, marcado_orfao_em: null, dias_orfao: 1 }
+    const base = { subscription_id: 's', subscription_name: 'Assinatura Principal', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, marcado_orfao_em: null, dias_orfao: 1 }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [],
       por_categoria: [{ categoria: 'disco_orfao', itens: 3, custo_mensal_estimado: 180, sem_custo_conhecido: 0 }],
@@ -214,6 +214,28 @@ describe('InventarioView', () => {
 
     // A contagem de "Recursos ociosos" conta só o disco pronto, não os 2 de validação
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
+  })
+
+  it('aba Desperdício mostra o nome da assinatura e permite buscar por ele', async () => {
+    const base = { location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 1 }
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 2, custo_mensal_estimado_total: 0, sem_custo_conhecido: 2, erros: [],
+      por_categoria: [],
+      itens: [
+        { ...base, categoria: 'disco_orfao', subscription_id: 's1', subscription_name: 'SP Produção', resource_id: '/d1', nome: 'disco-prod', resource_group: 'rg-a' },
+        { ...base, categoria: 'disco_orfao', subscription_id: 's2', subscription_name: 'SP BigData', resource_id: '/d2', nome: 'disco-bigdata', resource_group: 'rg-b' },
+      ],
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+    await screen.findByText('disco-prod')
+
+    expect(screen.getAllByText('SP Produção', { selector: 'td' }).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('SP BigData', { selector: 'td' }).length).toBeGreaterThan(0)
+
+    await userEvent.type(screen.getByPlaceholderText('Buscar por recurso ou assinatura...'), 'bigdata')
+    expect(screen.getByText('disco-bigdata')).toBeInTheDocument()
+    expect(screen.queryByText('disco-prod')).not.toBeInTheDocument()
   })
 
   it('mostra a aba Recursos por padrão', async () => {

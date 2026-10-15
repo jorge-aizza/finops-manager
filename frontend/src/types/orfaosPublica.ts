@@ -1,5 +1,7 @@
 // Contrato de GET /api/public/orfaos (server.js). Deliberadamente sem resource_id,
 // subscription_id ou erros: o portal é público e não deve expor o caminho completo dos recursos.
+// `subscription_name` é a exceção — rótulo legível, não path pro recurso, e o admin já o vê ao
+// curar a allowlist de assinaturas expostas (ver `orfaos_subscription_ids` em server.js).
 
 export type OrfaoCategoria =
   | 'disco_orfao' | 'snapshot_antigo' | 'ip_solto' | 'nic_orfa'
@@ -8,6 +10,7 @@ export type OrfaoCategoria =
 export interface OrfaoItem {
   nome: string | null
   categoria: OrfaoCategoria
+  subscription_name: string | null
   resource_group: string | null
   sku: string | null
   tamanho_gb: number | null

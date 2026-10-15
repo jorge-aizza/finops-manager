@@ -522,6 +522,8 @@ export type AzureDesperdicioCategoria =
 export interface AzureDesperdicioItem {
   categoria: AzureDesperdicioCategoria
   subscription_id: string
+  /** Resolvido via azure_subs_cache — null se a assinatura ainda não foi vista por nenhuma coleta de custo. */
+  subscription_name: string | null
   resource_id: string
   nome: string | null
   resource_group: string | null

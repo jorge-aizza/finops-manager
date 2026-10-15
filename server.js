@@ -4397,9 +4397,12 @@ app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
 // ── GET /api/public/orfaos ────────────────────────────────────────────────────
 // Visão de recursos órfãos do portal. Sem sessão (como o resto do portal), então: allowlist
 // explícita do admin (assinaturas + tipos; RG opcional), campos sanitizados (NUNCA resource_id,
-// subscription_id ou erros) e rate limit — a 1ª chamada com cache frio dispara consultas ao
-// Resource Graph. Reaproveita o cache da rota autenticada (mesma chave: todas as assinaturas do
-// Inventário) e NÃO grava em azure_desperdicio_deteccao.
+// subscription_id ou erros — o que daria caminho pra localizar/consultar o recurso direto na
+// Azure) e rate limit — a 1ª chamada com cache frio dispara consultas ao Resource Graph.
+// `subscription_name` (2026-10-15, pedido do usuário) é a exceção deliberada: é rótulo legível,
+// não path pro recurso, e o admin já o vê ao montar a allowlist abaixo — não é dado novo pra quem
+// decidiu quais assinaturas aparecem aqui. Reaproveita o cache da rota autenticada (mesma chave:
+// todas as assinaturas do Inventário) e NÃO grava em azure_desperdicio_deteccao.
 const _orfaosPublicoLimiter = require('express-rate-limit')({
   windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
   message: { error: 'Muitas requisições. Tente novamente em instantes.' },
@@ -4440,11 +4443,22 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
 
     // Imposto (Microsoft/Marketplace) já aplicado em _coletarDesperdicio, na origem — não
     // reaplicar aqui (dobraria o multiplicador).
+    // Nome da assinatura (pedido do usuário, 2026-10-15) — continua sem expor `subscription_id`
+    // (o GUID, que permitiria localizar/consultar o recurso direto na Azure). O NOME é um rótulo
+    // legível, não um caminho pro recurso, e o admin já o vê ao montar `orfaos_subscription_ids`
+    // (allowlist acima) — então não é dado novo pra quem já curou quais assinaturas aparecem aqui.
+    const subsNomeRow = filtrados.length
+      ? await pool.query(`SELECT subscription_id, subscription_name FROM azure_subs_cache WHERE subscription_id = ANY($1)`,
+          [[...new Set(filtrados.map((x) => x.subscription_id))]])
+      : { rows: [] };
+    const subsNomeMap = new Map(subsNomeRow.rows.map((s) => [s.subscription_id, s.subscription_name]));
+
     const itens = filtrados.map((x) => {
       const desde = x.marcado_orfao_em || primeira.get(String(x.resource_id).toUpperCase());
       return {
         nome: x.nome || null,
         categoria: x.categoria,
+        subscription_name: subsNomeMap.get(x.subscription_id) || null,
         resource_group: x.resource_group || null,
         sku: x.sku || null,
         tamanho_gb: x.tamanho_gb ?? null,
@@ -11031,6 +11045,15 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       }
     }
 
+    // Nome da assinatura (pedido do usuário, 2026-10-15) — mesmo join já usado no Excel
+    // (_gerarWorkbookDesperdicio), agora também na tela. Tela interna, autenticada: nunca
+    // esteve sob a restrição "nunca subscription_id" do portal público (ver `/api/public/orfaos`).
+    if (itens.length) {
+      const subsRow = await pool.query(`SELECT subscription_id, subscription_name FROM azure_subs_cache`);
+      const subsMap = new Map(subsRow.rows.map((s) => [s.subscription_id, s.subscription_name]));
+      for (const it of itens) it.subscription_name = subsMap.get(it.subscription_id) || null;
+    }
+
     const porCategoria = {};
     for (const it of itens) {
       const c = (porCategoria[it.categoria] ||= { categoria: it.categoria, itens: 0, custo_mensal_estimado: 0, sem_custo_conhecido: 0 });
@@ -11162,27 +11185,28 @@ async function _gerarWorkbookDesperdicio(itens, filtrosTxt, { sanitizado = false
     ws1.getRow(r).getCell(4).value = custoTotal; styleCell(ws1.getRow(r).getCell(4), { numFmt: BRL_FMT, alignment: hAlign('right') });
     [38, 16, 14, 22].forEach((w, i) => { ws1.getColumn(i + 1).width = w; });
 
-    // ── ABA 2: RECURSOS DETALHADOS ── (sanitizado omite Assinatura/Localização/Resource ID —
-    // nunca expostos pelo endpoint público, mesma política de `/api/public/orfaos`)
+    // ── ABA 2: RECURSOS DETALHADOS ── (sanitizado omite Localização/Resource ID/Órfão desde —
+    // nunca expostos pelo endpoint público, mesma política de `/api/public/orfaos`. Assinatura
+    // entra nos dois desde 2026-10-15: é rótulo legível, não o GUID — ver comentário do endpoint)
     const ws2 = wb.addWorksheet('Recursos Detalhados');
     const hdrs2 = sanitizado
-      ? ['Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Custo/mês (R$)', 'Dias órfão']
+      ? ['Assinatura', 'Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Custo/mês (R$)', 'Dias órfão']
       : ['Assinatura', 'Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Localização', 'Custo/mês (R$)', 'Dias órfão', 'Órfão desde', 'Resource ID'];
     const N2 = hdrs2.length;
-    const colCusto = sanitizado ? 6 : 8;
+    const colCusto = sanitizado ? 7 : 8;
     let r2 = writeHeaderBlock(ws2, `Recursos Ociosos — ${periodo}`, `Gerado em: ${hojeStr}`, N2);
     headerRow(ws2, r2, hdrs2); r2++;
     itens.forEach((it, idx) => {
       dataStyle(ws2, r2, N2, idx % 2 === 1);
       const row = ws2.getRow(r2);
       const valores = sanitizado
-        ? [it.resource_group || '—', it.nome || '—', _DESP_LABEL_XLSX[it.categoria] || it.categoria,
+        ? [it.subscription_name || '—', it.resource_group || '—', it.nome || '—', _DESP_LABEL_XLSX[it.categoria] || it.categoria,
            it.sku || '—', it.tamanho_gb, it.custo_mensal_estimado, it.dias_orfao]
         : [subsMap.get(it.subscription_id) || it.subscription_id, it.resource_group || '—', it.nome || it.resource_id,
            _DESP_LABEL_XLSX[it.categoria] || it.categoria, it.sku || '—', it.tamanho_gb, it.location || '—',
            it.custo_mensal_estimado, it.dias_orfao, it.marcado_orfao_em, it.resource_id];
       valores.forEach((v, i) => { row.getCell(i + 1).value = v === null ? '—' : v; });
-      styleCell(row.getCell(sanitizado ? 5 : 6), { alignment: hAlign('right') });
+      styleCell(row.getCell(6), { alignment: hAlign('right') });
       styleCell(row.getCell(colCusto), { alignment: hAlign('right'), numFmt: BRL_FMT });
       styleCell(row.getCell(colCusto + 1), { alignment: hAlign('center') });
       if (!sanitizado) styleCell(row.getCell(colCusto + 2), { alignment: hAlign('center'), numFmt: 'dd/mm/yyyy' });
@@ -11190,7 +11214,7 @@ async function _gerarWorkbookDesperdicio(itens, filtrosTxt, { sanitizado = false
     });
     ws2.autoFilter = { from: { row: 6, column: 1 }, to: { row: Math.max(r2 - 1, 6), column: N2 } };
     ws2.views = [{ showGridLines: false, state: 'frozen', ySplit: 6, xSplit: 0, activeCell: 'A7' }];
-    const larguras2 = sanitizado ? [34, 38, 28, 16, 13, 18, 11] : [26, 34, 38, 28, 16, 13, 16, 18, 11, 13, 60];
+    const larguras2 = sanitizado ? [26, 34, 38, 28, 16, 13, 18, 11] : [26, 34, 38, 28, 16, 13, 16, 18, 11, 13, 60];
     larguras2.forEach((w, i) => { ws2.getColumn(i + 1).width = w; });
 
     return wb;
@@ -11231,7 +11255,8 @@ app.post('/api/public/orfaos/export/excel', _orfaosPublicoLimiter, _portalMiddle
     const txt = (v) => (v == null ? '' : String(v).slice(0, 2000));
     const num = (v) => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
     const itens = body.itens.slice(0, 50000).map((x) => ({
-      categoria: txt(x.categoria), nome: txt(x.nome), resource_group: txt(x.resource_group), sku: txt(x.sku),
+      categoria: txt(x.categoria), nome: txt(x.nome), subscription_name: txt(x.subscription_name),
+      resource_group: txt(x.resource_group), sku: txt(x.sku),
       tamanho_gb: num(x.tamanho_gb), custo_mensal_estimado: x.custo_mensal_estimado === null ? null : num(x.custo_mensal_estimado),
       dias_orfao: num(x.dias_orfao),
     }));
@@ -11243,143 +11268,6 @@ app.post('/api/public/orfaos/export/excel', _orfaosPublicoLimiter, _portalMiddle
     res.end();
   } catch (e) {
     console.error('[Excel Órfãos Público] erro:', e.message);
-    if (!res.headersSent) res.status(500).json({ error: 'Erro ao gerar Excel: ' + e.message });
-  }
-});
-
-// Mesmo layout/paleta do Excel de Desperdício acima (GET .../desperdicio/export/excel) —
-// "padrão do sistema" — mas sem auth (rota pública) e sem Assinatura/Localização/Resource ID/
-// Órfão desde: esses campos nunca chegam ao navegador do portal público (ver OrfaoItem em
-// types/orfaosPublica.ts), então não existem aqui pra vazar.
-app.post('/api/public/orfaos/export/excel', _orfaosPublicoLimiter, _portalMiddleware, dbMiddleware, async (req, res) => {
-  try {
-    if (!req.portalCfg.orfaos_ativo) return res.status(403).json({ error: 'Visão de recursos órfãos desativada' });
-    const ExcelJS = require('exceljs');
-    const body = req.body || {};
-    if (!Array.isArray(body.itens)) return res.status(400).json({ error: 'Lista de itens inválida' });
-    const txt = (v) => (v == null ? '' : String(v).slice(0, 2000));
-    const num = (v) => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
-    const itens = body.itens.slice(0, 50000).map((x) => ({
-      categoria: txt(x.categoria), nome: txt(x.nome), resource_group: txt(x.resource_group), sku: txt(x.sku),
-      tamanho_gb: num(x.tamanho_gb), custo_mensal_estimado: x.custo_mensal_estimado === null ? null : num(x.custo_mensal_estimado),
-      dias_orfao: num(x.dias_orfao),
-    }));
-    const filtrosTxt = txt(body.filtros_descricao) || 'Sem filtros';
-
-    const GREEN_DARK = '4A0080', GREEN_MAIN = '7B2FBE', GREEN_LIGHT = 'F3E8FF', GREEN_TOTAL = '9333EA';
-    const NAVY = 'FF1B2A4A', GRAY_BDR = 'FFE0D4F5';
-    const BRL_FMT = '"R$ "#,##0.00', PCT_FMT = '0.0%';
-    const hoje = new Date();
-    const hojeStr = hoje.toLocaleDateString('pt-BR') + ' às ' + hoje.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-    const periodo = String(hoje.getFullYear());
-    const hFill = (hex) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + hex } });
-    const hFont = (bold, color, size, italic) => ({ bold: !!bold, color: { argb: color || NAVY }, size: size || 9, italic: !!italic, name: 'Arial' });
-    const hAlign = (h, v, wrap) => ({ horizontal: h || 'left', vertical: v || 'middle', wrapText: !!wrap });
-    const hBorder = (color) => { const s = { style: 'thin', color: { argb: color || GRAY_BDR } }; return { left: s, right: s, top: s, bottom: s }; };
-    const styleCell = (cell, { fill, font, alignment, border, numFmt } = {}) => {
-      if (fill) cell.fill = fill; if (font) cell.font = font; if (alignment) cell.alignment = alignment;
-      if (border) cell.border = border; if (numFmt) cell.numFmt = numFmt;
-    };
-    const headerRow = (ws, rowNum, headers, bg) => {
-      const row = ws.getRow(rowNum); row.height = 18;
-      headers.forEach((h, i) => {
-        const cell = row.getCell(i + 1); cell.value = h;
-        styleCell(cell, { fill: hFill(bg || GREEN_MAIN), font: hFont(true, 'FFFFFFFF', 9), alignment: hAlign('center'), border: hBorder('FF' + GREEN_DARK) });
-      });
-    };
-    const dataStyle = (ws, rowNum, ncols, shade) => {
-      const row = ws.getRow(rowNum); row.height = 16;
-      for (let i = 1; i <= ncols; i++) styleCell(row.getCell(i), { fill: hFill(shade ? GREEN_LIGHT : 'FFFFFF'), font: hFont(false, NAVY, 9), alignment: hAlign('left'), border: hBorder() });
-    };
-    const writeHeaderBlock = (ws, title, subtitle, ncols) => {
-      ws.mergeCells(1, 1, 2, ncols);
-      const c1 = ws.getCell(1, 1); c1.value = '  FinOps Manager   |   ' + title;
-      styleCell(c1, { fill: hFill(GREEN_DARK), font: hFont(true, 'FFFFFFFF', 13), alignment: hAlign('left', 'middle') });
-      ws.getRow(1).height = 28; ws.getRow(2).height = 6;
-      ws.mergeCells(3, 1, 3, ncols); ws.getCell(3, 1).fill = hFill(GREEN_MAIN); ws.getRow(3).height = 4;
-      ws.mergeCells(4, 1, 4, ncols);
-      const c4 = ws.getCell(4, 1); c4.value = '  ' + subtitle;
-      styleCell(c4, { fill: hFill('FFFFFF'), font: hFont(false, 'FF5B2080', 9, true), alignment: hAlign('left', 'middle') });
-      ws.getRow(4).height = 16;
-      ws.mergeCells(5, 1, 5, ncols); ws.getRow(5).height = 6;
-      return 6;
-    };
-    const sectionTitle = (ws, r, ncols, t) => {
-      ws.mergeCells(r, 1, r, ncols);
-      const c = ws.getCell(r, 1); c.value = t;
-      styleCell(c, { fill: hFill(GREEN_DARK), font: hFont(true, 'FFFFFFFF', 10), alignment: hAlign('left', 'middle') });
-      ws.getRow(r).height = 20;
-    };
-
-    const wb = new ExcelJS.Workbook();
-    wb.creator = 'FinOps Manager'; wb.created = hoje;
-
-    const custoTotal = itens.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0);
-    const semCusto = itens.filter((i) => i.custo_mensal_estimado === null).length;
-
-    // ── ABA 1: SUMÁRIO EXECUTIVO ──
-    const ws1 = wb.addWorksheet('Sumário Executivo');
-    ws1.views = [{ showGridLines: false }];
-    const N1 = 4;
-    let r = writeHeaderBlock(ws1, `Recursos Órfãos — ${periodo}`, `Gerado em: ${hojeStr}   |   Recursos órfãos: ${itens.length}   |   Filtros: ${filtrosTxt}`, N1);
-    sectionTitle(ws1, r, N1, 'VISÃO GERAL'); r++;
-    headerRow(ws1, r, ['Indicador', 'Valor', '', '']); r++;
-    [['Recursos órfãos', itens.length, null], ['Desperdício estimado por mês (R$)', custoTotal, BRL_FMT],
-     ['Projeção anual (R$)', custoTotal * 12, BRL_FMT], ['Recursos sem billing conhecido', semCusto, null]].forEach(([k, v, fmt], idx) => {
-      dataStyle(ws1, r, N1, idx % 2 === 1);
-      ws1.getRow(r).getCell(1).value = k;
-      ws1.getRow(r).getCell(2).value = v;
-      styleCell(ws1.getRow(r).getCell(2), { alignment: hAlign('right'), numFmt: fmt || '0' });
-      r++;
-    });
-    r++;
-    sectionTitle(ws1, r, N1, 'DESPERDÍCIO POR TIPO DE RECURSO'); r++;
-    headerRow(ws1, r, ['Tipo de recurso', 'Qtd', '% do custo', 'Custo/mês (R$)'], GREEN_TOTAL); r++;
-    const porTipo = {};
-    for (const i of itens) { const t = (porTipo[i.categoria] ||= { qtd: 0, custo: 0 }); t.qtd++; t.custo += i.custo_mensal_estimado || 0; }
-    Object.entries(porTipo).sort((a, b) => b[1].custo - a[1].custo).forEach(([cat, v], idx) => {
-      dataStyle(ws1, r, N1, idx % 2 === 1);
-      const row = ws1.getRow(r);
-      row.getCell(1).value = _DESP_LABEL_XLSX[cat] || cat;
-      row.getCell(2).value = v.qtd; styleCell(row.getCell(2), { alignment: hAlign('center') });
-      row.getCell(3).value = custoTotal > 0 ? v.custo / custoTotal : 0; styleCell(row.getCell(3), { alignment: hAlign('center'), numFmt: PCT_FMT });
-      row.getCell(4).value = v.custo; styleCell(row.getCell(4), { alignment: hAlign('right'), numFmt: BRL_FMT });
-      r++;
-    });
-    ws1.getRow(r).height = 18;
-    for (let i = 1; i <= N1; i++) styleCell(ws1.getRow(r).getCell(i), { fill: hFill(GREEN_TOTAL), font: hFont(true, 'FFFFFFFF', 9), alignment: hAlign('center'), border: hBorder('FF' + GREEN_DARK) });
-    ws1.getRow(r).getCell(1).value = 'TOTAL'; ws1.getRow(r).getCell(1).alignment = hAlign('left', 'middle');
-    ws1.getRow(r).getCell(2).value = itens.length;
-    ws1.getRow(r).getCell(3).value = 1; styleCell(ws1.getRow(r).getCell(3), { numFmt: PCT_FMT });
-    ws1.getRow(r).getCell(4).value = custoTotal; styleCell(ws1.getRow(r).getCell(4), { numFmt: BRL_FMT, alignment: hAlign('right') });
-    [38, 16, 14, 22].forEach((w, i) => { ws1.getColumn(i + 1).width = w; });
-
-    // ── ABA 2: RECURSOS DETALHADOS (sem Assinatura/Localização/Resource ID/Órfão desde) ──
-    const ws2 = wb.addWorksheet('Recursos Detalhados');
-    const hdrs2 = ['Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Custo/mês (R$)', 'Dias órfão'];
-    const N2 = hdrs2.length;
-    let r2 = writeHeaderBlock(ws2, `Recursos Órfãos — ${periodo}`, `Gerado em: ${hojeStr}`, N2);
-    headerRow(ws2, r2, hdrs2); r2++;
-    itens.forEach((it, idx) => {
-      dataStyle(ws2, r2, N2, idx % 2 === 1);
-      const row = ws2.getRow(r2);
-      [it.resource_group || '—', it.nome || '—', _DESP_LABEL_XLSX[it.categoria] || it.categoria, it.sku || '—',
-       it.tamanho_gb, it.custo_mensal_estimado, it.dias_orfao].forEach((v, i) => { row.getCell(i + 1).value = v === null ? '—' : v; });
-      styleCell(row.getCell(5), { alignment: hAlign('right') });
-      styleCell(row.getCell(6), { alignment: hAlign('right'), numFmt: BRL_FMT });
-      styleCell(row.getCell(7), { alignment: hAlign('center') });
-      r2++;
-    });
-    ws2.autoFilter = { from: { row: 6, column: 1 }, to: { row: Math.max(r2 - 1, 6), column: N2 } };
-    ws2.views = [{ showGridLines: false, state: 'frozen', ySplit: 6, xSplit: 0, activeCell: 'A7' }];
-    [26, 34, 28, 16, 13, 18, 11].forEach((w, i) => { ws2.getColumn(i + 1).width = w; });
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="FinOps_Portal_Orfaos_${hoje.toISOString().split('T')[0]}.xlsx"`);
-    await wb.xlsx.write(res);
-    res.end();
-  } catch (e) {
-    console.error('[Portal Órfãos Excel] erro:', e.message);
     if (!res.headersSent) res.status(500).json({ error: 'Erro ao gerar Excel: ' + e.message });
   }
 });

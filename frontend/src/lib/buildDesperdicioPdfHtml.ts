@@ -6,6 +6,7 @@ interface DesperdicioPdfItem {
   nome: string | null
   resource_id?: string | null
   categoria: string
+  subscription_name?: string | null
   resource_group: string | null
   sku: string | null
   tamanho_gb: number | null
@@ -54,6 +55,7 @@ export function buildDesperdicioPdfHtml(itens: DesperdicioPdfItem[], filtrosDesc
 
   const linhas = itens.map((i) =>
     '<tr><td>' + esc(i.nome || i.resource_id) + '</td>'
+    + '<td>' + esc(i.subscription_name || '—') + '</td>'
     + '<td>' + esc(CATEGORIA_LABEL[i.categoria] || i.categoria) + '</td>'
     + '<td>' + esc(i.resource_group || '—') + '</td>'
     + '<td>' + esc(i.sku || '—') + '</td>'
@@ -103,7 +105,7 @@ tbody tr.tot td{background:#9333ea;color:#fff;font-weight:700}
 <table><thead><tr><th style="text-align:left">Tipo de recurso</th><th>Qtd</th><th>% do custo</th><th>Custo/mês</th></tr></thead>
 <tbody>${tipoRows}<tr class="tot"><td>TOTAL</td><td class="c">${itens.length}</td><td class="c">100,0%</td><td class="r">${brl(custoTotal)}</td></tr></tbody></table>
 <h2>Recursos ociosos</h2>
-<table><thead><tr><th style="text-align:left">Recurso</th><th>Tipo</th><th>Resource Group</th><th>SKU</th><th>Tam.</th><th>Custo/mês</th><th>Dias órfão</th></tr></thead>
+<table><thead><tr><th style="text-align:left">Recurso</th><th>Assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th><th>Tam.</th><th>Custo/mês</th><th>Dias órfão</th></tr></thead>
 <tbody>${linhas}</tbody></table>
 <div class="nota">Custo estimado pelo billing observado nos últimos 30 dias. Recursos sem linha de billing conhecida aparecem como “—”, nunca como R$ 0,00.</div>
 </body></html>`

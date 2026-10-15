@@ -40,7 +40,7 @@ export default function PublicOrfaosView() {
   const filtrados = itens.filter((i) =>
     (!tipo || i.categoria === tipo)
     && (!rgsSelecionados.length || (!!i.resource_group && rgsSelecionados.includes(i.resource_group)))
-    && (!termo || (i.nome || '').toLowerCase().includes(termo)))
+    && (!termo || (i.nome || '').toLowerCase().includes(termo) || (i.subscription_name || '').toLowerCase().includes(termo)))
   const custo = filtrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
   const semCusto = filtrados.filter((i) => i.custo_mensal_estimado === null).length
   const temFiltro = !!(tipo || rgsSelecionados.length || termo)
@@ -133,7 +133,7 @@ export default function PublicOrfaosView() {
                   onChange={setRgsSelecionados}
                 />
               </div>
-              <input type="text" className="filter-input" style={{ minWidth: 220 }} placeholder="Buscar por nome do recurso..."
+              <input type="text" className="filter-input" style={{ minWidth: 220 }} placeholder="Buscar por recurso ou assinatura..."
                 value={busca} onChange={(e) => setBusca(e.target.value)} />
               {temFiltro && (
                 <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => { setTipo(''); setRgsSelecionados([]); setBusca('') }}>Limpar filtros</button>
@@ -173,7 +173,7 @@ export default function PublicOrfaosView() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Recurso</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
+                      <th>Recurso</th><th>Assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
                       <th style={{ textAlign: 'right' }}>Tam.</th>
                       <th style={{ textAlign: 'right' }}>Custo/mês</th>
                       <th style={{ textAlign: 'right' }}>Dias órfão</th>
@@ -183,6 +183,7 @@ export default function PublicOrfaosView() {
                     {filtrados.map((it, idx) => (
                       <tr key={idx}>
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.nome || ''}>{it.nome || '—'}</td>
+                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.subscription_name || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{CATEGORIA_LABEL[it.categoria] || it.categoria}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.resource_group || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.sku || '—'}</td>
