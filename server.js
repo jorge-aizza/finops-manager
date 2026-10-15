@@ -7679,11 +7679,50 @@ function _decryptSecret(enc) {
   return d.update(Buffer.from(dataH, 'hex'), undefined, 'utf8') + d.final('utf8');
 }
 
-// Handles both encrypted (iv:data:tag) and legacy plain-text values
+// Handles both encrypted (iv:data:tag) and legacy plain-text values.
+//
+// O fallback `return val` existe pela migração pré-criptografia (valor em texto puro que
+// contém ":"), mas ele também engolia o caso em que o valor ESTÁ cifrado e a decifragem
+// falhou — devolvendo o texto cifrado como se fosse o segredo. Isso custou caro uma vez
+// (2026-10-15): a senha do SMTP tinha sido salva quando MASTER_KEY ainda não estava no
+// .env (cifrada com o default do código); depois MASTER_KEY foi definida, a decifragem
+// passou a falhar, e o sistema mandava os 74 caracteres do texto cifrado como senha pro
+// servidor de e-mail. O servidor respondia "535 Incorrect authentication data" — ou seja,
+// um erro de CHAVE aparecia como erro de SENHA, e nenhum log dizia a verdade.
+// Agora: se o valor tem a forma de cifrado (iv:data:tag, tudo hex) e a decifragem falha,
+// grita no log — uma vez por valor, pra não poluir (isso roda em caminho quente, a cada
+// decifragem de credencial de SP).
+const _avisouDecryptFalhou = new Set();
+// Forma exata do que _encryptSecret produz: IV de 12 bytes (24 hex) : dados : tag de
+// 16 bytes (32 hex). Checar o TAMANHO do iv e da tag, e não só "é hex", evita falso
+// positivo em texto puro que por acaso tenha dois ":" e só caracteres hex
+// (ex. "a:b:c" — a, b e c são dígitos hex válidos).
+function _pareceCifrado(val) {
+  const p = String(val).split(':');
+  if (p.length !== 3) return false;
+  const hex = (s) => /^[0-9a-f]+$/i.test(s);
+  return p[0].length === 24 && hex(p[0]) && p[1].length > 0 && hex(p[1]) && p[2].length === 32 && hex(p[2]);
+}
 function _safeDecrypt(val) {
   if (!val) return val;
   if (!val.includes(':')) return val; // plain text (pre-encryption migration)
-  try { return _decryptSecret(val); } catch (_) { return val; }
+  try { return _decryptSecret(val); } catch (e) {
+    if (_pareceCifrado(val)) {
+      const id = String(val).slice(0, 16);
+      if (!_avisouDecryptFalhou.has(id)) {
+        _avisouDecryptFalhou.add(id);
+        console.error(
+          `[Cripto] FALHA ao decifrar um segredo (${id}…): ${e.message}\n` +
+          `         O valor está cifrado, mas não abre com a MASTER_KEY atual — ` +
+          `provável troca de MASTER_KEY depois que o segredo foi salvo.\n` +
+          `         O sistema vai usar o TEXTO CIFRADO como se fosse o segredo, e a ` +
+          `integração vai falhar como se a credencial estivesse errada.\n` +
+          `         Correção: regrave esse segredo pela tela (ele é recifrado com a chave atual).`
+        );
+      }
+    }
+    return val;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -7770,9 +7809,31 @@ async function _sendEmail({ to, subject, html }) {
     });
     _logEmailAttempt({ tipo: 'envio', destinatarios, assunto: subject, ok: true });
   } catch (e) {
-    console.warn('[Email] Falha ao enviar:', e.message);
+    // O log de tentativas (ring buffer, visível na tela de Integrações) registra SEMPRE —
+    // é ele que serve pra diagnosticar. O console só repete o mesmo erro uma vez a cada
+    // 10 min: quando o SMTP está mal configurado, todo alerta periódico falha igual, e
+    // isso enterrava o terminal (medido: 554 linhas idênticas de "535 Incorrect
+    // authentication data" em 24h) escondendo qualquer erro de verdade no meio.
     _logEmailAttempt({ tipo: 'envio', destinatarios, assunto: subject, ok: false, erro: e.message });
+    _avisarFalhaEmail(e.message);
   }
+}
+
+// Colapsa erros de e-mail repetidos no console: imprime o primeiro na hora e, se o MESMO
+// erro continuar, só volta a imprimir 10 min depois — informando quantos foram suprimidos.
+const _EMAIL_ERRO_JANELA_MS = 10 * 60 * 1000;
+let _emailErroUltimo = { msg: null, em: 0, suprimidos: 0 };
+function _avisarFalhaEmail(msg) {
+  const agora = Date.now();
+  if (msg === _emailErroUltimo.msg && (agora - _emailErroUltimo.em) < _EMAIL_ERRO_JANELA_MS) {
+    _emailErroUltimo.suprimidos++;
+    return;
+  }
+  const extra = _emailErroUltimo.suprimidos > 0 && msg === _emailErroUltimo.msg
+    ? ` (+${_emailErroUltimo.suprimidos} ocorrência(s) idêntica(s) suprimida(s) nos últimos ${_EMAIL_ERRO_JANELA_MS / 60000} min)`
+    : '';
+  console.warn(`[Email] Falha ao enviar: ${msg}${extra}`);
+  _emailErroUltimo = { msg, em: agora, suprimidos: 0 };
 }
 
 // Wrapper HTML com estilos inline (obrigatório em e-mail — a maioria dos clientes
@@ -13811,8 +13872,15 @@ async function _managementGetToken(tenantId, clientId, clientSecret) {
 // Graph (não o ARM) — usado só pra resolver GUID→nome de autores do Activity Log (ver
 // _graphResolveAutores). Exige a permissão de aplicativo Directory.Read.All concedida no
 // Entra ID pra esta Service Principal — sem isso, o token até é emitido (client_credentials
-// sempre emite um token), mas toda chamada ao Graph retorna 403 (verificado no momento da
-// chamada, não aqui).
+// sempre emite um token).
+//
+// ATENÇÃO (medido em 2026-10-15, corrigindo o que este comentário dizia antes): sem a
+// permissão, o Graph NÃO devolve 403 em `directoryObjects/getByIds` — devolve **200 com
+// `value: []`**. Então a falta de permissão é indistinguível de "nenhum GUID bateu", e a
+// resolução de autores vira um no-op silencioso pra sempre. O sinal confiável está no
+// próprio token: as permissões de aplicativo concedidas aparecem na claim `roles`. Nas
+// duas SPs deste ambiente `roles` vem **vazia** — Directory.Read.All nunca foi concedida.
+// `_graphResolveAutores` checa isso e diz o que falta, em vez de reportar 0 sem explicar.
 async function _graphGetToken(tenantId, clientId, clientSecret) {
   const resp = await _cbFetch(
     `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
@@ -13829,7 +13897,18 @@ async function _graphGetToken(tenantId, clientId, clientSecret) {
   if (!resp.ok) { const e = await resp.text(); throw new Error(`Token Microsoft Graph falhou (${resp.status}): ${e}`); }
   const tkData = await _safeRespJson(resp);
   if (!tkData.access_token) throw new Error('Token Microsoft Graph: resposta sem access_token');
-  return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
+  return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600, roles: _rolesDoToken(tkData.access_token) };
+}
+
+// Lê a claim `roles` (permissões de aplicativo concedidas) de um access token, sem
+// validar assinatura — é diagnóstico local, não decisão de autorização; quem valida é a
+// própria Azure na chamada seguinte. Serve pra distinguir "permissão não concedida" de
+// "não achei nada", que o Graph responde igual (200 + lista vazia).
+function _rolesDoToken(jwt) {
+  try {
+    const p = JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64').toString('utf8'));
+    return Array.isArray(p.roles) ? p.roles : [];
+  } catch (_) { return []; }
 }
 
 // Mesmo fluxo client_credentials de _managementGetToken, mas pro recurso do Log
@@ -13951,7 +14030,21 @@ async function _graphResolveAutores() {
   const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
   if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
   const spCfg = spRow.rows[0];
-  const { token } = await _graphGetToken(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
+  const { token, roles } = await _graphGetToken(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
+
+  // Directory.Read.All é o que permite resolver GUID→nome. Sem ela o Graph devolve 200 com
+  // lista vazia (não 403), então sem esta checagem a função reportaria "0 resolvidos" pra
+  // sempre sem dizer por quê. Checa antes de gastar chamadas.
+  const PERM = 'Directory.Read.All';
+  const temPermissao = roles.includes(PERM) || roles.includes('Directory.ReadWrite.All');
+  if (!temPermissao) {
+    throw new Error(
+      `Service Principal "${spCfg.nome}" não tem a permissão de aplicativo ${PERM} no Entra ID ` +
+      `(claim roles do token: ${roles.length ? roles.join(', ') : 'vazia'}). ` +
+      `Sem ela o Microsoft Graph aceita a chamada e devolve lista vazia, então nenhum autor é resolvido. ` +
+      `Conceda ${PERM} ao app registrado e dê o consentimento de administrador.`
+    );
+  }
 
   const rIds = await pool.query(`
     SELECT DISTINCT autor FROM (
