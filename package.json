@@ -1,10 +1,11 @@
 {
   "name": "finops-system",
-  "version": "4.1.0",
+  "version": "4.2.0",
   "description": "Sistema de Cadastro de Ações FinOps",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test \"tests/*.test.js\"",
     "dev": "nodemon server.js",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev --prefix frontend\"",
     "frontend:install": "npm install --prefix frontend",

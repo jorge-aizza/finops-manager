@@ -1,4 +1,4 @@
-# FinOps Manager — v4.1.0
+# FinOps Manager — v4.2.0
 
 Sistema web corporativo para gestão FinOps com inventário de recursos Azure, alocação de custos por tag, dashboard Databricks, e calculadora de custos Azure em tempo real.
 
@@ -8,7 +8,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 
 ## Índice
 
-1. [O que há de novo na v2.0](#o-que-há-de-novo-na-v20)
+1. [O que há de novo na v4.2.0](#o-que-há-de-novo-na-v420)
 2. [Pré-requisitos](#pré-requisitos)
 3. [⚠️ Pré-produção — passo a passo obrigatório](#️-pré-produção--passo-a-passo-obrigatório)
 4. [Variáveis de Ambiente](#variáveis-de-ambiente)
@@ -25,6 +25,34 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 15. [API Endpoints](#api-endpoints)
 
 ---
+
+## O que há de novo na v4.2.0
+
+### 🏢 Multi-Service Principal (multi-tenant)
+- **Coletas simultâneas por SP** — o estado da coleta deixou de ser global e passou a ser por execução (`Map` com chave `tipo:id`, ex. `api:7`). Duas SPs agendadas para o mesmo horário agora rodam juntas, cada uma com seu próprio log e progresso, em vez de uma esperar a outra
+- **Cancelamento seletivo** — `POST /api/azure-coleta/cancelar` aceita `{ tipo, id }`; sem corpo, mantém o comportamento antigo de cancelar tudo
+- `GET /api/azure-coleta/status` ganhou o array `execucoes[]` (uma entrada por coleta ativa); `em_execucao`/`progresso` continuam lá para não quebrar consumidores
+- **Filtro global de Tenant (SP)** — presente em todas as telas de monitoramento (Dashboard, Inventário, Log Analytics, Coleta, exports Excel). A atribuição é feita por `subscription_id`, nunca por `sp_id`, porque as tabelas de dados não carregam coluna de SP
+- **Coleta de Inventário e Log Analytics percorre todas as SPs ativas** via `_resourceGraphQueryTodasSps()`
+- Seletor de assinaturas do Portal Público agora agrupa por SP
+
+### 📜 Log Analytics FinOps — expansão
+- **Sentinel e Commitment Tier separados do custo de ingestão** — antes somavam tudo num bolo só. Hoje cada balde tem card próprio, amarrado ao mês selecionado
+- **Sugestão de nível de Commitment Tier** — calculada sobre a série diária de 60 dias (excluindo o dia UTC em curso, que vem parcial), com janela curta de 14 dias para detectar tendência e luz amarela antes da média alcançar o próximo degrau
+- **Preço real do GB: Analytics × Basic, por tabela** — mostra quanto custaria cada tabela em cada plano, para a decisão de downgrade
+- **Quem paga a análise do Sentinel** — detalhamento tabela por tabela (ex.: na nossa conta, 91,4% da fatura de análise do Sentinel está em `AzureDiagnostics`, não em tabelas nativas do produto)
+- **Snapshot diário** (`log_analytics_commitment_snapshot`) — grava a conclusão de Commitment Tier todo dia, para a tendência virar histórico auditável
+- **Cards de volume** — ingestão total, média diária do mês e retenção faturada; o card avisa quando o mês foi medido pela metade (`dias_com_gb` vs `dias_janela`)
+- **Seletores de Mês e Workspace** valem para a tela inteira; o filtro de Workspace aceita múltipla seleção e o card de observabilidade declara o recorte aplicado
+- **Ingestão por recurso** — ranking de quem gera volume dentro do workspace, com o caminho pelo qual o dado chega (Diagnostic Setting, DCR, agente)
+- **Gasto de observabilidade por balde** — inclui export de log que paga e não alimenta workspace nenhum
+
+### ⚡ Performance e correções
+- Índice `idx_azure_costs_cat_date` em `azure_costs(meter_category, cost_date)` — a consulta de observabilidade caiu de **202s para 10–27s** (era bitmap heap scan lossy com ~600 mil linhas rechecadas)
+- Aba Comparativo resolve os dois períodos numa varredura só e soma custo de um rollup diário, em vez de varrer as 9,1M linhas de `azure_costs`
+- **PVC do AKS voltaram a ficar escondidos do portal público** — a regra de disco órfão casava `pvc-` só no início do nome e deixava passar `kubernetes-dynamic-pvc-<uuid>`, listando 8 volumes vivos como descartáveis
+- Corrigido USD apresentado como BRL nas conclusões de Commitment Tier (`azure_price_list` é inteiramente USD; a calibração passou a vir da fatura)
+- Rede de testes nova para `LogAnalyticsView`
 
 ## O que há de novo na v4.1.0
 
@@ -1363,3 +1391,41 @@ Authorization: Bearer <jwt_token>
 | POST | `/api/reservas` | Criar reserva |
 | PUT | `/api/reservas/:id` | Atualizar reserva |
 | DELETE | `/api/reservas/:id` | Excluir reserva |
+
+### Coleta Azure — multi-SP *(novo v4.2)*
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/azure-coleta/status` | Estado da coleta. Campos legados (`em_execucao`, `progresso`, `cancelando`) + array novo `execucoes[]` com uma entrada por execução ativa (`{tipo, id, nome, iniciado_em, cancelando, progresso}`) |
+| POST | `/api/azure-coleta/cancelar` | Corpo opcional `{ tipo, id }` cancela só aquela execução (ex. `{tipo:'api', id:7}`); sem corpo, cancela todas as ativas |
+| POST | `/api/azure-coleta/sps/:id/coletar-api` | Dispara coleta manual daquela SP — não bloqueia mais se outra SP estiver coletando |
+| POST | `/api/azure-coleta/storages/:id/executar` | Idem para coleta via Storage Account |
+| GET | `/api/azure-coleta/diag-agendador` | Diagnóstico: quais configs estão `due` e por quê |
+
+### Log Analytics FinOps *(expandido v4.2)*
+
+Filtros de query aceitos pelas rotas de leitura: `mes=YYYY-MM`, `sp_id=<id>` (Service Principal) e
+`workspace_guid` — este último aceita **múltiplos** valores, separados por vírgula ou repetindo o
+parâmetro (`?workspace_guid=a,b` ou `?workspace_guid=a&workspace_guid=b`).
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/log-analytics/resumo` | Payload principal da tela: workspaces, cards de volume, Sentinel, Commitment Tier e sugestão de nível |
+| GET | `/api/log-analytics/workspaces` | Inventário de workspaces (retenção, plano, SKU) |
+| GET | `/api/log-analytics/workspaces/:guid/tabelas` | Tabelas com GB, custo real e comparativo Analytics × Basic por GB |
+| GET | `/api/log-analytics/workspaces/:guid/ingestao` | Série diária de ingestão do workspace |
+| GET | `/api/log-analytics/workspaces/:guid/consumo-diario` | Consumo diário consolidado |
+| GET | `/api/log-analytics/workspaces/:guid/recursos-volume` | Ranking de recursos por volume gerado, com o caminho de entrada do dado |
+| GET | `/api/log-analytics/workspaces/:guid/fontes` | Fontes de ingestão identificadas |
+| GET | `/api/log-analytics/workspaces/:guid/diagnostic-settings` | Diagnostic Settings do workspace, com detecção de fan-out |
+| GET | `/api/log-analytics/custo-observabilidade` | Gasto de observabilidade por balde; respeita o recorte de workspace e preserva o gasto sem workspace |
+| GET | `/api/log-analytics/export-sem-workspace` | Export de log que paga e não alimenta workspace nenhum |
+| GET | `/api/log-analytics/app-insights` | Inventário de Application Insights (sampling, daily cap, retenção) |
+| GET | `/api/log-analytics/recomendacoes` | Recomendações consolidadas (downgrade pra Basic, retenção, fan-out) |
+| GET | `/api/log-analytics/export/excel` | Export Excel da análise |
+| GET | `/api/log-analytics/export/dashboard` | Dashboard HTML autocontido |
+| POST | `/api/log-analytics/coleta/forcar` | Força coleta do inventário de Log Analytics |
+| POST | `/api/log-analytics/ingestao-recurso/forcar` | Força a coleta de ingestão por recurso |
+| POST | `/api/log-analytics/diagnostic-settings/forcar` | Força a coleta de Diagnostic Settings |
+| POST | `/api/log-analytics/workspaces/:guid/auditoria-consultas/habilitar` | Habilita `LAQueryLogs` (⚠️ escreve na Azure) |
+| POST | `/api/log-analytics/workspaces/:guid/tabelas/:tabela/detalhar-recurso` | Lista os recursos que alimentam uma tabela |

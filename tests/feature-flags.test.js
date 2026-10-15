@@ -4,6 +4,7 @@
  */
 
 const assert = require('assert');
+const { describe, it, beforeEach } = require('node:test');
 
 describe('Feature Flags', () => {
   // Mock flags cache (simulating server.js)

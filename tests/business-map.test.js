@@ -4,6 +4,7 @@
  */
 
 const assert = require('assert');
+const { describe, it } = require('node:test');
 
 describe('Business Map', () => {
   const mockBU = { id: 'bu-1', nome: 'Infraestrutura', status: 'Ativa' };

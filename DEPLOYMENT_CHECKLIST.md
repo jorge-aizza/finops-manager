@@ -25,6 +25,22 @@
 - ☐ Verify all 18 performance indexes created: `SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'azure_costs'`
 - ☐ Connection pooling defaults acceptable (max 20 connections, 30s idle)
 
+### Específico da v4.2.0 (nada manual — só saber o que esperar)
+
+- ☐ Índice novo `idx_azure_costs_cat_date` em `azure_costs(meter_category, cost_date)` é criado
+  automaticamente no startup, **em background**. Numa base com ~9M linhas levou **~10 minutos**.
+  Enquanto não termina, a tela de Log Analytics / observabilidade fica lenta (era 202s antes do
+  índice) — isso é esperado, não é falha de deploy. Conferir depois:
+  `SELECT indexname FROM pg_indexes WHERE indexname = 'idx_azure_costs_cat_date'`
+- ☐ Tabela nova `log_analytics_commitment_snapshot` (PK `workspace_guid, dia`) é criada pelo
+  `initDB()`. Começa vazia e ganha uma linha por workspace por dia a partir da primeira avaliação
+  de Commitment Tier — gráfico de tendência fica pobre nos primeiros dias, por desenho.
+- ☐ Coletas simultâneas: com 2+ SPs ativas e `auto_coleta=true` no mesmo horário, o agendador
+  agora dispara **todas** as configs due no mesmo tick (antes era `LIMIT 1`). Dimensionar o
+  `max` do pool PostgreSQL se houver muitas SPs — cada coleta usa conexões em paralelo.
+- ☐ `log_analytics_ingestao_diaria` só tem dados a partir de 30/08/2026 nesta instalação; numa
+  instalação nova, começa a acumular do dia da primeira coleta.
+
 ## File System
 
 - ☐ `uploads_tmp/` directory writable by app (for CSV/Parquet imports)
