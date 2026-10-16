@@ -126,6 +126,27 @@ pm2 logs finops
 - **Database must be running** before app start
 - **Multiple instances:** if using load balancing, only ONE scheduler should run (configure via env var if needed)
 
+## Dependency Security Remediation (2026-10-15)
+
+The production dependency update was validated on commit `cb13d5b`.
+
+- Nodemailer is pinned to the patched `^10.1.1` range. This major update requires Node.js 20 or newer; production runs Node.js 24.
+- ExcelJS remains on `4.4.0`; the `uuid` override to `11.1.1` is scoped to ExcelJS so `thrift` can keep its required `uuid@14.0.2`.
+- Nodemon keeps its existing major version; its Chokidar dependency is overridden to `4.0.3` to avoid the vulnerable 3.x watcher chain.
+- The lockfiles also resolve patched transitive versions, including `adm-zip@0.6.1`, `express@4.22.3`, `multer@2.4.0`, `source-map-js@1.2.2`, and `undici@7.30.1`.
+
+Validate dependency changes before deployment:
+
+```bash
+npm audit
+npm audit --prefix frontend
+npm test
+npm run frontend:build
+npm run frontend:test
+```
+
+Deployment validation on 2026-10-15: both audits reported zero vulnerabilities; backend tests passed (31 passed, 8 skipped); frontend tests passed (412 passed); the frontend production build succeeded; `GET /health` returned HTTP 200 with the database connected. Nodemailer was smoke-tested with stream transport; a live SMTP delivery was not performed.
+
 ---
 
 ## 📞 Support

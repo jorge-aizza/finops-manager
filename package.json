@@ -25,12 +25,20 @@
     "jwks-rsa": "^4.1.0",
     "ldapjs": "^3.0.7",
     "multer": "^2.2.0",
-    "nodemailer": "^9.0.5",
+    "nodemailer": "^10.1.1",
     "pg": "^8.11.3"
   },
   "devDependencies": {
     "concurrently": "^10.0.5",
     "nodemon": "^3.0.2",
     "playwright": "^1.62.1"
+  },
+  "overrides": {
+    "nodemon": {
+      "chokidar": "4.0.3"
+    },
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   }
 }
