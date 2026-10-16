@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '../api/client'
 import { getImportStatus, uploadImportFile } from '../api/coleta'
@@ -61,6 +61,22 @@ async function aguardarImport(jobId: string, idxAtual: number, total: number, on
   }
 }
 
+// Monta o mesmo formato de `Resultado` que handleFiles() produz ao final de um upload
+// desta sessão, mas a partir de um job que já tinha terminado quando o componente
+// montou (ver resync no useEffect abaixo) — reaproveitado pra não duplicar a lógica.
+function resultadoDeJobConcluido(job: ImportJob): Resultado {
+  const tudoOk = job.status === 'done'
+  return {
+    tudoOk,
+    concluidos: tudoOk ? 1 : 0,
+    falhas: tudoOk ? 0 : 1,
+    totalInseridos: job.inseridos || 0,
+    totalErros: job.erros || 0,
+    errosArquivos: tudoOk ? [] : [{ arquivo: job.arquivo, erro: job.erro || 'erro no servidor' }],
+    ultimoJob: job,
+  }
+}
+
 // Porta de _setupImport()/_aguardarImport() (calculadora.js) — antes só
 // acionável pelo botão "Selecionar Arquivos" dentro de #view-coleta, que
 // virou permanentemente display:none quando 'coleta' entrou em
@@ -75,6 +91,48 @@ export default function ImportManualPanel() {
   const [progresso, setProgresso] = useState<Progresso | null>(null)
   const [resultado, setResultado] = useState<Resultado | null>(null)
   const [verErros, setVerErros] = useState(false)
+
+  // Bug real corrigido (2026-10-16, achado pelo usuário: "fui fazer um Import Manual ao
+  // mudar de tela e voltar perdi o import e não atualiza"): o progresso/resultado vivia
+  // só em useState — ao navegar pra outra VIEW (não aba, view inteira: ColetaView
+  // desmonta por completo) e voltar, o componente remonta do zero sem checar se o
+  // servidor ainda tem um import rodando (ou um que terminou enquanto o usuário estava
+  // fora). `_importJob` no servidor é um singleton que sobrevive à troca de view — só
+  // faltava consultá-lo no mount, igual o resto do app já faz pra coleta (ColetaMonitor
+  // consulta GET /status ao montar, nunca assume estado zerado).
+  useEffect(() => {
+    let cancelado = false
+    async function resync() {
+      let job: ImportJob | null
+      try { const r = await getImportStatus(); job = r.job } catch { return }
+      if (cancelado || !job) return
+      if (job.status === 'running') {
+        window.suspendInactivityTimer?.()
+        setUploading(true)
+        setProgresso({ idxAtual: job.idx, total: job.total, arquivoAtual: job.arquivo + (job.subArquivo ? ` · ${job.subArquivo}` : ''), subLabel: 'retomando acompanhamento...', pct: 0 })
+        const jobFinal = await aguardarImport(job.id, job.idx, job.total, (tick) => {
+          if (!cancelado) setProgresso({ idxAtual: job!.idx, total: job!.total, ...tick })
+        })
+        if (cancelado) return
+        window.resumeInactivityTimer?.()
+        setProgresso(null)
+        setUploading(false)
+        setResultado(resultadoDeJobConcluido(jobFinal))
+        if (jobFinal.status === 'done') {
+          queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
+          queryClient.invalidateQueries({ queryKey: ['coleta-cobertura'] })
+          queryClient.invalidateQueries({ queryKey: ['azure-resumo'] })
+        }
+      } else if (job.status === 'done' || job.status === 'error') {
+        // Terminou enquanto o usuário estava em outra tela — mostra o resultado em vez
+        // de deixar o painel parecer que nada aconteceu.
+        setResultado(resultadoDeJobConcluido(job))
+      }
+    }
+    resync()
+    return () => { cancelado = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || !fileList.length) return
