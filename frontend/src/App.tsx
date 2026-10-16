@@ -13,6 +13,7 @@ import DatabricksDashboardView from './views/DatabricksDashboardView'
 import InventarioView from './views/InventarioView'
 import AlocacaoView from './views/AlocacaoView'
 import LogAnalyticsView from './views/LogAnalyticsView'
+import MailingView from './views/MailingView'
 import DatabricksBudgetAlertModal from './components/DatabricksBudgetAlertModal'
 import ErrorBoundary from './components/ErrorBoundary'
 
@@ -33,6 +34,7 @@ const VIEWS: Record<string, ComponentType> = {
   inventario: InventarioView,
   alocacao: AlocacaoView,
   'log-analytics': LogAnalyticsView,
+  mailing: MailingView,
 }
 
 export default function App() {
