@@ -1273,6 +1273,13 @@
           </svg>
           <span class="nav-label">Coleta Azure</span>
         </a>
+        <a class="nav-item" data-view="mailing" onclick="showView('mailing')" title="Mailing de Comunicados">
+          <svg viewBox="0 0 20 20" fill="none" width="17" height="17">
+            <rect x="2.5" y="4.5" width="15" height="11" rx="2" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M3 6l7 5 7-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="nav-label">Mailing</span>
+        </a>
         <!-- Inventário — grupo expansível: mesmas abas da barra na página (InventarioView), com
              realce sincronizado via showInvTab() em app.js. -->
         <div class="nav-group" id="nav-group-inventario">
@@ -3322,6 +3329,47 @@
                 <div id="smtp-log" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;font-family:'IBM Plex Mono',monospace;font-size:11px">
                   <div style="padding:10px 12px;color:var(--text-muted)">Nenhuma tentativa registrada ainda.</div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Relay SMTP do Mailing de Comunicados — propositalmente SEPARADO do card de
+               E-mail (SMTP) acima: é a config de envio dos Comunicados em massa, nunca a dos
+               Alertas. Sem campo de senha de propósito — relay anônimo, autorizado por IP de
+               origem (ver server.js, banner "MAILING DE COMUNICADOS"). -->
+          <div class="integration-card">
+            <div class="integration-header" style="justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:10px">
+                <svg class="integration-logo" viewBox="0 0 32 32" fill="none">
+                  <rect width="32" height="32" rx="4" fill="#7b2fbe"/>
+                  <rect x="6" y="9" width="20" height="14" rx="2" stroke="white" stroke-width="1.5" fill="none"/>
+                  <path d="M7 11l9 6 9-6" stroke="white" stroke-width="1.5" fill="none"/>
+                </svg>
+                <div>
+                  <div class="integration-title">Mailing de Comunicados — Relay SMTP</div>
+                  <div class="integration-sub">Envio de comunicados em massa. Relay anônimo (sem usuário/senha, liberado por IP) — totalmente separado do SMTP de Alertas acima.</div>
+                </div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-mailing_relay" onchange="toggleIntegration('mailing_relay')">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="config-mailing_relay" style="display:none">
+              <div class="form-grid-2" style="margin-top:12px">
+                <div class="form-group"><label>Host do relay</label><input type="text" id="mailing-relay-host" placeholder="relay.suaempresa.com.br"></div>
+                <div class="form-group"><label>Porta</label><input type="number" id="mailing-relay-port" placeholder="25" value="25"></div>
+                <div class="form-group"><label>Nome do remetente</label><input type="text" id="mailing-relay-remetente-nome" placeholder="Vivo FinOps"></div>
+                <div class="form-group"><label>E-mail do remetente</label><input type="text" id="mailing-relay-remetente-email" placeholder="finops-comunicados@suaempresa.com.br"></div>
+                <div class="form-group"><label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="mailing-relay-secure" style="width:auto"> Conexão segura (SSL/TLS na porta, ex: 465)</label></div>
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+                Sem usuário/senha — este relay autoriza pela rede de origem, não por credencial. Se o "Testar Conexão" falhar com
+                timeout/recusa daqui, verifique se esta máquina está na rede/IP liberado pelo relay (pode funcionar só a partir do servidor de produção).
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button type="button" class="btn-primary" onclick="testarConexao('mailing_relay')">Testar Conexão</button>
+                <button type="button" class="btn-rep secondary" onclick="salvarIntegracao('mailing_relay')">💾 Salvar Configuração</button>
               </div>
             </div>
           </div>

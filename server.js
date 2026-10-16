@@ -8915,6 +8915,571 @@ app.post('/api/azure-coleta/historico/:id/validar', authMiddleware, dbMiddleware
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// MAILING DE COMUNICADOS (2026-10-16, pedido do usuário)
+// ══════════════════════════════════════════════════════════════════════════════
+// Broadcast corporativo (1 comunicado → N destinatários) — DELIBERADAMENTE separado do
+// sistema de Alertas (seção "EMAIL — SMTP e alertas" acima, `_sendEmail`/integracoes
+// tipo='smtp'). São duas propostas diferentes por pedido explícito do usuário: uma não
+// pode interferir na outra. Isolamento em três camadas, não só nominal:
+//   - Config própria: integracoes tipo='mailing_relay' — nunca lê nem escreve tipo='smtp'
+//   - Transporter próprio: _mailingTransporter() — nunca reaproveita o do SMTP de Alertas
+//   - Estado de execução próprio: _mailingEnviosEmExecucao (Map) — nunca toca
+//     _coletasEmExecucao nem qualquer outro Map de execução do app
+//
+// Relay SMTP anônimo (decisão do usuário, 2026-10-16): sem usuário/senha — o relay
+// autoriza por IP de origem, não por credencial. Por isso não existe campo de senha
+// neste módulo, nem `_encryptSecret` é chamado aqui — não há segredo pra proteger.
+//
+// Rastreamento honesto: SMTP/relay não dá webhook de entrega nem de bounce (isso é
+// coisa de provedor transacional tipo SendGrid/SES, que este módulo não usa). O que
+// `mailing_envio_destinatario` registra é "meu servidor conseguiu entregar pro relay",
+// não "a pessoa recebeu/leu" — suficiente pro pedido (controle de envio), mas é a
+// limitação real da escolha de arquitetura, documentada aqui pra não virar surpresa.
+
+let _mailingTablesReady = false;
+async function ensureMailingTables() {
+  if (!pool) return;
+  if (_mailingTablesReady) return;
+  const run = (sql) => pool.query(sql).catch((e) => console.error('[Mailing] erro ao criar tabela:', e.message));
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_contatos (
+      id SERIAL PRIMARY KEY,
+      email VARCHAR(320) NOT NULL,
+      nome VARCHAR(200),
+      status VARCHAR(20) NOT NULL DEFAULT 'ativo',
+      origem VARCHAR(20) NOT NULL DEFAULT 'manual',
+      criado_em TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_contatos_email ON mailing_contatos(email)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_import_lote (
+      id SERIAL PRIMARY KEY,
+      arquivo_nome VARCHAR(500),
+      total_linhas INT DEFAULT 0,
+      novos INT DEFAULT 0,
+      atualizados INT DEFAULT 0,
+      invalidos INT DEFAULT 0,
+      invalidos_detalhe JSONB,
+      importado_por VARCHAR(200),
+      importado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_campanhas (
+      id SERIAL PRIMARY KEY,
+      assunto VARCHAR(500) NOT NULL,
+      corpo_html TEXT NOT NULL DEFAULT '',
+      remetente_email VARCHAR(320),
+      remetente_nome VARCHAR(200),
+      status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
+      criado_por VARCHAR(200),
+      criado_em TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW(),
+      iniciado_em TIMESTAMP,
+      concluido_em TIMESTAMP
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_envio_destinatario (
+      id SERIAL PRIMARY KEY,
+      campanha_id INT NOT NULL REFERENCES mailing_campanhas(id) ON DELETE CASCADE,
+      contato_id INT NOT NULL REFERENCES mailing_contatos(id) ON DELETE CASCADE,
+      status VARCHAR(20) NOT NULL DEFAULT 'pendente',
+      enviado_em TIMESTAMP,
+      erro TEXT
+    )
+  `);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_envio_unico ON mailing_envio_destinatario(campanha_id, contato_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_mailing_envio_campanha ON mailing_envio_destinatario(campanha_id, status)`);
+  _mailingTablesReady = true;
+}
+
+const _MAILING_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function _normalizarEmailMailing(v) { return String(v || '').trim().toLowerCase(); }
+function _emailValidoMailing(v) { return _MAILING_EMAIL_RE.test(v); }
+
+// Token de descadastro: determinístico (HMAC do e-mail), não precisa de tabela própria
+// nem de busca — o link se auto-verifica recalculando o HMAC e comparando.
+function _tokenDescadastroMailing(email) {
+  const crypto = require('crypto');
+  return crypto.createHmac('sha256', MASTER_KEY).update(_normalizarEmailMailing(email)).digest('hex').slice(0, 24);
+}
+
+async function _getMailingRelayConfig() {
+  const r = await pool.query(`SELECT config, ativo FROM integracoes WHERE tipo='mailing_relay'`);
+  if (!r.rows.length || !r.rows[0].ativo) return null;
+  const cfg = r.rows[0].config || {};
+  if (!cfg.host || !cfg.remetente_email) return null;
+  return cfg;
+}
+
+// Sem `auth` de propósito (ver banner do módulo) — relay anônimo, autorizado por IP de
+// origem. Nunca adicionar usuário/senha aqui: se um dia o relay passar a exigir
+// credencial, isso é uma config nova, não uma extensão desta.
+function _mailingTransporter(cfg) {
+  return nodemailer.createTransport({
+    host: cfg.host,
+    port: parseInt(cfg.port, 10) || 25,
+    secure: !!cfg.secure,
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 15_000,
+  });
+}
+
+async function _sendMailingEmail(cfg, { to, subject, html }) {
+  const transporter = _mailingTransporter(cfg);
+  await transporter.sendMail({
+    from: `"${cfg.remetente_nome || 'Vivo FinOps'}" <${cfg.remetente_email}>`,
+    to, subject, html,
+  });
+}
+
+// Testa o relay ainda não salvo — mesmo padrão de POST /api/integrations/smtp/testar
+// (o erro cru É o propósito da rota), mas sem senha: relay anônimo, autorizado por IP de
+// origem. Se falhar por timeout/recusa a partir de uma máquina fora da rede corporativa,
+// isso é esperado — o relay provavelmente só aceita conexão de dentro da rede liberada.
+app.post('/api/mailing/relay/testar', authMiddleware, adminMiddleware, async (req, res) => {
+  const { host, port, secure, remetente_email, remetente_nome } = req.body;
+  try {
+    if (!host || !remetente_email) {
+      return res.status(400).json({ error: 'Preencha host e e-mail do remetente antes de testar.' });
+    }
+    await _sendMailingEmail(
+      { host, port, secure, remetente_email, remetente_nome },
+      {
+        to: remetente_email,
+        subject: '✅ Teste de conexão — Relay de Mailing',
+        html: '<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;padding:24px">'
+          + '<h2 style="color:#4a0080">Teste de conexão — Relay de Mailing</h2>'
+          + '<p>Se você está lendo isso, o relay de Mailing está funcionando corretamente.</p>'
+          + '<p style="color:#9ca3af;font-size:12px">Este é um teste de configuração, não um comunicado — sem link de descadastro.</p>'
+          + '</body></html>',
+      }
+    );
+    res.json({ ok: true, message: `E-mail de teste enviado para ${remetente_email}.` });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Envelope mínimo em volta do HTML que vem do composer — não é o mesmo wrapper roxo de
+// `_emailTemplate` (esse é da marca dos Alertas); aqui o corpo já vem formatado pelo
+// usuário. Só garante <!DOCTYPE>/viewport (clientes de e-mail são exigentes com isso) e
+// o rodapé de descadastro, que é obrigatório em todo envio, não opcional.
+function _mailingEmailEnvelope(corpoHtml, unsubscribeUrl) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif">
+  <div style="max-width:640px;margin:0 auto;background:#ffffff">
+    ${corpoHtml}
+    <div style="padding:16px 24px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:11px;text-align:center">
+      Você está recebendo este comunicado da Vivo FinOps.
+      <a href="${unsubscribeUrl}" style="color:#9ca3af">Descadastrar-se</a>
+    </div>
+  </div>
+</body></html>`;
+}
+
+function _mailingPaginaDescadastro(titulo, mensagem) {
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>${_escHtmlServer(titulo)}</title></head>
+<body style="font-family:Arial,Helvetica,sans-serif;background:#f3f4f6;margin:0;padding:40px 20px;text-align:center">
+  <div style="max-width:420px;margin:0 auto;background:#fff;border-radius:8px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,.1)">
+    <h2 style="color:#4a0080;margin:0 0 12px">${_escHtmlServer(titulo)}</h2>
+    <p style="color:#374151;font-size:14px">${_escHtmlServer(mensagem)}</p>
+  </div>
+</body></html>`;
+}
+
+// ── Envio em lote — mesmo padrão de execução em background + progresso consultável já
+// provado em `_coletasEmExecucao` (coleta Azure v4.2), mas num Map 100% separado: uma
+// trava de execução de campanha nunca interfere numa coleta, nem vice-versa.
+const _mailingEnviosEmExecucao = new Map(); // campanhaId -> { iniciadoEm, cancelada, progresso }
+function _mailingEnvioAtivo(campanhaId) { return _mailingEnviosEmExecucao.has(campanhaId); }
+
+const _MAILING_LOTE_TAMANHO = 20;
+const _MAILING_LOTE_INTERVALO_MS = 2000; // pausa entre lotes — não afogar o relay
+
+async function _executarEnvioCampanha(campanhaId, baseUrl) {
+  if (_mailingEnvioAtivo(campanhaId)) throw new Error('Campanha já está sendo enviada');
+  const cfg = await _getMailingRelayConfig();
+  if (!cfg) throw new Error('Relay de Mailing não configurado ou desativado (Integrações)');
+  const camp = (await pool.query(`SELECT * FROM mailing_campanhas WHERE id=$1`, [campanhaId])).rows[0];
+  if (!camp) throw new Error('Campanha não encontrada');
+
+  const destinatarios = (await pool.query(
+    `SELECT med.id AS envio_id, mc.email, mc.nome
+     FROM mailing_envio_destinatario med
+     JOIN mailing_contatos mc ON mc.id = med.contato_id
+     WHERE med.campanha_id = $1 AND med.status = 'pendente'`,
+    [campanhaId]
+  )).rows;
+
+  const entry = { iniciadoEm: new Date(), cancelada: false, progresso: { total: destinatarios.length, enviados: 0, falhas: 0 } };
+  _mailingEnviosEmExecucao.set(campanhaId, entry);
+  await pool.query(`UPDATE mailing_campanhas SET status='enviando', iniciado_em=COALESCE(iniciado_em, NOW()) WHERE id=$1`, [campanhaId]);
+
+  try {
+    for (let i = 0; i < destinatarios.length; i += _MAILING_LOTE_TAMANHO) {
+      if (entry.cancelada) break;
+      const lote = destinatarios.slice(i, i + _MAILING_LOTE_TAMANHO);
+      await Promise.all(lote.map(async (d) => {
+        const unsubUrl = `${baseUrl}/api/public/mailing/descadastro?email=${encodeURIComponent(d.email)}&token=${_tokenDescadastroMailing(d.email)}`;
+        const html = _mailingEmailEnvelope(camp.corpo_html, unsubUrl);
+        try {
+          await _sendMailingEmail(cfg, { to: d.email, subject: camp.assunto, html });
+          await pool.query(`UPDATE mailing_envio_destinatario SET status='enviado', enviado_em=NOW(), erro=NULL WHERE id=$1`, [d.envio_id]);
+          entry.progresso.enviados++;
+        } catch (e) {
+          await pool.query(`UPDATE mailing_envio_destinatario SET status='falha', erro=$2 WHERE id=$1`, [d.envio_id, e.message]);
+          entry.progresso.falhas++;
+        }
+      }));
+      if (i + _MAILING_LOTE_TAMANHO < destinatarios.length) await new Promise((r) => setTimeout(r, _MAILING_LOTE_INTERVALO_MS));
+    }
+  } finally {
+    const pendentes = await pool.query(`SELECT COUNT(*)::int AS n FROM mailing_envio_destinatario WHERE campanha_id=$1 AND status='pendente'`, [campanhaId]);
+    const statusFinal = pendentes.rows[0].n > 0 ? 'enviando' : 'concluida';
+    await pool.query(
+      `UPDATE mailing_campanhas SET status=$2, concluido_em = CASE WHEN $2='concluida' THEN NOW() ELSE concluido_em END WHERE id=$1`,
+      [campanhaId, statusFinal]
+    );
+    _mailingEnviosEmExecucao.delete(campanhaId);
+  }
+}
+
+// ── Cadastro único de contatos ──────────────────────────────────────────────
+app.get('/api/mailing/contatos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const busca = String(req.query.busca || '').trim().toLowerCase();
+    const status = req.query.status;
+    const params = [];
+    let where = '1=1';
+    if (busca) { params.push(`%${busca}%`); where += ` AND (LOWER(email) LIKE $${params.length} OR LOWER(COALESCE(nome,'')) LIKE $${params.length})`; }
+    if (status) { params.push(status); where += ` AND status = $${params.length}`; }
+    const r = await pool.query(`SELECT * FROM mailing_contatos WHERE ${where} ORDER BY email LIMIT 5000`, params);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/contatos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const email = _normalizarEmailMailing(req.body.email);
+    if (!_emailValidoMailing(email)) return res.status(400).json({ error: 'E-mail inválido' });
+    const nome = (req.body.nome || '').trim() || null;
+    await pool.query(
+      `INSERT INTO mailing_contatos (email, nome, origem) VALUES ($1,$2,'manual')
+       ON CONFLICT (email) DO UPDATE SET nome = COALESCE(EXCLUDED.nome, mailing_contatos.nome), atualizado_em=NOW()`,
+      [email, nome]
+    );
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.patch('/api/mailing/contatos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, status } = req.body;
+    const sets = []; const vals = [];
+    if (nome !== undefined) { vals.push(nome || null); sets.push(`nome=$${vals.length}`); }
+    if (status !== undefined) {
+      if (!['ativo', 'opt_out'].includes(status)) return res.status(400).json({ error: 'status inválido' });
+      vals.push(status); sets.push(`status=$${vals.length}`);
+    }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(req.params.id);
+    await pool.query(`UPDATE mailing_contatos SET ${sets.join(',')}, atualizado_em=NOW() WHERE id=$${vals.length}`, vals);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/mailing/contatos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM mailing_contatos WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Detecta a coluna de e-mail (e opcionalmente nome) pelo cabeçalho da primeira linha —
+// planilha corporativa nunca vem com cabeçalho padronizado. Mesma lib (ExcelJS) lê
+// .xlsx e .csv, sem precisar de uma segunda dependência só pra CSV.
+async function _parsePlanilhaContatos(filePath, originalName) {
+  const ExcelJS = require('exceljs');
+  const wb = new ExcelJS.Workbook();
+  const ext = (originalName.split('.').pop() || '').toLowerCase();
+  let ws;
+  if (ext === 'csv') {
+    ws = await wb.csv.readFile(filePath);
+  } else {
+    await wb.xlsx.readFile(filePath);
+    ws = wb.worksheets[0];
+  }
+  if (!ws || ws.rowCount < 1) return { colEmailEncontrada: false, linhas: [] };
+  const headerVals = ws.getRow(1).values || [];
+  const headers = [];
+  for (let i = 1; i < headerVals.length; i++) headers.push(String(headerVals[i] ?? '').trim());
+  const colEmail = headers.findIndex((h) => /e.?mail/i.test(h));
+  const colNome  = headers.findIndex((h) => /nome|name/i.test(h));
+  const linhas = [];
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const vals = row.values || [];
+    const email = colEmail >= 0 ? String(vals[colEmail + 1] ?? '').trim() : '';
+    const nome  = colNome  >= 0 ? String(vals[colNome + 1]  ?? '').trim() : '';
+    if (email || nome) linhas.push({ email, nome });
+  });
+  return { colEmailEncontrada: colEmail >= 0, linhas };
+}
+
+if (_multer) {
+  const _mailingUploadDir = path.join(__dirname, 'uploads_tmp', 'mailing');
+  try { fs.mkdirSync(_mailingUploadDir, { recursive: true }); } catch (_) {}
+  const _mailingUpload = _multer({ dest: _mailingUploadDir, limits: { fileSize: 20 * 1024 * 1024 } });
+
+  app.post('/api/mailing/contatos/import', authMiddleware, dbMiddleware, (req, res, next) => {
+    _mailingUpload.single('arquivo')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      next();
+    });
+  }, async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+    try {
+      await ensureMailingTables();
+      const { colEmailEncontrada, linhas } = await _parsePlanilhaContatos(req.file.path, req.file.originalname);
+      if (!colEmailEncontrada) {
+        return res.status(400).json({ error: 'Não encontrei uma coluna de e-mail na planilha. A primeira linha precisa ter um cabeçalho com "email" (ou similar).' });
+      }
+      let novos = 0, atualizados = 0, invalidos = 0;
+      const amostraInvalidos = [];
+      for (const linha of linhas) {
+        const email = _normalizarEmailMailing(linha.email);
+        if (!_emailValidoMailing(email)) {
+          invalidos++;
+          if (amostraInvalidos.length < 20) amostraInvalidos.push(linha.email || '(vazio)');
+          continue;
+        }
+        const r = await pool.query(
+          `INSERT INTO mailing_contatos (email, nome, origem) VALUES ($1,$2,'import')
+           ON CONFLICT (email) DO UPDATE SET
+             nome = COALESCE(EXCLUDED.nome, mailing_contatos.nome), atualizado_em = NOW()
+           RETURNING (xmax = 0) AS inserido`,
+          [email, linha.nome || null]
+        );
+        if (r.rows[0].inserido) novos++; else atualizados++;
+      }
+      const lote = await pool.query(
+        `INSERT INTO mailing_import_lote (arquivo_nome, total_linhas, novos, atualizados, invalidos, invalidos_detalhe, importado_por)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [req.file.originalname, linhas.length, novos, atualizados, invalidos, JSON.stringify(amostraInvalidos), req.user?.email || req.user?.nome || null]
+      );
+      res.json(lote.rows[0]);
+    } catch (e) {
+      _dbErr(res, e);
+    } finally {
+      fs.unlink(req.file.path, () => {});
+    }
+  });
+
+  app.get('/api/mailing/import-lotes', authMiddleware, dbMiddleware, async (_req, res) => {
+    try {
+      await ensureMailingTables();
+      const r = await pool.query(`SELECT * FROM mailing_import_lote ORDER BY importado_em DESC LIMIT 50`);
+      res.json(r.rows);
+    } catch (e) { _dbErr(res, e); }
+  });
+
+  // Imagem do composer (banner/logo do comunicado) — precisa de URL pública porque o
+  // cliente de e-mail do destinatário busca a imagem remotamente, não existe "anexo
+  // embutido" confiável entre clientes. Pasta própria, servida estaticamente abaixo.
+  const _mailingAssetsDir = path.join(__dirname, 'mailing_uploads');
+  try { fs.mkdirSync(_mailingAssetsDir, { recursive: true }); } catch (_) {}
+  const _mailingImgUpload = _multer({
+    storage: _multer.diskStorage({
+      destination: (_, __, cb) => cb(null, _mailingAssetsDir),
+      filename: (_, file, cb) => cb(null, Date.now() + '_' + file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')),
+    }),
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (_, file, cb) => cb(null, /^image\/(png|jpe?g|gif|webp)$/.test(file.mimetype)),
+  });
+  app.post('/api/mailing/upload-imagem', authMiddleware, (req, res, next) => {
+    _mailingImgUpload.single('imagem')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      next();
+    });
+  }, (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhuma imagem enviada (use PNG/JPG/GIF/WEBP, até 5MB).' });
+    res.json({ ok: true, url: `/mailing-uploads/${req.file.filename}` });
+  });
+}
+app.use('/mailing-uploads', express.static(path.join(__dirname, 'mailing_uploads')));
+
+// ── Campanhas ────────────────────────────────────────────────────────────────
+app.get('/api/mailing/campanhas', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureMailingTables();
+    const r = await pool.query(`
+      SELECT c.*,
+        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id)                     AS total_destinatarios,
+        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='enviado') AS total_enviados,
+        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='falha')   AS total_falhas
+      FROM mailing_campanhas c ORDER BY c.criado_em DESC LIMIT 200
+    `);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.get('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const camp = (await pool.query(`SELECT * FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    res.json(camp);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const { assunto, corpo_html, remetente_email, remetente_nome } = req.body;
+    if (!assunto) return res.status(400).json({ error: 'Assunto é obrigatório' });
+    const r = await pool.query(
+      `INSERT INTO mailing_campanhas (assunto, corpo_html, remetente_email, remetente_nome, criado_por)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [assunto, corpo_html || '', remetente_email || null, remetente_nome || null, req.user?.email || req.user?.nome || null]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.put('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Só é possível editar campanhas em rascunho' });
+    const { assunto, corpo_html, remetente_email, remetente_nome } = req.body;
+    await pool.query(
+      `UPDATE mailing_campanhas SET assunto=$1, corpo_html=$2, remetente_email=$3, remetente_nome=$4, atualizado_em=NOW() WHERE id=$5`,
+      [assunto, corpo_html, remetente_email || null, remetente_nome || null, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Só é possível excluir campanhas em rascunho' });
+    await pool.query(`DELETE FROM mailing_campanhas WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas/:id/enviar-teste', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const email = _normalizarEmailMailing(req.body.email);
+    if (!_emailValidoMailing(email)) return res.status(400).json({ error: 'E-mail de teste inválido' });
+    const cfg = await _getMailingRelayConfig();
+    if (!cfg) return res.status(400).json({ error: 'Relay de Mailing não configurado. Configure em Integrações antes de testar.' });
+    const camp = (await pool.query(`SELECT * FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const unsubUrl = `${baseUrl}/api/public/mailing/descadastro?email=${encodeURIComponent(email)}&token=${_tokenDescadastroMailing(email)}`;
+    const html = _mailingEmailEnvelope(camp.corpo_html, unsubUrl);
+    await _sendMailingEmail(cfg, { to: email, subject: `[TESTE] ${camp.assunto}`, html });
+    res.json({ ok: true, message: `Teste enviado para ${email}` });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post('/api/mailing/campanhas/:id/enviar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const campId = parseInt(req.params.id);
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [campId])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Esta campanha já foi enviada ou está em andamento' });
+    if (_mailingEnvioAtivo(campId)) return res.status(409).json({ error: 'Campanha já está sendo enviada' });
+    const cfg = await _getMailingRelayConfig();
+    if (!cfg) return res.status(400).json({ error: 'Relay de Mailing não configurado. Configure em Integrações antes de enviar.' });
+
+    const ativosR = await pool.query(`SELECT COUNT(*)::int AS n FROM mailing_contatos WHERE status='ativo'`);
+    if (!ativosR.rows[0].n) return res.status(409).json({ error: 'Nenhum contato ativo para enviar.' });
+    // Snapshot no momento do disparo — quem entrar na lista depois não recebe retroativo.
+    await pool.query(
+      `INSERT INTO mailing_envio_destinatario (campanha_id, contato_id)
+       SELECT $1, id FROM mailing_contatos WHERE status='ativo'
+       ON CONFLICT (campanha_id, contato_id) DO NOTHING`,
+      [campId]
+    );
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.json({ ok: true, message: `Envio iniciado para ${ativosR.rows[0].n} destinatário(s)` });
+    _executarEnvioCampanha(campId, baseUrl).catch((e) => console.error('[Mailing] Erro no envio:', e.message));
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas/:id/reenviar-falhas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const campId = parseInt(req.params.id);
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [campId])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'concluida') return res.status(409).json({ error: 'Só é possível reenviar falhas de uma campanha já concluída' });
+    if (_mailingEnvioAtivo(campId)) return res.status(409).json({ error: 'Campanha já está sendo enviada' });
+    const cfg = await _getMailingRelayConfig();
+    if (!cfg) return res.status(400).json({ error: 'Relay de Mailing não configurado.' });
+    const r = await pool.query(`UPDATE mailing_envio_destinatario SET status='pendente', erro=NULL WHERE campanha_id=$1 AND status='falha' RETURNING id`, [campId]);
+    if (!r.rows.length) return res.status(409).json({ error: 'Nenhum envio com falha para reprocessar.' });
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.json({ ok: true, message: `Reprocessando ${r.rows.length} envio(s) com falha` });
+    _executarEnvioCampanha(campId, baseUrl).catch((e) => console.error('[Mailing] Erro no reenvio:', e.message));
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas/:id/cancelar', authMiddleware, dbMiddleware, async (req, res) => {
+  const entry = _mailingEnviosEmExecucao.get(parseInt(req.params.id));
+  if (entry) entry.cancelada = true;
+  res.json({ ok: true });
+});
+
+app.get('/api/mailing/campanhas/:id/progresso', authMiddleware, dbMiddleware, async (req, res) => {
+  const entry = _mailingEnviosEmExecucao.get(parseInt(req.params.id));
+  res.json({ em_execucao: !!entry, progresso: entry ? entry.progresso : null });
+});
+
+app.get('/api/mailing/campanhas/:id/envios', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT med.*, mc.email, mc.nome
+       FROM mailing_envio_destinatario med
+       JOIN mailing_contatos mc ON mc.id = med.contato_id
+       WHERE med.campanha_id = $1
+       ORDER BY med.status, mc.email`,
+      [req.params.id]
+    );
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Descadastro público (sem auth — link clicado fora do app) ────────────────
+const _mailingDescadastroLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Muitas requisições. Tente novamente em instantes.' },
+});
+app.get('/api/public/mailing/descadastro', _mailingDescadastroLimiter, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const email = _normalizarEmailMailing(req.query.email);
+    const token = String(req.query.token || '');
+    const valido = email && _emailValidoMailing(email) && token === _tokenDescadastroMailing(email);
+    if (!valido) return res.status(400).send(_mailingPaginaDescadastro('Link inválido', 'Este link de descadastro não é válido ou já expirou.'));
+    await pool.query(`UPDATE mailing_contatos SET status='opt_out', atualizado_em=NOW() WHERE email=$1`, [email]);
+    res.send(_mailingPaginaDescadastro('Descadastro confirmado', `O e-mail ${email} não vai mais receber comunicados.`));
+  } catch (e) {
+    res.status(500).send(_mailingPaginaDescadastro('Erro', 'Não foi possível processar sua solicitação agora. Tente novamente mais tarde.'));
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // INVENTÁRIO + AUDITORIA DE RECURSOS AZURE (2026-08-30, pedido do usuário)
 // ══════════════════════════════════════════════════════════════════════════════
 // Mesmo nível de acesso que /api/azure-coleta/sps* e /api/databricks-coleta/config*
