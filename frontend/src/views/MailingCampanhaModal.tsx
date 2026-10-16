@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { atualizarCampanha, criarCampanha, enviarTesteCampanha } from '../api/mailing'
 import type { MailingCampanha } from '../types/mailing'
 import MailingComposer from '../components/MailingComposer'
+import { buildTemplatePadraoFinOps } from '../lib/mailingTemplatePadrao'
 
 interface MailingCampanhaModalProps {
   campanha: MailingCampanha | null // null = nova
@@ -15,9 +16,12 @@ interface MailingCampanhaModalProps {
 export default function MailingCampanhaModal({ campanha, onClose }: MailingCampanhaModalProps) {
   const queryClient = useQueryClient()
   const [assunto, setAssunto] = useState(campanha?.assunto || '')
-  const [corpoHtml, setCorpoHtml] = useState(campanha?.corpo_html || '<p>Escreva o comunicado aqui...</p>')
-  const [remetenteNome, setRemetenteNome] = useState(campanha?.remetente_nome || '')
-  const [remetenteEmail, setRemetenteEmail] = useState(campanha?.remetente_email || '')
+  // Campanha nova já nasce com o modelo padrão FinOps (pedido do usuário, 2026-10-16 —
+  // reconstruído a partir do .msg real que o time usa). Editando uma existente, usa o
+  // conteúdo salvo dela, nunca o modelo por cima.
+  const [corpoHtml, setCorpoHtml] = useState(() => campanha?.corpo_html || buildTemplatePadraoFinOps())
+  const [remetenteNome, setRemetenteNome] = useState(campanha?.remetente_nome || (campanha ? '' : 'FinOps Vivo'))
+  const [remetenteEmail, setRemetenteEmail] = useState(campanha?.remetente_email || (campanha ? '' : 'finops.vivo.br@telefonica.com'))
   const [emailTeste, setEmailTeste] = useState('')
   const [mostrarPreview, setMostrarPreview] = useState(false)
 
@@ -89,9 +93,17 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
           <div className="form-group">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <label style={{ margin: 0 }}>Conteúdo do comunicado</label>
-              <button type="button" className="btn-ghost" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setMostrarPreview((v) => !v)}>
-                {mostrarPreview ? '✏ Voltar a editar' : '👁 Prévia'}
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {!campanha && (
+                  <button type="button" className="btn-ghost" style={{ fontSize: 11, padding: '3px 10px' }}
+                    onClick={() => { if (confirm('Limpar o conteúdo e começar do zero?')) setCorpoHtml('<p></p>') }}>
+                    🗋 Começar em branco
+                  </button>
+                )}
+                <button type="button" className="btn-ghost" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setMostrarPreview((v) => !v)}>
+                  {mostrarPreview ? '✏ Voltar a editar' : '👁 Prévia'}
+                </button>
+              </div>
             </div>
             {mostrarPreview ? (
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '16px 20px', maxHeight: 480, overflowY: 'auto', background: '#fff' }}>

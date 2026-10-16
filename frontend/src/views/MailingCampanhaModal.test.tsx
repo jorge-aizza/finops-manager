@@ -110,6 +110,38 @@ describe('MailingCampanhaModal', () => {
     await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('Relay de Mailing não configurado'), 'error'))
   });
 
+  it('campanha nova já abre com o modelo padrão FinOps e remetente preenchido', async () => {
+    renderModal(null)
+    const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
+    expect(editor.value).toContain('finops-banner-comunicado.png')
+    expect(editor.value).toContain('Como funcionará o processo?')
+    expect(screen.getByLabelText('Nome do remetente')).toHaveValue('FinOps Vivo')
+    expect(screen.getByLabelText('E-mail do remetente')).toHaveValue('finops.vivo.br@telefonica.com')
+  });
+
+  it('editar uma campanha existente usa o conteúdo salvo, não o modelo padrão', async () => {
+    renderModal(mockCampanha)
+    const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
+    expect(editor.value).toBe('<p>Conteúdo</p>')
+    expect(editor.value).not.toContain('finops-banner-comunicado.png')
+  });
+
+  it('"Começar em branco" limpa o modelo padrão após confirmação', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderModal(null)
+    const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
+    expect(editor.value).toContain('finops-banner-comunicado.png')
+
+    await user.click(screen.getByRole('button', { name: /Começar em branco/ }))
+    expect(editor.value).not.toContain('finops-banner-comunicado.png')
+  });
+
+  it('"Começar em branco" não existe ao editar uma campanha já existente', async () => {
+    renderModal(mockCampanha)
+    expect(screen.queryByRole('button', { name: /Começar em branco/ })).not.toBeInTheDocument()
+  });
+
   it('alterna entre editor e prévia', async () => {
     const user = userEvent.setup()
     renderModal(mockCampanha)

@@ -31,3 +31,9 @@ skills-lock.json
 # Logo do produto: *.png acima o pegaria, mas este NAO e opcional --
 # sem ele a top-bar, o login e o portal ficam sem marca.
 !finops-logo.png
+
+# Imagens de marca do modelo padrão de Comunicado (Mailing) — mesmo motivo do
+# finops-logo.png acima: não são upload de usuário, são parte do próprio
+# template (mailingTemplatePadrao.ts), precisam estar no deploy.
+!mailing_uploads/finops-banner-comunicado.png
+!mailing_uploads/finops-logo-assinatura.png
