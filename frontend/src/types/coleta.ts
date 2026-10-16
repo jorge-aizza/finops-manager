@@ -203,6 +203,40 @@ export interface ColetarTodasResponse {
   inaptas: ColetarTodasInapta[]
 }
 
+// Reprocessar Mês — plano de reprocessamento por SP (ver _planoReprocessarMes em
+// server.js). Só cobre SPs em modo 'subscription' (lista fixa pra comparar); SPs em
+// modo billing_profile não entram no plano em lote.
+export interface ReprocessarMesAssinatura {
+  subscription_id: string
+  subscription_name: string
+  dias_com_dados: number
+}
+
+export interface ReprocessarMesSp {
+  sp_id: number
+  sp_nome: string
+  ja_em_execucao?: boolean
+  assinaturas: ReprocessarMesAssinatura[]
+}
+
+export interface ReprocessarMesPreview {
+  mes: string
+  inicio: string | null
+  fim: string | null
+  dias_esperados: number
+  por_sp: ReprocessarMesSp[]
+}
+
+export interface ReprocessarMesResponse {
+  ok: boolean
+  message: string
+  mes: string
+  inicio: string
+  fim: string
+  iniciadas: Omit<ReprocessarMesSp, 'ja_em_execucao'>[]
+  puladas: Omit<ReprocessarMesSp, 'ja_em_execucao'>[]
+}
+
 export interface ColetaProgresso {
   tipo: 'api' | 'storage'
   fase: string

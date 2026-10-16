@@ -432,4 +432,110 @@ describe('ColetaView', () => {
       expect(coletaApi.coletarTodas).not.toHaveBeenCalled()
     });
   });
+
+  // ── Reprocessar Mês ──
+  describe('Reprocessar Mês', () => {
+    const planoUmaSp = {
+      mes: '2026-08', inicio: '2026-08-01', fim: '2026-08-31', dias_esperados: 31,
+      por_sp: [
+        {
+          sp_id: 1, sp_nome: 'SP Produção', ja_em_execucao: false,
+          assinaturas: [{ subscription_id: 'sub-1', subscription_name: 'Sub Principal', dias_com_dados: 20 }],
+        },
+      ],
+    }
+
+    async function abrirDetalheMes(user: ReturnType<typeof userEvent.setup>) {
+      renderWithClient()
+      const cell = await screen.findByTitle('65% de cobertura — 1.200 registros')
+      await user.click(cell)
+      await screen.findByText('Detalhe — 2026-08')
+    }
+
+    it('mostra o plano por SP na confirmação antes de disparar nada', async () => {
+      const user = userEvent.setup()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      vi.mocked(coletaApi.previewReprocessarMes).mockResolvedValue(planoUmaSp)
+      await abrirDetalheMes(user)
+
+      await user.click(screen.getByRole('button', { name: /Reprocessar mês/ }))
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
+      const msg = confirmSpy.mock.calls[0][0] as string
+      expect(msg).toContain('2026-08')
+      expect(msg).toContain('2026-08-01')
+      expect(msg).toContain('2026-08-31')
+      expect(msg).toContain('SP Produção')
+      expect(msg).toContain('Sub Principal')
+      expect(msg).toContain('20/31')
+      expect(coletaApi.reprocessarMes).not.toHaveBeenCalled()
+    });
+
+    it('dispara o reprocessamento ao confirmar', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(coletaApi.previewReprocessarMes).mockResolvedValue(planoUmaSp)
+      vi.mocked(coletaApi.reprocessarMes).mockResolvedValue({
+        ok: true, message: 'Reprocessamento de 2026-08 iniciado em 1 Service Principal(is)',
+        mes: '2026-08', inicio: '2026-08-01', fim: '2026-08-31',
+        iniciadas: planoUmaSp.por_sp.map(({ ja_em_execucao, ...pub }) => pub), puladas: [],
+      })
+      await abrirDetalheMes(user)
+
+      await user.click(screen.getByRole('button', { name: /Reprocessar mês/ }))
+
+      await waitFor(() => expect(coletaApi.reprocessarMes).toHaveBeenCalledWith('2026-08'))
+      await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(
+        expect.stringContaining('Reprocessamento de 2026-08 iniciado'), 'success',
+      ))
+    });
+
+    it('avisa quais SPs já estavam coletando e foram puladas, sem esconder o resto', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(coletaApi.previewReprocessarMes).mockResolvedValue(planoUmaSp)
+      vi.mocked(coletaApi.reprocessarMes).mockResolvedValue({
+        ok: true, message: 'Reprocessamento de 2026-08 iniciado em 0 Service Principal(is)',
+        mes: '2026-08', inicio: '2026-08-01', fim: '2026-08-31',
+        iniciadas: [], puladas: [{ sp_id: 1, sp_nome: 'SP Produção', assinaturas: planoUmaSp.por_sp[0].assinaturas }],
+      })
+      await abrirDetalheMes(user)
+
+      await user.click(screen.getByRole('button', { name: /Reprocessar mês/ }))
+
+      await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(
+        expect.stringContaining('1 SP ignorada(s)'), 'success',
+      ))
+    });
+
+    it('não pede confirmação quando não há buraco detectável no mês', async () => {
+      const user = userEvent.setup()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(coletaApi.previewReprocessarMes).mockResolvedValue({ ...planoUmaSp, por_sp: [] })
+      await abrirDetalheMes(user)
+
+      await user.click(screen.getByRole('button', { name: /Reprocessar mês/ }))
+
+      await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(
+        expect.stringContaining('Nenhum buraco detectável'), 'success',
+      ))
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(coletaApi.reprocessarMes).not.toHaveBeenCalled()
+    });
+
+    it('não dispara se o preview falhar', async () => {
+      const user = userEvent.setup()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(coletaApi.previewReprocessarMes).mockRejectedValue(new Error('timeout'))
+      await abrirDetalheMes(user)
+
+      await user.click(screen.getByRole('button', { name: /Reprocessar mês/ }))
+
+      await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(
+        expect.stringContaining('timeout'), 'error',
+      ))
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(coletaApi.reprocessarMes).not.toHaveBeenCalled()
+    });
+  });
 });

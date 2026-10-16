@@ -4,6 +4,7 @@ import type {
   AgendamentoSPInput, AgendamentoStorageInput, AzureResumo, ColetaStatus, ColetarAPIInput,
   ColetarTodasPreview, ColetarTodasResponse,
   CoberturaMes, DiagAgendador, DiagnosticoLinha, HistoricoItem, ImportItem, ImportJob, Pendente, PurgeResult, RGPreview,
+  ReprocessarMesPreview, ReprocessarMesResponse,
   ServicePrincipal, ServicePrincipalInput, StorageConfig, StorageConfigInput,
   SubscriptionPreview, TestarSPResponse, TestarStorageResponse,
 } from '../types/coleta'
@@ -54,6 +55,15 @@ export const previewColetarTodas = (periodo?: { data_inicio: string; data_fim: s
 
 export const coletarTodas = (input?: { data_inicio?: string; data_fim?: string; metric?: string }) =>
   apiFetch<ColetarTodasResponse>('POST', '/azure-coleta/coletar-todas', input || {}, 20000)
+
+// Reprocessar Mês — fecha buracos de uma competência específica (grade de Cobertura).
+// `mes` no formato 'YYYY-MM'. Preview resolve o mesmo plano que o POST executa, pra não
+// divergir (ver _planoReprocessarMes em server.js).
+export const previewReprocessarMes = (mes: string) =>
+  apiFetch<ReprocessarMesPreview>('GET', '/azure-coleta/reprocessar-mes/preview?mes=' + mes, undefined, 20000)
+
+export const reprocessarMes = (mes: string) =>
+  apiFetch<ReprocessarMesResponse>('POST', '/azure-coleta/reprocessar-mes', { mes }, 20000)
 
 export const cancelarColeta = (tipo?: 'api' | 'storage', id?: number | null) => {
   const body = (tipo && id !== undefined) ? { tipo, id } : undefined

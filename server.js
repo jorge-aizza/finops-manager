@@ -6407,7 +6407,11 @@ function _iniciarColetaEntry(tipo, id, histId) {
   const entry = {
     iniciadoEm: new Date(),
     cancelada: false,
-    progresso: { fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] },
+    // `tipo` no progresso (não só na chave do Map) — o frontend usa
+    // `progresso.tipo === 'api' ? 'API Oficial' : 'Via Storage'` pra rotular o card
+    // (ColetaMonitor.tsx). Faltando aqui, toda coleta — API ou Storage — caía no
+    // `else` e aparecia como "Via Storage" na tela, mesmo durante uma coleta via API.
+    progresso: { tipo, fase: '', sub_atual: '', sub_idx: 0, sub_total: 0, chunk_atual: '', chunk_idx: 0, chunk_total: 0, ins: 0, upd: 0, err: 0, log: [] },
     histId,
     status: null,
     concluidoEm: null,
@@ -11476,6 +11480,104 @@ app.post('/api/azure-coleta/coletar-todas', authMiddleware, dbMiddleware, async 
       console.log(`[ColetaTodas] Disparando SP #${sp.id} (${sp.nome}) modo=${sp.modo} ${sp.data_inicio}→${sp.data_fim}`);
       _executarColetaAPI(sp.id, sp._ba || '', sp._bp || '', sp.data_inicio, sp.data_fim, sp.modo, sp._subIds, [], metricEfetivo, 'manual')
         .catch(e => console.error(`[ColetaTodas] Erro SP #${sp.id}:`, e.message));
+    }
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Reprocessar Mês ─────────────────────────────────────────────────────────
+// Fecha buracos de uma competência específica (ex: Set/2026 com 70% de cobertura na
+// grade "Cobertura de Dados por Mês"). Diferente de Coletar Todas (que recarrega a
+// janela corrente de cada SP), este foca num mês já fechado — ou em andamento — e só
+// nas assinaturas que faltam dias ali, agrupadas pela SP dona de cada uma.
+//
+// Limite deliberado: só cobre SPs em modo 'subscription' (lista fixa de assinaturas em
+// `subscription_ids`). SPs em modo 'billing_profile' não têm uma lista fixa de
+// assinaturas pra comparar contra — "a assinatura X não apareceu neste mês" não é
+// detectável sem uma chamada extra à Azure pra listar tudo que existe no billing
+// profile. Essas SPs continuam reprocessáveis manualmente pela tela de Cobertura
+// (clique na assinatura → ▶), só não entram neste atalho em lote.
+function _diasEsperadosNoMes(mesKey) {
+  const [ano, mes] = mesKey.split('-').map(Number);
+  if (!ano || !mes || mes < 1 || mes > 12) return { inicio: null, fim: null, dias: 0 };
+  const inicioMes = new Date(Date.UTC(ano, mes - 1, 1));
+  const fimCalendario = new Date(Date.UTC(ano, mes, 0)); // último dia do mês
+  // Mês em andamento: só até ontem — hoje ainda não fechou na Azure (mesmo critério
+  // que o agendador usa pra janela de coleta normal).
+  const ontem = new Date(); ontem.setUTCDate(ontem.getUTCDate() - 1); ontem.setUTCHours(0, 0, 0, 0);
+  const fimEfetivo = fimCalendario < ontem ? fimCalendario : ontem;
+  if (fimEfetivo < inicioMes) return { inicio: null, fim: null, dias: 0 }; // mês inteiro no futuro
+  const dias = Math.round((fimEfetivo - inicioMes) / 86400000) + 1;
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { inicio: fmt(inicioMes), fim: fmt(fimEfetivo), dias };
+}
+
+async function _planoReprocessarMes(mesKey) {
+  const { inicio, fim, dias: diasEsperados } = _diasEsperadosNoMes(mesKey);
+  if (!inicio) return { mes: mesKey, inicio: null, fim: null, dias_esperados: 0, por_sp: [] };
+
+  const cobR = await pool.query(`
+    SELECT subscription_id, COALESCE(MAX(subscription_name), subscription_id) AS subscription_name,
+           COUNT(DISTINCT cost_date)::int AS dias_com_dados
+    FROM azure_costs
+    WHERE cost_date >= $1 AND cost_date <= $2 AND subscription_id IS NOT NULL AND subscription_id <> ''
+    GROUP BY subscription_id
+  `, [inicio, fim]);
+  const coberturaMap = new Map(cobR.rows.map((r) => [r.subscription_id, { nome: r.subscription_name, dias: r.dias_com_dados }]));
+
+  const spsR = await pool.query(`SELECT id, nome, modo_coleta, subscription_ids FROM azure_coleta_config WHERE ativo = true`);
+  const porSp = [];
+  for (const sp of spsR.rows) {
+    const subs = String(sp.subscription_ids || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+    if (!subs.length) continue; // billing_profile puro, ou SP sem assinatura cadastrada — fora de escopo (ver comentário acima)
+    const faltantes = [];
+    for (const sid of subs) {
+      const cob = coberturaMap.get(sid);
+      const diasCom = cob ? cob.dias : 0;
+      if (diasCom < diasEsperados) {
+        faltantes.push({ subscription_id: sid, subscription_name: cob?.nome || sid, dias_com_dados: diasCom });
+      }
+    }
+    if (faltantes.length) {
+      porSp.push({ sp_id: sp.id, sp_nome: sp.nome, ja_em_execucao: _coletaAtiva('api', sp.id), assinaturas: faltantes });
+    }
+  }
+  return { mes: mesKey, inicio, fim, dias_esperados: diasEsperados, por_sp: porSp };
+}
+
+app.get('/api/azure-coleta/reprocessar-mes/preview', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const mes = String(req.query.mes || '');
+    if (!/^\d{4}-\d{2}$/.test(mes)) return res.status(400).json({ error: 'Parâmetro mes deve ser YYYY-MM' });
+    res.json(await _planoReprocessarMes(mes));
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/azure-coleta/reprocessar-mes', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const mes = String((req.body || {}).mes || '');
+    if (!/^\d{4}-\d{2}$/.test(mes)) return res.status(400).json({ error: 'Campo mes deve ser YYYY-MM' });
+    const plano = await _planoReprocessarMes(mes);
+    const disparar = plano.por_sp.filter((sp) => !sp.ja_em_execucao);
+    if (!disparar.length) {
+      return res.status(409).json({
+        error: plano.por_sp.length
+          ? 'Todas as SPs com buraco neste mês já estão coletando agora.'
+          : 'Nenhuma assinatura com dado faltando neste mês (dentro do que é detectável — ver limite de modo billing_profile).',
+        por_sp: plano.por_sp,
+      });
+    }
+    res.json({
+      ok: true,
+      message: `Reprocessamento de ${mes} iniciado em ${disparar.length} Service Principal(is)`,
+      mes, inicio: plano.inicio, fim: plano.fim,
+      iniciadas: disparar.map(({ ja_em_execucao, ...pub }) => pub),
+      puladas: plano.por_sp.filter((sp) => sp.ja_em_execucao).map(({ ja_em_execucao, ...pub }) => pub),
+    });
+    for (const sp of disparar) {
+      const subIds = sp.assinaturas.map((a) => a.subscription_id);
+      console.log(`[ReprocessarMes] ${mes} — SP #${sp.sp_id} (${sp.sp_nome}): ${subIds.length} assinatura(s)`);
+      _executarColetaAPI(sp.sp_id, '', '', plano.inicio, plano.fim, 'subscription', subIds, [], 'ActualCost', 'manual')
+        .catch((e) => console.error(`[ReprocessarMes] Erro SP #${sp.sp_id}:`, e.message));
     }
   } catch (e) { _dbErr(res, e); }
 });

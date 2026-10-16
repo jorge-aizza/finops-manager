@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   coletarAPI, coletarTodas, criarPendente, deleteHistorico, deletePendente, deleteSP, deleteStorage, executarStorage,
   getCoberturaMeses, getHistorico, getImports, listPendentes, listSPs, listStorages,
-  previewColetarTodas, setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
+  previewColetarTodas, previewReprocessarMes, reprocessarMes, setSPAtivo, setSPPadrao, setStorageAtivo, testarSP, testarStorage,
 } from '../api/coleta'
 import {
   deleteDatabricksConfig, deleteDatabricksHistorico, getDatabricksHistorico, listDatabricksConfigs,
@@ -207,6 +207,48 @@ export default function ColetaView() {
     coletarTodasMutation.mutate()
   }
 
+  // ── Reprocessar Mês ──
+  // Fecha buracos de uma competência específica na grade de Cobertura — diferente de
+  // Coletar Todas (janela corrente), aqui o usuário escolhe o mês clicando na grade,
+  // e só as assinaturas com dia faltando ali entram no reprocessamento.
+  const [reprocessandoMes, setReprocessandoMes] = useState<string | null>(null)
+  const reprocessarMesMutation = useMutation({
+    mutationFn: (mes: string) => reprocessarMes(mes),
+    onSuccess: (r) => {
+      const pulou = r.puladas.length ? ` ${r.puladas.length} SP ignorada(s) (já coletando).` : ''
+      window.showToast?.(`${r.message}.${pulou}`, 'success')
+      queryClient.invalidateQueries({ queryKey: ['coleta-status'] })
+      queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao reprocessar mês: ' + e.message, 'error'),
+    onSettled: () => setReprocessandoMes(null),
+  })
+
+  async function handleReprocessarMes(mesKey: string) {
+    let plano
+    try {
+      plano = await previewReprocessarMes(mesKey)
+    } catch (e) {
+      window.showToast?.('Não foi possível montar o plano de reprocessamento: ' + (e as Error).message, 'error')
+      return
+    }
+    if (!plano.por_sp.length) {
+      window.showToast?.(`Nenhum buraco detectável em ${mesKey} (SPs em modo Billing Profile não entram neste atalho — ver tela de Cobertura por assinatura).`, 'success')
+      return
+    }
+    const linhas = plano.por_sp
+      .map((sp) =>
+        `• ${sp.sp_nome}${sp.ja_em_execucao ? ' (já coletando agora — será pulada)' : ''}: ${sp.assinaturas.length} assinatura(s)\n` +
+        sp.assinaturas.map((a) => `   - ${a.subscription_name} (${a.dias_com_dados}/${plano!.dias_esperados} dias)`).join('\n'))
+      .join('\n')
+    const msg =
+      `Reprocessar ${mesKey} (${plano.inicio} → ${plano.fim})?\n\n${linhas}\n\n` +
+      `Roda uma coleta real na Azure para essas assinaturas. Não altera os agendamentos configurados.`
+    if (!confirm(msg)) return
+    setReprocessandoMes(mesKey)
+    reprocessarMesMutation.mutate(mesKey)
+  }
+
   const [wizardSP, setWizardSP] = useState<ServicePrincipal | null>(null)
   const [agendamentoSP, setAgendamentoSP] = useState<ServicePrincipal | null>(null)
   const [diagOpen, setDiagOpen] = useState(false)
@@ -364,6 +406,8 @@ export default function ColetaView() {
             data={coberturaQuery.data || []}
             onColetarAgora={handleCoberturaColetarAgora}
             onAgendarPendente={handleCoberturaAgendarPendente}
+            onReprocessarMes={handleReprocessarMes}
+            reprocessandoMes={reprocessandoMes}
           />
         )}
 

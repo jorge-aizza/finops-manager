@@ -50,9 +50,13 @@ interface CoberturaGridProps {
   // Omitidas → colunas de ação não aparecem (uso em contextos read-only).
   onColetarAgora?: (mesKey: string, subId: string, subName: string) => void
   onAgendarPendente?: (mesKey: string, subId: string, subName: string) => void
+  // Reprocessar o mês inteiro de uma vez (todas as assinaturas com buraco, agrupadas
+  // por SP) — diferente das ações por-linha acima, que tratam uma assinatura por vez.
+  onReprocessarMes?: (mesKey: string) => void
+  reprocessandoMes?: string | null // mesKey em andamento, pra desabilitar o botão certo
 }
 
-export default function CoberturaGrid({ data, onColetarAgora, onAgendarPendente }: CoberturaGridProps) {
+export default function CoberturaGrid({ data, onColetarAgora, onAgendarPendente, onReprocessarMes, reprocessandoMes }: CoberturaGridProps) {
   const [selected, setSelected] = useState<string | null>(null) // 'YYYY-MM'
   const [hovered, setHovered] = useState<string | null>(null) // 'YYYY-MM'
 
@@ -159,8 +163,21 @@ export default function CoberturaGrid({ data, onColetarAgora, onAgendarPendente 
 
       {selected && (
         <div style={{ marginTop: 12, padding: 12, background: 'var(--bg-hover)', borderRadius: 8, border: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase' }}>
-            Detalhe — {selected}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+              Detalhe — {selected}
+            </div>
+            {onReprocessarMes && (
+              <button
+                className="btn-ghost"
+                style={{ fontSize: 11, padding: '4px 10px', borderColor: 'var(--accent)', color: 'var(--accent)' }}
+                title="Reprocessa todas as assinaturas com dia faltando neste mês, agrupadas por SP"
+                disabled={reprocessandoMes === selected}
+                onClick={() => onReprocessarMes(selected)}
+              >
+                {reprocessandoMes === selected ? 'Reprocessando…' : '🔁 Reprocessar mês'}
+              </button>
+            )}
           </div>
           <table className="data-table">
             <thead>
