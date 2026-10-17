@@ -1,7 +1,7 @@
 import { API_BASE, ApiError, apiFetch, getToken } from './client'
 import type {
   MailingCampanha, MailingCampanhaInput, MailingCampanhaProgresso, MailingContato,
-  MailingContatoStatus, MailingEnvio, MailingImportLote,
+  MailingContatoStatus, MailingEnvio, MailingImportLote, MailingTemplate, MailingTemplateInput,
 } from '../types/mailing'
 
 // ── Contatos (cadastro único) ──────────────────────────────────────
@@ -88,3 +88,13 @@ export const getProgressoCampanha = (id: number) =>
 
 export const listEnviosCampanha = (id: number) =>
   apiFetch<MailingEnvio[]>('GET', '/mailing/campanhas/' + id + '/envios')
+
+// ── Modelos (templates) ──────────────────────────────────────────
+export const listTemplates = () =>
+  apiFetch<MailingTemplate[]>('GET', '/mailing/templates')
+
+export const salvarTemplate = (input: MailingTemplateInput) =>
+  apiFetch<MailingTemplate>('POST', '/mailing/templates', input)
+
+export const excluirTemplate = (id: number) =>
+  apiFetch<{ ok: boolean }>('DELETE', '/mailing/templates/' + id)

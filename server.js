@@ -8993,6 +8993,26 @@ async function ensureMailingTables() {
   `);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_envio_unico ON mailing_envio_destinatario(campanha_id, contato_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_mailing_envio_campanha ON mailing_envio_destinatario(campanha_id, status)`);
+  // Biblioteca de modelos (2026-10-16, pedido do usuário: "deixar esse salvo como
+  // modelo... opção de salvar novo modelo, usar modelo ou criar novo"). Sem seed
+  // automático aqui de propósito: o modelo FinOps que veio do .msg do usuário já existe
+  // como template "embutido" no frontend (buildTemplatePadraoFinOps, calculado com
+  // window.location.origin correto pro ambiente atual) — semear esta tabela a partir do
+  // servidor exigiria adivinhar a origem (dev/prod têm domínios diferentes), arriscando
+  // salvar imagem com URL errada. Esta tabela é só pros modelos que o usuário salvar
+  // explicitamente pelo botão "Salvar como modelo" (já com a origem certa, calculada no navegador).
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_templates (
+      id SERIAL PRIMARY KEY,
+      nome VARCHAR(200) NOT NULL,
+      corpo_html TEXT NOT NULL DEFAULT '',
+      remetente_nome VARCHAR(200),
+      remetente_email VARCHAR(320),
+      criado_por VARCHAR(200),
+      criado_em TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
   _mailingTablesReady = true;
 }
 
@@ -9314,6 +9334,39 @@ if (_multer) {
   });
 }
 app.use('/mailing-uploads', express.static(path.join(__dirname, 'mailing_uploads')));
+
+// ── Modelos (templates) ────────────────────────────────────────────────────
+// CRUD simples — "Salvar como modelo" / "Usar modelo" no composer. O modelo FinOps que
+// veio do .msg do usuário é um template EMBUTIDO no frontend (buildTemplatePadraoFinOps),
+// não uma linha aqui — ver comentário em ensureMailingTables.
+app.get('/api/mailing/templates', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureMailingTables();
+    const r = await pool.query(`SELECT * FROM mailing_templates ORDER BY nome`);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/templates', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const { nome, corpo_html, remetente_nome, remetente_email } = req.body;
+    if (!nome?.trim()) return res.status(400).json({ error: 'Nome do modelo é obrigatório' });
+    const r = await pool.query(
+      `INSERT INTO mailing_templates (nome, corpo_html, remetente_nome, remetente_email, criado_por)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [nome.trim(), corpo_html || '', remetente_nome || null, remetente_email || null, req.user?.email || req.user?.nome || null]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/mailing/templates/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM mailing_templates WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
 
 // ── Campanhas ────────────────────────────────────────────────────────────────
 app.get('/api/mailing/campanhas', authMiddleware, dbMiddleware, async (_req, res) => {

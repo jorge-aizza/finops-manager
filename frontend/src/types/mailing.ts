@@ -71,3 +71,22 @@ export interface MailingCampanhaProgresso {
   em_execucao: boolean
   progresso: { total: number; enviados: number; falhas: number } | null
 }
+
+// Biblioteca de modelos — "Salvar como modelo" / "Usar modelo" no composer.
+export interface MailingTemplate {
+  id: number
+  nome: string
+  corpo_html: string
+  remetente_nome: string | null
+  remetente_email: string | null
+  criado_por: string | null
+  criado_em: string
+  atualizado_em: string
+}
+
+export interface MailingTemplateInput {
+  nome: string
+  corpo_html: string
+  remetente_nome?: string | null
+  remetente_email?: string | null
+}

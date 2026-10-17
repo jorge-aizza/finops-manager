@@ -34,6 +34,7 @@ function renderModal(campanha: MailingCampanha | null, onClose = vi.fn()) {
 beforeEach(() => {
   vi.clearAllMocks()
   window.showToast = vi.fn()
+  vi.mocked(mailingApi.listTemplates).mockResolvedValue([])
 })
 
 describe('MailingCampanhaModal', () => {
@@ -110,36 +111,110 @@ describe('MailingCampanhaModal', () => {
     await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('Relay de Mailing não configurado'), 'error'))
   });
 
-  it('campanha nova já abre com o modelo padrão FinOps e remetente preenchido', async () => {
+  it('campanha nova começa em branco, com o remetente padrão já preenchido', async () => {
     renderModal(null)
     const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
-    expect(editor.value).toContain('finops-banner-comunicado.png')
-    expect(editor.value).toContain('Como funcionará o processo?')
+    expect(editor.value).toBe('<p></p>')
     expect(screen.getByLabelText('Nome do remetente')).toHaveValue('FinOps Vivo')
     expect(screen.getByLabelText('E-mail do remetente')).toHaveValue('finops.vivo.br@telefonica.com')
   });
 
-  it('editar uma campanha existente usa o conteúdo salvo, não o modelo padrão', async () => {
+  it('editar uma campanha existente usa o conteúdo salvo', async () => {
     renderModal(mockCampanha)
     const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
     expect(editor.value).toBe('<p>Conteúdo</p>')
-    expect(editor.value).not.toContain('finops-banner-comunicado.png')
   });
 
-  it('"Começar em branco" limpa o modelo padrão após confirmação', async () => {
+  it('"Criar novo (em branco)" limpa o conteúdo após confirmação', async () => {
     const user = userEvent.setup()
     vi.spyOn(window, 'confirm').mockReturnValue(true)
-    renderModal(null)
+    renderModal(mockCampanha) // já vem com conteúdo salvo, pra ter o que limpar
     const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
-    expect(editor.value).toContain('finops-banner-comunicado.png')
+    expect(editor.value).toBe('<p>Conteúdo</p>')
 
-    await user.click(screen.getByRole('button', { name: /Começar em branco/ }))
-    expect(editor.value).not.toContain('finops-banner-comunicado.png')
+    await user.click(screen.getByRole('button', { name: /Criar novo \(em branco\)/ }))
+    expect(editor.value).toBe('<p></p>')
   });
 
-  it('"Começar em branco" não existe ao editar uma campanha já existente', async () => {
-    renderModal(mockCampanha)
-    expect(screen.queryByRole('button', { name: /Começar em branco/ })).not.toBeInTheDocument()
+  describe('seletor de modelos', () => {
+    it('mostra o modelo embutido FinOps e carrega seu conteúdo ao escolher', async () => {
+      const user = userEvent.setup()
+      renderModal(null)
+      await user.click(screen.getByRole('button', { name: /Usar modelo/ }))
+
+      expect(screen.getByText('Modelo FinOps — Governança de Recursos Órfãos')).toBeInTheDocument()
+      await user.click(screen.getByText('Modelo FinOps — Governança de Recursos Órfãos'))
+
+      const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
+      expect(editor.value).toContain('finops-banner-comunicado.png')
+      expect(editor.value).toContain('Como funcionará o processo?')
+    });
+
+    it('pede confirmação antes de substituir conteúdo já existente', async () => {
+      const user = userEvent.setup()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      renderModal(mockCampanha) // já tem '<p>Conteúdo</p>'
+      await user.click(screen.getByRole('button', { name: /Usar modelo/ }))
+      await user.click(screen.getByText('Modelo FinOps — Governança de Recursos Órfãos'))
+
+      expect(confirmSpy).toHaveBeenCalled()
+      const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
+      expect(editor.value).toBe('<p>Conteúdo</p>') // recusou — manteve o original
+    });
+
+    it('lista modelos salvos pelo usuário, além do embutido', async () => {
+      const user = userEvent.setup()
+      vi.mocked(mailingApi.listTemplates).mockResolvedValue([
+        { id: 1, nome: 'Aviso de Manutenção', corpo_html: '<p>Manutenção programada</p>', remetente_nome: null, remetente_email: null, criado_por: 'admin', criado_em: '', atualizado_em: '' },
+      ])
+      renderModal(null)
+      await user.click(screen.getByRole('button', { name: /Usar modelo/ }))
+
+      expect(await screen.findByText('Aviso de Manutenção')).toBeInTheDocument()
+      await user.click(screen.getByText('Aviso de Manutenção'))
+      expect((screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement).value).toBe('<p>Manutenção programada</p>')
+    });
+
+    it('exclui um modelo salvo, não o embutido (que não tem botão de excluir)', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(mailingApi.listTemplates).mockResolvedValue([
+        { id: 1, nome: 'Aviso de Manutenção', corpo_html: '<p>x</p>', remetente_nome: null, remetente_email: null, criado_por: 'admin', criado_em: '', atualizado_em: '' },
+      ])
+      vi.mocked(mailingApi.excluirTemplate).mockResolvedValue({ ok: true })
+      renderModal(null)
+      await user.click(screen.getByRole('button', { name: /Usar modelo/ }))
+      await screen.findByText('Aviso de Manutenção')
+
+      expect(screen.getAllByTitle('Excluir modelo')).toHaveLength(1) // só o modelo custom, não o embutido
+      await user.click(screen.getByTitle('Excluir modelo'))
+      await waitFor(() => expect(mailingApi.excluirTemplate).toHaveBeenCalledWith(1))
+    });
+  });
+
+  describe('salvar como modelo', () => {
+    it('salva o conteúdo atual como um novo modelo nomeado', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'prompt').mockReturnValue('Meu Novo Modelo')
+      vi.mocked(mailingApi.salvarTemplate).mockResolvedValue({
+        id: 9, nome: 'Meu Novo Modelo', corpo_html: '<p>Conteúdo</p>', remetente_nome: null, remetente_email: null, criado_por: 'admin', criado_em: '', atualizado_em: '',
+      })
+      renderModal(mockCampanha)
+      await user.click(screen.getByRole('button', { name: /Salvar como modelo/ }))
+
+      await waitFor(() => expect(mailingApi.salvarTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        nome: 'Meu Novo Modelo', corpo_html: '<p>Conteúdo</p>',
+      })))
+      expect(window.showToast).toHaveBeenCalledWith('Modelo salvo.', 'success')
+    });
+
+    it('não salva nada se o usuário cancelar o prompt de nome', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'prompt').mockReturnValue(null)
+      renderModal(mockCampanha)
+      await user.click(screen.getByRole('button', { name: /Salvar como modelo/ }))
+      expect(mailingApi.salvarTemplate).not.toHaveBeenCalled()
+    });
   });
 
   it('alterna entre editor e prévia', async () => {
