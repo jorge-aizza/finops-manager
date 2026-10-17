@@ -13,12 +13,17 @@
 // mesmo mecanismo que as imagens que o usuário sobe pelo composer, só que com nome fixo
 // em vez de timestamp, porque são reaproveitadas em todo comunicado, não de um upload só.
 //
-// Tamanho do logo via atributo `width`, não `style` (2026-10-16 — redesenho da
-// assinatura): o editor descarta `style` solto de imagem/cor ao carregar HTML pronto,
-// só preserva o que a extensão configurada em MailingComposer.tsx entende — `width` é
-// um desses (ver ImageComTamanho ali) e também é mais respeitado entre clientes de
-// e-mail que CSS de tamanho. Roxo de título/divisória vem do PADRÃO da extensão
-// (MailingComposer.tsx), não pintado aqui por instância — por isso sobrevive.
+// Tamanho do logo via atributo `width`, não `style`: o editor descarta `style` solto de
+// imagem/cor ao carregar HTML pronto, só preserva o que a extensão configurada em
+// MailingComposer.tsx entende — `width` é um desses (ver ImageComTamanho ali) e também
+// é mais respeitado entre clientes de e-mail que CSS de tamanho. Roxo dos títulos de
+// seção (ex: "Como funcionará o processo?") vem do PADRÃO da extensão de heading em
+// MailingComposer.tsx, não pintado aqui por instância — por isso sobrevive.
+//
+// Assinatura (2026-10-16, ajustada pelo usuário pra ficar fiel ao .msg original): logo
+// 120px (perto do 131px original), sem título extra nem divisória — só o que estava
+// no e-mail de verdade. "Equipe FinOps"/emoji de envelope/linha divisória que eu tinha
+// adicionado no primeiro rascunho foram tirados por pedido do usuário.
 export function buildTemplatePadraoFinOps(): string {
   const base = window.location.origin
   return `
@@ -51,12 +56,10 @@ export function buildTemplatePadraoFinOps(): string {
 <h3>Dúvidas e suporte</h3>
 <p>Em caso de dúvidas ou necessidade de suporte, entre em contato com as equipes responsáveis:</p>
 <p><strong>📧 finops.br@telefonica.com</strong></p>
-<hr>
-<p><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" width="90"></p>
-<h3>Equipe FinOps</h3>
+<p><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" width="120"></p>
 <p><strong>Diretoria de Infraestrutura e Cloud</strong><br>
-<strong>Telefônica Brasil | Vivo</strong></p>
-<p>✉ <a href="mailto:finops.br@telefonica.com">finops.br@telefonica.com</a></p>
+<strong>Telefônica Brasil | Vivo</strong><br>
+<a href="mailto:finops.br@telefonica.com">finops.br@telefonica.com</a></p>
 <p style="text-align:center"><strong><u>Este é um e-mail automático. Por favor não responda</u></strong></p>
 `.trim()
 }
