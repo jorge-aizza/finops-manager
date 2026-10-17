@@ -4,10 +4,12 @@
 // Outlook (decisão já registrada no plano do Mailing: o HTML do Outlook é sujo demais
 // pra editar depois — isso aqui é a MESMA aparência, compatível com o schema do TipTap).
 //
-// Simplificação deliberada: a assinatura original tinha o logo e o texto lado a lado
-// numa tabela — o editor (StarterKit, sem extensão de tabela) não preserva layout de
-// tabela/flex ao carregar o HTML, então a assinatura aqui é logo em cima, texto embaixo.
-// Mesmo conteúdo, só não o mesmo layout lado a lado.
+// Assinatura em tabela de 2 colunas (2026-10-17, pedido do usuário: "quero o texto na
+// frente da imagem como o MSG consegue") — igual ao .msg original. Precisou adicionar
+// suporte a tabela no editor (MailingComposer.tsx) pra isso sobreviver ao carregar o
+// modelo; sem extensão de tabela, imagem e texto nunca ficam lado a lado (a extensão de
+// imagem é bloco, quebra pro próprio parágrafo sempre — confirmado testando antes de
+// escrever este comentário, não é suposição).
 //
 // Imagens de marca (banner + logo) ficam em /mailing_uploads/, servidas estaticamente —
 // mesmo mecanismo que as imagens que o usuário sobe pelo composer, só que com nome fixo
@@ -20,10 +22,12 @@
 // seção (ex: "Como funcionará o processo?") vem do PADRÃO da extensão de heading em
 // MailingComposer.tsx, não pintado aqui por instância — por isso sobrevive.
 //
-// Assinatura (2026-10-16, ajustada pelo usuário pra ficar fiel ao .msg original): logo
-// 120px (perto do 131px original), sem título extra nem divisória — só o que estava
-// no e-mail de verdade. "Equipe FinOps"/emoji de envelope/linha divisória que eu tinha
-// adicionado no primeiro rascunho foram tirados por pedido do usuário.
+// Assinatura (ajustada pelo usuário pra ficar fiel ao .msg original): logo 120px (perto
+// do 131px original), sem título extra nem divisória — só o que estava no e-mail de
+// verdade. "Equipe FinOps"/emoji de envelope/linha divisória do primeiro rascunho foram
+// tirados por pedido do usuário. Logo com fundo transparente (2026-10-17) — a imagem
+// original tinha fundo branco sólido (não combinava com fundo escuro); removido por
+// flood-fill a partir das bordas, preservando as cores do desenho.
 export function buildTemplatePadraoFinOps(): string {
   const base = window.location.origin
   return `
@@ -56,10 +60,16 @@ export function buildTemplatePadraoFinOps(): string {
 <h3>Dúvidas e suporte</h3>
 <p>Em caso de dúvidas ou necessidade de suporte, entre em contato com as equipes responsáveis:</p>
 <p><strong>📧 finops.br@telefonica.com</strong></p>
-<p><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" width="120"></p>
-<p><strong>Diretoria de Infraestrutura e Cloud</strong><br>
+<table>
+<tbody>
+<tr>
+<td><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" width="120"></td>
+<td><p><strong>Diretoria de Infraestrutura e Cloud</strong><br>
 <strong>Telefônica Brasil | Vivo</strong><br>
-<a href="mailto:finops.br@telefonica.com">finops.br@telefonica.com</a></p>
+<a href="mailto:finops.br@telefonica.com">finops.br@telefonica.com</a></p></td>
+</tr>
+</tbody>
+</table>
 <p style="text-align:center"><strong><u>Este é um e-mail automático. Por favor não responda</u></strong></p>
 `.trim()
 }

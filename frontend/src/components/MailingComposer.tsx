@@ -7,6 +7,10 @@ import Underline from '@tiptap/extension-underline'
 import TextAlign from '@tiptap/extension-text-align'
 import { TextStyle } from '@tiptap/extension-text-style'
 import { Color } from '@tiptap/extension-color'
+import { Table } from '@tiptap/extension-table'
+import { TableRow } from '@tiptap/extension-table-row'
+import { TableCell } from '@tiptap/extension-table-cell'
+import { TableHeader } from '@tiptap/extension-table-header'
 import { uploadImagemMailing } from '../api/mailing'
 
 // TipTap só preserva, ao CARREGAR um HTML pronto (ex: um modelo), os atributos que a
@@ -143,6 +147,21 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
       TextAlign.configure({ types: ['heading', 'paragraph'] }),
       TextStyle,
       Color,
+      // Tabela — único jeito confiável de texto ao lado de imagem que sobrevive ao editor
+      // (2026-10-17, pedido do usuário: "quero o texto na frente da imagem como o MSG
+      // consegue" — a assinatura original do .msg usava uma tabela pra isso). `img`
+      // dentro de `<p>` nunca fica ao lado de texto porque a extensão de imagem é
+      // BLOCO, não inline — quebra a imagem pro próprio parágrafo dela, sempre.
+      // `border:0`/cellpadding/cellspacing como atributo HTML (não só CSS) de propósito:
+      // é o jeito mais respeitado entre clientes de e-mail pra garantir tabela sem
+      // bordas visíveis (mesmo raciocínio do `width` na imagem, acima).
+      Table.configure({
+        resizable: false,
+        HTMLAttributes: { border: '0', cellpadding: '0', cellspacing: '0', style: 'border-collapse:collapse;border:none' },
+      }),
+      TableRow,
+      TableHeader,
+      TableCell.configure({ HTMLAttributes: { style: 'border:none;vertical-align:top;padding:0' } }),
     ],
     content: value,
     editable,
