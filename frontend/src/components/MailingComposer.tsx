@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { useEditor, EditorContent, type Editor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
@@ -126,9 +126,16 @@ function Toolbar({ editor }: { editor: Editor }) {
 export default function MailingComposer({ value, onChange, editable = true }: MailingComposerProps) {
   const editor = useEditor({
     extensions: [
+      // link/underline: false — o StarterKit desta versão (3.32) já empacota as duas,
+      // e eu configuro versões próprias logo abaixo (cor de marca no link, etc.). Sem
+      // desativar as de dentro do StarterKit, ficam duas instâncias de cada registradas
+      // ("Duplicate extension names found", aviso real do TipTap) e qual delas "vence"
+      // fica por conta da ordem interna da lib, não da minha config — melhor não depender disso.
       StarterKit.configure({
         heading: { levels: [1, 2, 3], HTMLAttributes: { style: 'color:#4a0080' } },
         horizontalRule: { HTMLAttributes: { style: 'border:none;border-top:2px solid #7b2fbe;margin:20px 0' } },
+        link: false,
+        underline: false,
       }),
       ImageComTamanho.configure({ HTMLAttributes: { style: 'max-width:100%;height:auto' } }),
       Link.configure({ openOnClick: false, HTMLAttributes: { style: 'color:#7b2fbe' } }),
@@ -141,6 +148,24 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
     editable,
     onUpdate: ({ editor }) => onChange(editor.getHTML()),
   })
+
+  // Bug real corrigido (2026-10-16, achado pelo usuário: "Não aparece o modelo que do
+  // MSG que te mandei"): `content: value` acima só é lido na CRIAÇÃO do editor — trocar
+  // `value` depois (ex: clicar em "Usar modelo" em MailingCampanhaModal, que chama
+  // setCorpoHtml) não reflete na tela sozinho, porque o TipTap não observa a prop pra
+  // re-sincronizar. Confirmado rodando de verdade (não só lendo o código): um teste
+  // trocando `value` de fora mostrava o editor intocado. `setContent(value, false)` força
+  // a sincronização; o `false` evita disparar `onUpdate` de volta (senão era loop: troca
+  // externa → onUpdate → onChange → novo value → troca externa de novo). O `if` evita
+  // mexer no documento quando a mudança já veio de dentro do próprio editor (o usuário
+  // digitando) — nesse caso `editor.getHTML()` já é igual a `value`, nada a fazer.
+  useEffect(() => {
+    if (!editor) return
+    if (editor.getHTML() !== value) {
+      editor.commands.setContent(value, { emitUpdate: false })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, editor])
 
   if (!editor) return null
 
