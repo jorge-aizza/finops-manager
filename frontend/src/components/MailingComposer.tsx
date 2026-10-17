@@ -9,6 +9,32 @@ import { TextStyle } from '@tiptap/extension-text-style'
 import { Color } from '@tiptap/extension-color'
 import { uploadImagemMailing } from '../api/mailing'
 
+// TipTap só preserva, ao CARREGAR um HTML pronto (ex: um modelo), os atributos que a
+// extensão declara entender — `style` arbitrário em cima de <img>/<hr>/cor de texto é
+// descartado silenciosamente no parse, mesmo que aquele exato `style` fosse o que a
+// própria extensão geraria via botão da toolbar (confirmado testando o round-trip real,
+// 2026-10-16 — não é suposição). Por isso:
+//   - Tamanho de imagem usa o atributo HTML `width` (extensão abaixo, não vem no
+//     @tiptap/extension-image padrão), não `style="width:..."` — funciona nos dois
+//     sentidos (sobrevive ao editor E é o jeito mais compatível entre clientes de
+//     e-mail, que costumam respeitar `width=""` melhor que CSS)
+//   - Cor de marca em título/divisória é o PADRÃO da extensão (HTMLAttributes abaixo),
+//     não algo pintado por instância no HTML do modelo — isso sim sobrevive, porque é
+//     a própria regra de renderização da extensão, não um atributo solto que o parser
+//     precisa reconhecer
+const ImageComTamanho = Image.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      width: {
+        default: null,
+        parseHTML: (el: HTMLElement) => el.getAttribute('width'),
+        renderHTML: (attrs: { width?: string | null }) => (attrs.width ? { width: attrs.width } : {}),
+      },
+    }
+  },
+})
+
 // Editor visual do comunicado — monta HTML pronto pra e-mail (sem depender de colar
 // formatação suja do Outlook, ver decisão registrada no plano: um editor próprio com
 // blocos visuais é mais previsível entre clientes de e-mail do que tentar importar
@@ -100,8 +126,11 @@ function Toolbar({ editor }: { editor: Editor }) {
 export default function MailingComposer({ value, onChange, editable = true }: MailingComposerProps) {
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
-      Image.configure({ HTMLAttributes: { style: 'max-width:100%;height:auto' } }),
+      StarterKit.configure({
+        heading: { levels: [1, 2, 3], HTMLAttributes: { style: 'color:#4a0080' } },
+        horizontalRule: { HTMLAttributes: { style: 'border:none;border-top:2px solid #7b2fbe;margin:20px 0' } },
+      }),
+      ImageComTamanho.configure({ HTMLAttributes: { style: 'max-width:100%;height:auto' } }),
       Link.configure({ openOnClick: false, HTMLAttributes: { style: 'color:#7b2fbe' } }),
       Underline,
       TextAlign.configure({ types: ['heading', 'paragraph'] }),
@@ -118,7 +147,7 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)' }}>
       {editable && <Toolbar editor={editor} />}
-      <div style={{ padding: '16px 20px', minHeight: 240, maxHeight: 480, overflowY: 'auto' }}>
+      <div style={{ padding: '16px 20px', minHeight: 280, maxHeight: 560, overflowY: 'auto' }}>
         <EditorContent editor={editor} />
       </div>
     </div>

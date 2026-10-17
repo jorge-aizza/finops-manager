@@ -12,6 +12,13 @@
 // Imagens de marca (banner + logo) ficam em /mailing_uploads/, servidas estaticamente —
 // mesmo mecanismo que as imagens que o usuário sobe pelo composer, só que com nome fixo
 // em vez de timestamp, porque são reaproveitadas em todo comunicado, não de um upload só.
+//
+// Tamanho do logo via atributo `width`, não `style` (2026-10-16 — redesenho da
+// assinatura): o editor descarta `style` solto de imagem/cor ao carregar HTML pronto,
+// só preserva o que a extensão configurada em MailingComposer.tsx entende — `width` é
+// um desses (ver ImageComTamanho ali) e também é mais respeitado entre clientes de
+// e-mail que CSS de tamanho. Roxo de título/divisória vem do PADRÃO da extensão
+// (MailingComposer.tsx), não pintado aqui por instância — por isso sobrevive.
 export function buildTemplatePadraoFinOps(): string {
   const base = window.location.origin
   return `
@@ -45,10 +52,11 @@ export function buildTemplatePadraoFinOps(): string {
 <p>Em caso de dúvidas ou necessidade de suporte, entre em contato com as equipes responsáveis:</p>
 <p><strong>📧 finops.br@telefonica.com</strong></p>
 <hr>
-<p style="text-align:center"><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" style="width:110px;height:auto"></p>
+<p><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" width="90"></p>
+<h3>Equipe FinOps</h3>
 <p><strong>Diretoria de Infraestrutura e Cloud</strong><br>
-<strong>Telefônica Brasil | Vivo</strong><br>
-<a href="mailto:finops.br@telefonica.com">finops.br@telefonica.com</a></p>
+<strong>Telefônica Brasil | Vivo</strong></p>
+<p>✉ <a href="mailto:finops.br@telefonica.com">finops.br@telefonica.com</a></p>
 <p style="text-align:center"><strong><u>Este é um e-mail automático. Por favor não responda</u></strong></p>
 `.trim()
 }
