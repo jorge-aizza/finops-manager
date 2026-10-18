@@ -1597,7 +1597,16 @@ export default function InventarioView() {
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
                     {despSemCusto} recurso(s) sem nenhuma linha de billing conhecida —
                     aparecem como &ldquo;—&rdquo;, nunca como R$ 0,00: não saber o custo não é o mesmo que ser de graça.
-                    (NICs, por exemplo, não são cobradas na Azure — continuam sendo entulho, mas não gasto.)
+                    Disco e snapshot <strong>sempre</strong> faturam na Azure, então aqui isso indica billing
+                    não localizado, não recurso gratuito — vale investigar em vez de ignorar.
+                  </div>
+                )}
+
+                {desperdicioQuery.data.ocultos_sem_custo > 0 && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                    + {desperdicioQuery.data.ocultos_sem_custo} recurso(s) fora desta lista por não gerarem
+                    custo ao ficarem órfãos (NIC não é cobrada na Azure — medido, 0 de 300 faturam).
+                    Continuam sendo coletados e detectados normalmente.
                   </div>
                 )}
 

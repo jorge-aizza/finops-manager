@@ -4426,7 +4426,11 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       && (!rgs.size || (x.resource_group && rgs.has(String(x.resource_group).toUpperCase())))
       // Discos de PVC do AKS e de ASR precisam de validação manual (podem estar em uso
       // por outro sistema) — nunca expostos no portal público, só na tela interna.
-      && !x.motivo_validacao);
+      && !x.motivo_validacao
+      // Categoria que não gera custo por estar órfã fica fora da visão de FinOps (hoje só
+      // NIC — ver _DESP_CATEGORIAS_SEM_CUSTO). Redundante com a allowlist atual, que só
+      // libera disco e snapshot, mas a allowlist é editável pelo admin e esta regra não.
+      && !_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria));
 
     const det = filtrados.length
       ? await pool.query(
@@ -4819,7 +4823,11 @@ app.get('/api/admin/portal-config/orfaos-opcoes', authMiddleware, dbMiddleware, 
       rgMap.set(k, e);
     }
     res.json({
-      categorias: Object.entries(_DESP_LABEL_XLSX).map(([id, label]) => ({ id, label })),
+      // Categoria que não gera custo não é oferecida: selecioná-la no portal não traria
+      // nada (o endpoint público também a filtra) e pareceria configuração quebrada.
+      categorias: Object.entries(_DESP_LABEL_XLSX)
+        .filter(([id]) => !_DESP_CATEGORIAS_SEM_CUSTO.has(id))
+        .map(([id, label]) => ({ id, label })),
       resource_groups: Array.from(rgMap.values()).sort((a, b) => a.resource_group.localeCompare(b.resource_group)),
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -11732,18 +11740,29 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       for (const it of itens) it.subscription_name = subsMap.get(it.subscription_id) || null;
     }
 
+    // Fora da visão de FinOps o que não gera custo por estar órfão (pedido do usuário,
+    // 2026-10-18: "preciso olhar somente para os que podem gerar custos por estar órfã").
+    // Recorte pela NATUREZA do recurso, nunca por `custo_mensal_estimado === null`: null
+    // aqui significa "não achamos o billing", não "é grátis" — filtrar por ele esconderia
+    // disco e snapshot de verdade (medido: 182 itens no portal público, incluindo um
+    // Premium_LRS de 20 GB órfão há 1242 dias).
+    const itensFinops = itens.filter((x) => !_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria));
+
     const porCategoria = {};
-    for (const it of itens) {
+    for (const it of itensFinops) {
       const c = (porCategoria[it.categoria] ||= { categoria: it.categoria, itens: 0, custo_mensal_estimado: 0, sem_custo_conhecido: 0 });
       c.itens++;
       if (it.custo_mensal_estimado === null) c.sem_custo_conhecido++;
       else c.custo_mensal_estimado += it.custo_mensal_estimado;
     }
 
-    itens.sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
+    itensFinops.sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
 
     // Economia realizada: apura o que ainda falta e monta o resumo. Nunca derruba a tela —
     // o desperdício (o dado principal daqui) não pode sumir porque a apuração falhou.
+    // `itens` COMPLETO aqui de propósito, não `itensFinops`: a apuração trata "sumiu da
+    // lista viva" como exclusão, então mandar a lista já filtrada faria toda NIC órfã viva
+    // parecer excluída e virar economia.
     let saving = null;
     try {
       await _apurarSavingOrfaos(itens.map((x) => x.resource_id));
@@ -11752,16 +11771,19 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       console.error('[Saving Órfãos] falha ao apurar:', e.message);
     }
 
-    console.log(`[Desperdicio] ${itens.length} itens de ${alvos.length} assinatura(s) em ${Date.now() - t0Desp} ms`);
+    console.log(`[Desperdicio] ${itensFinops.length} itens (${itens.length} coletados) de ${alvos.length} assinatura(s) em ${Date.now() - t0Desp} ms`);
     res.json({
       gerado_em: new Date().toISOString(),
       dias_snapshot: dias,
-      total_itens: itens.length,
+      total_itens: itensFinops.length,
       saving,
-      custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
-      sem_custo_conhecido: itens.filter((x) => x.custo_mensal_estimado === null).length,
+      custo_mensal_estimado_total: itensFinops.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
+      sem_custo_conhecido: itensFinops.filter((x) => x.custo_mensal_estimado === null).length,
+      // Quantos ficaram fora por não gerarem custo — continuam coletados e detectados,
+      // só não entram na visão de FinOps.
+      ocultos_sem_custo: itens.length - itensFinops.length,
       por_categoria: Object.values(porCategoria).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
-      itens,
+      itens: itensFinops,
       erros,
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -12015,10 +12037,27 @@ async function _snapshotsDeRetencaoVivos(itensDesperdicio) {
 // (o que o usuário vê é o que sai no arquivo).
 const _DESP_LABEL_XLSX = {
   disco_orfao: 'Disco não anexado', snapshot_antigo: 'Snapshot antigo', ip_solto: 'IP público sem uso',
+  // ⚠ Ao adicionar categoria nova aqui, veja se ela gera custo — se não gerar, entra também
+  // em _DESP_CATEGORIAS_SEM_CUSTO (logo abaixo da definição deste mapa).
   nic_orfa: 'NIC não anexada', app_service_plan_vazio: 'App Service Plan sem apps',
   lb_sem_backend: 'Load Balancer sem backend', appgw_sem_backend: 'App Gateway sem backend',
   vm_parada: 'VM parada (sem desalocar)',
 };
+
+// Categorias que NÃO geram custo por estarem órfãs — ficam fora da visão de FinOps (tela de
+// Desperdício e portal público), mas continuam sendo coletadas e detectadas normalmente.
+//
+// Só NIC entra aqui, e isso foi MEDIDO, não suposto (2026-10-18): amostrando 300 recursos
+// vivos de cada tipo contra azure_costs nos últimos 30 dias — NIC 0/300 faturam; IP público
+// 287/300; disco 293/300; snapshot 273/300; Load Balancer 245/246; App Gateway 54/54. Ou
+// seja, IP solto e snapshot FATURAM e continuam na lista, ao contrário do que a intuição
+// sugeriria para um IP não associado.
+//
+// Cuidado: isto NÃO é o mesmo que filtrar por `custo_mensal_estimado === null`. Null neste
+// projeto é "não achamos o billing", não "é grátis" — filtrar por null esconderia disco e
+// snapshot reais (medido: 182 no portal público, um deles Premium_LRS de 20 GB órfão há
+// 1242 dias). Por isso o recorte é por tipo de recurso, não por ausência de dado.
+const _DESP_CATEGORIAS_SEM_CUSTO = new Set(['nic_orfa']);
 // Monta o workbook de Desperdício — reaproveitado pelo endpoint interno (completo, com
 // Assinatura/Resource ID/Localização) e pelo endpoint público (`sanitizado: true`, omite esses
 // campos porque o tipo público nunca os expõe — mesma política de `/api/public/orfaos`).

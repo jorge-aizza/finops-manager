@@ -579,6 +579,9 @@ export interface AzureDesperdicioResposta {
   total_itens: number
   /** null quando a apuração falhou — a tela de desperdício continua funcionando sem ela. */
   saving: AzureSavingOrfaos | null
+  /** Itens coletados que ficaram fora por não gerarem custo ao ficarem órfãos (hoje, NIC).
+   *  Continuam coletados e detectados — só não entram na visão de FinOps. */
+  ocultos_sem_custo: number
   custo_mensal_estimado_total: number
   sem_custo_conhecido: number
   por_categoria: {
