@@ -557,6 +557,11 @@ export interface AzureSavingOrfaos {
   recursos_eliminados: number
   /** Excluídos sem billing conhecido — não entram na soma (null nunca vira zero). */
   sem_custo_conhecido: number
+  /** Excluídos que eram disco de PVC/AKS ou ASR. Ficam FORA do total pela mesma razão que
+   *  ficam fora do desperdício: o estado do recurso não prova abandono, então a exclusão
+   *  pode ter sido o ciclo de vida do cluster, não o processo de FinOps. */
+  para_validacao: number
+  para_validacao_custo_mensal: number
   itens: {
     resource_id: string
     categoria: AzureDesperdicioCategoria

@@ -226,7 +226,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 800, economia_mensal_bruta: 1000, desconto_mensal_snapshots: 200,
-        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, itens: [],
+        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, itens: [],
       },
     })
     renderWithClient()
@@ -245,6 +245,34 @@ describe('InventarioView', () => {
     expect(within(acumulado).getByText(/1 sem custo conhecido/)).toBeInTheDocument()
   })
 
+  // PVC/ASR excluídos NÃO entram na economia (2026-10-18, pergunta do usuário: "está
+  // seguindo a mesma lógica dos PVC e ASR né?"). Não estava — e o caso real era grave: o
+  // único recurso com custo apurado na base era um disco `pvc-...` de AKS, apagado pelo
+  // ciclo de vida do cluster, inflando a economia em R$ 1.367/mês sozinho. O backend já
+  // tira do total; aqui se trava que a tela mostra o que ficou de fora, pra não confundir
+  // "não economizamos" com "não contabilizamos".
+  it('separa excluídos de AKS/ASR do total de economia, mas mostra quanto ficou de fora', async () => {
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [],
+      por_categoria: [], itens: [],
+      saving: {
+        economia_mensal: 300, economia_mensal_bruta: 300, desconto_mensal_snapshots: 0,
+        economia_acumulada: 900, recursos_eliminados: 2, sem_custo_conhecido: 0,
+        para_validacao: 1, para_validacao_custo_mensal: 1367.2, itens: [],
+      },
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+
+    const card = (await screen.findByText('💰 Economia realizada por mês')).closest('.stat-card') as HTMLElement
+    // O valor em destaque ignora o disco de AKS/ASR — não é 1.667, é 300.
+    expect(card.querySelector('.stat-value')).toHaveTextContent(/300/)
+    expect(card.querySelector('.stat-value')).not.toHaveTextContent(/1\.667/)
+    // E o que ficou de fora aparece, em vez de sumir sem explicação.
+    const acumulado = screen.getByText('Economia acumulada').closest('.stat-card') as HTMLElement
+    expect(within(acumulado).getByText(/1 em validação \(AKS\/ASR\)/)).toBeInTheDocument()
+  })
+
   // Zero apurado não é resultado — é ausência de medição. Mostrar "R$ 0" como economia
   // passaria a ideia errada de que o processo não economizou nada.
   it('não mostra card de economia quando nada foi apurado', async () => {
@@ -253,7 +281,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 0, economia_mensal_bruta: 0, desconto_mensal_snapshots: 0,
-        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, itens: [],
+        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, para_validacao: 0, para_validacao_custo_mensal: 0, itens: [],
       },
     })
     renderWithClient()

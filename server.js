@@ -11936,7 +11936,17 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = []) {
     subs.length ? [subs] : []
   );
   // Recurso que voltou a existir com o mesmo id não é economia — alguém recriou.
-  const linhas = r.rows.filter((x) => !x.recriado);
+  // Disco de PVC do AKS / ASR fica FORA do total, pela mesma razão que já fica fora do
+  // desperdício na tela e no portal público (ver `despPronto` em InventarioView.tsx e o
+  // filtro em /api/public/orfaos): o estado do recurso não prova abandono. Contar aqui
+  // creditaria ao processo de FinOps um disco que o ciclo de vida do cluster apagou
+  // sozinho — e deixaria os dois números (desperdício e economia) em bases diferentes.
+  // Classificação pelo NOME, a mesma função da coleta: não precisa de coluna nova e vale
+  // retroativamente pro que já foi apurado.
+  const paraValidacao = (x) =>
+    x.categoria === 'disco_orfao' && !!_classificarDiscoValidacao({ name: x.nome });
+  const linhas = r.rows.filter((x) => !x.recriado && !paraValidacao(x));
+  const emValidacao = r.rows.filter((x) => !x.recriado && paraValidacao(x));
   const agora = Date.now();
   const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
 
@@ -11978,6 +11988,10 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = []) {
     economia_acumulada: Math.max(0, acumuladaBruta - acumuladaDesconto),
     recursos_eliminados: itens.length,
     sem_custo_conhecido: semCusto,
+    // Excluídos que eram PVC/ASR: ficam de fora do total de propósito (ver acima), mas são
+    // expostos pra diferença entre "não economizamos" e "não contabilizamos" ficar visível.
+    para_validacao: emValidacao.length,
+    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
     itens,
   };
 }

@@ -1559,6 +1559,12 @@ export default function InventarioView() {
                           {desperdicioQuery.data.saving.recursos_eliminados} recurso(s) eliminado(s)
                           {desperdicioQuery.data.saving.sem_custo_conhecido > 0 && ` · ${desperdicioQuery.data.saving.sem_custo_conhecido} sem custo conhecido`}
                         </div>
+                        {desperdicioQuery.data.saving.para_validacao > 0 && (
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
+                            title="Discos de PVC/AKS e ASR não entram no total: a exclusão pode ter sido o ciclo de vida do cluster, não o processo de FinOps — mesma razão por que ficam fora do desperdício">
+                            + {desperdicioQuery.data.saving.para_validacao} em validação (AKS/ASR), {fmtBRLCurto(desperdicioQuery.data.saving.para_validacao_custo_mensal)}/mês não contabilizado
+                          </div>
+                        )}
                       </div>
                     </>
                   )}
