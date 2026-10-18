@@ -12,6 +12,7 @@ const resposta: OrfaosPublicaResposta = {
   gerado_em: '2026-09-26T12:00:00Z',
   total_itens: 3,
   custo_mensal_estimado_total: 150,
+  saving: null,
   por_categoria: [
     { categoria: 'disco_orfao', itens: 2, custo_mensal_estimado: 150 },
     { categoria: 'ip_solto', itens: 1, custo_mensal_estimado: 0 },
@@ -133,5 +134,35 @@ describe('PublicOrfaosView', () => {
     await user.type(screen.getByPlaceholderText(/[Bb]uscar/), 'homolog')
     expect(screen.getByText('disco-b')).toBeInTheDocument()
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+  })
+
+  // Economia realizada no portal público (2026-10-17 — usuário pediu "nos dois portais").
+  // Diferente dos outros cards, este NÃO reage aos filtros: é o total do processo, não do
+  // recorte que o visitante está olhando. O filtro abaixo prova isso.
+  it('mostra economia já realizada e não a altera ao filtrar a lista', async () => {
+    const user = userEvent.setup()
+    vi.mocked(orfaosApi.getOrfaosPublica).mockResolvedValue({
+      ...resposta,
+      saving: { economia_mensal: 1250, economia_acumulada: 7500, recursos_eliminados: 12 },
+    })
+    renderView()
+
+    const card = (await screen.findByText('💰 Economia já realizada')).closest('.stat-card') as HTMLElement
+    expect(within(card).getByText(/1\.250/)).toBeInTheDocument()
+    expect(within(card).getByText(/12 recurso\(s\) eliminado\(s\)/)).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText(/[Bb]uscar/), 'homolog')
+    expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+    expect(within(card).getByText(/1\.250/)).toBeInTheDocument()
+  })
+
+  it('não mostra card de economia quando nada foi apurado', async () => {
+    vi.mocked(orfaosApi.getOrfaosPublica).mockResolvedValue({
+      ...resposta,
+      saving: { economia_mensal: 0, economia_acumulada: 0, recursos_eliminados: 0 },
+    })
+    renderView()
+    await screen.findByText('disco-a')
+    expect(screen.queryByText('💰 Economia já realizada')).not.toBeInTheDocument()
   })
 })

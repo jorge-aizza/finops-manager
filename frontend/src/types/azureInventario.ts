@@ -543,10 +543,37 @@ export interface AzureDesperdicioItem {
   /** Quantos dias desde que foi marcado como órfão — null se não marcado. */
   dias_orfao: number | null
 }
+/** Economia já realizada: órfãos que foram identificados aqui e depois excluídos de fato.
+ *  Custo apurado no faturamento real dos 30 dias ANTES da exclusão (depois disso o recurso
+ *  não fatura mais, uma janela corrente devolveria zero). */
+export interface AzureSavingOrfaos {
+  /** Já descontado o snapshot de retenção ainda vivo — é o número que vale como run-rate. */
+  economia_mensal: number
+  /** Antes do desconto dos snapshots — útil pra explicar a diferença na tela. */
+  economia_mensal_bruta: number
+  /** Quanto os snapshots dos 90 dias ainda estão custando. */
+  desconto_mensal_snapshots: number
+  economia_acumulada: number
+  recursos_eliminados: number
+  /** Excluídos sem billing conhecido — não entram na soma (null nunca vira zero). */
+  sem_custo_conhecido: number
+  itens: {
+    resource_id: string
+    categoria: AzureDesperdicioCategoria
+    nome: string | null
+    subscription_id: string | null
+    resource_group: string | null
+    excluido_em: string
+    excluido_por: string | null
+    custo_mensal: number | null
+  }[]
+}
 export interface AzureDesperdicioResposta {
   gerado_em: string
   dias_snapshot: number
   total_itens: number
+  /** null quando a apuração falhou — a tela de desperdício continua funcionando sem ela. */
+  saving: AzureSavingOrfaos | null
   custo_mensal_estimado_total: number
   sem_custo_conhecido: number
   por_categoria: {

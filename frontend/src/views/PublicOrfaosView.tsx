@@ -153,6 +153,19 @@ export default function PublicOrfaosView() {
                 <div className="stat-label">Recursos órfãos{temFiltro ? ` (de ${itens.length})` : ''}</div>
                 <div className="stat-value">{filtrados.length}</div>
               </div>
+              {/* Economia realizada. Só aparece com algo apurado — "R$ 0" aqui pareceria
+                  resultado ruim, quando na verdade significa "ainda não houve exclusão
+                  rastreada". Diferente dos outros cards, NÃO reage aos filtros da tela:
+                  é o total do processo, não do recorte que o visitante está olhando. */}
+              {query.data?.saving && query.data.saving.recursos_eliminados > 0 && (
+                <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
+                  <div className="stat-label">💰 Economia já realizada</div>
+                  <div className="stat-value" style={{ color: 'var(--green,#22c55e)' }}>{fmtBRL(query.data.saving.economia_mensal)}/mês</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    {query.data.saving.recursos_eliminados} recurso(s) eliminado(s) · {fmtBRL(query.data.saving.economia_acumulada)} acumulado
+                  </div>
+                </div>
+              )}
             </div>
 
             {semCusto > 0 && (

@@ -4474,11 +4474,27 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       c.itens++;
       c.custo_mensal_estimado += it.custo_mensal_estimado || 0;
     }
+    // Economia realizada — só os TOTAIS. A lista de itens fica de fora de propósito: ela traz
+    // resource_id e subscription_id, que esta rota pública nunca expõe (mesma regra do resto do
+    // endpoint). Apuração não roda aqui, só leitura: quem apura é a tela interna, autenticada.
+    let saving = null;
+    try {
+      const resumo = await _resumoSavingOrfaos([...subsPermitidas], await _snapshotsDeRetencaoVivos(filtrados));
+      saving = {
+        economia_mensal: resumo.economia_mensal,
+        economia_acumulada: resumo.economia_acumulada,
+        recursos_eliminados: resumo.recursos_eliminados,
+      };
+    } catch (e) {
+      console.error('[Portal Órfãos] falha no saving:', e.message);
+    }
+
     res.json({
       gerado_em: new Date().toISOString(),
       total_itens: itens.length,
       custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
       por_categoria: Object.values(porCat).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
+      saving,
       itens,
     });
   } catch (e) {
@@ -7108,6 +7124,42 @@ async function ensureAzureColetaTable() {
       ultima_deteccao_em   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // Origem do snapshot (sourceResourceId do ARG) — guardada na DETECÇÃO porque depois que o
+  // snapshot é excluído ele some do Resource Graph e o vínculo com o disco que o gerou seria
+  // perdido. É esse vínculo que evita contar economia duas vezes na apuração de saving
+  // (ver _apurarSavingOrfaos).
+  await pool.query(`ALTER TABLE azure_desperdicio_deteccao ADD COLUMN IF NOT EXISTS origem_resource_id TEXT`).catch(() => {});
+  // ── Economia realizada com órfãos excluídos (2026-10-17, pedido do usuário) ──
+  // MATERIALIZADA de propósito, em vez de recalculada por join a cada leitura: economia
+  // realizada é fato histórico. O inventário tem retenção OPCIONAL de excluídos
+  // (`retencao_excluidos_ativa`, ver ALTER mais abaixo) e azure_costs tem expurgo manual —
+  // com qualquer um dos dois, um número que já foi reportado à diretoria cairia sozinho.
+  // `tipo`: 'economia' = órfão identificado que foi excluído; 'desconto' = custo que o próprio
+  // processo criou (snapshot de retenção dos 90 dias), abatido da economia enquanto existir.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_desperdicio_saving (
+      resource_id_upper   TEXT PRIMARY KEY,
+      tipo                VARCHAR(10) NOT NULL DEFAULT 'economia',
+      categoria           VARCHAR(30),
+      subscription_id     VARCHAR(200),
+      resource_group      TEXT,
+      nome                TEXT,
+      origem_resource_id  TEXT,
+      criado_em           TIMESTAMPTZ,
+      excluido_em         TIMESTAMPTZ NOT NULL,
+      excluido_por        VARCHAR(300),
+      custo_mensal        NUMERIC(14,4),
+      dias_observados     INTEGER,
+      apurado_em          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_desp_saving_excluido ON azure_desperdicio_saving (excluido_em)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_desp_saving_sub ON azure_desperdicio_saving (subscription_id)`);
+  // NOTA pra quem for mexer na apuração de saving: a tentação é criar um índice funcional
+  // só em LOWER(resource_id) aqui (o que existe é composto, com subscription_id na frente).
+  // Foi testado — 287 MB, e o planner NUNCA o escolheu: continuou usando o composto, com o
+  // mesmo tempo. O que resolve o custo da apuração não é índice novo, é não varrer o
+  // inventário inteiro (ver _apurarSavingOrfaos, que só consulta o que sumiu da lista viva).
   // Unicidade case-insensitive de resource_id (migrations/inventarioResourceIdCase.js): o índice
   // funcional é criado por ela (LOWER(resource_id)). Reconciliação usa busca + insert/update
   // explícita para evitar sintaxe ON CONFLICT com funções. Idempotente — sem custo quando já existe.
@@ -11487,7 +11539,8 @@ function _kqlSnapshotsAntigos(dias) {
     | extend criado = todatetime(properties.timeCreated)
     | where criado < ago(${dias}d)
     | project id, name, resourceGroup, location, sizeGB = toint(properties.diskSizeGB),
-              criadoEm = tostring(properties.timeCreated)`;
+              criadoEm = tostring(properties.timeCreated),
+              origem = tostring(properties.creationData.sourceResourceId)`;
 }
 
 // Custo observado no billing, não preço de tabela. Predicado de INCLUSÃO sobre
@@ -11588,6 +11641,8 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
       sku: x.sku || null,
       tamanho_gb: x.sizeGB ?? null,
       criado_em: x.criadoEm || null,
+      // Só snapshot tem origem (o disco que o gerou) — ver _apurarSavingOrfaos.
+      origem_resource_id: x.origem || null,
       motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao(x) : null,
       custo_periodo: custoPeriodoComImposto,
       dias_observados: c ? c.dias : 0,
@@ -11651,13 +11706,14 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     // recurso foi reaproveitado e depois abandonado de novo — reinicia a contagem.
     if (itens.length) {
       const up = await pool.query(
-        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria)
-         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat FROM unnest($1::text[], $2::text[]) AS u(id, cat)
+        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria, origem_resource_id)
+         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat, u.origem FROM unnest($1::text[], $2::text[], $3::text[]) AS u(id, cat, origem)
          ON CONFLICT (resource_id_upper) DO UPDATE SET
            primeira_deteccao_em = CASE WHEN azure_desperdicio_deteccao.ultima_deteccao_em < NOW() - INTERVAL '3 days' THEN NOW() ELSE azure_desperdicio_deteccao.primeira_deteccao_em END,
-           ultima_deteccao_em = NOW(), categoria = EXCLUDED.categoria
+           ultima_deteccao_em = NOW(), categoria = EXCLUDED.categoria,
+           origem_resource_id = COALESCE(EXCLUDED.origem_resource_id, azure_desperdicio_deteccao.origem_resource_id)
          RETURNING resource_id_upper, primeira_deteccao_em`,
-        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria)]
+        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria), itens.map((x) => x.origem_resource_id || null)]
       );
       const primeira = new Map(up.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
       for (const it of itens) {
@@ -11685,11 +11741,23 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     }
 
     itens.sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
+
+    // Economia realizada: apura o que ainda falta e monta o resumo. Nunca derruba a tela —
+    // o desperdício (o dado principal daqui) não pode sumir porque a apuração falhou.
+    let saving = null;
+    try {
+      await _apurarSavingOrfaos(itens.map((x) => x.resource_id));
+      saving = await _resumoSavingOrfaos(alvos, await _snapshotsDeRetencaoVivos(itens));
+    } catch (e) {
+      console.error('[Saving Órfãos] falha ao apurar:', e.message);
+    }
+
     console.log(`[Desperdicio] ${itens.length} itens de ${alvos.length} assinatura(s) em ${Date.now() - t0Desp} ms`);
     res.json({
       gerado_em: new Date().toISOString(),
       dias_snapshot: dias,
       total_itens: itens.length,
+      saving,
       custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
       sem_custo_conhecido: itens.filter((x) => x.custo_mensal_estimado === null).length,
       por_categoria: Object.values(porCategoria).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
@@ -11698,6 +11766,235 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ECONOMIA REALIZADA COM ÓRFÃOS EXCLUÍDOS (2026-10-17, pedido do usuário)
+// ══════════════════════════════════════════════════════════════════════════════
+// Cruza três fatos que o sistema já tinha separados:
+//   1. "foi identificado como órfão"  → azure_desperdicio_deteccao
+//   2. "foi excluído em D, por quem"  → azure_recursos_inventario (Activity Log)
+//   3. "custava quanto de verdade"    → azure_costs (faturado, não preço de tabela)
+//
+// Só conta recurso cuja exclusão veio DEPOIS da primeira detecção como órfão: economia que
+// a gente reivindica é a que a gente apontou. Exclusão anterior à detecção é faxina de
+// outra pessoa.
+//
+// O custo é apurado na janela de 30 dias ANTES da exclusão, não nos últimos 30 dias
+// corridos — depois de excluído o recurso não fatura mais, uma janela corrente devolveria
+// zero. Mesma convenção do resto do módulo: sem billing conhecido → null, NUNCA zero
+// ("não custa nada" é diferente de "não sabemos").
+//
+// Snapshot dos 90 dias (decisão do usuário, 2026-10-17): o processo de vocês transforma
+// disco órfão em snapshot retido 90 dias antes da exclusão definitiva, e esse snapshot
+// AINDA CUSTA. Contar o disco cheio nesse período superestimaria. Por isso o snapshot entra
+// como linha `tipo='desconto'`, abatida da economia enquanto ele existir — e, quando ele
+// mesmo é excluído, NÃO vira economia própria (seria contar duas vezes: o custo dele já
+// estava sendo abatido, e ele nunca fez parte do desperdício original — foi criado pelo
+// próprio processo de limpeza).
+const _SAVING_JANELA_DIAS = 30;
+
+// Custo faturado por recurso, cada um na SUA janela (cada exclusão tem data diferente).
+// Uma passada só com unnest de 3 colunas em vez de uma consulta por recurso.
+async function _custoObservadoNaJanela(janelas) {
+  const out = new Map();
+  if (!janelas.length) return out;
+  for (let i = 0; i < janelas.length; i += 1000) {
+    const lote = janelas.slice(i, i + 1000);
+    const r = await pool.query(
+      `SELECT UPPER(ac.resource_id) AS rid,
+              SUM(COALESCE(ac.cost_in_billing_currency,0)) FILTER (WHERE ac.publisher_type = 'Marketplace') AS custo_marketplace,
+              SUM(COALESCE(ac.cost_in_billing_currency,0)) FILTER (WHERE ac.publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+              COUNT(DISTINCT ac.cost_date) AS dias
+       FROM azure_costs ac
+       JOIN unnest($1::text[], $2::date[], $3::date[]) AS t(rid, desde, ate)
+         ON UPPER(ac.resource_id) = t.rid
+       WHERE ac.cost_date >= t.desde AND ac.cost_date < t.ate
+       GROUP BY 1`,
+      [lote.map((j) => j.rid), lote.map((j) => j.desde), lote.map((j) => j.ate)]
+    );
+    for (const row of r.rows) out.set(row.rid, {
+      custo_microsoft: Number(row.custo_microsoft || 0),
+      custo_marketplace: Number(row.custo_marketplace || 0),
+      dias: Number(row.dias),
+    });
+  }
+  return out;
+}
+
+// Apura o que ainda não foi apurado e grava. Idempotente: recurso já na tabela é ignorado,
+// exceto quando ficou com custo desconhecido (billing pode ter chegado depois — a fatura da
+// Azure atrasa, ver _ultimoDiaCustoFechado).
+// `idsVivos`: resource_ids que AINDA aparecem como órfãos na varredura atual do Resource
+// Graph. Só o que sumiu de lá é candidato — é justamente o evento que interessa ("era órfão,
+// não é mais"). Receber isso em vez de redescobrir é o que mantém a consulta barata: sem
+// isso, era preciso cruzar as milhares de detecções com o inventário INTEIRO (1,1M linhas)
+// a cada abertura da tela, e o planner caía em Parallel Seq Scan — 7s a 21s medidos com
+// EXPLAIN ANALYZE, dependendo de como a junção era escrita. Agora o cruzamento pesado só
+// acontece para as poucas dezenas que realmente sumiram.
+async function _apurarSavingOrfaos(idsVivos) {
+  const vivos = (idsVivos || []).map((x) => String(x).toUpperCase());
+  // Sumiram da lista viva e ainda não foram apurados com custo. Só tabelas pequenas aqui.
+  // LEFT JOIN + IS NULL em vez de `NOT ... = ANY(array)`: com milhares de elementos o
+  // segundo degrada pra seq scan (armadilha já documentada neste arquivo).
+  const sumidos = await pool.query(
+    `SELECT d.resource_id_upper, d.categoria, d.origem_resource_id, d.primeira_deteccao_em
+     FROM azure_desperdicio_deteccao d
+     LEFT JOIN unnest($1::text[]) AS v(rid) ON v.rid = d.resource_id_upper
+     LEFT JOIN azure_desperdicio_saving s
+       ON s.resource_id_upper = d.resource_id_upper AND s.custo_mensal IS NOT NULL
+     WHERE v.rid IS NULL AND s.resource_id_upper IS NULL
+     LIMIT 2000`,
+    [vivos]
+  );
+  if (!sumidos.rows.length) return 0;
+
+  // Agora sim o inventário — mas só para os que sumiram (dezenas), não para tudo.
+  // `= ANY` aqui é de propósito, apesar do aviso geral deste arquivo de preferir
+  // `JOIN unnest`: aquele aviso vale pra MILHARES de elementos, onde `= ANY` degrada pra
+  // seq scan. Com algumas dezenas é o contrário — medido: `= ANY` 17 ms, `JOIN unnest`
+  // 348 ms, os dois usando índice.
+  const meta = await pool.query(
+    `SELECT LOWER(ri.resource_id) AS rid_lower, ri.subscription_id, ri.resource_group,
+            ri.nome, ri.criado_em, ri.excluido_em, ri.excluido_por
+     FROM azure_recursos_inventario ri
+     WHERE LOWER(ri.resource_id) = ANY($1::text[])
+       AND ri.ativo = false AND ri.excluido_em IS NOT NULL`,
+    [sumidos.rows.map((x) => x.resource_id_upper.toLowerCase())]
+  );
+  const metaPorId = new Map(meta.rows.map((m) => [m.rid_lower, m]));
+
+  // Sumir do Resource Graph sem exclusão registrada no inventário NÃO é economia: pode ser
+  // perda de permissão, falha de coleta ou buraco no Activity Log. Fica de fora (a tela
+  // mostra esses à parte como "exclusão não confirmada").
+  const cand = { rows: [] };
+  for (const s of sumidos.rows) {
+    const m = metaPorId.get(s.resource_id_upper.toLowerCase());
+    if (!m) continue;
+    // Exclusão ANTERIOR à primeira detecção é faxina de outra pessoa — a economia que a
+    // gente reivindica é a dos recursos que a gente apontou.
+    if (s.primeira_deteccao_em && new Date(m.excluido_em) < new Date(s.primeira_deteccao_em)) continue;
+    cand.rows.push({ ...s, ...m });
+  }
+  if (!cand.rows.length) return 0;
+
+  const janelas = cand.rows.map((c) => {
+    const ate = new Date(c.excluido_em);
+    const desde = new Date(ate);
+    desde.setDate(desde.getDate() - _SAVING_JANELA_DIAS);
+    return { rid: c.resource_id_upper, desde: desde.toISOString().slice(0, 10), ate: ate.toISOString().slice(0, 10) };
+  });
+  const custos = await _custoObservadoNaJanela(janelas);
+  const impostoCfg = await _getImpostoConfig();
+
+  // Discos já contabilizados — um snapshot gerado por um deles é desconto, não economia.
+  const jaContados = new Set(
+    (await pool.query(`SELECT resource_id_upper FROM azure_desperdicio_saving WHERE tipo='economia'`)).rows
+      .map((r) => r.resource_id_upper)
+  );
+  for (const c of cand.rows) if (c.categoria !== 'snapshot_antigo') jaContados.add(c.resource_id_upper);
+
+  let gravados = 0;
+  for (const c of cand.rows) {
+    const obs = custos.get(c.resource_id_upper);
+    const comImposto = obs ? _comImpostoSplit(obs.custo_microsoft, obs.custo_marketplace, impostoCfg) : null;
+    const custoMensal = obs && obs.dias > 0 ? (comImposto / obs.dias) * 30 : null;
+    const origemUpper = c.origem_resource_id ? String(c.origem_resource_id).toUpperCase() : null;
+    const ehDesconto = c.categoria === 'snapshot_antigo' && origemUpper && jaContados.has(origemUpper);
+    await pool.query(
+      `INSERT INTO azure_desperdicio_saving
+         (resource_id_upper, tipo, categoria, subscription_id, resource_group, nome,
+          origem_resource_id, criado_em, excluido_em, excluido_por, custo_mensal, dias_observados)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (resource_id_upper) DO UPDATE SET
+         custo_mensal = EXCLUDED.custo_mensal, dias_observados = EXCLUDED.dias_observados,
+         tipo = EXCLUDED.tipo, apurado_em = NOW()`,
+      [c.resource_id_upper, ehDesconto ? 'desconto' : 'economia', c.categoria, c.subscription_id,
+       c.resource_group, c.nome, origemUpper, c.criado_em, c.excluido_em, c.excluido_por,
+       custoMensal, obs ? obs.dias : 0]
+    );
+    gravados++;
+  }
+  return gravados;
+}
+
+const _MS_MES = 30 * 86400000;
+
+// Monta o resumo. `snapshotsVivos`: snapshots que AINDA existem no Resource Graph e cuja
+// origem é um disco já contabilizado — abatem a economia enquanto não forem excluídos
+// (depois disso viram linha 'desconto' pela apuração, com período fechado).
+async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = []) {
+  const subs = (subscriptionIds || []).map((s) => String(s).toLowerCase());
+  const r = await pool.query(
+    `SELECT s.*,
+            EXISTS (
+              SELECT 1 FROM azure_recursos_inventario ri
+              WHERE LOWER(ri.resource_id) = LOWER(s.resource_id_upper) AND ri.ativo = true
+            ) AS recriado
+     FROM azure_desperdicio_saving s
+     ${subs.length ? 'WHERE LOWER(s.subscription_id) = ANY($1)' : ''}
+     ORDER BY s.excluido_em DESC`,
+    subs.length ? [subs] : []
+  );
+  // Recurso que voltou a existir com o mesmo id não é economia — alguém recriou.
+  const linhas = r.rows.filter((x) => !x.recriado);
+  const agora = Date.now();
+  const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
+
+  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0;
+  const itens = [];
+  for (const x of linhas.filter((l) => l.tipo === 'economia')) {
+    const c = x.custo_mensal === null ? null : Number(x.custo_mensal);
+    if (c === null) { semCusto++; } else {
+      mensalBruta += c;
+      acumuladaBruta += c * meses(x.excluido_em, agora);
+    }
+    itens.push({
+      resource_id: x.resource_id_upper, categoria: x.categoria, nome: x.nome,
+      subscription_id: x.subscription_id, resource_group: x.resource_group,
+      excluido_em: x.excluido_em, excluido_por: x.excluido_por, custo_mensal: c,
+    });
+  }
+
+  // Descontos já fechados (snapshot que existiu e morreu): período real entre criação e
+  // exclusão. Não afetam a economia MENSAL de hoje — aquele custo já não existe mais.
+  let acumuladaDesconto = 0;
+  for (const x of linhas.filter((l) => l.tipo === 'desconto')) {
+    if (x.custo_mensal === null) continue;
+    acumuladaDesconto += Number(x.custo_mensal) * meses(x.criado_em || x.excluido_em, x.excluido_em);
+  }
+  // Descontos em aberto (snapshot vivo): abatem a economia mensal corrente e acumulam desde
+  // que o snapshot foi criado.
+  let descontoMensal = 0;
+  for (const s of snapshotsVivos) {
+    if (s.custo_mensal_estimado === null || s.custo_mensal_estimado === undefined) continue;
+    descontoMensal += s.custo_mensal_estimado;
+    acumuladaDesconto += s.custo_mensal_estimado * meses(s.criado_em || agora, agora);
+  }
+
+  return {
+    economia_mensal: Math.max(0, mensalBruta - descontoMensal),
+    economia_mensal_bruta: mensalBruta,
+    desconto_mensal_snapshots: descontoMensal,
+    economia_acumulada: Math.max(0, acumuladaBruta - acumuladaDesconto),
+    recursos_eliminados: itens.length,
+    sem_custo_conhecido: semCusto,
+    itens,
+  };
+}
+
+// Snapshots vivos cuja origem é um disco já contabilizado como economia — o abatimento dos
+// 90 dias. Recebe os itens de desperdício que já foram coletados (não refaz consulta ao ARG).
+async function _snapshotsDeRetencaoVivos(itensDesperdicio) {
+  const snaps = itensDesperdicio.filter((x) => x.categoria === 'snapshot_antigo' && x.origem_resource_id);
+  if (!snaps.length) return [];
+  const origens = [...new Set(snaps.map((s) => String(s.origem_resource_id).toUpperCase()))];
+  const r = await pool.query(
+    `SELECT resource_id_upper FROM azure_desperdicio_saving WHERE tipo='economia' AND resource_id_upper = ANY($1)`,
+    [origens]
+  );
+  const contados = new Set(r.rows.map((x) => x.resource_id_upper));
+  return snaps.filter((s) => contados.has(String(s.origem_resource_id).toUpperCase()));
+}
 
 // Exportar Desperdício pra Excel — mesmo layout do Excel de Ações FinOps (GET /api/export/excel):
 // banner roxo, aba "Sumário Executivo" e aba de detalhes. Recebe os itens já filtrados na tela

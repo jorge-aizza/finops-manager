@@ -24,5 +24,13 @@ export interface OrfaosPublicaResposta {
   total_itens: number
   custo_mensal_estimado_total: number
   por_categoria: { categoria: OrfaoCategoria; itens: number; custo_mensal_estimado: number }[]
+  /** Economia já realizada com órfãos excluídos. Só os totais: a lista de itens traz
+   *  resource_id/subscription_id, que esta rota pública nunca expõe. null se a apuração falhou. */
+  saving: {
+    /** Já descontado o snapshot de retenção dos 90 dias, que ainda custa. */
+    economia_mensal: number
+    economia_acumulada: number
+    recursos_eliminados: number
+  } | null
   itens: OrfaoItem[]
 }

@@ -1535,6 +1535,33 @@ export default function InventarioView() {
                       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtBRLCurto(despValidarCustoMensal)}/mês</div>
                     </div>
                   )}
+                  {/* Economia realizada — o contraponto do desperdício: o que já foi eliminado.
+                      Só aparece quando há algo apurado, pra não exibir "R$ 0" como se fosse
+                      resultado (ainda não houve exclusão rastreada ≠ não economizamos nada). */}
+                  {desperdicioQuery.data?.saving && desperdicioQuery.data.saving.recursos_eliminados > 0 && (
+                    <>
+                      <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
+                        <div className="stat-label">💰 Economia realizada por mês</div>
+                        <div className="stat-value" style={{ color: 'var(--green,#22c55e)' }}>
+                          {fmtBRLCurto(desperdicioQuery.data.saving.economia_mensal)}
+                        </div>
+                        {desperdicioQuery.data.saving.desconto_mensal_snapshots > 0 && (
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
+                            title="Snapshots de retenção dos 90 dias ainda custam — já descontados deste valor">
+                            {fmtBRLCurto(desperdicioQuery.data.saving.economia_mensal_bruta)} − {fmtBRLCurto(desperdicioQuery.data.saving.desconto_mensal_snapshots)} em snapshots
+                          </div>
+                        )}
+                      </div>
+                      <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
+                        <div className="stat-label">Economia acumulada</div>
+                        <div className="stat-value">{fmtBRLCurto(desperdicioQuery.data.saving.economia_acumulada)}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          {desperdicioQuery.data.saving.recursos_eliminados} recurso(s) eliminado(s)
+                          {desperdicioQuery.data.saving.sem_custo_conhecido > 0 && ` · ${desperdicioQuery.data.saving.sem_custo_conhecido} sem custo conhecido`}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
