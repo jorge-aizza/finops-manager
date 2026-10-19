@@ -8137,6 +8137,7 @@ async function _checkAnomaliasCrescimentoInventario() {
   if (!anomalias.length) return;
   const cfg = await _getSmtpConfig();
   const destinatarios = cfg ? _parseDestinatarios(cfg.destinatarios_padrao) : [];
+  const novas = [];
   for (const a of anomalias) {
     const chave = `crescimento:${a.subscription_id}:${a.resource_group || 'global'}:${a.dia}`;
     if (!(await _tentarClaimAlerta('anomalia_crescimento_inventario', chave))) continue;
@@ -8167,15 +8168,33 @@ async function _checkAnomaliasCrescimentoInventario() {
       'inventario:recursos',
       destinoParams
     );
-    if (destinatarios.length) {
-      await _sendEmail({
-        to: destinatarios,
-        subject: `📈 Crescimento anômalo — ${escopoTxt}`,
-        html: _emailTemplate('Crescimento anômalo detectado', `
-          <p><strong>${_escHtmlServer(escopoTxt)}</strong> ficou fora do padrão histórico em ${new Date(a.dia).toLocaleDateString('pt-BR')}: ${partesHtml.join(' e ')}.</p>
-          <p>Janela de referência: últimos 35 dias.</p>`),
-      });
-    }
+    // Acumula em vez de enviar aqui dentro (2026-10-18). Um e-mail por anomalia dava ~157
+    // mensagens por dia para um único destinatário, e de forma recorrente: o dedup de
+    // _tentarClaimAlerta libera a mesma chave após 24h, e a janela de detecção são 35 dias,
+    // então cada anomalia realertava todo dia até envelhecer. Caixa nesse volume deixa de
+    // ser lida, que é o pior desfecho para um alerta. O sino continua item a item.
+    novas.push({
+      escopoTxt,
+      dia: a.dia,
+      partesHtml,
+      // Ordena o resumo pelo desvio mais forte, não por ordem de varredura.
+      severidade: Math.max(a.zscore_criacoes || 0, a.zscore_custo || 0),
+    });
+  }
+
+  // Resumo único, já ordenado pela anomalia mais forte.
+  if (destinatarios.length && novas.length) {
+    novas.sort((x, y) => y.severidade - x.severidade);
+    const linhas = novas.map((x) => `<li style="margin-bottom:6px"><strong>${_escHtmlServer(x.escopoTxt)}</strong> — ${new Date(x.dia).toLocaleDateString('pt-BR')}: ${x.partesHtml.join(' e ')}</li>`).join('');
+    await _sendEmail({
+      to: destinatarios,
+      subject: `📈 ${novas.length} crescimento(s) anômalo(s) detectado(s)`,
+      html: _emailTemplate(`${novas.length} crescimento(s) anômalo(s)`, `
+        <p>Escopos fora do padrão histórico, do desvio mais forte para o mais fraco:</p>
+        <ul style="padding-left:18px">${linhas}</ul>
+        <p style="margin-top:12px;font-size:12px;color:#6b7280">Janela de referência: últimos 35 dias.
+        Cada item também está no sino, com link para a lista de recursos do escopo.</p>`),
+    });
   }
 }
 
@@ -8403,12 +8422,10 @@ async function _alertarColetaComErro(titulo, mensagem) {
 // sugeridas após expandir o rastreio de propriedades) — evento, sem dedup (cada linha em
 // `azure_recursos_mudancas_propriedade` só é inserida uma vez). Deliberadamente só propriedades
 // de infra (SKU de VM, disco, storage, IP) — NUNCA tags: uma re-tag em massa por automação
-// dispararia dezenas de e-mails de uma vez, mesmo raciocínio já usado pra excluir e-mail de
-// "coleta com sucesso" ("viraria spam sem valor"). Chamado pelo próprio `_coletarInventarioAzure`
-// logo após o INSERT bem-sucedido — nunca lança pro chamador (mesma garantia de `_sendEmail`).
-async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, quando, ids = null) {
-  // Sino primeiro (2026-09-04) — sempre, independente de SMTP configurado (mesmo raciocínio
-  // de _checkAnomaliasCrescimentoInventario). E-mail continua condicionado à config existente.
+// encheria o sino de ruído. Chamado pelo próprio `_coletarInventarioAzure` logo após o INSERT
+// bem-sucedido; o chamador trata a falha (`.catch`), nada aqui derruba a coleta.
+async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, ids = null) {
+  // Sino sempre, independente de SMTP configurado.
   // Com `ids`, o clique abre o detalhe do próprio recurso; sem, cai na aba Auditoria.
   await _registrarNotificacaoColeta(
     `🔧 ${p.propriedade_label} — ${nomeRecurso}`,
@@ -8417,18 +8434,13 @@ async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, 
     ids ? 'inventario:recursos' : 'inventario:auditoria',
     ids ? { resource_id: ids.resource_id, subscription_id: ids.subscription_id } : null
   );
-  const cfg = await _getSmtpConfig();
-  if (!cfg) return;
-  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (!destinatarios.length) return;
-  await _sendEmail({
-    to: destinatarios,
-    subject: `🔧 ${p.propriedade_label} mudou — ${nomeRecurso}`,
-    html: _emailTemplate('Alteração de propriedade detectada', `
-      <p><strong>${_escHtmlServer(nomeRecurso)}</strong> (${_escHtmlServer(resourceGroup || '—')})</p>
-      <p>${_escHtmlServer(p.propriedade_label)}: <strong style="color:#dc2626">${_escHtmlServer(p.valor_anterior)}</strong> → <strong style="color:#16a34a">${_escHtmlServer(p.valor_novo)}</strong></p>
-      <p style="margin-top:12px;font-size:12px;color:#6b7280">Detectado por ${_escHtmlServer(autor || 'desconhecido')} em ${quando ? new Date(quando).toLocaleString('pt-BR') : '—'}. Veja o histórico completo em Inventário → Auditoria.</p>`),
-  });
+  // SÓ SINO, sem e-mail (2026-10-18). A exclusão de tags no comentário acima já reconhecia o
+  // risco de rajada, mas o mesmo valia para o resto: esta função não passa por
+  // _tentarClaimAlerta, dispara uma vez por propriedade alterada dentro da coleta, e a coleta
+  // processa de 150 a 200 mil eventos de auditoria por dia (medido). Um redimensionamento em
+  // massa geraria uma rajada sem teto. Mudança de SKU é acompanhamento: não tem prazo nem
+  // exige ação imediata, que é o critério para merecer e-mail aqui. O sino já registra tudo,
+  // com link direto para o recurso.
 }
 
 // Estimativa aprovada/reprovada — evento (PUT /api/estimativas/:id/status), sem
@@ -15330,7 +15342,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
               // Alerta por e-mail (2026-09-03, item 1) — só propriedades de infra, nunca tags
               // (ver `_alertarMudancaPropriedade`). Best-effort, nunca derruba a coleta.
               if (!p.propriedade.startsWith('tag:')) {
-                _alertarMudancaPropriedade(nome, resourceGroup, p, autor, quando, { subscription_id: subId, resource_id: resourceId }).catch((eMail) => {
+                _alertarMudancaPropriedade(nome, resourceGroup, p, autor, { subscription_id: subId, resource_id: resourceId }).catch((eMail) => {
                   _logColetaInv(`  ✗ ${subId}: alerta por e-mail falhou — ${eMail.message}`);
                 });
               }
