@@ -7698,7 +7698,10 @@ async function _rebuildAlocacaoTags(origem = 'agendado', forcar = false) {
     await ensureAzureColetaTable();
     const r = await pool.query(
       `SELECT to_char(cost_date,'YYYY-MM') AS mes, MAX(importado_em) AS ultimo_import
-       FROM azure_costs GROUP BY 1 ORDER BY 1`
+       -- cost_date NULO fica de fora: to_char(NULL) devolve NULL, o mês chega aqui como null e
+       -- a concatenação mes + '-01' monta a string 'null-01', que estourava o cast pra date
+       -- e abortava o rollup no fim do laço (NULL ordena por último). Medido: 56 mil linhas.
+       FROM azure_costs WHERE cost_date IS NOT NULL GROUP BY 1 ORDER BY 1`
     );
     const st = await pool.query(`SELECT mes, construido_em FROM azure_tag_rollup_status`);
     const construido = new Map(st.rows.map(x => [x.mes.trim(), x.construido_em]));
@@ -17700,6 +17703,10 @@ async function _coletarConsultasPorTabela(ws, getLogAnalyticsToken) {
 async function _coletarDCRs(workspaceByResourceId) {
   const { escopos } = await _getInventarioEscopos();
   const todasLinhas = [];
+  // Só as assinaturas cuja listagem REALMENTE respondeu. O DELETE abaixo apaga por
+  // assinatura antes de reinserir; apagar uma que falhou (403, timeout) descartaria a
+  // coleta anterior dela e a tela ficaria sem DCR nenhum até a próxima dar certo.
+  const subsColetadas = [];
   await _mapLimit(escopos, 4, async (escopo) => {
     const sub = escopo.subscriptionId;
     const url = `https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Insights/dataCollectionRules?api-version=2023-03-11`;
@@ -17713,6 +17720,7 @@ async function _coletarDCRs(workspaceByResourceId) {
       return;
     }
     if (!resp.ok) { console.warn(`[LogAnalytics] Assinatura ${sub} retornou ${resp.status} ao listar DCRs`); return; }
+    subsColetadas.push(sub);
     const data = await _safeRespJson(resp);
     for (const dcr of (data.value || [])) {
       const p = dcr.properties || {};
@@ -17734,11 +17742,14 @@ async function _coletarDCRs(workspaceByResourceId) {
       }
     }
   });
-  if (todasLinhas.length) {
+  // Condicionado a subsColetadas, não a todasLinhas: assinatura que respondeu e não tem
+  // mais nenhum DCR precisa ter as linhas antigas removidas, senao a tela mostra DCR
+  // que não existe mais na Azure.
+  if (subsColetadas.length) {
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
-      await c.query(`DELETE FROM log_analytics_dcrs WHERE subscription_id = ANY($1)`, [subs]);
+      await c.query(`DELETE FROM log_analytics_dcrs WHERE subscription_id = ANY($1)`, [subsColetadas]);
       for (const l of todasLinhas) {
         await c.query(
           `INSERT INTO log_analytics_dcrs (subscription_id, resource_group, nome, workspace_guid_destino, streams, tipos_fonte, detalhe_fontes, atualizado_em)
