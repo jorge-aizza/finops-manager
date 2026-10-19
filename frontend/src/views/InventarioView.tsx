@@ -615,6 +615,7 @@ export default function InventarioView() {
     despBuscaNorm ? `Busca: "${filtroDespBusca.trim()}"` : '',
   ].filter(Boolean).join(' | ') || 'Sem filtros'
   const [despPdfHtml, setDespPdfHtml] = useState<string | null>(null)
+  const [despSavingAberto, setDespSavingAberto] = useState(false)
   const exportarDespExcelMutation = useMutation({
     mutationFn: () => baixarAzureDesperdicioExcel(despFiltrados, despFiltrosDescricao),
     onError: (e: Error) => window.showToast?.('Erro ao exportar: ' + e.message, 'error'),
@@ -1559,16 +1560,77 @@ export default function InventarioView() {
                           {desperdicioQuery.data.saving.recursos_eliminados} recurso(s) eliminado(s)
                           {desperdicioQuery.data.saving.sem_custo_conhecido > 0 && ` · ${desperdicioQuery.data.saving.sem_custo_conhecido} sem custo conhecido`}
                         </div>
+                        {/* Os dois avisos abaixo existem porque o total desta tela conta TUDO
+                            que foi excluído — inclusive o que merece ressalva. Quem olha aqui
+                            tem contexto pra julgar, mas precisa ver a ressalva junto do número. */}
                         {desperdicioQuery.data.saving.para_validacao > 0 && (
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
-                            title="Discos de PVC/AKS e ASR não entram no total: a exclusão pode ter sido o ciclo de vida do cluster, não o processo de FinOps — mesma razão por que ficam fora do desperdício">
-                            + {desperdicioQuery.data.saving.para_validacao} em validação (AKS/ASR), {fmtBRLCurto(desperdicioQuery.data.saving.para_validacao_custo_mensal)}/mês não contabilizado
+                          <div style={{ fontSize: 11, color: 'var(--orange,#ff8c42)' }}
+                            title="Disco de PVC/AKS ou ASR: o estado do recurso não prova abandono, então a exclusão pode ter sido o ciclo de vida do cluster e não o processo de FinOps">
+                            ⚠ {desperdicioQuery.data.saving.para_validacao} em validação (AKS/ASR) dentro do total, {fmtBRLCurto(desperdicioQuery.data.saving.para_validacao_custo_mensal)}/mês
                           </div>
                         )}
+                        {desperdicioQuery.data.saving.eliminados_recentes > 0 && (
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
+                            title="Excluídos com menos de 7 dias como órfãos — costuma ser rotatividade normal de infra (Private Endpoint recriado, por exemplo), não resultado do processo">
+                            {desperdicioQuery.data.saving.eliminados_recentes} de {desperdicioQuery.data.saving.recursos_eliminados} com menos de 7 dias como órfão
+                          </div>
+                        )}
+                        <button
+                          type="button" className="btn-ghost"
+                          style={{ fontSize: 11, marginTop: 6, padding: 0, textDecoration: 'underline' }}
+                          onClick={() => setDespSavingAberto((v) => !v)}
+                        >
+                          {despSavingAberto ? 'Ocultar detalhes' : 'Ver detalhes'}
+                        </button>
                       </div>
                     </>
                   )}
                 </div>
+
+                {despSavingAberto && desperdicioQuery.data?.saving && (
+                  <div className="card" style={{ marginBottom: 12 }}>
+                    <div className="card-header">
+                      <span className="card-title">Economia realizada — detalhe</span>
+                      <span className="badge">{desperdicioQuery.data.saving.itens.length}</span>
+                    </div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>Recurso</th><th>Tipo</th><th>Resource Group</th>
+                            <th>Excluído em</th><th>Excluído por</th>
+                            <th style={{ textAlign: 'right' }}>Dias como órfão</th>
+                            <th style={{ textAlign: 'right' }}>Custo/mês</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {desperdicioQuery.data.saving.itens.map((i) => (
+                            <tr key={i.resource_id}>
+                              <td>
+                                {i.nome || '—'}
+                                {i.motivo_validacao && (
+                                  <span className="badge" style={{ marginLeft: 6, background: 'var(--orange,#ff8c42)' }}>
+                                    {i.motivo_validacao === 'aks_pvc' ? 'AKS/PVC' : 'ASR'}
+                                  </span>
+                                )}
+                              </td>
+                              <td>{DESPERDICIO_LABEL[i.categoria] ?? i.categoria}</td>
+                              <td>{i.resource_group || '—'}</td>
+                              <td>{new Date(i.excluido_em).toLocaleDateString('pt-BR')}</td>
+                              <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{i.excluido_por || '—'}</td>
+                              {/* 0 dias é informação, não ausência dela: foi detectado e excluído
+                                  no mesmo dia. Já null é "não sabemos" e vira travessão. */}
+                              <td style={{ textAlign: 'right', color: i.dias_orfao !== null && i.dias_orfao < 7 ? 'var(--orange,#ff8c42)' : undefined }}>
+                                {i.dias_orfao === null ? '—' : i.dias_orfao}
+                              </td>
+                              <td style={{ textAlign: 'right' }}>{i.custo_mensal === null ? '—' : fmtBRLCurto(i.custo_mensal)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
 
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {despPorTipo.map((c) => {

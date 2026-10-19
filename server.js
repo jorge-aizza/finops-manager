@@ -4483,7 +4483,13 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
     // endpoint). Apuração não roda aqui, só leitura: quem apura é a tela interna, autenticada.
     let saving = null;
     try {
-      const resumo = await _resumoSavingOrfaos([...subsPermitidas], await _snapshotsDeRetencaoVivos(filtrados));
+      // Mesmos filtros do que este portal publica — `categorias` e `rgs` já foram montados
+      // no topo desta rota a partir da allowlist do admin.
+      const resumo = await _resumoSavingOrfaos(
+        [...subsPermitidas],
+        await _snapshotsDeRetencaoVivos(filtrados),
+        { publico: true, categorias, resourceGroups: rgs }
+      );
       saving = {
         economia_mensal: resumo.economia_mensal,
         economia_acumulada: resumo.economia_acumulada,
@@ -7163,6 +7169,19 @@ async function ensureAzureColetaTable() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_desp_saving_excluido ON azure_desperdicio_saving (excluido_em)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_desp_saving_sub ON azure_desperdicio_saving (subscription_id)`);
+  // Quando o recurso foi visto como órfão pela primeira vez. Guardado AQUI, e não lido da
+  // detecção na hora de montar a tela, por dois motivos: a linha da detecção pode sumir
+  // (expurgo, recurso redetectado) e o "dias como órfão na data da exclusão" é um fato
+  // congelado no momento da apuração, não algo que deva mudar depois. É o sinal que separa
+  // economia de rotatividade: na base real, as NICs excluídas tinham 0 dias como órfãs.
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS primeira_deteccao_em TIMESTAMPTZ`).catch(() => {});
+  // Preenche o que já foi apurado antes desta coluna existir, enquanto a detecção ainda
+  // tiver a linha. Roda uma vez: depois do UPDATE não sobra candidato.
+  await pool.query(`
+    UPDATE azure_desperdicio_saving s SET primeira_deteccao_em = d.primeira_deteccao_em
+    FROM azure_desperdicio_deteccao d
+    WHERE d.resource_id_upper = s.resource_id_upper AND s.primeira_deteccao_em IS NULL
+  `).catch(() => {});
   // NOTA pra quem for mexer na apuração de saving: a tentação é criar um índice funcional
   // só em LOWER(resource_id) aqui (o que existe é composto, com subscription_id na frente).
   // Foi testado — 287 MB, e o planner NUNCA o escolheu: continuou usando o composto, com o
@@ -11801,6 +11820,8 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     let saving = null;
     try {
       await _apurarSavingOrfaos(itens.map((x) => x.resource_id));
+      // Tela interna: modo completo, sem os filtros do portal público. Conta inclusive
+      // PVC/ASR — quem olha aqui tem contexto pra julgar, e o detalhe traz a evidência.
       saving = await _resumoSavingOrfaos(alvos, await _snapshotsDeRetencaoVivos(itens));
     } catch (e) {
       console.error('[Saving Órfãos] falha ao apurar:', e.message);
@@ -11960,14 +11981,15 @@ async function _apurarSavingOrfaos(idsVivos) {
     await pool.query(
       `INSERT INTO azure_desperdicio_saving
          (resource_id_upper, tipo, categoria, subscription_id, resource_group, nome,
-          origem_resource_id, criado_em, excluido_em, excluido_por, custo_mensal, dias_observados)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          origem_resource_id, criado_em, excluido_em, excluido_por, custo_mensal, dias_observados,
+          primeira_deteccao_em)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (resource_id_upper) DO UPDATE SET
          custo_mensal = EXCLUDED.custo_mensal, dias_observados = EXCLUDED.dias_observados,
          tipo = EXCLUDED.tipo, apurado_em = NOW()`,
       [c.resource_id_upper, ehDesconto ? 'desconto' : 'economia', c.categoria, c.subscription_id,
        c.resource_group, c.nome, origemUpper, c.criado_em, c.excluido_em, c.excluido_por,
-       custoMensal, obs ? obs.dias : 0]
+       custoMensal, obs ? obs.dias : 0, c.primeira_deteccao_em || null]
     );
     gravados++;
   }
@@ -11979,7 +12001,7 @@ const _MS_MES = 30 * 86400000;
 // Monta o resumo. `snapshotsVivos`: snapshots que AINDA existem no Resource Graph e cuja
 // origem é um disco já contabilizado — abatem a economia enquanto não forem excluídos
 // (depois disso viram linha 'desconto' pela apuração, com período fechado).
-async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = []) {
+async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes = {}) {
   const subs = (subscriptionIds || []).map((s) => String(s).toLowerCase());
   const r = await pool.query(
     `SELECT s.*,
@@ -11993,17 +12015,42 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = []) {
     subs.length ? [subs] : []
   );
   // Recurso que voltou a existir com o mesmo id não é economia — alguém recriou.
-  // Disco de PVC do AKS / ASR fica FORA do total, pela mesma razão que já fica fora do
-  // desperdício na tela e no portal público (ver `despPronto` em InventarioView.tsx e o
-  // filtro em /api/public/orfaos): o estado do recurso não prova abandono. Contar aqui
-  // creditaria ao processo de FinOps um disco que o ciclo de vida do cluster apagou
-  // sozinho — e deixaria os dois números (desperdício e economia) em bases diferentes.
-  // Classificação pelo NOME, a mesma função da coleta: não precisa de coluna nova e vale
-  // retroativamente pro que já foi apurado.
+  //
+  // Os dois portais contam BASES DIFERENTES, de propósito (decisão do usuário, 2026-10-18):
+  //
+  //   PRIVADO  — conta tudo que foi excluído, inclusive disco de PVC/AKS e ASR. Quem olha
+  //              essa tela tem contexto para julgar, e o detalhe expõe a evidência (quem
+  //              excluiu, quando, há quantos dias era órfão) para a decisão ser dela.
+  //
+  //   PÚBLICO  — só o que aquele portal de fato publicou, com os mesmos 5 filtros de
+  //              /api/public/orfaos. Sem isso o card anunciava economia de recurso que
+  //              nunca apareceu lá: dos 21 apurados, 20 eram NIC (categoria que o público
+  //              não publica) e 1 era PVC com 6 dias de órfão (o público exige 30+).
+  const pub = !!opcoes.publico;
+  const cats = opcoes.categorias instanceof Set ? opcoes.categorias : null;
+  const rgs = opcoes.resourceGroups instanceof Set ? opcoes.resourceGroups : null;
+  const diasOrfao = (x) => (x.primeira_deteccao_em && x.excluido_em)
+    ? Math.max(0, Math.floor((new Date(x.excluido_em).getTime() - new Date(x.primeira_deteccao_em).getTime()) / 86400000))
+    : null;
   const paraValidacao = (x) =>
     x.categoria === 'disco_orfao' && !!_classificarDiscoValidacao({ name: x.nome });
-  const linhas = r.rows.filter((x) => !x.recriado && !paraValidacao(x));
-  const emValidacao = r.rows.filter((x) => !x.recriado && paraValidacao(x));
+  // Filtros do fluxo público, aplicados só quando `publico`. Disco exige 30+ dias de órfão
+  // CONFIRMADOS: `null` (sem data conhecida) não passa, mesma convenção do endpoint público
+  // — "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 30+".
+  const noFluxoPublico = (x) => {
+    // Espelha o filtro da própria rota pública: categoria que não gera custo por estar órfã
+    // não aparece lá, então também não pode contar como economia dela.
+    if (_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria)) return false;
+    if (cats && !cats.has(x.categoria)) return false;
+    if (rgs && rgs.size && !(x.resource_group && rgs.has(String(x.resource_group).toUpperCase()))) return false;
+    if (paraValidacao(x)) return false;
+    if (x.categoria === 'disco_orfao') { const d = diasOrfao(x); if (d === null || d < 30) return false; }
+    return true;
+  };
+  const visivel = (x) => !x.recriado && (pub ? noFluxoPublico(x) : true);
+  const linhas = r.rows.filter(visivel);
+  // Só o privado separa "em validação": no público eles já saíram pelo filtro acima.
+  const emValidacao = pub ? [] : r.rows.filter((x) => !x.recriado && paraValidacao(x));
   const agora = Date.now();
   const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
 
@@ -12015,10 +12062,16 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = []) {
       mensalBruta += c;
       acumuladaBruta += c * meses(x.excluido_em, agora);
     }
+    // Campos de evidência para o detalhe da tela privada: quem excluiu, quando, e há quantos
+    // dias o recurso já era órfão naquele momento. O tempo como órfão é o que separa
+    // economia do processo de rotatividade normal de infra — Private Endpoint recriado no
+    // mesmo dia aparece com 0 dias e não deve ser lido como resultado.
     itens.push({
       resource_id: x.resource_id_upper, categoria: x.categoria, nome: x.nome,
       subscription_id: x.subscription_id, resource_group: x.resource_group,
       excluido_em: x.excluido_em, excluido_por: x.excluido_por, custo_mensal: c,
+      dias_orfao: diasOrfao(x),
+      motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao({ name: x.nome }) : null,
     });
   }
 
@@ -12045,9 +12098,15 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = []) {
     economia_acumulada: Math.max(0, acumuladaBruta - acumuladaDesconto),
     recursos_eliminados: itens.length,
     sem_custo_conhecido: semCusto,
-    // Excluídos que eram PVC/ASR: ficam de fora do total de propósito (ver acima), mas são
-    // expostos pra diferença entre "não economizamos" e "não contabilizamos" ficar visível.
+    // Quantos dos contabilizados são disco de PVC/AKS ou ASR. No privado eles ENTRAM no
+    // total (decisão do usuário) — isto aqui é sinalização, não exclusão: serve pra tela
+    // avisar que parte do número depende de validação. No público é sempre 0, porque lá
+    // esses discos nem passam do filtro.
     para_validacao: emValidacao.length,
+    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
+    // Quantos foram excluídos com menos de 7 dias como órfãos: forte indício de rotatividade
+    // de infra, não de ação do processo de FinOps.
+    eliminados_recentes: itens.filter((x) => x.dias_orfao !== null && x.dias_orfao < 7).length,
     para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
     itens,
   };

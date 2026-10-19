@@ -226,7 +226,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 800, economia_mensal_bruta: 1000, desconto_mensal_snapshots: 200,
-        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, itens: [],
+        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, eliminados_recentes: 0, itens: [],
       },
     })
     renderWithClient()
@@ -277,26 +277,71 @@ describe('InventarioView', () => {
   // ciclo de vida do cluster, inflando a economia em R$ 1.367/mês sozinho. O backend já
   // tira do total; aqui se trava que a tela mostra o que ficou de fora, pra não confundir
   // "não economizamos" com "não contabilizamos".
-  it('separa excluídos de AKS/ASR do total de economia, mas mostra quanto ficou de fora', async () => {
+  // A tela interna conta TUDO que foi excluído, inclusive PVC/ASR (decisão do usuário,
+  // 2026-10-18: "trate exclusão como economia no portal privado"). Quem olha aqui tem
+  // contexto para julgar — mas precisa ver a ressalva junto do número, não depois.
+  // No portal público a regra é a oposta, e isso é testado em PublicOrfaosView.test.tsx.
+  it('sinaliza AKS/ASR e exclusões recentes sem tirá-las do total', async () => {
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0,
       por_categoria: [], itens: [],
       saving: {
-        economia_mensal: 300, economia_mensal_bruta: 300, desconto_mensal_snapshots: 0,
-        economia_acumulada: 900, recursos_eliminados: 2, sem_custo_conhecido: 0,
-        para_validacao: 1, para_validacao_custo_mensal: 1367.2, itens: [],
+        economia_mensal: 1667.2, economia_mensal_bruta: 1667.2, desconto_mensal_snapshots: 0,
+        economia_acumulada: 900, recursos_eliminados: 5, sem_custo_conhecido: 0,
+        para_validacao: 1, para_validacao_custo_mensal: 1367.2, eliminados_recentes: 3, itens: [],
       },
     })
     renderWithClient()
     await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
 
+    // O disco de AKS/ASR está DENTRO do valor em destaque.
     const card = (await screen.findByText('💰 Economia realizada por mês')).closest('.stat-card') as HTMLElement
-    // O valor em destaque ignora o disco de AKS/ASR — não é 1.667, é 300.
-    expect(card.querySelector('.stat-value')).toHaveTextContent(/300/)
-    expect(card.querySelector('.stat-value')).not.toHaveTextContent(/1\.667/)
-    // E o que ficou de fora aparece, em vez de sumir sem explicação.
+    expect(card.querySelector('.stat-value')).toHaveTextContent(/1\.667/)
+
+    // E as duas ressalvas aparecem, para o número não ser lido como resultado limpo.
     const acumulado = screen.getByText('Economia acumulada').closest('.stat-card') as HTMLElement
-    expect(within(acumulado).getByText(/1 em validação \(AKS\/ASR\)/)).toBeInTheDocument()
+    expect(within(acumulado).getByText(/1 em validação \(AKS\/ASR\) dentro do total/)).toBeInTheDocument()
+    expect(within(acumulado).getByText(/3 de 5 com menos de 7 dias como órfão/)).toBeInTheDocument()
+  })
+
+  // "Ver detalhes" é o que torna o número auditável: sem quem/quando/há quanto tempo, o
+  // usuário não consegue separar economia do processo de rotatividade normal de infra.
+  it('abre o detalhe com quem excluiu, quando e há quantos dias era órfão', async () => {
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0,
+      por_categoria: [], itens: [],
+      saving: {
+        economia_mensal: 1367.2, economia_mensal_bruta: 1367.2, desconto_mensal_snapshots: 0,
+        economia_acumulada: 780, recursos_eliminados: 2, sem_custo_conhecido: 1,
+        para_validacao: 1, para_validacao_custo_mensal: 1367.2, eliminados_recentes: 1,
+        itens: [
+          {
+            resource_id: '/D1', categoria: 'disco_orfao', nome: 'pvc-f8773465', subscription_id: 's',
+            resource_group: 'mc_rg-aks', excluido_em: '2026-09-30T20:40:16Z',
+            excluido_por: 'fulano@telefonica.com', custo_mensal: 1367.2, dias_orfao: 6, motivo_validacao: 'aks_pvc',
+          },
+          {
+            resource_id: '/N1', categoria: 'nic_orfa', nome: 'pe-algum-nic', subscription_id: 's',
+            resource_group: 'rg-b', excluido_em: '2026-10-16T00:00:00Z',
+            excluido_por: null, custo_mensal: null, dias_orfao: null, motivo_validacao: null,
+          },
+        ],
+      },
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Ver detalhes' }))
+
+    const painel = screen.getByText('Economia realizada — detalhe').closest('.card') as HTMLElement
+    const dentro = within(painel)
+    expect(dentro.getByText('pvc-f8773465')).toBeInTheDocument()
+    expect(dentro.getByText('fulano@telefonica.com')).toBeInTheDocument()
+    expect(dentro.getByText('AKS/PVC')).toBeInTheDocument()
+    expect(dentro.getByText('6')).toBeInTheDocument()
+    // Sem custo e sem data de detecção viram travessão, nunca zero: "não sabemos" é
+    // diferente de "foi no mesmo dia" e de "não custa nada".
+    expect(dentro.getByText('pe-algum-nic')).toBeInTheDocument()
+    expect(dentro.getAllByText('—').length).toBeGreaterThanOrEqual(3)
   })
 
   // Zero apurado não é resultado — é ausência de medição. Mostrar "R$ 0" como economia
@@ -307,7 +352,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 0, economia_mensal_bruta: 0, desconto_mensal_snapshots: 0,
-        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, para_validacao: 0, para_validacao_custo_mensal: 0, itens: [],
+        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, para_validacao: 0, para_validacao_custo_mensal: 0, eliminados_recentes: 0, itens: [],
       },
     })
     renderWithClient()

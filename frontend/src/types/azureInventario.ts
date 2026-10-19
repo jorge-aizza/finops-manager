@@ -557,11 +557,14 @@ export interface AzureSavingOrfaos {
   recursos_eliminados: number
   /** Excluídos sem billing conhecido — não entram na soma (null nunca vira zero). */
   sem_custo_conhecido: number
-  /** Excluídos que eram disco de PVC/AKS ou ASR. Ficam FORA do total pela mesma razão que
-   *  ficam fora do desperdício: o estado do recurso não prova abandono, então a exclusão
-   *  pode ter sido o ciclo de vida do cluster, não o processo de FinOps. */
+  /** Quantos dos contabilizados são disco de PVC/AKS ou ASR. Na tela interna eles ENTRAM no
+   *  total — isto é sinalização de que parte do número depende de validação, não exclusão.
+   *  No portal público é sempre 0: lá esses discos nem passam do filtro. */
   para_validacao: number
   para_validacao_custo_mensal: number
+  /** Excluídos com menos de 7 dias como órfãos. Indício de rotatividade normal de infra
+   *  (Private Endpoint recriado, por exemplo), não de ação do processo de FinOps. */
+  eliminados_recentes: number
   itens: {
     resource_id: string
     categoria: AzureDesperdicioCategoria
@@ -571,6 +574,11 @@ export interface AzureSavingOrfaos {
     excluido_em: string
     excluido_por: string | null
     custo_mensal: number | null
+    /** Dias entre a primeira detecção como órfão e a exclusão. null quando a data de
+     *  detecção não é conhecida — "não sabemos", não "foi no mesmo dia". */
+    dias_orfao: number | null
+    /** Preenchido só em disco que precisa de validação manual antes de creditar. */
+    motivo_validacao: 'aks_pvc' | 'asr' | null
   }[]
 }
 export interface AzureDesperdicioResposta {
