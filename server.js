@@ -60,6 +60,7 @@ const crypto   = require('crypto');
 const fs       = require('fs');
 const jwksRsa  = require('jwks-rsa');
 const nodemailer = require('nodemailer');
+const { diasOrfaoNaExclusao } = require('./savingOrfaos');
 
 const JWT_SECRET  = process.env.JWT_SECRET  || 'finops-secret-2024';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '8h';
@@ -7135,9 +7136,11 @@ async function ensureAzureColetaTable() {
       resource_id_upper    TEXT PRIMARY KEY,
       categoria            VARCHAR(30),
       primeira_deteccao_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      ultima_deteccao_em   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      ultima_deteccao_em   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      desde_orfao_em       TIMESTAMPTZ
     )
   `);
+  await pool.query(`ALTER TABLE azure_desperdicio_deteccao ADD COLUMN IF NOT EXISTS desde_orfao_em TIMESTAMPTZ`).catch(() => {});
   // Origem do snapshot (sourceResourceId do ARG) — guardada na DETECÇÃO porque depois que o
   // snapshot é excluído ele some do Resource Graph e o vínculo com o disco que o gerou seria
   // perdido. É esse vínculo que evita contar economia duas vezes na apuração de saving
@@ -7164,6 +7167,7 @@ async function ensureAzureColetaTable() {
       excluido_por        VARCHAR(300),
       custo_mensal        NUMERIC(14,4),
       dias_observados     INTEGER,
+      desde_orfao_em      TIMESTAMPTZ,
       apurado_em          TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
@@ -7175,12 +7179,19 @@ async function ensureAzureColetaTable() {
   // congelado no momento da apuração, não algo que deva mudar depois. É o sinal que separa
   // economia de rotatividade: na base real, as NICs excluídas tinham 0 dias como órfãs.
   await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS primeira_deteccao_em TIMESTAMPTZ`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS desde_orfao_em TIMESTAMPTZ`).catch(() => {});
   // Preenche o que já foi apurado antes desta coluna existir, enquanto a detecção ainda
   // tiver a linha. Roda uma vez: depois do UPDATE não sobra candidato.
   await pool.query(`
     UPDATE azure_desperdicio_saving s SET primeira_deteccao_em = d.primeira_deteccao_em
     FROM azure_desperdicio_deteccao d
     WHERE d.resource_id_upper = s.resource_id_upper AND s.primeira_deteccao_em IS NULL
+  `).catch(() => {});
+  await pool.query(`
+    UPDATE azure_desperdicio_saving s
+    SET desde_orfao_em = COALESCE(d.desde_orfao_em, s.primeira_deteccao_em, d.primeira_deteccao_em)
+    FROM azure_desperdicio_deteccao d
+    WHERE d.resource_id_upper = s.resource_id_upper AND s.desde_orfao_em IS NULL
   `).catch(() => {});
   // NOTA pra quem for mexer na apuração de saving: a tentação é criar um índice funcional
   // só em LOWER(resource_id) aqui (o que existe é composto, com subscription_id na frente).
@@ -11768,14 +11779,15 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     // recurso foi reaproveitado e depois abandonado de novo — reinicia a contagem.
     if (itens.length) {
       const up = await pool.query(
-        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria, origem_resource_id)
-         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat, u.origem FROM unnest($1::text[], $2::text[], $3::text[]) AS u(id, cat, origem)
+        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria, origem_resource_id, desde_orfao_em)
+         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat, u.origem, u.desde FROM unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[]) AS u(id, cat, origem, desde)
          ON CONFLICT (resource_id_upper) DO UPDATE SET
            primeira_deteccao_em = CASE WHEN azure_desperdicio_deteccao.ultima_deteccao_em < NOW() - INTERVAL '3 days' THEN NOW() ELSE azure_desperdicio_deteccao.primeira_deteccao_em END,
            ultima_deteccao_em = NOW(), categoria = EXCLUDED.categoria,
-           origem_resource_id = COALESCE(EXCLUDED.origem_resource_id, azure_desperdicio_deteccao.origem_resource_id)
+           origem_resource_id = COALESCE(EXCLUDED.origem_resource_id, azure_desperdicio_deteccao.origem_resource_id),
+           desde_orfao_em = EXCLUDED.desde_orfao_em
          RETURNING resource_id_upper, primeira_deteccao_em`,
-        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria), itens.map((x) => x.origem_resource_id || null)]
+        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria), itens.map((x) => x.origem_resource_id || null), itens.map((x) => x.marcado_orfao_em || null)]
       );
       const primeira = new Map(up.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
       for (const it of itens) {
@@ -11915,7 +11927,8 @@ async function _apurarSavingOrfaos(idsVivos) {
   // LEFT JOIN + IS NULL em vez de `NOT ... = ANY(array)`: com milhares de elementos o
   // segundo degrada pra seq scan (armadilha já documentada neste arquivo).
   const sumidos = await pool.query(
-    `SELECT d.resource_id_upper, d.categoria, d.origem_resource_id, d.primeira_deteccao_em
+    `SELECT d.resource_id_upper, d.categoria, d.origem_resource_id, d.primeira_deteccao_em,
+            COALESCE(d.desde_orfao_em, d.primeira_deteccao_em) AS desde_orfao_em
      FROM azure_desperdicio_deteccao d
      LEFT JOIN unnest($1::text[]) AS v(rid) ON v.rid = d.resource_id_upper
      LEFT JOIN azure_desperdicio_saving s
@@ -11982,14 +11995,15 @@ async function _apurarSavingOrfaos(idsVivos) {
       `INSERT INTO azure_desperdicio_saving
          (resource_id_upper, tipo, categoria, subscription_id, resource_group, nome,
           origem_resource_id, criado_em, excluido_em, excluido_por, custo_mensal, dias_observados,
-          primeira_deteccao_em)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           primeira_deteccao_em, desde_orfao_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        ON CONFLICT (resource_id_upper) DO UPDATE SET
          custo_mensal = EXCLUDED.custo_mensal, dias_observados = EXCLUDED.dias_observados,
-         tipo = EXCLUDED.tipo, apurado_em = NOW()`,
+         tipo = EXCLUDED.tipo, primeira_deteccao_em = EXCLUDED.primeira_deteccao_em,
+         desde_orfao_em = EXCLUDED.desde_orfao_em, apurado_em = NOW()`,
       [c.resource_id_upper, ehDesconto ? 'desconto' : 'economia', c.categoria, c.subscription_id,
        c.resource_group, c.nome, origemUpper, c.criado_em, c.excluido_em, c.excluido_por,
-       custoMensal, obs ? obs.dias : 0, c.primeira_deteccao_em || null]
+       custoMensal, obs ? obs.dias : 0, c.primeira_deteccao_em || null, c.desde_orfao_em || null]
     );
     gravados++;
   }
@@ -12029,9 +12043,7 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
   const pub = !!opcoes.publico;
   const cats = opcoes.categorias instanceof Set ? opcoes.categorias : null;
   const rgs = opcoes.resourceGroups instanceof Set ? opcoes.resourceGroups : null;
-  const diasOrfao = (x) => (x.primeira_deteccao_em && x.excluido_em)
-    ? Math.max(0, Math.floor((new Date(x.excluido_em).getTime() - new Date(x.primeira_deteccao_em).getTime()) / 86400000))
-    : null;
+  const diasOrfao = diasOrfaoNaExclusao;
   const paraValidacao = (x) =>
     x.categoria === 'disco_orfao' && !!_classificarDiscoValidacao({ name: x.nome });
   // Filtros do fluxo público, aplicados só quando `publico`. Disco exige 30+ dias de órfão
