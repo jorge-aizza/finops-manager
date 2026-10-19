@@ -1703,6 +1703,25 @@ select option { background: var(--bg-card); }
 [data-theme="light"] table tbody td    { color: #374151; border-color: #e5e7eb; }
 [data-theme="light"] tr:hover td       { background: rgba(147,51,234,0.05) !important; }
 
+/* ── EDITOR DO MAILING: tabela ali não é grade de dados ──
+   A assinatura do comunicado usa <table> só pra pôr o logo ao lado do texto
+   (único jeito que sobrevive ao editor — ver MailingComposer.tsx). As regras
+   de tabela acima são pensadas pra grades de dados e pintavam fundo, zebra e
+   hover nela: o preview mostrava um bloco claro atrás da assinatura que NÃO
+   existe no e-mail enviado (o HTML gerado não carrega este CSS — conferido no
+   getHTML(), a tabela sai só com border-collapse/border:none). Isso aqui faz o
+   preview voltar a mostrar o que de fato será enviado.
+   Seletores com .ProseMirror na frente de propósito: ganham por especificidade
+   das regras acima em vez de depender da ordem do arquivo — mesma armadilha já
+   documentada em .data-table td mais acima. */
+.ProseMirror table,
+.ProseMirror table tbody tr,
+.ProseMirror table tbody tr:nth-child(even),
+[data-theme="light"] .ProseMirror table tbody tr,
+[data-theme="light"] .ProseMirror table tbody tr:nth-child(even) { background: transparent; }
+[data-theme="light"] .ProseMirror table tbody td { color: inherit; border-color: transparent; }
+[data-theme="light"] .ProseMirror tr:hover td { background: transparent !important; }
+
 /* ── PAINEL DE NOTIFICAÇÕES ── */
 [data-theme="light"] #notif-panel {
   background: #ffffff !important;

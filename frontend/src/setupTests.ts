@@ -45,3 +45,17 @@ class LocalStorageStub {
   clear() { this.store.clear() }
 }
 Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new LocalStorageStub() })
+
+// TipTap/ProseMirror (MailingComposer) chama várias APIs de layout real do navegador
+// a cada tecla digitada, pra saber onde posicionar o cursor na tela — jsdom não
+// implementa nenhuma delas (sem motor de renderização de verdade). Sem estes stubs,
+// `npm test` saía com exit code 1 mesmo com todas as asserções passando: Vitest trata
+// uma exceção não capturada (disparada DENTRO do ProseMirror, não no teste) como falha
+// de suíte. Confirmado isolando o editor sem nenhum código deste projeto — é
+// pré-existente do par TipTap+jsdom, não um bug daqui.
+Range.prototype.getClientRects = () => ({ length: 0, item: () => null, [Symbol.iterator]: function* () {} }) as unknown as DOMRectList
+Range.prototype.getBoundingClientRect = () => ({
+  width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON() {},
+})
+document.elementFromPoint = () => null
+window.scrollBy = () => {}

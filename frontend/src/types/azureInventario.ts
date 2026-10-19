@@ -543,10 +543,53 @@ export interface AzureDesperdicioItem {
   /** Quantos dias desde que foi marcado como órfão — null se não marcado. */
   dias_orfao: number | null
 }
+/** Economia já realizada: órfãos que foram identificados aqui e depois excluídos de fato.
+ *  Custo apurado no faturamento real dos 30 dias ANTES da exclusão (depois disso o recurso
+ *  não fatura mais, uma janela corrente devolveria zero). */
+export interface AzureSavingOrfaos {
+  /** Já descontado o snapshot de retenção ainda vivo — é o número que vale como run-rate. */
+  economia_mensal: number
+  /** Antes do desconto dos snapshots — útil pra explicar a diferença na tela. */
+  economia_mensal_bruta: number
+  /** Quanto os snapshots dos 90 dias ainda estão custando. */
+  desconto_mensal_snapshots: number
+  economia_acumulada: number
+  recursos_eliminados: number
+  /** Excluídos sem billing conhecido — não entram na soma (null nunca vira zero). */
+  sem_custo_conhecido: number
+  /** Quantos dos contabilizados são disco de PVC/AKS ou ASR. Na tela interna eles ENTRAM no
+   *  total — isto é sinalização de que parte do número depende de validação, não exclusão.
+   *  No portal público é sempre 0: lá esses discos nem passam do filtro. */
+  para_validacao: number
+  para_validacao_custo_mensal: number
+  /** Excluídos com menos de 7 dias como órfãos. Indício de rotatividade normal de infra
+   *  (Private Endpoint recriado, por exemplo), não de ação do processo de FinOps. */
+  eliminados_recentes: number
+  itens: {
+    resource_id: string
+    categoria: AzureDesperdicioCategoria
+    nome: string | null
+    subscription_id: string | null
+    resource_group: string | null
+    excluido_em: string
+    excluido_por: string | null
+    custo_mensal: number | null
+    /** Dias entre a primeira detecção como órfão e a exclusão. null quando a data de
+     *  detecção não é conhecida — "não sabemos", não "foi no mesmo dia". */
+    dias_orfao: number | null
+    /** Preenchido só em disco que precisa de validação manual antes de creditar. */
+    motivo_validacao: 'aks_pvc' | 'asr' | null
+  }[]
+}
 export interface AzureDesperdicioResposta {
   gerado_em: string
   dias_snapshot: number
   total_itens: number
+  /** null quando a apuração falhou — a tela de desperdício continua funcionando sem ela. */
+  saving: AzureSavingOrfaos | null
+  /** Itens coletados que ficaram fora por não gerarem custo ao ficarem órfãos (hoje, NIC).
+   *  Continuam coletados e detectados — só não entram na visão de FinOps. */
+  ocultos_sem_custo: number
   custo_mensal_estimado_total: number
   sem_custo_conhecido: number
   por_categoria: {

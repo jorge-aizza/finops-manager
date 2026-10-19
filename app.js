@@ -601,7 +601,7 @@ let allAcoes = [];
 // C:\Users\jorge\.claude\plans\magical-gliding-gem.md. showView() monta o
 // bundle React em #react-root em vez de ativar a antiga #view-<nome>
 // (que fica no HTML vazia, sem conteúdo, até a migração terminar de vez).
-const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks', 'inventario', 'alocacao', 'log-analytics']);
+const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks', 'inventario', 'alocacao', 'log-analytics', 'mailing']);
 
 // ── VIEW ROUTING ──────────────────────────────
 function showView(view) {
@@ -641,7 +641,7 @@ function showView(view) {
   }
   currentView = view;
 
-  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure', databricks: 'Dashboard Databricks' };
+  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure', databricks: 'Dashboard Databricks', mailing: 'Mailing de Comunicados' };
   document.getElementById('page-title').textContent = titles[view] || view;
 
   const btn = document.getElementById('top-action-btn');
@@ -1958,6 +1958,15 @@ async function openSettingsModal() {
             if (el) el.value = i.config[map[k]] || '';
           });
           const secureEl = document.getElementById('smtp-secure');
+          if (secureEl) secureEl.checked = !!i.config.secure;
+        } else if (i.tipo === 'mailing_relay') {
+          // Sem senha — relay anônimo, nada a mascarar/omitir aqui (diferente do smtp acima).
+          const map = { host:'host', port:'port', 'remetente-nome':'remetente_nome', 'remetente-email':'remetente_email' };
+          Object.keys(map).forEach(k => {
+            const el = document.getElementById('mailing-relay-' + k);
+            if (el) el.value = i.config[map[k]] || '';
+          });
+          const secureEl = document.getElementById('mailing-relay-secure');
           if (secureEl) secureEl.checked = !!i.config.secure;
         }
       }
@@ -3428,6 +3437,13 @@ async function salvarIntegracao(tipo) {
       secure:document.getElementById('smtp-secure').checked, usuario:document.getElementById('smtp-usuario').value,
       senha:document.getElementById('smtp-senha')?.value||'', remetente_nome:document.getElementById('smtp-remetente-nome').value,
       remetente_email:document.getElementById('smtp-remetente-email').value, destinatarios_padrao:document.getElementById('smtp-destinatarios').value };
+  } else if (tipo==='mailing_relay') {
+    // Sem senha — relay anônimo (ver server.js, banner "MAILING DE COMUNICADOS"). Config
+    // isolada do SMTP de Alertas acima, tipo diferente na mesma tabela `integracoes`.
+    config = { host:document.getElementById('mailing-relay-host').value, port:document.getElementById('mailing-relay-port').value||25,
+      secure:document.getElementById('mailing-relay-secure').checked,
+      remetente_nome:document.getElementById('mailing-relay-remetente-nome').value,
+      remetente_email:document.getElementById('mailing-relay-remetente-email').value };
   }
   const ativo = document.getElementById('toggle-'+tipo).checked;
   try { await api('POST','/integrations/'+tipo,{config,ativo}); showToast('Configuração salva!','success'); }
@@ -3488,6 +3504,14 @@ async function testarConexao(type) {
     try { const r=await api('POST','/integrations/smtp/testar',{host,port,secure,usuario,senha,remetente_nome,remetente_email},45000); showToast(r.message||'E-mail de teste enviado!','success'); }
     catch(e) { showToast('Falha: '+e.message,'error'); }
     finally { carregarSmtpLog(); }
+  } else if (type==='mailing_relay') {
+    const host=document.getElementById('mailing-relay-host').value, port=document.getElementById('mailing-relay-port').value||25;
+    const secure=document.getElementById('mailing-relay-secure').checked;
+    const remetente_nome=document.getElementById('mailing-relay-remetente-nome').value, remetente_email=document.getElementById('mailing-relay-remetente-email').value;
+    if (!host||!remetente_email) { showToast('Preencha host e e-mail do remetente para testar','error'); return; }
+    showToast('Enviando e-mail de teste pelo relay...','success');
+    try { const r=await api('POST','/mailing/relay/testar',{host,port,secure,remetente_nome,remetente_email},45000); showToast(r.message||'E-mail de teste enviado!','success'); }
+    catch(e) { showToast('Falha: '+e.message+' — se esta máquina não estiver na rede liberada pelo relay, isso é esperado.','error'); }
   } else {
     showToast('Para testar Entra ID, configure e use o botão na tela de login','success');
   }

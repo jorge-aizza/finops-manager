@@ -4426,7 +4426,11 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       && (!rgs.size || (x.resource_group && rgs.has(String(x.resource_group).toUpperCase())))
       // Discos de PVC do AKS e de ASR precisam de validação manual (podem estar em uso
       // por outro sistema) — nunca expostos no portal público, só na tela interna.
-      && !x.motivo_validacao);
+      && !x.motivo_validacao
+      // Categoria que não gera custo por estar órfã fica fora da visão de FinOps (hoje só
+      // NIC — ver _DESP_CATEGORIAS_SEM_CUSTO). Redundante com a allowlist atual, que só
+      // libera disco e snapshot, mas a allowlist é editável pelo admin e esta regra não.
+      && !_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria));
 
     const det = filtrados.length
       ? await pool.query(
@@ -4474,11 +4478,33 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       c.itens++;
       c.custo_mensal_estimado += it.custo_mensal_estimado || 0;
     }
+    // Economia realizada — só os TOTAIS. A lista de itens fica de fora de propósito: ela traz
+    // resource_id e subscription_id, que esta rota pública nunca expõe (mesma regra do resto do
+    // endpoint). Apuração não roda aqui, só leitura: quem apura é a tela interna, autenticada.
+    let saving = null;
+    try {
+      // Mesmos filtros do que este portal publica — `categorias` e `rgs` já foram montados
+      // no topo desta rota a partir da allowlist do admin.
+      const resumo = await _resumoSavingOrfaos(
+        [...subsPermitidas],
+        await _snapshotsDeRetencaoVivos(filtrados),
+        { publico: true, categorias, resourceGroups: rgs }
+      );
+      saving = {
+        economia_mensal: resumo.economia_mensal,
+        economia_acumulada: resumo.economia_acumulada,
+        recursos_eliminados: resumo.recursos_eliminados,
+      };
+    } catch (e) {
+      console.error('[Portal Órfãos] falha no saving:', e.message);
+    }
+
     res.json({
       gerado_em: new Date().toISOString(),
       total_itens: itens.length,
       custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
       por_categoria: Object.values(porCat).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
+      saving,
       itens,
     });
   } catch (e) {
@@ -4803,7 +4829,11 @@ app.get('/api/admin/portal-config/orfaos-opcoes', authMiddleware, dbMiddleware, 
       rgMap.set(k, e);
     }
     res.json({
-      categorias: Object.entries(_DESP_LABEL_XLSX).map(([id, label]) => ({ id, label })),
+      // Categoria que não gera custo não é oferecida: selecioná-la no portal não traria
+      // nada (o endpoint público também a filtra) e pareceria configuração quebrada.
+      categorias: Object.entries(_DESP_LABEL_XLSX)
+        .filter(([id]) => !_DESP_CATEGORIAS_SEM_CUSTO.has(id))
+        .map(([id, label]) => ({ id, label })),
       resource_groups: Array.from(rgMap.values()).sort((a, b) => a.resource_group.localeCompare(b.resource_group)),
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -7108,6 +7138,55 @@ async function ensureAzureColetaTable() {
       ultima_deteccao_em   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // Origem do snapshot (sourceResourceId do ARG) — guardada na DETECÇÃO porque depois que o
+  // snapshot é excluído ele some do Resource Graph e o vínculo com o disco que o gerou seria
+  // perdido. É esse vínculo que evita contar economia duas vezes na apuração de saving
+  // (ver _apurarSavingOrfaos).
+  await pool.query(`ALTER TABLE azure_desperdicio_deteccao ADD COLUMN IF NOT EXISTS origem_resource_id TEXT`).catch(() => {});
+  // ── Economia realizada com órfãos excluídos (2026-10-17, pedido do usuário) ──
+  // MATERIALIZADA de propósito, em vez de recalculada por join a cada leitura: economia
+  // realizada é fato histórico. O inventário tem retenção OPCIONAL de excluídos
+  // (`retencao_excluidos_ativa`, ver ALTER mais abaixo) e azure_costs tem expurgo manual —
+  // com qualquer um dos dois, um número que já foi reportado à diretoria cairia sozinho.
+  // `tipo`: 'economia' = órfão identificado que foi excluído; 'desconto' = custo que o próprio
+  // processo criou (snapshot de retenção dos 90 dias), abatido da economia enquanto existir.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_desperdicio_saving (
+      resource_id_upper   TEXT PRIMARY KEY,
+      tipo                VARCHAR(10) NOT NULL DEFAULT 'economia',
+      categoria           VARCHAR(30),
+      subscription_id     VARCHAR(200),
+      resource_group      TEXT,
+      nome                TEXT,
+      origem_resource_id  TEXT,
+      criado_em           TIMESTAMPTZ,
+      excluido_em         TIMESTAMPTZ NOT NULL,
+      excluido_por        VARCHAR(300),
+      custo_mensal        NUMERIC(14,4),
+      dias_observados     INTEGER,
+      apurado_em          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_desp_saving_excluido ON azure_desperdicio_saving (excluido_em)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_desp_saving_sub ON azure_desperdicio_saving (subscription_id)`);
+  // Quando o recurso foi visto como órfão pela primeira vez. Guardado AQUI, e não lido da
+  // detecção na hora de montar a tela, por dois motivos: a linha da detecção pode sumir
+  // (expurgo, recurso redetectado) e o "dias como órfão na data da exclusão" é um fato
+  // congelado no momento da apuração, não algo que deva mudar depois. É o sinal que separa
+  // economia de rotatividade: na base real, as NICs excluídas tinham 0 dias como órfãs.
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS primeira_deteccao_em TIMESTAMPTZ`).catch(() => {});
+  // Preenche o que já foi apurado antes desta coluna existir, enquanto a detecção ainda
+  // tiver a linha. Roda uma vez: depois do UPDATE não sobra candidato.
+  await pool.query(`
+    UPDATE azure_desperdicio_saving s SET primeira_deteccao_em = d.primeira_deteccao_em
+    FROM azure_desperdicio_deteccao d
+    WHERE d.resource_id_upper = s.resource_id_upper AND s.primeira_deteccao_em IS NULL
+  `).catch(() => {});
+  // NOTA pra quem for mexer na apuração de saving: a tentação é criar um índice funcional
+  // só em LOWER(resource_id) aqui (o que existe é composto, com subscription_id na frente).
+  // Foi testado — 287 MB, e o planner NUNCA o escolheu: continuou usando o composto, com o
+  // mesmo tempo. O que resolve o custo da apuração não é índice novo, é não varrer o
+  // inventário inteiro (ver _apurarSavingOrfaos, que só consulta o que sumiu da lista viva).
   // Unicidade case-insensitive de resource_id (migrations/inventarioResourceIdCase.js): o índice
   // funcional é criado por ela (LOWER(resource_id)). Reconciliação usa busca + insert/update
   // explícita para evitar sintaxe ON CONFLICT com funções. Idempotente — sem custo quando já existe.
@@ -7638,7 +7717,10 @@ async function _rebuildAlocacaoTags(origem = 'agendado', forcar = false) {
     await ensureAzureColetaTable();
     const r = await pool.query(
       `SELECT to_char(cost_date,'YYYY-MM') AS mes, MAX(importado_em) AS ultimo_import
-       FROM azure_costs GROUP BY 1 ORDER BY 1`
+       -- cost_date NULO fica de fora: to_char(NULL) devolve NULL, o mês chega aqui como null e
+       -- a concatenação mes + '-01' monta a string 'null-01', que estourava o cast pra date
+       -- e abortava o rollup no fim do laço (NULL ordena por último). Medido: 56 mil linhas.
+       FROM azure_costs WHERE cost_date IS NOT NULL GROUP BY 1 ORDER BY 1`
     );
     const st = await pool.query(`SELECT mes, construido_em FROM azure_tag_rollup_status`);
     const construido = new Map(st.rows.map(x => [x.mes.trim(), x.construido_em]));
@@ -7758,6 +7840,30 @@ function _escHtmlServer(str) {
 
 function _parseDestinatarios(str) {
   return String(str || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+// Resolve o destinatário de um alerta para a PESSOA responsável, caindo na lista global do
+// SMTP quando não der pra identificar. Alerta que chega pra todo mundo não é de ninguém:
+// orçamento estourado interessa a quem é dono do orçamento, não à caixa coletiva.
+//
+// `identificador` é texto livre nas tabelas (`acoes_finops.responsavel`,
+// `databricks_budgets.usuario`, `estimativas.responsavel`), então casa por nome OU por
+// e-mail — em algumas telas as pessoas digitam um, em outras o outro. Só usuário ativo:
+// mandar alerta pra quem saiu da empresa é pior que mandar pra lista, porque ninguém lê e
+// ninguém percebe que não foi lido.
+async function _destinatariosPara(identificador, padrao) {
+  const alvo = String(identificador || "").trim();
+  if (!alvo || !pool) return padrao;
+  try {
+    const r = await pool.query(
+      `SELECT email FROM usuarios WHERE ativo = true AND (nome ILIKE $1 OR email ILIKE $1) AND email IS NOT NULL LIMIT 1`,
+      [alvo]
+    );
+    return r.rows[0]?.email ? [r.rows[0].email] : padrao;
+  } catch (_) {
+    // Falha de consulta não pode engolir o alerta — cai na lista global.
+    return padrao;
+  }
 }
 
 async function _getSmtpConfig() {
@@ -7885,8 +7991,8 @@ async function _tentarClaimAlerta(tipo, chave) {
 async function _checkOrcamentosDatabricks() {
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
-  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (!destinatarios.length) return;
+  const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!padrao.length) return;
   const alertas = await _computeAlertasDatabricks();
   const mes = new Date().toISOString().slice(0, 7);
   for (const a of alertas) {
@@ -7896,6 +8002,9 @@ async function _checkOrcamentosDatabricks() {
     const escopoTxt = a.budget.escopo_tipo === 'workspace' ? a.budget.workspace_id
       : a.budget.escopo_tipo === 'tag' ? `${a.budget.tag_key} = ${a.budget.tag_valor}`
       : 'todos os workspaces';
+    // Dono do orçamento quando identificável (coluna `usuario` já existia e não era usada);
+    // sem isso, a lista global.
+    const destinatarios = await _destinatariosPara(a.budget.usuario, padrao);
     await _sendEmail({
       to: destinatarios,
       subject: `⚠ Orçamento Databricks ${a.severidade === 'estourado' ? 'estourado' : 'em alerta'} — ${a.budget.nome}`,
@@ -7992,11 +8101,7 @@ async function _checkAcoesVencendo() {
     WHERE a.status NOT IN ('Concluído','Cancelado') AND a.data_conclusao IS NOT NULL AND a.data_conclusao <= $1
   `, [em5dias.toISOString().split('T')[0]]);
   for (const acao of r.rows) {
-    let destinatarios = padrao;
-    if (acao.responsavel) {
-      const uMatch = await pool.query(`SELECT email FROM usuarios WHERE nome ILIKE $1 LIMIT 1`, [acao.responsavel]);
-      if (uMatch.rows[0]?.email) destinatarios = [uMatch.rows[0].email];
-    }
+    const destinatarios = await _destinatariosPara(acao.responsavel, padrao);
     if (!destinatarios.length) continue;
     if (!(await _tentarClaimAlerta('acao_vencendo', `acao:${acao.id}`))) continue;
     const dias = Math.floor((new Date(acao.data_conclusao) - new Date()) / 86400000);
@@ -8074,6 +8179,7 @@ async function _checkAnomaliasCrescimentoInventario() {
   if (!anomalias.length) return;
   const cfg = await _getSmtpConfig();
   const destinatarios = cfg ? _parseDestinatarios(cfg.destinatarios_padrao) : [];
+  const novas = [];
   for (const a of anomalias) {
     const chave = `crescimento:${a.subscription_id}:${a.resource_group || 'global'}:${a.dia}`;
     if (!(await _tentarClaimAlerta('anomalia_crescimento_inventario', chave))) continue;
@@ -8104,15 +8210,33 @@ async function _checkAnomaliasCrescimentoInventario() {
       'inventario:recursos',
       destinoParams
     );
-    if (destinatarios.length) {
-      await _sendEmail({
-        to: destinatarios,
-        subject: `📈 Crescimento anômalo — ${escopoTxt}`,
-        html: _emailTemplate('Crescimento anômalo detectado', `
-          <p><strong>${_escHtmlServer(escopoTxt)}</strong> ficou fora do padrão histórico em ${new Date(a.dia).toLocaleDateString('pt-BR')}: ${partesHtml.join(' e ')}.</p>
-          <p>Janela de referência: últimos 35 dias.</p>`),
-      });
-    }
+    // Acumula em vez de enviar aqui dentro (2026-10-18). Um e-mail por anomalia dava ~157
+    // mensagens por dia para um único destinatário, e de forma recorrente: o dedup de
+    // _tentarClaimAlerta libera a mesma chave após 24h, e a janela de detecção são 35 dias,
+    // então cada anomalia realertava todo dia até envelhecer. Caixa nesse volume deixa de
+    // ser lida, que é o pior desfecho para um alerta. O sino continua item a item.
+    novas.push({
+      escopoTxt,
+      dia: a.dia,
+      partesHtml,
+      // Ordena o resumo pelo desvio mais forte, não por ordem de varredura.
+      severidade: Math.max(a.zscore_criacoes || 0, a.zscore_custo || 0),
+    });
+  }
+
+  // Resumo único, já ordenado pela anomalia mais forte.
+  if (destinatarios.length && novas.length) {
+    novas.sort((x, y) => y.severidade - x.severidade);
+    const linhas = novas.map((x) => `<li style="margin-bottom:6px"><strong>${_escHtmlServer(x.escopoTxt)}</strong> — ${new Date(x.dia).toLocaleDateString('pt-BR')}: ${x.partesHtml.join(' e ')}</li>`).join('');
+    await _sendEmail({
+      to: destinatarios,
+      subject: `📈 ${novas.length} crescimento(s) anômalo(s) detectado(s)`,
+      html: _emailTemplate(`${novas.length} crescimento(s) anômalo(s)`, `
+        <p>Escopos fora do padrão histórico, do desvio mais forte para o mais fraco:</p>
+        <ul style="padding-left:18px">${linhas}</ul>
+        <p style="margin-top:12px;font-size:12px;color:#6b7280">Janela de referência: últimos 35 dias.
+        Cada item também está no sino, com link para a lista de recursos do escopo.</p>`),
+    });
   }
 }
 
@@ -8340,12 +8464,10 @@ async function _alertarColetaComErro(titulo, mensagem) {
 // sugeridas após expandir o rastreio de propriedades) — evento, sem dedup (cada linha em
 // `azure_recursos_mudancas_propriedade` só é inserida uma vez). Deliberadamente só propriedades
 // de infra (SKU de VM, disco, storage, IP) — NUNCA tags: uma re-tag em massa por automação
-// dispararia dezenas de e-mails de uma vez, mesmo raciocínio já usado pra excluir e-mail de
-// "coleta com sucesso" ("viraria spam sem valor"). Chamado pelo próprio `_coletarInventarioAzure`
-// logo após o INSERT bem-sucedido — nunca lança pro chamador (mesma garantia de `_sendEmail`).
-async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, quando, ids = null) {
-  // Sino primeiro (2026-09-04) — sempre, independente de SMTP configurado (mesmo raciocínio
-  // de _checkAnomaliasCrescimentoInventario). E-mail continua condicionado à config existente.
+// encheria o sino de ruído. Chamado pelo próprio `_coletarInventarioAzure` logo após o INSERT
+// bem-sucedido; o chamador trata a falha (`.catch`), nada aqui derruba a coleta.
+async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, ids = null) {
+  // Sino sempre, independente de SMTP configurado.
   // Com `ids`, o clique abre o detalhe do próprio recurso; sem, cai na aba Auditoria.
   await _registrarNotificacaoColeta(
     `🔧 ${p.propriedade_label} — ${nomeRecurso}`,
@@ -8354,18 +8476,13 @@ async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, 
     ids ? 'inventario:recursos' : 'inventario:auditoria',
     ids ? { resource_id: ids.resource_id, subscription_id: ids.subscription_id } : null
   );
-  const cfg = await _getSmtpConfig();
-  if (!cfg) return;
-  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (!destinatarios.length) return;
-  await _sendEmail({
-    to: destinatarios,
-    subject: `🔧 ${p.propriedade_label} mudou — ${nomeRecurso}`,
-    html: _emailTemplate('Alteração de propriedade detectada', `
-      <p><strong>${_escHtmlServer(nomeRecurso)}</strong> (${_escHtmlServer(resourceGroup || '—')})</p>
-      <p>${_escHtmlServer(p.propriedade_label)}: <strong style="color:#dc2626">${_escHtmlServer(p.valor_anterior)}</strong> → <strong style="color:#16a34a">${_escHtmlServer(p.valor_novo)}</strong></p>
-      <p style="margin-top:12px;font-size:12px;color:#6b7280">Detectado por ${_escHtmlServer(autor || 'desconhecido')} em ${quando ? new Date(quando).toLocaleString('pt-BR') : '—'}. Veja o histórico completo em Inventário → Auditoria.</p>`),
-  });
+  // SÓ SINO, sem e-mail (2026-10-18). A exclusão de tags no comentário acima já reconhecia o
+  // risco de rajada, mas o mesmo valia para o resto: esta função não passa por
+  // _tentarClaimAlerta, dispara uma vez por propriedade alterada dentro da coleta, e a coleta
+  // processa de 150 a 200 mil eventos de auditoria por dia (medido). Um redimensionamento em
+  // massa geraria uma rajada sem teto. Mudança de SKU é acompanhamento: não tem prazo nem
+  // exige ação imediata, que é o critério para merecer e-mail aqui. O sino já registra tudo,
+  // com link direto para o recurso.
 }
 
 // Estimativa aprovada/reprovada — evento (PUT /api/estimativas/:id/status), sem
@@ -8375,11 +8492,8 @@ async function _alertarEstimativaStatus(estimativa) {
   if (estimativa.status !== 'Aprovado' && estimativa.status !== 'Nao Aprovado') return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
-  let destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (estimativa.responsavel) {
-    const uMatch = await pool.query(`SELECT email FROM usuarios WHERE nome ILIKE $1 LIMIT 1`, [estimativa.responsavel]);
-    if (uMatch.rows[0]?.email) destinatarios = [uMatch.rows[0].email];
-  }
+  const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
+  const destinatarios = await _destinatariosPara(estimativa.responsavel, padrao);
   if (!destinatarios.length) return;
   const aprovado = estimativa.status === 'Aprovado';
   await _sendEmail({
@@ -8912,6 +9026,624 @@ app.post('/api/azure-coleta/historico/:id/validar', authMiddleware, dbMiddleware
     );
     res.json(updated[0] || {});
   } catch (e) { _dbErr(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MAILING DE COMUNICADOS (2026-10-16, pedido do usuário)
+// ══════════════════════════════════════════════════════════════════════════════
+// Broadcast corporativo (1 comunicado → N destinatários) — DELIBERADAMENTE separado do
+// sistema de Alertas (seção "EMAIL — SMTP e alertas" acima, `_sendEmail`/integracoes
+// tipo='smtp'). São duas propostas diferentes por pedido explícito do usuário: uma não
+// pode interferir na outra. Isolamento em três camadas, não só nominal:
+//   - Config própria: integracoes tipo='mailing_relay' — nunca lê nem escreve tipo='smtp'
+//   - Transporter próprio: _mailingTransporter() — nunca reaproveita o do SMTP de Alertas
+//   - Estado de execução próprio: _mailingEnviosEmExecucao (Map) — nunca toca
+//     _coletasEmExecucao nem qualquer outro Map de execução do app
+//
+// Relay SMTP anônimo (decisão do usuário, 2026-10-16): sem usuário/senha — o relay
+// autoriza por IP de origem, não por credencial. Por isso não existe campo de senha
+// neste módulo, nem `_encryptSecret` é chamado aqui — não há segredo pra proteger.
+//
+// Rastreamento honesto: SMTP/relay não dá webhook de entrega nem de bounce (isso é
+// coisa de provedor transacional tipo SendGrid/SES, que este módulo não usa). O que
+// `mailing_envio_destinatario` registra é "meu servidor conseguiu entregar pro relay",
+// não "a pessoa recebeu/leu" — suficiente pro pedido (controle de envio), mas é a
+// limitação real da escolha de arquitetura, documentada aqui pra não virar surpresa.
+
+let _mailingTablesReady = false;
+async function ensureMailingTables() {
+  if (!pool) return;
+  if (_mailingTablesReady) return;
+  const run = (sql) => pool.query(sql).catch((e) => console.error('[Mailing] erro ao criar tabela:', e.message));
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_contatos (
+      id SERIAL PRIMARY KEY,
+      email VARCHAR(320) NOT NULL,
+      nome VARCHAR(200),
+      status VARCHAR(20) NOT NULL DEFAULT 'ativo',
+      origem VARCHAR(20) NOT NULL DEFAULT 'manual',
+      criado_em TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_contatos_email ON mailing_contatos(email)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_import_lote (
+      id SERIAL PRIMARY KEY,
+      arquivo_nome VARCHAR(500),
+      total_linhas INT DEFAULT 0,
+      novos INT DEFAULT 0,
+      atualizados INT DEFAULT 0,
+      invalidos INT DEFAULT 0,
+      invalidos_detalhe JSONB,
+      importado_por VARCHAR(200),
+      importado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_campanhas (
+      id SERIAL PRIMARY KEY,
+      assunto VARCHAR(500) NOT NULL,
+      corpo_html TEXT NOT NULL DEFAULT '',
+      remetente_email VARCHAR(320),
+      remetente_nome VARCHAR(200),
+      status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
+      criado_por VARCHAR(200),
+      criado_em TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW(),
+      iniciado_em TIMESTAMP,
+      concluido_em TIMESTAMP
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_envio_destinatario (
+      id SERIAL PRIMARY KEY,
+      campanha_id INT NOT NULL REFERENCES mailing_campanhas(id) ON DELETE CASCADE,
+      contato_id INT NOT NULL REFERENCES mailing_contatos(id) ON DELETE CASCADE,
+      status VARCHAR(20) NOT NULL DEFAULT 'pendente',
+      enviado_em TIMESTAMP,
+      erro TEXT
+    )
+  `);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_envio_unico ON mailing_envio_destinatario(campanha_id, contato_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_mailing_envio_campanha ON mailing_envio_destinatario(campanha_id, status)`);
+  // Biblioteca de modelos (2026-10-16, pedido do usuário: "deixar esse salvo como
+  // modelo... opção de salvar novo modelo, usar modelo ou criar novo"). Sem seed
+  // automático aqui de propósito: o modelo FinOps que veio do .msg do usuário já existe
+  // como template "embutido" no frontend (buildTemplatePadraoFinOps, calculado com
+  // window.location.origin correto pro ambiente atual) — semear esta tabela a partir do
+  // servidor exigiria adivinhar a origem (dev/prod têm domínios diferentes), arriscando
+  // salvar imagem com URL errada. Esta tabela é só pros modelos que o usuário salvar
+  // explicitamente pelo botão "Salvar como modelo" (já com a origem certa, calculada no navegador).
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_templates (
+      id SERIAL PRIMARY KEY,
+      nome VARCHAR(200) NOT NULL,
+      corpo_html TEXT NOT NULL DEFAULT '',
+      remetente_nome VARCHAR(200),
+      remetente_email VARCHAR(320),
+      criado_por VARCHAR(200),
+      criado_em TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  _mailingTablesReady = true;
+}
+
+const _MAILING_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function _normalizarEmailMailing(v) { return String(v || '').trim().toLowerCase(); }
+function _emailValidoMailing(v) { return _MAILING_EMAIL_RE.test(v); }
+
+// Token de descadastro: determinístico (HMAC do e-mail), não precisa de tabela própria
+// nem de busca — o link se auto-verifica recalculando o HMAC e comparando.
+function _tokenDescadastroMailing(email) {
+  const crypto = require('crypto');
+  return crypto.createHmac('sha256', MASTER_KEY).update(_normalizarEmailMailing(email)).digest('hex').slice(0, 24);
+}
+
+async function _getMailingRelayConfig() {
+  const r = await pool.query(`SELECT config, ativo FROM integracoes WHERE tipo='mailing_relay'`);
+  if (!r.rows.length || !r.rows[0].ativo) return null;
+  const cfg = r.rows[0].config || {};
+  if (!cfg.host || !cfg.remetente_email) return null;
+  return cfg;
+}
+
+// Sem `auth` de propósito (ver banner do módulo) — relay anônimo, autorizado por IP de
+// origem. Nunca adicionar usuário/senha aqui: se um dia o relay passar a exigir
+// credencial, isso é uma config nova, não uma extensão desta.
+function _mailingTransporter(cfg) {
+  return nodemailer.createTransport({
+    host: cfg.host,
+    port: parseInt(cfg.port, 10) || 25,
+    secure: !!cfg.secure,
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 15_000,
+  });
+}
+
+async function _sendMailingEmail(cfg, { to, subject, html }) {
+  const transporter = _mailingTransporter(cfg);
+  await transporter.sendMail({
+    from: `"${cfg.remetente_nome || 'Vivo FinOps'}" <${cfg.remetente_email}>`,
+    to, subject, html,
+  });
+}
+
+// Testa o relay ainda não salvo — mesmo padrão de POST /api/integrations/smtp/testar
+// (o erro cru É o propósito da rota), mas sem senha: relay anônimo, autorizado por IP de
+// origem. Se falhar por timeout/recusa a partir de uma máquina fora da rede corporativa,
+// isso é esperado — o relay provavelmente só aceita conexão de dentro da rede liberada.
+app.post('/api/mailing/relay/testar', authMiddleware, adminMiddleware, async (req, res) => {
+  const { host, port, secure, remetente_email, remetente_nome } = req.body;
+  try {
+    if (!host || !remetente_email) {
+      return res.status(400).json({ error: 'Preencha host e e-mail do remetente antes de testar.' });
+    }
+    await _sendMailingEmail(
+      { host, port, secure, remetente_email, remetente_nome },
+      {
+        to: remetente_email,
+        subject: '✅ Teste de conexão — Relay de Mailing',
+        html: '<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;padding:24px">'
+          + '<h2 style="color:#4a0080">Teste de conexão — Relay de Mailing</h2>'
+          + '<p>Se você está lendo isso, o relay de Mailing está funcionando corretamente.</p>'
+          + '<p style="color:#9ca3af;font-size:12px">Este é um teste de configuração, não um comunicado — sem link de descadastro.</p>'
+          + '</body></html>',
+      }
+    );
+    res.json({ ok: true, message: `E-mail de teste enviado para ${remetente_email}.` });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Envelope mínimo em volta do HTML que vem do composer — não é o mesmo wrapper roxo de
+// `_emailTemplate` (esse é da marca dos Alertas); aqui o corpo já vem formatado pelo
+// usuário. Só garante <!DOCTYPE>/viewport (clientes de e-mail são exigentes com isso) e
+// o rodapé de descadastro, que é obrigatório em todo envio, não opcional.
+function _mailingEmailEnvelope(corpoHtml, unsubscribeUrl) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif">
+  <div style="max-width:640px;margin:0 auto;background:#ffffff">
+    ${corpoHtml}
+    <div style="padding:16px 24px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:11px;text-align:center">
+      Você está recebendo este comunicado da Vivo FinOps.
+      <a href="${unsubscribeUrl}" style="color:#9ca3af">Descadastrar-se</a>
+    </div>
+  </div>
+</body></html>`;
+}
+
+function _mailingPaginaDescadastro(titulo, mensagem) {
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>${_escHtmlServer(titulo)}</title></head>
+<body style="font-family:Arial,Helvetica,sans-serif;background:#f3f4f6;margin:0;padding:40px 20px;text-align:center">
+  <div style="max-width:420px;margin:0 auto;background:#fff;border-radius:8px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,.1)">
+    <h2 style="color:#4a0080;margin:0 0 12px">${_escHtmlServer(titulo)}</h2>
+    <p style="color:#374151;font-size:14px">${_escHtmlServer(mensagem)}</p>
+  </div>
+</body></html>`;
+}
+
+// ── Envio em lote — mesmo padrão de execução em background + progresso consultável já
+// provado em `_coletasEmExecucao` (coleta Azure v4.2), mas num Map 100% separado: uma
+// trava de execução de campanha nunca interfere numa coleta, nem vice-versa.
+const _mailingEnviosEmExecucao = new Map(); // campanhaId -> { iniciadoEm, cancelada, progresso }
+function _mailingEnvioAtivo(campanhaId) { return _mailingEnviosEmExecucao.has(campanhaId); }
+
+const _MAILING_LOTE_TAMANHO = 20;
+const _MAILING_LOTE_INTERVALO_MS = 2000; // pausa entre lotes — não afogar o relay
+
+async function _executarEnvioCampanha(campanhaId, baseUrl) {
+  if (_mailingEnvioAtivo(campanhaId)) throw new Error('Campanha já está sendo enviada');
+  const cfg = await _getMailingRelayConfig();
+  if (!cfg) throw new Error('Relay de Mailing não configurado ou desativado (Integrações)');
+  const camp = (await pool.query(`SELECT * FROM mailing_campanhas WHERE id=$1`, [campanhaId])).rows[0];
+  if (!camp) throw new Error('Campanha não encontrada');
+
+  const destinatarios = (await pool.query(
+    `SELECT med.id AS envio_id, mc.email, mc.nome
+     FROM mailing_envio_destinatario med
+     JOIN mailing_contatos mc ON mc.id = med.contato_id
+     WHERE med.campanha_id = $1 AND med.status = 'pendente'`,
+    [campanhaId]
+  )).rows;
+
+  const entry = { iniciadoEm: new Date(), cancelada: false, progresso: { total: destinatarios.length, enviados: 0, falhas: 0 } };
+  _mailingEnviosEmExecucao.set(campanhaId, entry);
+  await pool.query(`UPDATE mailing_campanhas SET status='enviando', iniciado_em=COALESCE(iniciado_em, NOW()) WHERE id=$1`, [campanhaId]);
+
+  try {
+    for (let i = 0; i < destinatarios.length; i += _MAILING_LOTE_TAMANHO) {
+      if (entry.cancelada) break;
+      const lote = destinatarios.slice(i, i + _MAILING_LOTE_TAMANHO);
+      await Promise.all(lote.map(async (d) => {
+        const unsubUrl = `${baseUrl}/api/public/mailing/descadastro?email=${encodeURIComponent(d.email)}&token=${_tokenDescadastroMailing(d.email)}`;
+        const html = _mailingEmailEnvelope(camp.corpo_html, unsubUrl);
+        try {
+          await _sendMailingEmail(cfg, { to: d.email, subject: camp.assunto, html });
+          await pool.query(`UPDATE mailing_envio_destinatario SET status='enviado', enviado_em=NOW(), erro=NULL WHERE id=$1`, [d.envio_id]);
+          entry.progresso.enviados++;
+        } catch (e) {
+          await pool.query(`UPDATE mailing_envio_destinatario SET status='falha', erro=$2 WHERE id=$1`, [d.envio_id, e.message]);
+          entry.progresso.falhas++;
+        }
+      }));
+      if (i + _MAILING_LOTE_TAMANHO < destinatarios.length) await new Promise((r) => setTimeout(r, _MAILING_LOTE_INTERVALO_MS));
+    }
+  } finally {
+    const pendentes = await pool.query(`SELECT COUNT(*)::int AS n FROM mailing_envio_destinatario WHERE campanha_id=$1 AND status='pendente'`, [campanhaId]);
+    const statusFinal = pendentes.rows[0].n > 0 ? 'enviando' : 'concluida';
+    await pool.query(
+      `UPDATE mailing_campanhas SET status=$2, concluido_em = CASE WHEN $2='concluida' THEN NOW() ELSE concluido_em END WHERE id=$1`,
+      [campanhaId, statusFinal]
+    );
+    _mailingEnviosEmExecucao.delete(campanhaId);
+  }
+}
+
+// ── Cadastro único de contatos ──────────────────────────────────────────────
+app.get('/api/mailing/contatos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const busca = String(req.query.busca || '').trim().toLowerCase();
+    const status = req.query.status;
+    const params = [];
+    let where = '1=1';
+    if (busca) { params.push(`%${busca}%`); where += ` AND (LOWER(email) LIKE $${params.length} OR LOWER(COALESCE(nome,'')) LIKE $${params.length})`; }
+    if (status) { params.push(status); where += ` AND status = $${params.length}`; }
+    const r = await pool.query(`SELECT * FROM mailing_contatos WHERE ${where} ORDER BY email LIMIT 5000`, params);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/contatos', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const email = _normalizarEmailMailing(req.body.email);
+    if (!_emailValidoMailing(email)) return res.status(400).json({ error: 'E-mail inválido' });
+    const nome = (req.body.nome || '').trim() || null;
+    await pool.query(
+      `INSERT INTO mailing_contatos (email, nome, origem) VALUES ($1,$2,'manual')
+       ON CONFLICT (email) DO UPDATE SET nome = COALESCE(EXCLUDED.nome, mailing_contatos.nome), atualizado_em=NOW()`,
+      [email, nome]
+    );
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.patch('/api/mailing/contatos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { nome, status } = req.body;
+    const sets = []; const vals = [];
+    if (nome !== undefined) { vals.push(nome || null); sets.push(`nome=$${vals.length}`); }
+    if (status !== undefined) {
+      if (!['ativo', 'opt_out'].includes(status)) return res.status(400).json({ error: 'status inválido' });
+      vals.push(status); sets.push(`status=$${vals.length}`);
+    }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(req.params.id);
+    await pool.query(`UPDATE mailing_contatos SET ${sets.join(',')}, atualizado_em=NOW() WHERE id=$${vals.length}`, vals);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/mailing/contatos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM mailing_contatos WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// Detecta a coluna de e-mail (e opcionalmente nome) pelo cabeçalho da primeira linha —
+// planilha corporativa nunca vem com cabeçalho padronizado. Mesma lib (ExcelJS) lê
+// .xlsx e .csv, sem precisar de uma segunda dependência só pra CSV.
+async function _parsePlanilhaContatos(filePath, originalName) {
+  const ExcelJS = require('exceljs');
+  const wb = new ExcelJS.Workbook();
+  const ext = (originalName.split('.').pop() || '').toLowerCase();
+  let ws;
+  if (ext === 'csv') {
+    ws = await wb.csv.readFile(filePath);
+  } else {
+    await wb.xlsx.readFile(filePath);
+    ws = wb.worksheets[0];
+  }
+  if (!ws || ws.rowCount < 1) return { colEmailEncontrada: false, linhas: [] };
+  const headerVals = ws.getRow(1).values || [];
+  const headers = [];
+  for (let i = 1; i < headerVals.length; i++) headers.push(String(headerVals[i] ?? '').trim());
+  const colEmail = headers.findIndex((h) => /e.?mail/i.test(h));
+  const colNome  = headers.findIndex((h) => /nome|name/i.test(h));
+  const linhas = [];
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const vals = row.values || [];
+    const email = colEmail >= 0 ? String(vals[colEmail + 1] ?? '').trim() : '';
+    const nome  = colNome  >= 0 ? String(vals[colNome + 1]  ?? '').trim() : '';
+    if (email || nome) linhas.push({ email, nome });
+  });
+  return { colEmailEncontrada: colEmail >= 0, linhas };
+}
+
+if (_multer) {
+  const _mailingUploadDir = path.join(__dirname, 'uploads_tmp', 'mailing');
+  try { fs.mkdirSync(_mailingUploadDir, { recursive: true }); } catch (_) {}
+  const _mailingUpload = _multer({ dest: _mailingUploadDir, limits: { fileSize: 20 * 1024 * 1024 } });
+
+  app.post('/api/mailing/contatos/import', authMiddleware, dbMiddleware, (req, res, next) => {
+    _mailingUpload.single('arquivo')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      next();
+    });
+  }, async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+    try {
+      await ensureMailingTables();
+      const { colEmailEncontrada, linhas } = await _parsePlanilhaContatos(req.file.path, req.file.originalname);
+      if (!colEmailEncontrada) {
+        return res.status(400).json({ error: 'Não encontrei uma coluna de e-mail na planilha. A primeira linha precisa ter um cabeçalho com "email" (ou similar).' });
+      }
+      let novos = 0, atualizados = 0, invalidos = 0;
+      const amostraInvalidos = [];
+      for (const linha of linhas) {
+        const email = _normalizarEmailMailing(linha.email);
+        if (!_emailValidoMailing(email)) {
+          invalidos++;
+          if (amostraInvalidos.length < 20) amostraInvalidos.push(linha.email || '(vazio)');
+          continue;
+        }
+        const r = await pool.query(
+          `INSERT INTO mailing_contatos (email, nome, origem) VALUES ($1,$2,'import')
+           ON CONFLICT (email) DO UPDATE SET
+             nome = COALESCE(EXCLUDED.nome, mailing_contatos.nome), atualizado_em = NOW()
+           RETURNING (xmax = 0) AS inserido`,
+          [email, linha.nome || null]
+        );
+        if (r.rows[0].inserido) novos++; else atualizados++;
+      }
+      const lote = await pool.query(
+        `INSERT INTO mailing_import_lote (arquivo_nome, total_linhas, novos, atualizados, invalidos, invalidos_detalhe, importado_por)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [req.file.originalname, linhas.length, novos, atualizados, invalidos, JSON.stringify(amostraInvalidos), req.user?.email || req.user?.nome || null]
+      );
+      res.json(lote.rows[0]);
+    } catch (e) {
+      _dbErr(res, e);
+    } finally {
+      fs.unlink(req.file.path, () => {});
+    }
+  });
+
+  app.get('/api/mailing/import-lotes', authMiddleware, dbMiddleware, async (_req, res) => {
+    try {
+      await ensureMailingTables();
+      const r = await pool.query(`SELECT * FROM mailing_import_lote ORDER BY importado_em DESC LIMIT 50`);
+      res.json(r.rows);
+    } catch (e) { _dbErr(res, e); }
+  });
+
+  // Imagem do composer (banner/logo do comunicado) — precisa de URL pública porque o
+  // cliente de e-mail do destinatário busca a imagem remotamente, não existe "anexo
+  // embutido" confiável entre clientes. Pasta própria, servida estaticamente abaixo.
+  const _mailingAssetsDir = path.join(__dirname, 'mailing_uploads');
+  try { fs.mkdirSync(_mailingAssetsDir, { recursive: true }); } catch (_) {}
+  const _mailingImgUpload = _multer({
+    storage: _multer.diskStorage({
+      destination: (_, __, cb) => cb(null, _mailingAssetsDir),
+      filename: (_, file, cb) => cb(null, Date.now() + '_' + file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')),
+    }),
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (_, file, cb) => cb(null, /^image\/(png|jpe?g|gif|webp)$/.test(file.mimetype)),
+  });
+  app.post('/api/mailing/upload-imagem', authMiddleware, (req, res, next) => {
+    _mailingImgUpload.single('imagem')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      next();
+    });
+  }, (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhuma imagem enviada (use PNG/JPG/GIF/WEBP, até 5MB).' });
+    res.json({ ok: true, url: `/mailing-uploads/${req.file.filename}` });
+  });
+}
+app.use('/mailing-uploads', express.static(path.join(__dirname, 'mailing_uploads')));
+
+// ── Modelos (templates) ────────────────────────────────────────────────────
+// CRUD simples — "Salvar como modelo" / "Usar modelo" no composer. O modelo FinOps que
+// veio do .msg do usuário é um template EMBUTIDO no frontend (buildTemplatePadraoFinOps),
+// não uma linha aqui — ver comentário em ensureMailingTables.
+app.get('/api/mailing/templates', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureMailingTables();
+    const r = await pool.query(`SELECT * FROM mailing_templates ORDER BY nome`);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/templates', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const { nome, corpo_html, remetente_nome, remetente_email } = req.body;
+    if (!nome?.trim()) return res.status(400).json({ error: 'Nome do modelo é obrigatório' });
+    const r = await pool.query(
+      `INSERT INTO mailing_templates (nome, corpo_html, remetente_nome, remetente_email, criado_por)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [nome.trim(), corpo_html || '', remetente_nome || null, remetente_email || null, req.user?.email || req.user?.nome || null]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/mailing/templates/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM mailing_templates WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Campanhas ────────────────────────────────────────────────────────────────
+app.get('/api/mailing/campanhas', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureMailingTables();
+    const r = await pool.query(`
+      SELECT c.*,
+        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id)                     AS total_destinatarios,
+        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='enviado') AS total_enviados,
+        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='falha')   AS total_falhas
+      FROM mailing_campanhas c ORDER BY c.criado_em DESC LIMIT 200
+    `);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.get('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const camp = (await pool.query(`SELECT * FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    res.json(camp);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const { assunto, corpo_html, remetente_email, remetente_nome } = req.body;
+    if (!assunto) return res.status(400).json({ error: 'Assunto é obrigatório' });
+    const r = await pool.query(
+      `INSERT INTO mailing_campanhas (assunto, corpo_html, remetente_email, remetente_nome, criado_por)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [assunto, corpo_html || '', remetente_email || null, remetente_nome || null, req.user?.email || req.user?.nome || null]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.put('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Só é possível editar campanhas em rascunho' });
+    const { assunto, corpo_html, remetente_email, remetente_nome } = req.body;
+    await pool.query(
+      `UPDATE mailing_campanhas SET assunto=$1, corpo_html=$2, remetente_email=$3, remetente_nome=$4, atualizado_em=NOW() WHERE id=$5`,
+      [assunto, corpo_html, remetente_email || null, remetente_nome || null, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Só é possível excluir campanhas em rascunho' });
+    await pool.query(`DELETE FROM mailing_campanhas WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas/:id/enviar-teste', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const email = _normalizarEmailMailing(req.body.email);
+    if (!_emailValidoMailing(email)) return res.status(400).json({ error: 'E-mail de teste inválido' });
+    const cfg = await _getMailingRelayConfig();
+    if (!cfg) return res.status(400).json({ error: 'Relay de Mailing não configurado. Configure em Integrações antes de testar.' });
+    const camp = (await pool.query(`SELECT * FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const unsubUrl = `${baseUrl}/api/public/mailing/descadastro?email=${encodeURIComponent(email)}&token=${_tokenDescadastroMailing(email)}`;
+    const html = _mailingEmailEnvelope(camp.corpo_html, unsubUrl);
+    await _sendMailingEmail(cfg, { to: email, subject: `[TESTE] ${camp.assunto}`, html });
+    res.json({ ok: true, message: `Teste enviado para ${email}` });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post('/api/mailing/campanhas/:id/enviar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const campId = parseInt(req.params.id);
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [campId])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Esta campanha já foi enviada ou está em andamento' });
+    if (_mailingEnvioAtivo(campId)) return res.status(409).json({ error: 'Campanha já está sendo enviada' });
+    const cfg = await _getMailingRelayConfig();
+    if (!cfg) return res.status(400).json({ error: 'Relay de Mailing não configurado. Configure em Integrações antes de enviar.' });
+
+    const ativosR = await pool.query(`SELECT COUNT(*)::int AS n FROM mailing_contatos WHERE status='ativo'`);
+    if (!ativosR.rows[0].n) return res.status(409).json({ error: 'Nenhum contato ativo para enviar.' });
+    // Snapshot no momento do disparo — quem entrar na lista depois não recebe retroativo.
+    await pool.query(
+      `INSERT INTO mailing_envio_destinatario (campanha_id, contato_id)
+       SELECT $1, id FROM mailing_contatos WHERE status='ativo'
+       ON CONFLICT (campanha_id, contato_id) DO NOTHING`,
+      [campId]
+    );
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.json({ ok: true, message: `Envio iniciado para ${ativosR.rows[0].n} destinatário(s)` });
+    _executarEnvioCampanha(campId, baseUrl).catch((e) => console.error('[Mailing] Erro no envio:', e.message));
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas/:id/reenviar-falhas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const campId = parseInt(req.params.id);
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [campId])).rows[0];
+    if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
+    if (camp.status !== 'concluida') return res.status(409).json({ error: 'Só é possível reenviar falhas de uma campanha já concluída' });
+    if (_mailingEnvioAtivo(campId)) return res.status(409).json({ error: 'Campanha já está sendo enviada' });
+    const cfg = await _getMailingRelayConfig();
+    if (!cfg) return res.status(400).json({ error: 'Relay de Mailing não configurado.' });
+    const r = await pool.query(`UPDATE mailing_envio_destinatario SET status='pendente', erro=NULL WHERE campanha_id=$1 AND status='falha' RETURNING id`, [campId]);
+    if (!r.rows.length) return res.status(409).json({ error: 'Nenhum envio com falha para reprocessar.' });
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.json({ ok: true, message: `Reprocessando ${r.rows.length} envio(s) com falha` });
+    _executarEnvioCampanha(campId, baseUrl).catch((e) => console.error('[Mailing] Erro no reenvio:', e.message));
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.post('/api/mailing/campanhas/:id/cancelar', authMiddleware, dbMiddleware, async (req, res) => {
+  const entry = _mailingEnviosEmExecucao.get(parseInt(req.params.id));
+  if (entry) entry.cancelada = true;
+  res.json({ ok: true });
+});
+
+app.get('/api/mailing/campanhas/:id/progresso', authMiddleware, dbMiddleware, async (req, res) => {
+  const entry = _mailingEnviosEmExecucao.get(parseInt(req.params.id));
+  res.json({ em_execucao: !!entry, progresso: entry ? entry.progresso : null });
+});
+
+app.get('/api/mailing/campanhas/:id/envios', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT med.*, mc.email, mc.nome
+       FROM mailing_envio_destinatario med
+       JOIN mailing_contatos mc ON mc.id = med.contato_id
+       WHERE med.campanha_id = $1
+       ORDER BY med.status, mc.email`,
+      [req.params.id]
+    );
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+// ── Descadastro público (sem auth — link clicado fora do app) ────────────────
+const _mailingDescadastroLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Muitas requisições. Tente novamente em instantes.' },
+});
+app.get('/api/public/mailing/descadastro', _mailingDescadastroLimiter, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const email = _normalizarEmailMailing(req.query.email);
+    const token = String(req.query.token || '');
+    const valido = email && _emailValidoMailing(email) && token === _tokenDescadastroMailing(email);
+    if (!valido) return res.status(400).send(_mailingPaginaDescadastro('Link inválido', 'Este link de descadastro não é válido ou já expirou.'));
+    await pool.query(`UPDATE mailing_contatos SET status='opt_out', atualizado_em=NOW() WHERE email=$1`, [email]);
+    res.send(_mailingPaginaDescadastro('Descadastro confirmado', `O e-mail ${email} não vai mais receber comunicados.`));
+  } catch (e) {
+    res.status(500).send(_mailingPaginaDescadastro('Erro', 'Não foi possível processar sua solicitação agora. Tente novamente mais tarde.'));
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -10869,7 +11601,8 @@ function _kqlSnapshotsAntigos(dias) {
     | extend criado = todatetime(properties.timeCreated)
     | where criado < ago(${dias}d)
     | project id, name, resourceGroup, location, sizeGB = toint(properties.diskSizeGB),
-              criadoEm = tostring(properties.timeCreated)`;
+              criadoEm = tostring(properties.timeCreated),
+              origem = tostring(properties.creationData.sourceResourceId)`;
 }
 
 // Custo observado no billing, não preço de tabela. Predicado de INCLUSÃO sobre
@@ -10970,6 +11703,8 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
       sku: x.sku || null,
       tamanho_gb: x.sizeGB ?? null,
       criado_em: x.criadoEm || null,
+      // Só snapshot tem origem (o disco que o gerou) — ver _apurarSavingOrfaos.
+      origem_resource_id: x.origem || null,
       motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao(x) : null,
       custo_periodo: custoPeriodoComImposto,
       dias_observados: c ? c.dias : 0,
@@ -11033,13 +11768,14 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     // recurso foi reaproveitado e depois abandonado de novo — reinicia a contagem.
     if (itens.length) {
       const up = await pool.query(
-        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria)
-         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat FROM unnest($1::text[], $2::text[]) AS u(id, cat)
+        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria, origem_resource_id)
+         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat, u.origem FROM unnest($1::text[], $2::text[], $3::text[]) AS u(id, cat, origem)
          ON CONFLICT (resource_id_upper) DO UPDATE SET
            primeira_deteccao_em = CASE WHEN azure_desperdicio_deteccao.ultima_deteccao_em < NOW() - INTERVAL '3 days' THEN NOW() ELSE azure_desperdicio_deteccao.primeira_deteccao_em END,
-           ultima_deteccao_em = NOW(), categoria = EXCLUDED.categoria
+           ultima_deteccao_em = NOW(), categoria = EXCLUDED.categoria,
+           origem_resource_id = COALESCE(EXCLUDED.origem_resource_id, azure_desperdicio_deteccao.origem_resource_id)
          RETURNING resource_id_upper, primeira_deteccao_em`,
-        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria)]
+        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria), itens.map((x) => x.origem_resource_id || null)]
       );
       const primeira = new Map(up.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
       for (const it of itens) {
@@ -11058,38 +11794,364 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       for (const it of itens) it.subscription_name = subsMap.get(it.subscription_id) || null;
     }
 
+    // Fora da visão de FinOps o que não gera custo por estar órfão (pedido do usuário,
+    // 2026-10-18: "preciso olhar somente para os que podem gerar custos por estar órfã").
+    // Recorte pela NATUREZA do recurso, nunca por `custo_mensal_estimado === null`: null
+    // aqui significa "não achamos o billing", não "é grátis" — filtrar por ele esconderia
+    // disco e snapshot de verdade (medido: 182 itens no portal público, incluindo um
+    // Premium_LRS de 20 GB órfão há 1242 dias).
+    const itensFinops = itens.filter((x) => !_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria));
+
     const porCategoria = {};
-    for (const it of itens) {
+    for (const it of itensFinops) {
       const c = (porCategoria[it.categoria] ||= { categoria: it.categoria, itens: 0, custo_mensal_estimado: 0, sem_custo_conhecido: 0 });
       c.itens++;
       if (it.custo_mensal_estimado === null) c.sem_custo_conhecido++;
       else c.custo_mensal_estimado += it.custo_mensal_estimado;
     }
 
-    itens.sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
-    console.log(`[Desperdicio] ${itens.length} itens de ${alvos.length} assinatura(s) em ${Date.now() - t0Desp} ms`);
+    itensFinops.sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
+
+    // Economia realizada: apura o que ainda falta e monta o resumo. Nunca derruba a tela —
+    // o desperdício (o dado principal daqui) não pode sumir porque a apuração falhou.
+    // `itens` COMPLETO aqui de propósito, não `itensFinops`: a apuração trata "sumiu da
+    // lista viva" como exclusão, então mandar a lista já filtrada faria toda NIC órfã viva
+    // parecer excluída e virar economia.
+    let saving = null;
+    try {
+      await _apurarSavingOrfaos(itens.map((x) => x.resource_id));
+      // Tela interna: modo completo, sem os filtros do portal público. Conta inclusive
+      // PVC/ASR — quem olha aqui tem contexto pra julgar, e o detalhe traz a evidência.
+      saving = await _resumoSavingOrfaos(alvos, await _snapshotsDeRetencaoVivos(itens));
+    } catch (e) {
+      console.error('[Saving Órfãos] falha ao apurar:', e.message);
+    }
+
+    console.log(`[Desperdicio] ${itensFinops.length} itens (${itens.length} coletados) de ${alvos.length} assinatura(s) em ${Date.now() - t0Desp} ms`);
     res.json({
       gerado_em: new Date().toISOString(),
       dias_snapshot: dias,
-      total_itens: itens.length,
-      custo_mensal_estimado_total: itens.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
-      sem_custo_conhecido: itens.filter((x) => x.custo_mensal_estimado === null).length,
+      total_itens: itensFinops.length,
+      saving,
+      custo_mensal_estimado_total: itensFinops.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
+      sem_custo_conhecido: itensFinops.filter((x) => x.custo_mensal_estimado === null).length,
+      // Quantos ficaram fora por não gerarem custo — continuam coletados e detectados,
+      // só não entram na visão de FinOps.
+      ocultos_sem_custo: itens.length - itensFinops.length,
       por_categoria: Object.values(porCategoria).sort((a, b) => b.custo_mensal_estimado - a.custo_mensal_estimado),
-      itens,
+      itens: itensFinops,
       erros,
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ECONOMIA REALIZADA COM ÓRFÃOS EXCLUÍDOS (2026-10-17, pedido do usuário)
+// ══════════════════════════════════════════════════════════════════════════════
+// Cruza três fatos que o sistema já tinha separados:
+//   1. "foi identificado como órfão"  → azure_desperdicio_deteccao
+//   2. "foi excluído em D, por quem"  → azure_recursos_inventario (Activity Log)
+//   3. "custava quanto de verdade"    → azure_costs (faturado, não preço de tabela)
+//
+// Só conta recurso cuja exclusão veio DEPOIS da primeira detecção como órfão: economia que
+// a gente reivindica é a que a gente apontou. Exclusão anterior à detecção é faxina de
+// outra pessoa.
+//
+// O custo é apurado na janela de 30 dias ANTES da exclusão, não nos últimos 30 dias
+// corridos — depois de excluído o recurso não fatura mais, uma janela corrente devolveria
+// zero. Mesma convenção do resto do módulo: sem billing conhecido → null, NUNCA zero
+// ("não custa nada" é diferente de "não sabemos").
+//
+// Snapshot dos 90 dias (decisão do usuário, 2026-10-17): o processo de vocês transforma
+// disco órfão em snapshot retido 90 dias antes da exclusão definitiva, e esse snapshot
+// AINDA CUSTA. Contar o disco cheio nesse período superestimaria. Por isso o snapshot entra
+// como linha `tipo='desconto'`, abatida da economia enquanto ele existir — e, quando ele
+// mesmo é excluído, NÃO vira economia própria (seria contar duas vezes: o custo dele já
+// estava sendo abatido, e ele nunca fez parte do desperdício original — foi criado pelo
+// próprio processo de limpeza).
+const _SAVING_JANELA_DIAS = 30;
+
+// Custo faturado por recurso, cada um na SUA janela (cada exclusão tem data diferente).
+// Uma passada só com unnest de 3 colunas em vez de uma consulta por recurso.
+async function _custoObservadoNaJanela(janelas) {
+  const out = new Map();
+  if (!janelas.length) return out;
+  for (let i = 0; i < janelas.length; i += 1000) {
+    const lote = janelas.slice(i, i + 1000);
+    const r = await pool.query(
+      `SELECT UPPER(ac.resource_id) AS rid,
+              SUM(COALESCE(ac.cost_in_billing_currency,0)) FILTER (WHERE ac.publisher_type = 'Marketplace') AS custo_marketplace,
+              SUM(COALESCE(ac.cost_in_billing_currency,0)) FILTER (WHERE ac.publisher_type IS DISTINCT FROM 'Marketplace') AS custo_microsoft,
+              COUNT(DISTINCT ac.cost_date) AS dias
+       FROM azure_costs ac
+       JOIN unnest($1::text[], $2::date[], $3::date[]) AS t(rid, desde, ate)
+         ON UPPER(ac.resource_id) = t.rid
+       WHERE ac.cost_date >= t.desde AND ac.cost_date < t.ate
+       GROUP BY 1`,
+      [lote.map((j) => j.rid), lote.map((j) => j.desde), lote.map((j) => j.ate)]
+    );
+    for (const row of r.rows) out.set(row.rid, {
+      custo_microsoft: Number(row.custo_microsoft || 0),
+      custo_marketplace: Number(row.custo_marketplace || 0),
+      dias: Number(row.dias),
+    });
+  }
+  return out;
+}
+
+// Apura o que ainda não foi apurado e grava. Idempotente: recurso já na tabela é ignorado,
+// exceto quando ficou com custo desconhecido (billing pode ter chegado depois — a fatura da
+// Azure atrasa, ver _ultimoDiaCustoFechado).
+// `idsVivos`: resource_ids que AINDA aparecem como órfãos na varredura atual do Resource
+// Graph. Só o que sumiu de lá é candidato — é justamente o evento que interessa ("era órfão,
+// não é mais"). Receber isso em vez de redescobrir é o que mantém a consulta barata: sem
+// isso, era preciso cruzar as milhares de detecções com o inventário INTEIRO (1,1M linhas)
+// a cada abertura da tela, e o planner caía em Parallel Seq Scan — 7s a 21s medidos com
+// EXPLAIN ANALYZE, dependendo de como a junção era escrita. Agora o cruzamento pesado só
+// acontece para as poucas dezenas que realmente sumiram.
+async function _apurarSavingOrfaos(idsVivos) {
+  const vivos = (idsVivos || []).map((x) => String(x).toUpperCase());
+  // Sumiram da lista viva e ainda não foram apurados com custo. Só tabelas pequenas aqui.
+  // LEFT JOIN + IS NULL em vez de `NOT ... = ANY(array)`: com milhares de elementos o
+  // segundo degrada pra seq scan (armadilha já documentada neste arquivo).
+  const sumidos = await pool.query(
+    `SELECT d.resource_id_upper, d.categoria, d.origem_resource_id, d.primeira_deteccao_em
+     FROM azure_desperdicio_deteccao d
+     LEFT JOIN unnest($1::text[]) AS v(rid) ON v.rid = d.resource_id_upper
+     LEFT JOIN azure_desperdicio_saving s
+       ON s.resource_id_upper = d.resource_id_upper AND s.custo_mensal IS NOT NULL
+     WHERE v.rid IS NULL AND s.resource_id_upper IS NULL
+     LIMIT 2000`,
+    [vivos]
+  );
+  if (!sumidos.rows.length) return 0;
+
+  // Agora sim o inventário — mas só para os que sumiram (dezenas), não para tudo.
+  // `= ANY` aqui é de propósito, apesar do aviso geral deste arquivo de preferir
+  // `JOIN unnest`: aquele aviso vale pra MILHARES de elementos, onde `= ANY` degrada pra
+  // seq scan. Com algumas dezenas é o contrário — medido: `= ANY` 17 ms, `JOIN unnest`
+  // 348 ms, os dois usando índice.
+  const meta = await pool.query(
+    `SELECT LOWER(ri.resource_id) AS rid_lower, ri.subscription_id, ri.resource_group,
+            ri.nome, ri.criado_em, ri.excluido_em, ri.excluido_por
+     FROM azure_recursos_inventario ri
+     WHERE LOWER(ri.resource_id) = ANY($1::text[])
+       AND ri.ativo = false AND ri.excluido_em IS NOT NULL`,
+    [sumidos.rows.map((x) => x.resource_id_upper.toLowerCase())]
+  );
+  const metaPorId = new Map(meta.rows.map((m) => [m.rid_lower, m]));
+
+  // Sumir do Resource Graph sem exclusão registrada no inventário NÃO é economia: pode ser
+  // perda de permissão, falha de coleta ou buraco no Activity Log. Fica de fora (a tela
+  // mostra esses à parte como "exclusão não confirmada").
+  const cand = { rows: [] };
+  for (const s of sumidos.rows) {
+    const m = metaPorId.get(s.resource_id_upper.toLowerCase());
+    if (!m) continue;
+    // Exclusão ANTERIOR à primeira detecção é faxina de outra pessoa — a economia que a
+    // gente reivindica é a dos recursos que a gente apontou.
+    if (s.primeira_deteccao_em && new Date(m.excluido_em) < new Date(s.primeira_deteccao_em)) continue;
+    cand.rows.push({ ...s, ...m });
+  }
+  if (!cand.rows.length) return 0;
+
+  const janelas = cand.rows.map((c) => {
+    const ate = new Date(c.excluido_em);
+    const desde = new Date(ate);
+    desde.setDate(desde.getDate() - _SAVING_JANELA_DIAS);
+    return { rid: c.resource_id_upper, desde: desde.toISOString().slice(0, 10), ate: ate.toISOString().slice(0, 10) };
+  });
+  const custos = await _custoObservadoNaJanela(janelas);
+  const impostoCfg = await _getImpostoConfig();
+
+  // Discos já contabilizados — um snapshot gerado por um deles é desconto, não economia.
+  const jaContados = new Set(
+    (await pool.query(`SELECT resource_id_upper FROM azure_desperdicio_saving WHERE tipo='economia'`)).rows
+      .map((r) => r.resource_id_upper)
+  );
+  for (const c of cand.rows) if (c.categoria !== 'snapshot_antigo') jaContados.add(c.resource_id_upper);
+
+  let gravados = 0;
+  for (const c of cand.rows) {
+    const obs = custos.get(c.resource_id_upper);
+    const comImposto = obs ? _comImpostoSplit(obs.custo_microsoft, obs.custo_marketplace, impostoCfg) : null;
+    const custoMensal = obs && obs.dias > 0 ? (comImposto / obs.dias) * 30 : null;
+    const origemUpper = c.origem_resource_id ? String(c.origem_resource_id).toUpperCase() : null;
+    const ehDesconto = c.categoria === 'snapshot_antigo' && origemUpper && jaContados.has(origemUpper);
+    await pool.query(
+      `INSERT INTO azure_desperdicio_saving
+         (resource_id_upper, tipo, categoria, subscription_id, resource_group, nome,
+          origem_resource_id, criado_em, excluido_em, excluido_por, custo_mensal, dias_observados,
+          primeira_deteccao_em)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       ON CONFLICT (resource_id_upper) DO UPDATE SET
+         custo_mensal = EXCLUDED.custo_mensal, dias_observados = EXCLUDED.dias_observados,
+         tipo = EXCLUDED.tipo, apurado_em = NOW()`,
+      [c.resource_id_upper, ehDesconto ? 'desconto' : 'economia', c.categoria, c.subscription_id,
+       c.resource_group, c.nome, origemUpper, c.criado_em, c.excluido_em, c.excluido_por,
+       custoMensal, obs ? obs.dias : 0, c.primeira_deteccao_em || null]
+    );
+    gravados++;
+  }
+  return gravados;
+}
+
+const _MS_MES = 30 * 86400000;
+
+// Monta o resumo. `snapshotsVivos`: snapshots que AINDA existem no Resource Graph e cuja
+// origem é um disco já contabilizado — abatem a economia enquanto não forem excluídos
+// (depois disso viram linha 'desconto' pela apuração, com período fechado).
+async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes = {}) {
+  const subs = (subscriptionIds || []).map((s) => String(s).toLowerCase());
+  const r = await pool.query(
+    `SELECT s.*,
+            EXISTS (
+              SELECT 1 FROM azure_recursos_inventario ri
+              WHERE LOWER(ri.resource_id) = LOWER(s.resource_id_upper) AND ri.ativo = true
+            ) AS recriado
+     FROM azure_desperdicio_saving s
+     ${subs.length ? 'WHERE LOWER(s.subscription_id) = ANY($1)' : ''}
+     ORDER BY s.excluido_em DESC`,
+    subs.length ? [subs] : []
+  );
+  // Recurso que voltou a existir com o mesmo id não é economia — alguém recriou.
+  //
+  // Os dois portais contam BASES DIFERENTES, de propósito (decisão do usuário, 2026-10-18):
+  //
+  //   PRIVADO  — conta tudo que foi excluído, inclusive disco de PVC/AKS e ASR. Quem olha
+  //              essa tela tem contexto para julgar, e o detalhe expõe a evidência (quem
+  //              excluiu, quando, há quantos dias era órfão) para a decisão ser dela.
+  //
+  //   PÚBLICO  — só o que aquele portal de fato publicou, com os mesmos 5 filtros de
+  //              /api/public/orfaos. Sem isso o card anunciava economia de recurso que
+  //              nunca apareceu lá: dos 21 apurados, 20 eram NIC (categoria que o público
+  //              não publica) e 1 era PVC com 6 dias de órfão (o público exige 30+).
+  const pub = !!opcoes.publico;
+  const cats = opcoes.categorias instanceof Set ? opcoes.categorias : null;
+  const rgs = opcoes.resourceGroups instanceof Set ? opcoes.resourceGroups : null;
+  const diasOrfao = (x) => (x.primeira_deteccao_em && x.excluido_em)
+    ? Math.max(0, Math.floor((new Date(x.excluido_em).getTime() - new Date(x.primeira_deteccao_em).getTime()) / 86400000))
+    : null;
+  const paraValidacao = (x) =>
+    x.categoria === 'disco_orfao' && !!_classificarDiscoValidacao({ name: x.nome });
+  // Filtros do fluxo público, aplicados só quando `publico`. Disco exige 30+ dias de órfão
+  // CONFIRMADOS: `null` (sem data conhecida) não passa, mesma convenção do endpoint público
+  // — "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 30+".
+  const noFluxoPublico = (x) => {
+    // Espelha o filtro da própria rota pública: categoria que não gera custo por estar órfã
+    // não aparece lá, então também não pode contar como economia dela.
+    if (_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria)) return false;
+    if (cats && !cats.has(x.categoria)) return false;
+    if (rgs && rgs.size && !(x.resource_group && rgs.has(String(x.resource_group).toUpperCase()))) return false;
+    if (paraValidacao(x)) return false;
+    if (x.categoria === 'disco_orfao') { const d = diasOrfao(x); if (d === null || d < 30) return false; }
+    return true;
+  };
+  const visivel = (x) => !x.recriado && (pub ? noFluxoPublico(x) : true);
+  const linhas = r.rows.filter(visivel);
+  // Só o privado separa "em validação": no público eles já saíram pelo filtro acima.
+  const emValidacao = pub ? [] : r.rows.filter((x) => !x.recriado && paraValidacao(x));
+  const agora = Date.now();
+  const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
+
+  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0;
+  const itens = [];
+  for (const x of linhas.filter((l) => l.tipo === 'economia')) {
+    const c = x.custo_mensal === null ? null : Number(x.custo_mensal);
+    if (c === null) { semCusto++; } else {
+      mensalBruta += c;
+      acumuladaBruta += c * meses(x.excluido_em, agora);
+    }
+    // Campos de evidência para o detalhe da tela privada: quem excluiu, quando, e há quantos
+    // dias o recurso já era órfão naquele momento. O tempo como órfão é o que separa
+    // economia do processo de rotatividade normal de infra — Private Endpoint recriado no
+    // mesmo dia aparece com 0 dias e não deve ser lido como resultado.
+    itens.push({
+      resource_id: x.resource_id_upper, categoria: x.categoria, nome: x.nome,
+      subscription_id: x.subscription_id, resource_group: x.resource_group,
+      excluido_em: x.excluido_em, excluido_por: x.excluido_por, custo_mensal: c,
+      dias_orfao: diasOrfao(x),
+      motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao({ name: x.nome }) : null,
+    });
+  }
+
+  // Descontos já fechados (snapshot que existiu e morreu): período real entre criação e
+  // exclusão. Não afetam a economia MENSAL de hoje — aquele custo já não existe mais.
+  let acumuladaDesconto = 0;
+  for (const x of linhas.filter((l) => l.tipo === 'desconto')) {
+    if (x.custo_mensal === null) continue;
+    acumuladaDesconto += Number(x.custo_mensal) * meses(x.criado_em || x.excluido_em, x.excluido_em);
+  }
+  // Descontos em aberto (snapshot vivo): abatem a economia mensal corrente e acumulam desde
+  // que o snapshot foi criado.
+  let descontoMensal = 0;
+  for (const s of snapshotsVivos) {
+    if (s.custo_mensal_estimado === null || s.custo_mensal_estimado === undefined) continue;
+    descontoMensal += s.custo_mensal_estimado;
+    acumuladaDesconto += s.custo_mensal_estimado * meses(s.criado_em || agora, agora);
+  }
+
+  return {
+    economia_mensal: Math.max(0, mensalBruta - descontoMensal),
+    economia_mensal_bruta: mensalBruta,
+    desconto_mensal_snapshots: descontoMensal,
+    economia_acumulada: Math.max(0, acumuladaBruta - acumuladaDesconto),
+    recursos_eliminados: itens.length,
+    sem_custo_conhecido: semCusto,
+    // Quantos dos contabilizados são disco de PVC/AKS ou ASR. No privado eles ENTRAM no
+    // total (decisão do usuário) — isto aqui é sinalização, não exclusão: serve pra tela
+    // avisar que parte do número depende de validação. No público é sempre 0, porque lá
+    // esses discos nem passam do filtro.
+    para_validacao: emValidacao.length,
+    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
+    // Quantos foram excluídos com menos de 7 dias como órfãos: forte indício de rotatividade
+    // de infra, não de ação do processo de FinOps.
+    eliminados_recentes: itens.filter((x) => x.dias_orfao !== null && x.dias_orfao < 7).length,
+    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
+    itens,
+  };
+}
+
+// Snapshots vivos cuja origem é um disco já contabilizado como economia — o abatimento dos
+// 90 dias. Recebe os itens de desperdício que já foram coletados (não refaz consulta ao ARG).
+async function _snapshotsDeRetencaoVivos(itensDesperdicio) {
+  const snaps = itensDesperdicio.filter((x) => x.categoria === 'snapshot_antigo' && x.origem_resource_id);
+  if (!snaps.length) return [];
+  const origens = [...new Set(snaps.map((s) => String(s.origem_resource_id).toUpperCase()))];
+  const r = await pool.query(
+    `SELECT resource_id_upper FROM azure_desperdicio_saving WHERE tipo='economia' AND resource_id_upper = ANY($1)`,
+    [origens]
+  );
+  const contados = new Set(r.rows.map((x) => x.resource_id_upper));
+  return snaps.filter((s) => contados.has(String(s.origem_resource_id).toUpperCase()));
+}
 
 // Exportar Desperdício pra Excel — mesmo layout do Excel de Ações FinOps (GET /api/export/excel):
 // banner roxo, aba "Sumário Executivo" e aba de detalhes. Recebe os itens já filtrados na tela
 // (o que o usuário vê é o que sai no arquivo).
 const _DESP_LABEL_XLSX = {
   disco_orfao: 'Disco não anexado', snapshot_antigo: 'Snapshot antigo', ip_solto: 'IP público sem uso',
+  // ⚠ Ao adicionar categoria nova aqui, veja se ela gera custo — se não gerar, entra também
+  // em _DESP_CATEGORIAS_SEM_CUSTO (logo abaixo da definição deste mapa).
   nic_orfa: 'NIC não anexada', app_service_plan_vazio: 'App Service Plan sem apps',
   lb_sem_backend: 'Load Balancer sem backend', appgw_sem_backend: 'App Gateway sem backend',
   vm_parada: 'VM parada (sem desalocar)',
 };
+
+// Categorias que NÃO geram custo por estarem órfãs — ficam fora da visão de FinOps (tela de
+// Desperdício e portal público), mas continuam sendo coletadas e detectadas normalmente.
+//
+// Só NIC entra aqui, e isso foi MEDIDO, não suposto (2026-10-18): amostrando 300 recursos
+// vivos de cada tipo contra azure_costs nos últimos 30 dias — NIC 0/300 faturam; IP público
+// 287/300; disco 293/300; snapshot 273/300; Load Balancer 245/246; App Gateway 54/54. Ou
+// seja, IP solto e snapshot FATURAM e continuam na lista, ao contrário do que a intuição
+// sugeriria para um IP não associado.
+//
+// Cuidado: isto NÃO é o mesmo que filtrar por `custo_mensal_estimado === null`. Null neste
+// projeto é "não achamos o billing", não "é grátis" — filtrar por null esconderia disco e
+// snapshot reais (medido: 182 no portal público, um deles Premium_LRS de 20 GB órfão há
+// 1242 dias). Por isso o recorte é por tipo de recurso, não por ausência de dado.
+const _DESP_CATEGORIAS_SEM_CUSTO = new Set(['nic_orfa']);
 // Monta o workbook de Desperdício — reaproveitado pelo endpoint interno (completo, com
 // Assinatura/Resource ID/Localização) e pelo endpoint público (`sanitizado: true`, omite esses
 // campos porque o tipo público nunca os expõe — mesma política de `/api/public/orfaos`).
@@ -14359,7 +15421,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
               // Alerta por e-mail (2026-09-03, item 1) — só propriedades de infra, nunca tags
               // (ver `_alertarMudancaPropriedade`). Best-effort, nunca derruba a coleta.
               if (!p.propriedade.startsWith('tag:')) {
-                _alertarMudancaPropriedade(nome, resourceGroup, p, autor, quando, { subscription_id: subId, resource_id: resourceId }).catch((eMail) => {
+                _alertarMudancaPropriedade(nome, resourceGroup, p, autor, { subscription_id: subId, resource_id: resourceId }).catch((eMail) => {
                   _logColetaInv(`  ✗ ${subId}: alerta por e-mail falhou — ${eMail.message}`);
                 });
               }
@@ -16732,6 +17794,10 @@ async function _coletarConsultasPorTabela(ws, getLogAnalyticsToken) {
 async function _coletarDCRs(workspaceByResourceId) {
   const { escopos } = await _getInventarioEscopos();
   const todasLinhas = [];
+  // Só as assinaturas cuja listagem REALMENTE respondeu. O DELETE abaixo apaga por
+  // assinatura antes de reinserir; apagar uma que falhou (403, timeout) descartaria a
+  // coleta anterior dela e a tela ficaria sem DCR nenhum até a próxima dar certo.
+  const subsColetadas = [];
   await _mapLimit(escopos, 4, async (escopo) => {
     const sub = escopo.subscriptionId;
     const url = `https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Insights/dataCollectionRules?api-version=2023-03-11`;
@@ -16745,6 +17811,7 @@ async function _coletarDCRs(workspaceByResourceId) {
       return;
     }
     if (!resp.ok) { console.warn(`[LogAnalytics] Assinatura ${sub} retornou ${resp.status} ao listar DCRs`); return; }
+    subsColetadas.push(sub);
     const data = await _safeRespJson(resp);
     for (const dcr of (data.value || [])) {
       const p = dcr.properties || {};
@@ -16766,11 +17833,14 @@ async function _coletarDCRs(workspaceByResourceId) {
       }
     }
   });
-  if (todasLinhas.length) {
+  // Condicionado a subsColetadas, não a todasLinhas: assinatura que respondeu e não tem
+  // mais nenhum DCR precisa ter as linhas antigas removidas, senao a tela mostra DCR
+  // que não existe mais na Azure.
+  if (subsColetadas.length) {
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
-      await c.query(`DELETE FROM log_analytics_dcrs WHERE subscription_id = ANY($1)`, [subs]);
+      await c.query(`DELETE FROM log_analytics_dcrs WHERE subscription_id = ANY($1)`, [subsColetadas]);
       for (const l of todasLinhas) {
         await c.query(
           `INSERT INTO log_analytics_dcrs (subscription_id, resource_group, nome, workspace_guid_destino, streams, tipos_fonte, detalhe_fontes, atualizado_em)
