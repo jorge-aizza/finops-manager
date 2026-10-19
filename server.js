@@ -7823,6 +7823,30 @@ function _parseDestinatarios(str) {
   return String(str || '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+// Resolve o destinatário de um alerta para a PESSOA responsável, caindo na lista global do
+// SMTP quando não der pra identificar. Alerta que chega pra todo mundo não é de ninguém:
+// orçamento estourado interessa a quem é dono do orçamento, não à caixa coletiva.
+//
+// `identificador` é texto livre nas tabelas (`acoes_finops.responsavel`,
+// `databricks_budgets.usuario`, `estimativas.responsavel`), então casa por nome OU por
+// e-mail — em algumas telas as pessoas digitam um, em outras o outro. Só usuário ativo:
+// mandar alerta pra quem saiu da empresa é pior que mandar pra lista, porque ninguém lê e
+// ninguém percebe que não foi lido.
+async function _destinatariosPara(identificador, padrao) {
+  const alvo = String(identificador || "").trim();
+  if (!alvo || !pool) return padrao;
+  try {
+    const r = await pool.query(
+      `SELECT email FROM usuarios WHERE ativo = true AND (nome ILIKE $1 OR email ILIKE $1) AND email IS NOT NULL LIMIT 1`,
+      [alvo]
+    );
+    return r.rows[0]?.email ? [r.rows[0].email] : padrao;
+  } catch (_) {
+    // Falha de consulta não pode engolir o alerta — cai na lista global.
+    return padrao;
+  }
+}
+
 async function _getSmtpConfig() {
   if (!pool) return null;
   try {
@@ -7948,8 +7972,8 @@ async function _tentarClaimAlerta(tipo, chave) {
 async function _checkOrcamentosDatabricks() {
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
-  const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (!destinatarios.length) return;
+  const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
+  if (!padrao.length) return;
   const alertas = await _computeAlertasDatabricks();
   const mes = new Date().toISOString().slice(0, 7);
   for (const a of alertas) {
@@ -7959,6 +7983,9 @@ async function _checkOrcamentosDatabricks() {
     const escopoTxt = a.budget.escopo_tipo === 'workspace' ? a.budget.workspace_id
       : a.budget.escopo_tipo === 'tag' ? `${a.budget.tag_key} = ${a.budget.tag_valor}`
       : 'todos os workspaces';
+    // Dono do orçamento quando identificável (coluna `usuario` já existia e não era usada);
+    // sem isso, a lista global.
+    const destinatarios = await _destinatariosPara(a.budget.usuario, padrao);
     await _sendEmail({
       to: destinatarios,
       subject: `⚠ Orçamento Databricks ${a.severidade === 'estourado' ? 'estourado' : 'em alerta'} — ${a.budget.nome}`,
@@ -8055,11 +8082,7 @@ async function _checkAcoesVencendo() {
     WHERE a.status NOT IN ('Concluído','Cancelado') AND a.data_conclusao IS NOT NULL AND a.data_conclusao <= $1
   `, [em5dias.toISOString().split('T')[0]]);
   for (const acao of r.rows) {
-    let destinatarios = padrao;
-    if (acao.responsavel) {
-      const uMatch = await pool.query(`SELECT email FROM usuarios WHERE nome ILIKE $1 LIMIT 1`, [acao.responsavel]);
-      if (uMatch.rows[0]?.email) destinatarios = [uMatch.rows[0].email];
-    }
+    const destinatarios = await _destinatariosPara(acao.responsavel, padrao);
     if (!destinatarios.length) continue;
     if (!(await _tentarClaimAlerta('acao_vencendo', `acao:${acao.id}`))) continue;
     const dias = Math.floor((new Date(acao.data_conclusao) - new Date()) / 86400000);
@@ -8450,11 +8473,8 @@ async function _alertarEstimativaStatus(estimativa) {
   if (estimativa.status !== 'Aprovado' && estimativa.status !== 'Nao Aprovado') return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
-  let destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
-  if (estimativa.responsavel) {
-    const uMatch = await pool.query(`SELECT email FROM usuarios WHERE nome ILIKE $1 LIMIT 1`, [estimativa.responsavel]);
-    if (uMatch.rows[0]?.email) destinatarios = [uMatch.rows[0].email];
-  }
+  const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
+  const destinatarios = await _destinatariosPara(estimativa.responsavel, padrao);
   if (!destinatarios.length) return;
   const aprovado = estimativa.status === 'Aprovado';
   await _sendEmail({
