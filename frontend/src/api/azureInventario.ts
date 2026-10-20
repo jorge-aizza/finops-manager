@@ -309,6 +309,14 @@ export const getAzureDesperdicio = (subscriptionId?: string, diasSnapshot?: numb
   return apiFetch<AzureDesperdicioResposta>('GET', '/azure-inventario/desperdicio' + (qs ? '?' + qs : ''), undefined, 180000)
 }
 
+// Exceção manual na economia: marca um item como "não é economia nossa" (ou desfaz).
+// `resource_id` vai no corpo porque é um caminho da Azure cheio de barras — na URL viraria
+// vários segmentos de rota. Quem marcou sai do token no servidor, não daqui.
+export const ignorarSavingOrfao = (resourceId: string, ignorar: boolean, motivo?: string) =>
+  apiFetch<{ resource_id_upper: string; ignorado: boolean; ignorado_por: string | null; ignorado_motivo: string | null }>(
+    'POST', '/azure-inventario/saving/ignorar', { resource_id: resourceId, ignorar, motivo }
+  )
+
 export const rebuildAzureAlocacaoTags = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-costs/alocacao-tags/rebuild')
 

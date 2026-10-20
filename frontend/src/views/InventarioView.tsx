@@ -13,6 +13,7 @@ import {
   getAzureCrescimentoLiquido, baixarAzureInventarioExcel, getAzureAdvisor, getAzureRedeTopologia,
   getAzurePropriedadeHistorico, getAzureRelatorioDiario, getAzureCrescimentoDetalhe, getAzureAnomaliasCrescimento,
   getAzureDesperdicio, getAzureInventarioCrescimentoPersistente, getAzureConformidade, baixarAzureDesperdicioExcel,
+  ignorarSavingOrfao,
 } from '../api/azureInventario'
 import { buildDesperdicioPdfHtml } from '../lib/buildDesperdicioPdfHtml'
 import InvoicePreviewModal from '../components/InvoicePreviewModal'
@@ -737,6 +738,28 @@ export default function InventarioView() {
     },
     onError: (e: Error) => window.showToast?.('Erro: ' + e.message, 'error'),
   })
+
+  // Exceção manual na economia. Invalida a consulta do desperdício porque os totais do card
+  // mudam junto — o item sai (ou volta) da soma, não só da linha.
+  const ignorarSaving = useMutation({
+    mutationFn: ({ resourceId, ignorar, motivo }: { resourceId: string; ignorar: boolean; motivo?: string }) =>
+      ignorarSavingOrfao(resourceId, ignorar, motivo),
+    onSuccess: (_r, v) => {
+      window.showToast?.(v.ignorar ? "Item fora do total." : "Item voltou a contar.", "success")
+      queryClient.invalidateQueries({ queryKey: ["azure-inv-desperdicio"] })
+    },
+    onError: (e: Error) => window.showToast?.("Erro: " + e.message, "error"),
+  })
+
+  // `window.prompt` porque o motivo é uma linha de texto e a alternativa seria um modal
+  // só pra isso. Cancelar (null) aborta; string vazia o servidor recusa.
+  function handleIgnorarSaving(resourceId: string, jaIgnorado: boolean) {
+    if (jaIgnorado) { ignorarSaving.mutate({ resourceId, ignorar: false }); return }
+    const motivo = window.prompt("Por que este item não deve contar como economia do processo?")
+    if (motivo === null) return
+    if (!motivo.trim()) { window.showToast?.("Informe o motivo.", "error"); return }
+    ignorarSaving.mutate({ resourceId, ignorar: true, motivo: motivo.trim() })
+  }
 
   const limparHistoricoMutation = useMutation({
     mutationFn: limparAzureInventarioColetaHistorico,
@@ -1544,7 +1567,8 @@ export default function InventarioView() {
                       "R$ 0" sem nada por trás — sem apuração nenhuma, o bloco não entra. */}
                   {desperdicioQuery.data?.saving
                     && (desperdicioQuery.data.saving.recursos_eliminados > 0
-                      || desperdicioQuery.data.saving.nao_contabilizados_piso > 0) && (
+                      || desperdicioQuery.data.saving.nao_contabilizados_piso > 0
+                      || desperdicioQuery.data.saving.nao_contabilizados_manual > 0) && (
                     <>
                       <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
                         <div className="stat-label">💰 Economia realizada por mês</div>
@@ -1606,6 +1630,7 @@ export default function InventarioView() {
                             <th>Excluído em</th><th>Excluído por</th>
                             <th style={{ textAlign: 'right' }}>Dias como órfão</th>
                             <th style={{ textAlign: 'right' }}>Custo/mês</th>
+                            <th />
                           </tr>
                         </thead>
                         <tbody>
@@ -1622,9 +1647,18 @@ export default function InventarioView() {
                                 )}
                                 {!i.contabilizado && (
                                   <span className="badge" style={{ marginLeft: 6 }}
-                                    title={`Não entra no total: ficou menos de ${desperdicioQuery.data!.saving!.dias_min_orfao} dias como órfão`}>
-                                    não contabilizado
+                                    title={i.motivo_fora === 'ignorado'
+                                      ? `Marcado manualmente por ${i.ignorado_por || '—'}${i.ignorado_em ? ' em ' + new Date(i.ignorado_em).toLocaleDateString('pt-BR') : ''}: ${i.ignorado_motivo || ''}`
+                                      : `Não entra no total: ficou menos de ${desperdicioQuery.data!.saving!.dias_min_orfao} dias como órfão`}>
+                                    {i.motivo_fora === 'ignorado' ? 'ignorado manualmente' : 'abaixo do piso'}
                                   </span>
+                                )}
+                                {/* O motivo da exceção manual fica visível na linha, não só no
+                                    tooltip: é o que permite outra pessoa auditar a decisão. */}
+                                {i.motivo_fora === 'ignorado' && i.ignorado_motivo && (
+                                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                    {i.ignorado_motivo} · {i.ignorado_por || '—'}
+                                  </div>
                                 )}
                               </td>
                               <td>{DESPERDICIO_LABEL[i.categoria] ?? i.categoria}</td>
@@ -1637,6 +1671,20 @@ export default function InventarioView() {
                                 {i.dias_orfao === null ? '—' : i.dias_orfao}
                               </td>
                               <td style={{ textAlign: 'right' }}>{i.custo_mensal === null ? '—' : fmtBRLCurto(i.custo_mensal)}</td>
+                              {/* Só aparece em item que o piso já aceitou ou que foi marcado à
+                                  mão. Oferecer "não contabilizar" no que a regra automática já
+                                  barrou seria redundante e confundiria os dois mecanismos. */}
+                              <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {i.motivo_fora !== 'piso' && (
+                                  <button
+                                    type="button" className="btn-ghost" style={{ fontSize: 11 }}
+                                    disabled={ignorarSaving.isPending}
+                                    onClick={() => handleIgnorarSaving(i.resource_id, i.motivo_fora === 'ignorado')}
+                                  >
+                                    {i.motivo_fora === 'ignorado' ? 'Voltar a contar' : 'Não contabilizar'}
+                                  </button>
+                                )}
+                              </td>
                             </tr>
                           ))}
                         </tbody>

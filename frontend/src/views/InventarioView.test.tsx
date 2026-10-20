@@ -226,7 +226,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 800, economia_mensal_bruta: 1000, desconto_mensal_snapshots: 200,
-        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, itens: [],
+        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, nao_contabilizados_manual: 0, itens: [],
       },
     })
     renderWithClient()
@@ -288,7 +288,7 @@ describe('InventarioView', () => {
       saving: {
         economia_mensal: 1667.2, economia_mensal_bruta: 1667.2, desconto_mensal_snapshots: 0,
         economia_acumulada: 900, recursos_eliminados: 5, sem_custo_conhecido: 0,
-        para_validacao: 1, para_validacao_custo_mensal: 1367.2, nao_contabilizados_piso: 3, dias_min_orfao: 30, itens: [],
+        para_validacao: 1, para_validacao_custo_mensal: 1367.2, nao_contabilizados_piso: 3, dias_min_orfao: 30, nao_contabilizados_manual: 0, itens: [],
       },
     })
     renderWithClient()
@@ -307,6 +307,89 @@ describe('InventarioView', () => {
   // O piso de dias como órfão (30, o prazo do fluxo real) tira do total quem foi excluído
   // antes disso — mas o item continua no detalhe, marcado. Esconder impediria conferir se o
   // piso está calibrado, e "não contabilizamos" é diferente de "não economizamos".
+  // Exceção manual: o piso resolve o caso dominante, mas não o disco órfão há tempo
+  // suficiente que foi apagado pelo time da aplicação. Como é override humano sobre um
+  // número que vai para a diretoria, o motivo é obrigatório e fica visível na linha.
+  it('permite marcar um item como não contabilizado, exigindo motivo', async () => {
+    const itemBase = {
+      resource_id: '/D9', categoria: 'disco_orfao' as const, nome: 'disco-antigo', subscription_id: 's',
+      resource_group: 'rg-a', excluido_em: '2026-09-01T00:00:00Z', excluido_por: 'alguem@telefonica.com',
+      custo_mensal: 500, dias_orfao: 45, motivo_validacao: null,
+      contabilizado: true, motivo_fora: null, ignorado_por: null, ignorado_em: null, ignorado_motivo: null,
+    }
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0,
+      por_categoria: [], itens: [],
+      saving: {
+        economia_mensal: 500, economia_mensal_bruta: 500, desconto_mensal_snapshots: 0,
+        economia_acumulada: 500, recursos_eliminados: 1, sem_custo_conhecido: 0,
+        para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0,
+        dias_min_orfao: 30, nao_contabilizados_manual: 0, itens: [itemBase],
+      },
+    })
+    vi.mocked(azureInventarioApi.ignorarSavingOrfao).mockResolvedValue({
+      resource_id_upper: '/D9', ignorado: true, ignorado_por: 'jorge@x', ignorado_motivo: 'time da aplicação',
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Ver detalhes' }))
+
+    // Cancelar o prompt não chama a API — marcar é decisão, não acidente.
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue(null)
+    await userEvent.click(screen.getByRole('button', { name: 'Não contabilizar' }))
+    expect(azureInventarioApi.ignorarSavingOrfao).not.toHaveBeenCalled()
+
+    // Motivo em branco também não passa — o servidor recusaria, mas a tela nem tenta.
+    prompt.mockReturnValue('   ')
+    await userEvent.click(screen.getByRole('button', { name: 'Não contabilizar' }))
+    expect(azureInventarioApi.ignorarSavingOrfao).not.toHaveBeenCalled()
+
+    prompt.mockReturnValue('apagado pelo time da aplicação')
+    await userEvent.click(screen.getByRole('button', { name: 'Não contabilizar' }))
+    expect(azureInventarioApi.ignorarSavingOrfao).toHaveBeenCalledWith('/D9', true, 'apagado pelo time da aplicação')
+    prompt.mockRestore()
+  })
+
+  // Item já marcado mostra quem marcou e por quê na própria linha — sem isso ninguém
+  // consegue auditar a decisão depois — e oferece desfazer sem pedir motivo.
+  it('item ignorado mostra a trilha e permite voltar a contar', async () => {
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0,
+      por_categoria: [], itens: [],
+      saving: {
+        economia_mensal: 0, economia_mensal_bruta: 0, desconto_mensal_snapshots: 0,
+        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0,
+        para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0,
+        dias_min_orfao: 30, nao_contabilizados_manual: 1,
+        itens: [{
+          resource_id: '/D9', categoria: 'disco_orfao', nome: 'disco-antigo', subscription_id: 's',
+          resource_group: 'rg-a', excluido_em: '2026-09-01T00:00:00Z', excluido_por: 'alguem@telefonica.com',
+          custo_mensal: 500, dias_orfao: 45, motivo_validacao: null, contabilizado: false,
+          motivo_fora: 'ignorado', ignorado_por: 'jorge@telefonica.com',
+          ignorado_em: '2026-10-20T10:00:00Z', ignorado_motivo: 'apagado pelo time da aplicação',
+        }],
+      },
+    })
+    vi.mocked(azureInventarioApi.ignorarSavingOrfao).mockResolvedValue({
+      resource_id_upper: '/D9', ignorado: false, ignorado_por: null, ignorado_motivo: null,
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Ver detalhes' }))
+
+    const painel = screen.getByText('Economia realizada — detalhe').closest('.card') as HTMLElement
+    const dentro = within(painel)
+    expect(dentro.getByText('ignorado manualmente')).toBeInTheDocument()
+    expect(dentro.getByText(/apagado pelo time da aplicação · jorge@telefonica.com/)).toBeInTheDocument()
+
+    // Desfazer não pede motivo.
+    const prompt = vi.spyOn(window, 'prompt')
+    await userEvent.click(dentro.getByRole('button', { name: 'Voltar a contar' }))
+    expect(prompt).not.toHaveBeenCalled()
+    expect(azureInventarioApi.ignorarSavingOrfao).toHaveBeenCalledWith('/D9', false, undefined)
+    prompt.mockRestore()
+  })
+
   it('mostra no detalhe o item barrado pelo piso, marcado e fora do total', async () => {
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0,
@@ -314,13 +397,13 @@ describe('InventarioView', () => {
       saving: {
         economia_mensal: 0, economia_mensal_bruta: 0, desconto_mensal_snapshots: 0,
         economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0,
-        para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 1, dias_min_orfao: 30,
+        para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 1, dias_min_orfao: 30, nao_contabilizados_manual: 0,
         itens: [
           {
             resource_id: '/D1', categoria: 'disco_orfao', nome: 'pvc-f8773465', subscription_id: 's',
             resource_group: 'mc_rg-aks', excluido_em: '2026-09-30T20:40:16Z',
             excluido_por: 'fulano@telefonica.com', custo_mensal: 1367.2, dias_orfao: 6,
-            motivo_validacao: 'aks_pvc', contabilizado: false,
+            motivo_validacao: 'aks_pvc', contabilizado: false, motivo_fora: 'piso', ignorado_por: null, ignorado_em: null, ignorado_motivo: null,
           },
         ],
       },
@@ -337,7 +420,7 @@ describe('InventarioView', () => {
     const painel = screen.getByText('Economia realizada — detalhe').closest('.card') as HTMLElement
     const dentro = within(painel)
     expect(dentro.getByText('pvc-f8773465')).toBeInTheDocument()
-    expect(dentro.getByText('não contabilizado')).toBeInTheDocument()
+    expect(dentro.getByText('abaixo do piso')).toBeInTheDocument()
     expect(dentro.getByText('6')).toBeInTheDocument()
   })
 
@@ -350,17 +433,17 @@ describe('InventarioView', () => {
       saving: {
         economia_mensal: 1367.2, economia_mensal_bruta: 1367.2, desconto_mensal_snapshots: 0,
         economia_acumulada: 780, recursos_eliminados: 2, sem_custo_conhecido: 1,
-        para_validacao: 1, para_validacao_custo_mensal: 1367.2, nao_contabilizados_piso: 1, dias_min_orfao: 30,
+        para_validacao: 1, para_validacao_custo_mensal: 1367.2, nao_contabilizados_piso: 1, dias_min_orfao: 30, nao_contabilizados_manual: 0,
         itens: [
           {
             resource_id: '/D1', categoria: 'disco_orfao', nome: 'pvc-f8773465', subscription_id: 's',
             resource_group: 'mc_rg-aks', excluido_em: '2026-09-30T20:40:16Z',
-            excluido_por: 'fulano@telefonica.com', custo_mensal: 1367.2, dias_orfao: 6, motivo_validacao: 'aks_pvc', contabilizado: true,
+            excluido_por: 'fulano@telefonica.com', custo_mensal: 1367.2, dias_orfao: 6, motivo_validacao: 'aks_pvc', contabilizado: true, motivo_fora: null, ignorado_por: null, ignorado_em: null, ignorado_motivo: null,
           },
           {
             resource_id: '/N1', categoria: 'nic_orfa', nome: 'pe-algum-nic', subscription_id: 's',
             resource_group: 'rg-b', excluido_em: '2026-10-16T00:00:00Z',
-            excluido_por: null, custo_mensal: null, dias_orfao: null, motivo_validacao: null, contabilizado: true,
+            excluido_por: null, custo_mensal: null, dias_orfao: null, motivo_validacao: null, contabilizado: true, motivo_fora: null, ignorado_por: null, ignorado_em: null, ignorado_motivo: null,
           },
         ],
       },
@@ -389,7 +472,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 0, economia_mensal_bruta: 0, desconto_mensal_snapshots: 0,
-        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, itens: [],
+        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, nao_contabilizados_manual: 0, itens: [],
       },
     })
     renderWithClient()

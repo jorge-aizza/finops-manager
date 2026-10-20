@@ -7182,6 +7182,20 @@ async function ensureAzureColetaTable() {
     FROM azure_desperdicio_deteccao d
     WHERE d.resource_id_upper = s.resource_id_upper AND s.primeira_deteccao_em IS NULL
   `).catch(() => {});
+  // Exceção manual (2026-10-20): o piso de dias resolve o caso dominante, mas não todos —
+  // um disco órfão há 45 dias pode ter sido apagado pelo time da aplicação, não pelo
+  // processo de FinOps, e nenhuma regra automática distingue isso. Daí poder marcar item a
+  // item pela tela. Grava QUEM, QUANDO e POR QUÊ de propósito: é override manual sobre um
+  // número que vai para a diretoria, então precisa de trilha — sem isso alguém pode remover
+  // item inconveniente e ninguém percebe.
+  //
+  // Marcar nunca APAGA a linha: o item continua no detalhe, riscado e com o motivo à vista,
+  // e dá pra voltar atrás. Economia realizada é fato histórico; o que muda é a
+  // classificação dele, não a existência.
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado_por VARCHAR(300)`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado_em TIMESTAMPTZ`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado_motivo TEXT`).catch(() => {});
   // NOTA pra quem for mexer na apuração de saving: a tentação é criar um índice funcional
   // só em LOWER(resource_id) aqui (o que existe é composto, com subscription_id na frente).
   // Foi testado — 287 MB, e o planner NUNCA o escolheu: continuou usando o composto, com o
@@ -11733,6 +11747,41 @@ async function _getDesperdicioCached(subscriptionIds, diasSnapshot) {
   return p;
 }
 
+// Marca (ou desmarca) um item de economia como "não é economia nossa" — a exceção manual
+// para o que o piso de dias não pega: disco órfão o bastante, mas apagado pelo time da
+// aplicação e não pelo processo de FinOps.
+//
+// `resource_id` vai no corpo, não na URL: é um caminho da Azure cheio de barras, que como
+// parâmetro de rota seria interpretado como segmentos.
+//
+// Grava quem marcou a partir do token, nunca do corpo da requisição — se o cliente
+// pudesse dizer quem foi, a trilha de auditoria não valeria nada.
+app.post('/api/azure-inventario/saving/ignorar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { resource_id, ignorar, motivo } = req.body || {};
+    if (!resource_id) return res.status(400).json({ error: "resource_id é obrigatório" });
+    const marcar = ignorar !== false;
+    // Motivo obrigatório pra marcar, dispensável pra desmarcar: a decisão que tira dinheiro
+    // do número precisa de justificativa; voltar atrás é restaurar o padrão.
+    const just = String(motivo || "").trim();
+    if (marcar && !just) return res.status(400).json({ error: "Informe o motivo de não contabilizar" });
+    const quem = req.user?.email || req.user?.usuario || `usuario:${req.user?.id ?? "?"}`;
+    const r = await pool.query(
+      `UPDATE azure_desperdicio_saving
+          SET ignorado = $2,
+              ignorado_por = CASE WHEN $2 THEN $3 ELSE NULL END,
+              ignorado_em = CASE WHEN $2 THEN NOW() ELSE NULL END,
+              ignorado_motivo = CASE WHEN $2 THEN $4 ELSE NULL END
+        WHERE resource_id_upper = UPPER($1)
+        RETURNING resource_id_upper, ignorado, ignorado_por, ignorado_em, ignorado_motivo`,
+      [resource_id, marcar, quem, just || null]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: "Item de economia não encontrado" });
+    console.log(`[Saving Órfãos] ${marcar ? "ignorado" : "voltou a contar"}: ${r.rows[0].resource_id_upper} por ${quem}${just ? " — " + just : ""}`);
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
 app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const t0Desp = Date.now();
@@ -12063,12 +12112,17 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
   const agora = Date.now();
   const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
 
-  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0, barradosPeloPiso = 0;
+  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0, barradosPeloPiso = 0, ignorados = 0;
   const itens = [];
   for (const x of linhas.filter((l) => l.tipo === 'economia')) {
     const c = x.custo_mensal === null ? null : Number(x.custo_mensal);
-    const conta = cumpriuPiso(x);
-    if (!conta) barradosPeloPiso++;
+    // Dois motivos distintos para não contar, e a tela precisa diferenciá-los: o piso é
+    // regra automática e revisável; a exceção manual é decisão de uma pessoa, com trilha.
+    // A manual tem precedência — se alguém marcou, o porquê dela é que deve aparecer.
+    const motivoFora = x.ignorado ? 'ignorado' : (cumpriuPiso(x) ? null : 'piso');
+    const conta = motivoFora === null;
+    if (motivoFora === 'ignorado') ignorados++;
+    else if (motivoFora === 'piso') barradosPeloPiso++;
     else if (c === null) semCusto++;
     else {
       mensalBruta += c;
@@ -12076,7 +12130,7 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
     }
     // O detalhe lista TAMBÉM o que não contabilizou, com o motivo — some da soma, não da
     // tela. "Não contabilizamos" é diferente de "não economizamos", e sem ver o item
-    // barrado ninguém consegue conferir se o piso está calibrado.
+    // barrado ninguém consegue conferir se a regra está calibrada nem auditar a exceção.
     itens.push({
       resource_id: x.resource_id_upper, categoria: x.categoria, nome: x.nome,
       subscription_id: x.subscription_id, resource_group: x.resource_group,
@@ -12084,6 +12138,10 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
       dias_orfao: diasOrfao(x),
       motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao({ name: x.nome }) : null,
       contabilizado: conta,
+      motivo_fora: motivoFora,
+      ignorado_por: x.ignorado_por || null,
+      ignorado_em: x.ignorado_em || null,
+      ignorado_motivo: x.ignorado_motivo || null,
     });
   }
 
@@ -12116,6 +12174,10 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
     // Excluídos antes de completar o piso de dias como órfão. Não entram no total, mas
     // aparecem no detalhe: é o número que permite conferir se o piso está calibrado.
     nao_contabilizados_piso: barradosPeloPiso,
+    // Marcados manualmente como "não é economia nossa". Separado do piso de propósito: um
+    // é regra, o outro é decisão humana — misturar os dois esconderia quanto do número
+    // depende de julgamento.
+    nao_contabilizados_manual: ignorados,
     dias_min_orfao: _SAVING_DIAS_MIN_ORFAO,
     // Quantos dos CONTABILIZADOS são disco de PVC/AKS ou ASR. No privado eles entram no
     // total (decisão do usuário) — isto é sinalização de que parte do número depende de

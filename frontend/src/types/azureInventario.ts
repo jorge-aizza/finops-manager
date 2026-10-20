@@ -567,6 +567,10 @@ export interface AzureSavingOrfaos {
   /** Excluídos antes de completar o piso de dias como órfão — fora do total, mas visíveis
    *  no detalhe: é o número que permite conferir se o piso está calibrado. */
   nao_contabilizados_piso: number
+  /** Marcados manualmente como "não é economia nossa". Separado do piso de propósito: um é
+   *  regra automática, o outro é decisão humana — misturar esconderia quanto do número
+   *  depende de julgamento. */
+  nao_contabilizados_manual: number
   /** O piso em dias que o backend aplicou (hoje 30, o prazo do fluxo real). */
   dias_min_orfao: number
   itens: {
@@ -583,9 +587,14 @@ export interface AzureSavingOrfaos {
     dias_orfao: number | null
     /** Preenchido só em disco que precisa de validação manual antes de creditar. */
     motivo_validacao: 'aks_pvc' | 'asr' | null
-    /** false quando o item não atingiu o piso de dias como órfão: aparece no detalhe, mas
-     *  não entra em nenhum total. */
+    /** false quando o item ficou de fora dos totais — aparece no detalhe mesmo assim. */
     contabilizado: boolean
+    /** Por que ficou de fora: 'piso' é a regra automática de dias como órfão, 'ignorado' é
+     *  marcação manual. null quando está contabilizado. */
+    motivo_fora: 'piso' | 'ignorado' | null
+    ignorado_por: string | null
+    ignorado_em: string | null
+    ignorado_motivo: string | null
   }[]
 }
 export interface AzureDesperdicioResposta {
