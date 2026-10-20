@@ -226,7 +226,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 800, economia_mensal_bruta: 1000, desconto_mensal_snapshots: 200,
-        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, eliminados_recentes: 0, itens: [],
+        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, itens: [],
       },
     })
     renderWithClient()
@@ -288,7 +288,7 @@ describe('InventarioView', () => {
       saving: {
         economia_mensal: 1667.2, economia_mensal_bruta: 1667.2, desconto_mensal_snapshots: 0,
         economia_acumulada: 900, recursos_eliminados: 5, sem_custo_conhecido: 0,
-        para_validacao: 1, para_validacao_custo_mensal: 1367.2, eliminados_recentes: 3, itens: [],
+        para_validacao: 1, para_validacao_custo_mensal: 1367.2, nao_contabilizados_piso: 3, dias_min_orfao: 30, itens: [],
       },
     })
     renderWithClient()
@@ -301,7 +301,44 @@ describe('InventarioView', () => {
     // E as duas ressalvas aparecem, para o número não ser lido como resultado limpo.
     const acumulado = screen.getByText('Economia acumulada').closest('.stat-card') as HTMLElement
     expect(within(acumulado).getByText(/1 em validação \(AKS\/ASR\) dentro do total/)).toBeInTheDocument()
-    expect(within(acumulado).getByText(/3 de 5 com menos de 7 dias como órfão/)).toBeInTheDocument()
+    expect(within(acumulado).getByText(/3 não contabilizado\(s\): menos de 30 dias como órfão/)).toBeInTheDocument()
+  })
+
+  // O piso de dias como órfão (30, o prazo do fluxo real) tira do total quem foi excluído
+  // antes disso — mas o item continua no detalhe, marcado. Esconder impediria conferir se o
+  // piso está calibrado, e "não contabilizamos" é diferente de "não economizamos".
+  it('mostra no detalhe o item barrado pelo piso, marcado e fora do total', async () => {
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0,
+      por_categoria: [], itens: [],
+      saving: {
+        economia_mensal: 0, economia_mensal_bruta: 0, desconto_mensal_snapshots: 0,
+        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0,
+        para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 1, dias_min_orfao: 30,
+        itens: [
+          {
+            resource_id: '/D1', categoria: 'disco_orfao', nome: 'pvc-f8773465', subscription_id: 's',
+            resource_group: 'mc_rg-aks', excluido_em: '2026-09-30T20:40:16Z',
+            excluido_por: 'fulano@telefonica.com', custo_mensal: 1367.2, dias_orfao: 6,
+            motivo_validacao: 'aks_pvc', contabilizado: false,
+          },
+        ],
+      },
+    })
+    renderWithClient()
+    await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+
+    // O card aparece mesmo com total zero, porque há algo apurado a explicar.
+    const acumulado = await screen.findByText('Economia acumulada')
+    expect(within(acumulado.closest('.stat-card') as HTMLElement)
+      .getByText(/1 não contabilizado\(s\): menos de 30 dias como órfão/)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Ver detalhes' }))
+    const painel = screen.getByText('Economia realizada — detalhe').closest('.card') as HTMLElement
+    const dentro = within(painel)
+    expect(dentro.getByText('pvc-f8773465')).toBeInTheDocument()
+    expect(dentro.getByText('não contabilizado')).toBeInTheDocument()
+    expect(dentro.getByText('6')).toBeInTheDocument()
   })
 
   // "Ver detalhes" é o que torna o número auditável: sem quem/quando/há quanto tempo, o
@@ -313,17 +350,17 @@ describe('InventarioView', () => {
       saving: {
         economia_mensal: 1367.2, economia_mensal_bruta: 1367.2, desconto_mensal_snapshots: 0,
         economia_acumulada: 780, recursos_eliminados: 2, sem_custo_conhecido: 1,
-        para_validacao: 1, para_validacao_custo_mensal: 1367.2, eliminados_recentes: 1,
+        para_validacao: 1, para_validacao_custo_mensal: 1367.2, nao_contabilizados_piso: 1, dias_min_orfao: 30,
         itens: [
           {
             resource_id: '/D1', categoria: 'disco_orfao', nome: 'pvc-f8773465', subscription_id: 's',
             resource_group: 'mc_rg-aks', excluido_em: '2026-09-30T20:40:16Z',
-            excluido_por: 'fulano@telefonica.com', custo_mensal: 1367.2, dias_orfao: 6, motivo_validacao: 'aks_pvc',
+            excluido_por: 'fulano@telefonica.com', custo_mensal: 1367.2, dias_orfao: 6, motivo_validacao: 'aks_pvc', contabilizado: true,
           },
           {
             resource_id: '/N1', categoria: 'nic_orfa', nome: 'pe-algum-nic', subscription_id: 's',
             resource_group: 'rg-b', excluido_em: '2026-10-16T00:00:00Z',
-            excluido_por: null, custo_mensal: null, dias_orfao: null, motivo_validacao: null,
+            excluido_por: null, custo_mensal: null, dias_orfao: null, motivo_validacao: null, contabilizado: true,
           },
         ],
       },
@@ -352,7 +389,7 @@ describe('InventarioView', () => {
       por_categoria: [], itens: [],
       saving: {
         economia_mensal: 0, economia_mensal_bruta: 0, desconto_mensal_snapshots: 0,
-        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, para_validacao: 0, para_validacao_custo_mensal: 0, eliminados_recentes: 0, itens: [],
+        economia_acumulada: 0, recursos_eliminados: 0, sem_custo_conhecido: 0, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, itens: [],
       },
     })
     renderWithClient()

@@ -11870,6 +11870,11 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
 // estava sendo abatido, e ele nunca fez parte do desperdício original — foi criado pelo
 // próprio processo de limpeza).
 const _SAVING_JANELA_DIAS = 30;
+// Quantos dias o recurso precisa ter ficado órfão para a exclusão contar como economia do
+// processo. 30 vem do fluxo real de vocês — o time espera esse prazo antes de agir, então
+// exclusão mais rápida veio de outra coisa. Mesmo número que o portal público já usava como
+// piso para disco (_DIAS_MIN_DISCO_PUBLICO), agora valendo para todas as categorias.
+const _SAVING_DIAS_MIN_ORFAO = 30;
 
 // Custo faturado por recurso, cada um na SUA janela (cada exclusão tem data diferente).
 // Uma passada só com unnest de 3 colunas em vez de uma consulta por recurso.
@@ -12016,16 +12021,23 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
   );
   // Recurso que voltou a existir com o mesmo id não é economia — alguém recriou.
   //
-  // Os dois portais contam BASES DIFERENTES, de propósito (decisão do usuário, 2026-10-18):
+  // PISO DE TEMPO COMO ÓRFÃO (2026-10-19, informado pelo usuário): o fluxo de vocês espera
+  // 30 dias com o recurso órfão antes de agir. Exclusão mais rápida que isso não pode ter
+  // vindo do processo — foi o ciclo de vida da própria infra. Vale para TODAS as categorias
+  // por decisão do usuário: uma regra só é mais fácil de explicar, e afrouxar depois é
+  // seguro, enquanto apertar obrigaria a revisar número já reportado à diretoria.
   //
-  //   PRIVADO  — conta tudo que foi excluído, inclusive disco de PVC/AKS e ASR. Quem olha
-  //              essa tela tem contexto para julgar, e o detalhe expõe a evidência (quem
-  //              excluiu, quando, há quantos dias era órfão) para a decisão ser dela.
+  // Na base em que foi medido, isso zera o total: as 20 NICs tinham 0 dias (Private Endpoint
+  // recriado no mesmo dia) e o disco PVC tinha 6. Resultado severo, mas honesto — nada do
+  // que foi excluído até aqui passou pelo fluxo de 30 dias.
   //
-  //   PÚBLICO  — só o que aquele portal de fato publicou, com os mesmos 5 filtros de
-  //              /api/public/orfaos. Sem isso o card anunciava economia de recurso que
-  //              nunca apareceu lá: dos 21 apurados, 20 eram NIC (categoria que o público
-  //              não publica) e 1 era PVC com 6 dias de órfão (o público exige 30+).
+  // `null` (sem data de detecção) NÃO passa, mesma convenção do endpoint público: "não
+  // sabemos há quanto tempo" é diferente de "sabemos que é 30+".
+  //
+  // Os dois portais contam bases diferentes (decisão do usuário, 2026-10-18):
+  //   PRIVADO — conta inclusive disco de PVC/AKS e ASR; quem olha tem contexto pra julgar,
+  //             e o detalhe expõe a evidência (quem excluiu, quando, dias como órfão).
+  //   PÚBLICO — só o que aquele portal publicou, com os mesmos filtros de /api/public/orfaos.
   const pub = !!opcoes.publico;
   const cats = opcoes.categorias instanceof Set ? opcoes.categorias : null;
   const rgs = opcoes.resourceGroups instanceof Set ? opcoes.resourceGroups : null;
@@ -12034,44 +12046,44 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
     : null;
   const paraValidacao = (x) =>
     x.categoria === 'disco_orfao' && !!_classificarDiscoValidacao({ name: x.nome });
-  // Filtros do fluxo público, aplicados só quando `publico`. Disco exige 30+ dias de órfão
-  // CONFIRMADOS: `null` (sem data conhecida) não passa, mesma convenção do endpoint público
-  // — "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 30+".
+  const cumpriuPiso = (x) => { const d = diasOrfao(x); return d !== null && d >= _SAVING_DIAS_MIN_ORFAO; };
   const noFluxoPublico = (x) => {
-    // Espelha o filtro da própria rota pública: categoria que não gera custo por estar órfã
-    // não aparece lá, então também não pode contar como economia dela.
-    if (_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria)) return false;
     if (cats && !cats.has(x.categoria)) return false;
     if (rgs && rgs.size && !(x.resource_group && rgs.has(String(x.resource_group).toUpperCase()))) return false;
     if (paraValidacao(x)) return false;
-    if (x.categoria === 'disco_orfao') { const d = diasOrfao(x); if (d === null || d < 30) return false; }
     return true;
   };
-  const visivel = (x) => !x.recriado && (pub ? noFluxoPublico(x) : true);
-  const linhas = r.rows.filter(visivel);
-  // Só o privado separa "em validação": no público eles já saíram pelo filtro acima.
-  const emValidacao = pub ? [] : r.rows.filter((x) => !x.recriado && paraValidacao(x));
+  // Categoria que não gera custo ao ficar órfã sai dos DOIS modos. Antes só o público a
+  // filtrava, e o card privado dizia "21 recursos eliminados" enquanto a lista de
+  // desperdício ao lado não mostrava nenhuma NIC — as duas telas em bases diferentes,
+  // exatamente o problema que o usuário já tinha apontado no caso do PVC.
+  const naVisao = (x) => !x.recriado && !_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria)
+    && (pub ? noFluxoPublico(x) : true);
+  const linhas = r.rows.filter(naVisao);
   const agora = Date.now();
   const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
 
-  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0;
+  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0, barradosPeloPiso = 0;
   const itens = [];
   for (const x of linhas.filter((l) => l.tipo === 'economia')) {
     const c = x.custo_mensal === null ? null : Number(x.custo_mensal);
-    if (c === null) { semCusto++; } else {
+    const conta = cumpriuPiso(x);
+    if (!conta) barradosPeloPiso++;
+    else if (c === null) semCusto++;
+    else {
       mensalBruta += c;
       acumuladaBruta += c * meses(x.excluido_em, agora);
     }
-    // Campos de evidência para o detalhe da tela privada: quem excluiu, quando, e há quantos
-    // dias o recurso já era órfão naquele momento. O tempo como órfão é o que separa
-    // economia do processo de rotatividade normal de infra — Private Endpoint recriado no
-    // mesmo dia aparece com 0 dias e não deve ser lido como resultado.
+    // O detalhe lista TAMBÉM o que não contabilizou, com o motivo — some da soma, não da
+    // tela. "Não contabilizamos" é diferente de "não economizamos", e sem ver o item
+    // barrado ninguém consegue conferir se o piso está calibrado.
     itens.push({
       resource_id: x.resource_id_upper, categoria: x.categoria, nome: x.nome,
       subscription_id: x.subscription_id, resource_group: x.resource_group,
       excluido_em: x.excluido_em, excluido_por: x.excluido_por, custo_mensal: c,
       dias_orfao: diasOrfao(x),
       motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao({ name: x.nome }) : null,
+      contabilizado: conta,
     });
   }
 
@@ -12091,23 +12103,27 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
     acumuladaDesconto += s.custo_mensal_estimado * meses(s.criado_em || agora, agora);
   }
 
+  const contabilizados = itens.filter((x) => x.contabilizado);
   return {
     economia_mensal: Math.max(0, mensalBruta - descontoMensal),
     economia_mensal_bruta: mensalBruta,
     desconto_mensal_snapshots: descontoMensal,
     economia_acumulada: Math.max(0, acumuladaBruta - acumuladaDesconto),
-    recursos_eliminados: itens.length,
+    // Só o que de fato entrou na conta. `itens` traz mais que isso — inclui os barrados,
+    // para o detalhe poder mostrar por que ficaram de fora.
+    recursos_eliminados: contabilizados.length,
     sem_custo_conhecido: semCusto,
-    // Quantos dos contabilizados são disco de PVC/AKS ou ASR. No privado eles ENTRAM no
-    // total (decisão do usuário) — isto aqui é sinalização, não exclusão: serve pra tela
-    // avisar que parte do número depende de validação. No público é sempre 0, porque lá
-    // esses discos nem passam do filtro.
-    para_validacao: emValidacao.length,
-    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
-    // Quantos foram excluídos com menos de 7 dias como órfãos: forte indício de rotatividade
-    // de infra, não de ação do processo de FinOps.
-    eliminados_recentes: itens.filter((x) => x.dias_orfao !== null && x.dias_orfao < 7).length,
-    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
+    // Excluídos antes de completar o piso de dias como órfão. Não entram no total, mas
+    // aparecem no detalhe: é o número que permite conferir se o piso está calibrado.
+    nao_contabilizados_piso: barradosPeloPiso,
+    dias_min_orfao: _SAVING_DIAS_MIN_ORFAO,
+    // Quantos dos CONTABILIZADOS são disco de PVC/AKS ou ASR. No privado eles entram no
+    // total (decisão do usuário) — isto é sinalização de que parte do número depende de
+    // validação, não exclusão. No público é sempre 0: lá esses discos nem passam do filtro.
+    para_validacao: contabilizados.filter((x) => x.motivo_validacao).length,
+    para_validacao_custo_mensal: contabilizados
+      .filter((x) => x.motivo_validacao)
+      .reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
     itens,
   };
 }

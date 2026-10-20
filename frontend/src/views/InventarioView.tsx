@@ -1537,9 +1537,14 @@ export default function InventarioView() {
                     </div>
                   )}
                   {/* Economia realizada — o contraponto do desperdício: o que já foi eliminado.
-                      Só aparece quando há algo apurado, pra não exibir "R$ 0" como se fosse
-                      resultado (ainda não houve exclusão rastreada ≠ não economizamos nada). */}
-                  {desperdicioQuery.data?.saving && desperdicioQuery.data.saving.recursos_eliminados > 0 && (
+                      Aparece quando há QUALQUER coisa apurada, contabilizada ou não. Condicionar
+                      só ao total escondia o card justamente no caso mais confuso: exclusões que
+                      existiram mas não atingiram o piso de dias como órfão. Aí o usuário não
+                      veria nem o zero nem o motivo dele. O que continua não acontecendo é exibir
+                      "R$ 0" sem nada por trás — sem apuração nenhuma, o bloco não entra. */}
+                  {desperdicioQuery.data?.saving
+                    && (desperdicioQuery.data.saving.recursos_eliminados > 0
+                      || desperdicioQuery.data.saving.nao_contabilizados_piso > 0) && (
                     <>
                       <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
                         <div className="stat-label">💰 Economia realizada por mês</div>
@@ -1569,10 +1574,10 @@ export default function InventarioView() {
                             ⚠ {desperdicioQuery.data.saving.para_validacao} em validação (AKS/ASR) dentro do total, {fmtBRLCurto(desperdicioQuery.data.saving.para_validacao_custo_mensal)}/mês
                           </div>
                         )}
-                        {desperdicioQuery.data.saving.eliminados_recentes > 0 && (
+                        {desperdicioQuery.data.saving.nao_contabilizados_piso > 0 && (
                           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
-                            title="Excluídos com menos de 7 dias como órfãos — costuma ser rotatividade normal de infra (Private Endpoint recriado, por exemplo), não resultado do processo">
-                            {desperdicioQuery.data.saving.eliminados_recentes} de {desperdicioQuery.data.saving.recursos_eliminados} com menos de 7 dias como órfão
+                            title={`O fluxo espera ${desperdicioQuery.data.saving.dias_min_orfao} dias com o recurso órfão antes de agir. Exclusão mais rápida não veio do processo — foi o ciclo de vida da própria infra. Os itens continuam visíveis no detalhe.`}>
+                            {desperdicioQuery.data.saving.nao_contabilizados_piso} não contabilizado(s): menos de {desperdicioQuery.data.saving.dias_min_orfao} dias como órfão
                           </div>
                         )}
                         <button
@@ -1605,12 +1610,20 @@ export default function InventarioView() {
                         </thead>
                         <tbody>
                           {desperdicioQuery.data.saving.itens.map((i) => (
-                            <tr key={i.resource_id}>
+                            // Linha que não contou fica esmaecida, não escondida: sem ver o
+                            // item barrado ninguém consegue conferir se o piso está calibrado.
+                            <tr key={i.resource_id} style={i.contabilizado ? undefined : { opacity: 0.55 }}>
                               <td>
                                 {i.nome || '—'}
                                 {i.motivo_validacao && (
                                   <span className="badge" style={{ marginLeft: 6, background: 'var(--orange,#ff8c42)' }}>
                                     {i.motivo_validacao === 'aks_pvc' ? 'AKS/PVC' : 'ASR'}
+                                  </span>
+                                )}
+                                {!i.contabilizado && (
+                                  <span className="badge" style={{ marginLeft: 6 }}
+                                    title={`Não entra no total: ficou menos de ${desperdicioQuery.data!.saving!.dias_min_orfao} dias como órfão`}>
+                                    não contabilizado
                                   </span>
                                 )}
                               </td>
