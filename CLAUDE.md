@@ -45,6 +45,8 @@ npm start                # Prod: node server.js
 | **Cost Rules** | RN-* financial formulas | 09-CALCULADORA |
 | **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, Auditoria de Consultas KQL, Sentinel e Commitment Tier separados, sugestão de tier | `server.js` ("LOG ANALYTICS FINOPS" block) |
 | **Multi-SP (v4.2)** | Coleta simultânea por Service Principal, filtro global de Tenant | `_getInventarioEscopos()`, `_coletasEmExecucao` |
+| **Mailing de Comunicados** | Broadcast corporativo via relay SMTP anônimo, cadastro único de contatos, editor visual (TipTap), acompanhamento por destinatário | `server.js` ("MAILING DE COMUNICADOS" block), `frontend/src/views/Mailing*` |
+| **Economia realizada** | Órfão identificado + excluído + custo faturado = saving auditável | `_apurarSavingOrfaos()`, `_resumoSavingOrfaos()`, `azure_desperdicio_saving` |
 | **Deployment** | Docker, PM2, systemd | 10-DEPLOYMENT |
 
 ---
@@ -76,6 +78,38 @@ Meses anteriores têm cobertura parcial. Número em GB para mês antigo é parci
 
 **`frontend/dist/` é gitignored.** Deploy sem `npm run frontend:build` serve tela em branco.
 
+**Métrica nova tem que usar a MESMA base de recorte da métrica irmã.**
+O usuário pegou isto antes dos testes: o card de economia contava disco de PVC/AKS que a tela de
+desperdício ao lado já excluía, e o único recurso com custo apurado era justamente um
+`pvc-*` num RG `mc_*` — 100% do número exibido estava errado. Antes de mostrar qualquer número
+novo, procure a métrica irmã, veja que filtros ela aplica, e ou aplique os mesmos ou explique na
+tela por que não. Divergência proposital se expõe ("1 em validação dentro do total"), não se omite.
+
+**`custo_mensal_estimado === null` é "não achamos o billing", NUNCA "é grátis".**
+Por isso o recorte do que aparece na visão de FinOps é por TIPO de recurso que não fatura
+(`_DESP_CATEGORIAS_SEM_CUSTO`, hoje só `nic_orfa`), não por custo nulo. Medido amostrando 300
+recursos vivos de cada tipo: NIC 0/300 faturam; IP público 287/300; disco 293/300; snapshot
+273/300. Filtrar por `null` esconderia 182 discos e snapshots reais, um deles órfão há 1242 dias.
+
+**Economia só conta exclusão após 30 dias como órfão (`_SAVING_DIAS_MIN_ORFAO`).**
+É o prazo do fluxo real: o time espera isso antes de agir, então exclusão mais rápida veio do
+ciclo de vida da infra, não do processo. Vale para todas as categorias. Quem não cumpre o piso
+continua visível no detalhe, marcado — "não contabilizamos" é diferente de "não economizamos", e
+esconder impediria calibrar o piso. Exceções que a regra não pega têm marcação manual, com motivo
+e autor obrigatórios (`ignorado_*` em `azure_desperdicio_saving`).
+
+**Dado que só existe no Resource Graph precisa ser gravado na DETECÇÃO.**
+Depois que o recurso é excluído ele some do ARG. `origem_resource_id` (disco que gerou o snapshot,
+usado para não contar a mesma economia duas vezes) e `primeira_deteccao_em` são gravados na hora
+da detecção/apuração justamente por isso — e `primeira_deteccao_em` fica congelado: "dias como
+órfão na data da exclusão" é fato histórico, não algo que deva mudar depois.
+
+**E-mail só para o que é acionável, com prazo, em volume limitado e para quem pode agir.**
+Os quatro critérios juntos. Alerta por item dentro de laço de coleta vira rajada sem teto — foi o
+caso de mudança de propriedade (hoje só sino) e de anomalia de crescimento (hoje um resumo único;
+eram ~157/dia para um destinatário, e de forma recorrente, porque o dedup libera a chave a cada
+24h e a janela de detecção são 35 dias). Para rotear ao responsável use `_destinatariosPara()`.
+
 ---
 
 ## 💡 Memory Topics
@@ -85,6 +119,8 @@ Meses anteriores têm cobertura parcial. Número em GB para mês antigo é parci
 - **[[database-schema]]** — PostgreSQL tables, indexes, resource_id case
 - **[[frontend-react-migration]]** — Strangler fig, bridge, checklist
 - **[[branding-logos]]** — Theme-aware assets, CSS filters
+- **[[mailing-comunicados]]** — Relay anônimo separado do SMTP de Alertas; unificação pendente
+- **[[feedback-consistencia-metricas]]** — Conferir base de recorte entre métricas irmãs
 
 ---
 
@@ -103,6 +139,20 @@ criado em background no startup e leva ~10 min numa base de 9M linhas (telas de 
 ficam lentas até terminar); a tabela `log_analytics_commitment_snapshot` nasce vazia e acumula uma
 linha por workspace/dia; o agendador agora dispara **todas** as SPs due no mesmo tick (antes
 `LIMIT 1`), então reveja o `max` do pool PostgreSQL se houver muitas SPs ativas.
+
+**Depois da v4.2** — as tabelas do Mailing (`mailing_*`) e de economia (`azure_desperdicio_saving`)
+nascem no startup, vazias, sem passo manual. Duas coisas a saber:
+
+- **Onde ficam os segredos da aplicação**: no BANCO, cifrados com a `MASTER_KEY` — Service
+  Principals em `azure_coleta_config`, senha do SMTP em `integracoes`. O `.env` guarda só o que o
+  processo precisa antes de existir banco (conexão, `JWT_SECRET`, `MASTER_KEY`). Consequência: a
+  `MASTER_KEY` faz parte do backup junto com o dump; perdê-la ou trocá-la torna todas as
+  credenciais salvas ilegíveis, e elas precisam ser recadastradas uma a uma pelas telas. Quando
+  isso acontece o sintoma é `[Cripto] FALHA ao decifrar um segredo` no log, e o envio falha com
+  `535 Incorrect authentication data`.
+- **O Mailing usa relay SMTP anônimo próprio** (`integracoes` tipo `mailing_relay`, sem senha,
+  autorizado por IP), separado do SMTP de Alertas. O "Testar Conexão" pode falhar na estação e
+  funcionar em produção — é liberação por IP de origem, não configuração errada.
 
 See `MODULES/10-DEPLOYMENT`, `DEPLOYMENT_CHECKLIST.md` for full checklist.
 
@@ -124,3 +174,22 @@ Texto duplicado na tela (mesmo número em dois cards) resolve por `role`, não p
 A suíte leva ~4 min e às vezes cospe `[vitest-pool]: Timeout waiting for worker to respond` em
 alguns arquivos — é o pool de forks estourando no Windows, não teste quebrado; o exit code segue 0
 e a contagem de arquivos fecha. Só investigue se algum arquivo aparecer como `failed`.
+
+Quando o pool flaka a ponto de a CONTAGEM variar entre execuções (já aconteceu: 54 arquivos numa
+rodada, 39 com 15 erros na seguinte), não adianta reler a saída — peça relatório estruturado, que
+não depende do stdout:
+
+```bash
+cd frontend && npx vitest run --reporter=json --outputFile=<caminho>.json --pool=threads --maxWorkers=2
+```
+
+Confirmar comportamento de função embutida em `server.js` sem subir o servidor: extrair o trecho
+por linha e executá-lo com `new Function(...deps)`, injetando dependências stubadas. Foi assim que
+se provou que 157 anomalias viram 1 e-mail e que o resumo de economia trata os dois portais com
+bases diferentes. **Vale o esforço**: `node --check` passa em código sintaticamente válido e
+semanticamente errado — um bloco de resumo acabou DENTRO do laço que deveria agregar, e só o teste
+pegou.
+
+Servidor de desenvolvimento: se uma mudança não refletir, confira se o processo na porta 3000 não
+é um node órfão (nodemon morre e deixa o filho rodando, servindo código antigo indefinidamente).
+`Get-NetTCPConnection -LocalPort 3000 -State Listen` mostra o PID e a hora de início.
