@@ -149,6 +149,9 @@ beforeEach(() => {
   vi.clearAllMocks()
   window.showToast = vi.fn()
   vi.mocked(coletaApi.listSPs).mockResolvedValue([])
+  // A barra de progresso das coletas consulta isto ao montar; sem o default a query resolve
+  // undefined e o React Query reclama em toda renderização da tela.
+  vi.mocked(logAnalyticsApi.getProgressoLogAnalytics).mockResolvedValue({ execucoes: [] })
   vi.mocked(logAnalyticsApi.getLogAnalyticsWorkspaces).mockResolvedValue(mockWorkspaces)
   vi.mocked(logAnalyticsApi.getLogAnalyticsResumo).mockResolvedValue(mockResumo)
   vi.mocked(logAnalyticsApi.getLogAnalyticsRecomendacoes).mockResolvedValue(mockRecomendacoes)

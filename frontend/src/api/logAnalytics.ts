@@ -457,6 +457,28 @@ export const getLogAnalyticsCustoObservabilidade = (mes?: string, spId?: number 
   return apiFetch<LogAnalyticsCustoObservabilidade>('GET', '/log-analytics/custo-observabilidade' + (q.toString() ? '?' + q : ''))
 }
 
+/** Andamento de uma das três coletas desta tela. */
+export interface LogAnalyticsExecucao {
+  tipo: 'coleta' | 'diagnostic' | 'ingestao_recurso'
+  /** Texto curto do que está acontecendo ("descobrindo workspaces", "concluído", "falhou"). */
+  fase: string
+  atual: number
+  /** 0 enquanto a fase de descoberta não terminou — só depois dá pra saber quantos são. */
+  total: number
+  /** Último item processado (nome do workspace, por exemplo). */
+  detalhe: string | null
+  iniciado_em: string
+  concluido_em: string | null
+  erro: string | null
+  em_execucao: boolean
+  segundos: number
+}
+
+// Barato (lê um Map em memória) — feito pra ser chamado de segundo em segundo enquanto houver
+// coleta rodando. Inclui o que acabou de terminar, pra barra não sumir no instante da conclusão.
+export const getProgressoLogAnalytics = () =>
+  apiFetch<{ execucoes: LogAnalyticsExecucao[] }>('GET', '/log-analytics/progresso')
+
 export const forcarColetaLogAnalytics = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/coleta/forcar')
 

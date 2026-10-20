@@ -11,6 +11,7 @@ import {
 } from '../api/logAnalytics'
 import LogAnalyticsConsumoModal from '../components/LogAnalyticsConsumoModal'
 import CmsMultiSelect from '../components/CmsMultiSelect'
+import LogAnalyticsProgressoBar from '../components/LogAnalyticsProgressoBar'
 import { TenantSelector } from '../components/TenantSelector'
 import { useTenantFilter } from '../contexts/TenantFilterContext'
 
@@ -419,6 +420,10 @@ export default function LogAnalyticsView() {
         </button>
         </div>
       </div>
+
+      {/* Logo abaixo dos botões que disparam as coletas: é onde o olho já está quando o
+          usuário clica. Não renderiza nada quando não há execução recente. */}
+      <LogAnalyticsProgressoBar />
 
       <div className="stats-grid-5">
         <div className="stat-card accent">

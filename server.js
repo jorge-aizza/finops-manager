@@ -18049,10 +18049,46 @@ async function _coletarAppInsightsTudo() {
 // então usamos o Resource Graph só pra ENUMERAR candidatos (rápido, tabela `resources` é
 // confiável) e chamamos a API oficial recurso a recurso, em paralelo. Por isso cadência
 // própria (semanal + botão manual), não entra no loop diário de 24h da coleta principal.
+// ── Progresso das coletas de Log Analytics ──────────────────────────────────
+// As três coletas desta tela são longas (medido no startup: 83 min a principal, 456s os
+// Diagnostic Settings) e até aqui só existia um booleano "em execução". A tela disparava,
+// mostrava um toast e invalidava as consultas por tempo fixo — o usuário não tinha como
+// saber se estava andando, travado ou já terminado.
+//
+// Mesma ideia do `_coletasEmExecucao` da coleta Azure: Map por tipo com o progresso dentro.
+// A entrada NÃO é apagada ao concluir, só sobrescrita no próximo disparo — assim a tela
+// mostra o resultado final (e o erro, quando houve) até o usuário sair dela.
+const _LA_PROGRESSO_TTL_MS = 10 * 60_000; // tempo que uma execução concluída continua visível
+const _laProgresso = new Map(); // tipo -> { fase, atual, total, detalhe, iniciadoEm, concluidoEm, erro }
+
+function _laProgIniciar(tipo, fase, total = 0) {
+  _laProgresso.set(tipo, { fase, atual: 0, total, detalhe: null, iniciadoEm: new Date(), concluidoEm: null, erro: null });
+}
+// `total` pode chegar depois da fase de descoberta (só aí se sabe quantos workspaces há).
+function _laProgAtualizar(tipo, campos) {
+  const p = _laProgresso.get(tipo);
+  if (p) Object.assign(p, campos);
+}
+function _laProgAvancar(tipo, detalhe) {
+  const p = _laProgresso.get(tipo);
+  if (!p) return;
+  p.atual++;
+  if (detalhe !== undefined) p.detalhe = detalhe;
+}
+function _laProgFinalizar(tipo, { erro = null, detalhe = null } = {}) {
+  const p = _laProgresso.get(tipo);
+  if (!p) return;
+  p.concluidoEm = new Date();
+  p.erro = erro ? String(erro) : null;
+  if (detalhe) p.detalhe = detalhe;
+  p.fase = erro ? "falhou" : "concluído";
+}
+
 let _logAnalyticsDiagEmExecucao = false;
 async function _coletarDiagnosticSettingsTudo() {
   if (_logAnalyticsDiagEmExecucao) return { ok: false, motivo: 'coleta de Diagnostic Settings já em execução' };
   _logAnalyticsDiagEmExecucao = true;
+  _laProgIniciar('diagnostic', 'descobrindo recursos monitoráveis');
   const t0 = Date.now();
   try {
     await ensureLogAnalyticsTable();
@@ -18065,6 +18101,7 @@ async function _coletarDiagnosticSettingsTudo() {
     const tiposClause = _LOG_ANALYTICS_TIPOS_MONITORAVEIS.map(t => `'${t}'`).join(', ');
     const kql = `resources | where type in (${tiposClause}) | project id, type, subscriptionId`;
     const candidatos = await _resourceGraphQueryTodasSps(kql);
+    _laProgAtualizar('diagnostic', { fase: 'consultando Diagnostic Settings', total: candidatos.length });
     console.log(`[LogAnalytics] Diagnostic Settings: ${candidatos.length} recurso(s) candidato(s) de ${_LOG_ANALYTICS_TIPOS_MONITORAVEIS.length} tipo(s) monitorados.`);
 
     const linhas = [];
@@ -18085,6 +18122,7 @@ async function _coletarDiagnosticSettingsTudo() {
         resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 20_000 });
       } catch (e) { outrasFalhas++; anotar(`rede: ${e.message}`.slice(0, 60)); return; }
       checados++;
+      _laProgAvancar('diagnostic');
       if (resp.status === 404) { naoEncontrados++; return; } // recurso efêmero (ex.: VM de cluster auto-scaling), já não existe
       if (!resp.ok) {
         outrasFalhas++;
@@ -18154,9 +18192,11 @@ async function _coletarDiagnosticSettingsTudo() {
       for (const [motivo, n] of top) console.log(`    ${String(n).padStart(5)}  ${motivo}`);
       if (motivosFalha.size > 30) console.log(`    ... mais ${motivosFalha.size - 30} causa(s) distinta(s)`);
     }
+    _laProgFinalizar('diagnostic', { detalhe: `${checados} de ${candidatos.length} recurso(s) checado(s), ${linhas.length} configuração(ões) encontrada(s)` });
     return { ok: true, candidatos: candidatos.length, checados, configuracoes: linhas.length, fanout };
   } catch (e) {
     console.warn('[LogAnalytics] Falha geral na coleta de Diagnostic Settings:', e.message);
+    _laProgFinalizar('diagnostic', { erro: e.message });
     return { ok: false, motivo: e.message };
   } finally {
     _logAnalyticsDiagEmExecucao = false;
@@ -18489,10 +18529,12 @@ let _logAnalyticsColetaEmExecucao = false;
 async function _coletarLogAnalyticsTudo(origem = 'agendado') {
   if (_logAnalyticsColetaEmExecucao) return { ok: false, motivo: 'coleta já em execução' };
   _logAnalyticsColetaEmExecucao = true;
+  _laProgIniciar('coleta', 'descobrindo workspaces');
   const t0 = Date.now();
   try {
     await ensureLogAnalyticsTable();
     const workspaces = await _descobrirLogAnalyticsWorkspaces();
+    _laProgAtualizar('coleta', { fase: 'coletando workspaces', total: workspaces.length });
     const { escopos } = await _getInventarioEscopos();
     // Cada workspace é consultado com a credencial da SP dona da sua assinatura — com mais de
     // uma SP cadastrada, o token de uma devolve 403 nos workspaces da outra.
@@ -18503,22 +18545,28 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
       (await pool.query(`SELECT workspace_guid FROM log_analytics_workspaces WHERE auditoria_consultas_habilitada = true`)).rows.map(r => r.workspace_guid)
     );
     const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
-      const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
-      if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
-      const { getToken, getLogAnalyticsToken } = escopo;
-      await _coletarIngestaoWorkspace(ws, getLogAnalyticsToken);
-      await _coletarTabelasWorkspace(ws, getToken);
-      if (comAuditoria.has(ws.workspace_guid)) {
-        try { await _coletarConsultasPorTabela(ws, getLogAnalyticsToken); }
-        catch (e) { console.warn(`[LogAnalytics] Falha ao coletar LAQueryLogs de ${ws.nome}:`, e.message); }
+      // `finally` para o contador andar mesmo quando o workspace lança (SP sem acesso, por
+      // exemplo) — senão a barra trava antes de 100% com a coleta já encerrada.
+      try {
+        const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+        if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
+        const { getToken, getLogAnalyticsToken } = escopo;
+        await _coletarIngestaoWorkspace(ws, getLogAnalyticsToken);
+        await _coletarTabelasWorkspace(ws, getToken);
+        if (comAuditoria.has(ws.workspace_guid)) {
+          try { await _coletarConsultasPorTabela(ws, getLogAnalyticsToken); }
+          catch (e) { console.warn(`[LogAnalytics] Falha ao coletar LAQueryLogs de ${ws.nome}:`, e.message); }
+        }
+        await _avaliarRegrasLogAnalytics(ws);
+        try { await _avaliarCommitmentTier(ws); }
+        catch (e) { console.warn(`[LogAnalytics] Falha ao avaliar Commitment Tier de ${ws.nome}:`, e.message); }
+        // Quem gerou o volume, não só quanto cada tabela ingeriu. É a etapa mais cara da coleta
+        // (uma consulta KQL por tabela grande), por isso vem por último e nunca derruba o resto.
+        try { await _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken); }
+        catch (e) { console.warn(`[LogAnalytics] Falha na ingestão por recurso de ${ws.nome}:`, e.message); }
+      } finally {
+        _laProgAvancar('coleta', ws.nome || ws.workspace_guid);
       }
-      await _avaliarRegrasLogAnalytics(ws);
-      try { await _avaliarCommitmentTier(ws); }
-      catch (e) { console.warn(`[LogAnalytics] Falha ao avaliar Commitment Tier de ${ws.nome}:`, e.message); }
-      // Quem gerou o volume, não só quanto cada tabela ingeriu. É a etapa mais cara da coleta
-      // (uma consulta KQL por tabela grande), por isso vem por último e nunca derruba o resto.
-      try { await _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken); }
-      catch (e) { console.warn(`[LogAnalytics] Falha na ingestão por recurso de ${ws.nome}:`, e.message); }
     });
     // DCR é barato (1 chamada por subscription, não por recurso) — entra na coleta diária.
     // Diagnostic Settings NÃO entra aqui (etapa cara, 1 chamada por recurso do tenant inteiro)
@@ -18539,9 +18587,11 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
     const falhas = resultados.filter(r => r.status === 'rejected');
     console.log(`[LogAnalytics] ${origem}: ${workspaces.length} workspace(s), ${falhas.length} falha(s) em ${Math.round((Date.now() - t0) / 1000)}s`);
     if (falhas.length) console.warn('[LogAnalytics] Primeira falha:', falhas[0].reason?.message);
+    _laProgFinalizar('coleta', { detalhe: `${workspaces.length} workspace(s), ${falhas.length} falha(s)` });
     return { ok: true, workspaces: workspaces.length, falhas: falhas.length };
   } catch (e) {
     console.warn('[LogAnalytics] Falha geral na coleta:', e.message);
+    _laProgFinalizar('coleta', { erro: e.message });
     return { ok: false, motivo: e.message };
   } finally {
     _logAnalyticsColetaEmExecucao = false;
@@ -19520,6 +19570,34 @@ app.get('/api/log-analytics/recomendacoes', authMiddleware, dbMiddleware, async 
   } catch (e) { _dbErr(res, e); }
 });
 
+// Progresso das três coletas desta tela. Consulta barata (lê um Map em memória), feita pra
+// ser chamada de segundo em segundo enquanto houver algo rodando.
+//
+// Devolve também o que ACABOU de terminar, por _LA_PROGRESSO_TTL_MS: sem isso a barra some
+// no instante da conclusão e o usuário nunca vê o resultado — só o sumiço, que é
+// indistinguível de "a tela perdeu o estado".
+app.get('/api/log-analytics/progresso', authMiddleware, async (_req, res) => {
+  const agora = Date.now();
+  const execucoes = [];
+  for (const [tipo, p] of _laProgresso) {
+    const fim = p.concluidoEm ? new Date(p.concluidoEm).getTime() : null;
+    if (fim && agora - fim > _LA_PROGRESSO_TTL_MS) { _laProgresso.delete(tipo); continue; }
+    execucoes.push({
+      tipo,
+      fase: p.fase,
+      atual: p.atual,
+      total: p.total,
+      detalhe: p.detalhe,
+      iniciado_em: p.iniciadoEm,
+      concluido_em: p.concluidoEm,
+      erro: p.erro,
+      em_execucao: !p.concluidoEm,
+      segundos: Math.round((( fim || agora) - new Date(p.iniciadoEm).getTime()) / 1000),
+    });
+  }
+  res.json({ execucoes });
+});
+
 app.post('/api/log-analytics/coleta/forcar', authMiddleware, dbMiddleware, async (_req, res) => {
   if (_logAnalyticsColetaEmExecucao) return res.status(409).json({ error: 'Coleta de Log Analytics já em execução' });
   res.status(202).json({ ok: true, message: 'Coleta de Log Analytics iniciada — pode levar alguns minutos' });
@@ -19804,23 +19882,33 @@ app.post('/api/log-analytics/ingestao-recurso/forcar', authMiddleware, dbMiddlew
   if (_laIngRecursoEmExecucao) return res.status(409).json({ error: 'Coleta de ingestão por recurso já em execução' });
   res.status(202).json({ ok: true, message: 'Coleta de ingestão por recurso iniciada — leva vários minutos' });
   _laIngRecursoEmExecucao = true;
+  _laProgIniciar('ingestao_recurso', 'descobrindo workspaces');
   (async () => {
     const t0 = Date.now();
     try {
       const workspaces = await _descobrirLogAnalyticsWorkspaces();
+      _laProgAtualizar('ingestao_recurso', { fase: 'consultando ingestão por recurso', total: workspaces.length });
       const { escopos } = await _getInventarioEscopos();
       const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
       let tabelas = 0, linhas = 0;
       const r = await _mapLimitSettled(workspaces, 4, async (ws) => {
         const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
-        if (!escopo) return;
-        const x = await _coletarIngestaoPorRecurso(ws, escopo.getLogAnalyticsToken);
-        tabelas += x.tabelas; linhas += x.linhas;
+        // `finally` para o contador andar inclusive no workspace pulado por falta de escopo
+        // e no que lançou — senão a barra trava antes de 100% sem nada estar errado.
+        try {
+          if (!escopo) return;
+          const x = await _coletarIngestaoPorRecurso(ws, escopo.getLogAnalyticsToken);
+          tabelas += x.tabelas; linhas += x.linhas;
+        } finally {
+          _laProgAvancar('ingestao_recurso', ws.nome || ws.workspace_guid);
+        }
       });
       const falhas = r.filter((x) => x.status === 'rejected').length;
       console.log(`[LogAnalytics] Ingestão por recurso: ${workspaces.length} workspace(s), ${tabelas} tabela(s), ${linhas} linha(s), ${falhas} falha(s) em ${Math.round((Date.now() - t0) / 1000)}s`);
+      _laProgFinalizar('ingestao_recurso', { detalhe: `${workspaces.length} workspace(s), ${tabelas} tabela(s), ${linhas} linha(s)` });
     } catch (e) {
       console.warn('[LogAnalytics] Ingestão por recurso falhou:', e.message);
+      _laProgFinalizar('ingestao_recurso', { erro: e.message });
     } finally { _laIngRecursoEmExecucao = false; }
   })();
 });
