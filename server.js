@@ -928,6 +928,29 @@ app.post('/api/integrations/:tipo', authMiddleware, adminMiddleware, async (req,
   } catch (err) { _dbErr(res, err); }
 });
 
+// Liga/desliga uma integração sem tocar na configuração (2026-10-21, bug relatado pelo usuário:
+// "quando desativo uma configuração na tela de integração ele não salva").
+//
+// A causa era estrutural, não um erro de gravação: o botão "Salvar Configuração" vive DENTRO do
+// painel `#config-<tipo>`, que o próprio toggle esconde ao desligar. Desligar escondia o botão
+// que gravaria o desligamento, então o estado "inativo" era impossível de persistir pela tela.
+//
+// UPDATE puro, nunca INSERT: se a integração ainda não foi configurada não há o que ativar, e
+// criar linha com config vazia só produziria uma integração "ligada" que não envia nada. Quem
+// configura pela primeira vez passa pelo POST acima, que grava config e `ativo` juntos.
+app.patch('/api/integrations/:tipo/ativo', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE integracoes SET ativo = $2, atualizado_em = NOW() WHERE tipo = $1 RETURNING tipo, ativo`,
+      [req.params.tipo, !!req.body?.ativo]
+    );
+    // Sem linha: nada foi salvo, e a tela precisa saber pra não dizer "salvo" a quem só
+    // alternou o botão de uma integração nunca configurada.
+    if (!r.rows.length) return res.json({ ok: true, persistido: false });
+    res.json({ ok: true, persistido: true, ativo: r.rows[0].ativo });
+  } catch (err) { _dbErr(res, err); }
+});
+
 // Testa credenciais SMTP ainda não salvas (mesmo padrão de POST /api/azure-coleta/sps/:id/testar
 // — o erro cru É o propósito da rota) — envia um e-mail de teste pro próprio remetente.
 // Timeouts explícitos de 10s por fase (2026-09-02) — mesmo motivo de `_sendEmail`: sem isso, um
@@ -8067,10 +8090,69 @@ async function _tentarClaimAlerta(tipo, chave) {
   return r.rows.length > 0;
 }
 
+// ── Quais alertas enviar (2026-10-21, pedido do usuário) ────────────────────────────────────
+// Catálogo dos alertas que mandam e-mail. A chave é o que fica gravado; o rótulo alimenta a
+// tela de Integrações. Alerta que só vai pro sino (mudança de propriedade) não entra aqui —
+// não há e-mail pra ligar ou desligar.
+const _ALERTAS_CATALOGO = [
+  { chave: 'orcamento_databricks', label: 'Orçamento Databricks estourado ou em alerta' },
+  { chave: 'anomalia_databricks', label: 'Anomalia de custo e de consumo no Databricks' },
+  { chave: 'reserva_vencendo', label: 'Reserva cloud vencendo ou expirada' },
+  { chave: 'acao_vencendo', label: 'Ação FinOps com prazo vencendo' },
+  { chave: 'gap_coleta', label: 'Gap de coleta — inventário pausado' },
+  { chave: 'anomalia_crescimento', label: 'Crescimento anômalo de recursos (resumo único)' },
+  { chave: 'orcamento_inventario', label: 'Orçamento de Inventário estourado ou em alerta' },
+  { chave: 'relatorio_semanal', label: 'Relatório semanal de Inventário' },
+  { chave: 'relatorio_diario', label: 'Relatório diário de Inventário' },
+  { chave: 'coleta_erro', label: 'Erro em coleta' },
+  { chave: 'estimativa_status', label: 'Estimativa aprovada ou reprovada' },
+];
+
+// Guarda a lista do que está DESLIGADO, não do que está ligado: assim o padrão é "tudo
+// habilitado" e quem nunca mexeu na tela continua recebendo o que já recebia — alerta novo
+// também nasce ligado, em vez de ficar mudo até alguém lembrar de habilitar.
+//
+// Sem cache: estas funções rodam em agendador, não em caminho de requisição, e uma consulta
+// indexada por execução é barata perto de alertar errado por causa de cache velho.
+async function _alertaAtivo(chave) {
+  if (!pool) return true;
+  try {
+    const r = await pool.query(`SELECT config FROM integracoes WHERE tipo='alertas_tipos'`);
+    const desativados = r.rows[0]?.config?.desativados;
+    return !(Array.isArray(desativados) && desativados.includes(chave));
+  } catch (_) {
+    return true; // falha de consulta não pode silenciar alerta
+  }
+}
+
+app.get('/api/alertas-tipos', authMiddleware, adminMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`SELECT config FROM integracoes WHERE tipo='alertas_tipos'`);
+    const desativados = Array.isArray(r.rows[0]?.config?.desativados) ? r.rows[0].config.desativados : [];
+    res.json({ alertas: _ALERTAS_CATALOGO.map((a) => ({ ...a, ativo: !desativados.includes(a.chave) })) });
+  } catch (err) { _dbErr(res, err); }
+});
+
+app.post('/api/alertas-tipos', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const validas = new Set(_ALERTAS_CATALOGO.map((a) => a.chave));
+    // Filtra por chave conhecida: sem isso, uma chave inventada ficaria gravada para sempre
+    // sem corresponder a alerta nenhum, e ninguém descobriria por que não aparece na tela.
+    const desativados = (Array.isArray(req.body?.desativados) ? req.body.desativados : []).filter((c) => validas.has(c));
+    await pool.query(
+      `INSERT INTO integracoes (tipo, config, ativo) VALUES ('alertas_tipos', $1, true)
+       ON CONFLICT (tipo) DO UPDATE SET config = EXCLUDED.config, atualizado_em = NOW()`,
+      [JSON.stringify({ desativados })]
+    );
+    res.json({ ok: true, desativados });
+  } catch (err) { _dbErr(res, err); }
+});
+
 // Orçamento Databricks estourado (≥75%) — chave inclui o mês (YYYY-MM) pra
 // reavisar todo mês se continuar estourado, em vez de nunca mais alertar depois
 // da primeira vez. Reaproveita a mesma regra de severidade da rota do dashboard.
 async function _checkOrcamentosDatabricks() {
+  if (!(await _alertaAtivo('orcamento_databricks'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8103,6 +8185,7 @@ async function _checkOrcamentosDatabricks() {
 // cooldown de 24h já cobre "continua anômalo → reavisa todo dia enquanto persistir",
 // mesmo padrão de reserva/ação vencendo acima).
 async function _checkAnomaliasDatabricks() {
+  if (!(await _alertaAtivo('anomalia_databricks'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8142,6 +8225,7 @@ async function _checkAnomaliasDatabricks() {
 // (checkRsvAlertsPopup, app.js). Destinatário: dono real (criado_por → usuarios.email)
 // quando existir; sem isso, lista padrão configurada no SMTP.
 async function _checkReservasVencendo() {
+  if (!(await _alertaAtivo('reserva_vencendo'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8173,6 +8257,7 @@ async function _checkReservasVencendo() {
 // match é feito no sentido contrário, req.user.nome ILIKE responsavel); sem
 // match, cai pra lista padrão.
 async function _checkAcoesVencendo() {
+  if (!(await _alertaAtivo('acao_vencendo'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8240,7 +8325,9 @@ async function _checkGapColetaInventario() {
       'inventario:auditoria'
     );
 
-    if (destinatarios.length) {
+    // Trava só o E-MAIL, não o sino: o registro em notificacoes_sistema acima vale mesmo com
+    // o alerta desligado — desligar aqui é "pare de me mandar e-mail disso", não "esconda".
+    if (destinatarios.length && await _alertaAtivo('gap_coleta')) {
       await _sendEmail({
         to: destinatarios,
         subject: `⚠️ Gap de coleta — Inventário pausado por ${diasDesdeUltima || '?'} dias`,
@@ -8307,7 +8394,9 @@ async function _checkAnomaliasCrescimentoInventario() {
   }
 
   // Resumo único, já ordenado pela anomalia mais forte.
-  if (destinatarios.length && novas.length) {
+  // Trava só o E-MAIL, não o sino: o registro em notificacoes_sistema acima vale mesmo com
+  // o alerta desligado — desligar aqui é "pare de me mandar e-mail disso", não "esconda".
+  if (destinatarios.length && novas.length && await _alertaAtivo('anomalia_crescimento')) {
     novas.sort((x, y) => y.severidade - x.severidade);
     const linhas = novas.map((x) => `<li style="margin-bottom:6px"><strong>${_escHtmlServer(x.escopoTxt)}</strong> — ${new Date(x.dia).toLocaleDateString('pt-BR')}: ${x.partesHtml.join(' e ')}</li>`).join('');
     await _sendEmail({
@@ -8327,6 +8416,7 @@ async function _checkAnomaliasCrescimentoInventario() {
 // "continua estourado → reavisa todo dia enquanto persistir" (mesmo padrão de reserva/
 // ação vencendo).
 async function _checkOrcamentosInventario() {
+  if (!(await _alertaAtivo('orcamento_inventario'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8355,6 +8445,7 @@ async function _checkOrcamentosInventario() {
 // data nova) — muda exatamente a cada 7 dias, então dispara no máximo 1x por semana
 // mesmo com o tick horário rodando o tempo todo.
 async function _checkRelatorioSemanalInventario() {
+  if (!(await _alertaAtivo('relatorio_semanal'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8477,6 +8568,7 @@ async function _computeRelatorioDiarioInventario(subsFiltro = null) {
 }
 
 async function _checkRelatorioDiarioInventario() {
+  if (!(await _alertaAtivo('relatorio_diario'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8535,6 +8627,7 @@ function _iniciarAlertasEmail() {
 // Chamada ao lado de cada _registrarNotificacaoColeta(...,'coleta_erro') — não
 // duplica a lógica de notificação in-app, só soma o envio por e-mail.
 async function _alertarColetaComErro(titulo, mensagem) {
+  if (!(await _alertaAtivo('coleta_erro'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8571,6 +8664,7 @@ async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, 
 // dedup (dispara 1x por troca real de status). `responsavel` é texto livre —
 // mesma tentativa de casar com usuarios.nome usada em _checkAcoesVencendo.
 async function _alertarEstimativaStatus(estimativa) {
+  if (!(await _alertaAtivo('estimativa_status'))) return;
   if (estimativa.status !== 'Aprovado' && estimativa.status !== 'Nao Aprovado') return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;

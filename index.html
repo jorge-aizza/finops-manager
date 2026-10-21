@@ -3377,6 +3377,32 @@
             </div>
           </div>
 
+          <!-- Quais alertas enviar (2026-10-21, pedido do usuário) — card SEM toggle próprio de
+               propósito: não é uma integração que liga/desliga, é a preferência de quais
+               e-mails saem pelo transporte configurado acima. Sempre aberto, por isso. -->
+          <div class="integration-card">
+            <div class="integration-header" style="justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:10px">
+                <svg class="integration-logo" viewBox="0 0 32 32" fill="none">
+                  <rect width="32" height="32" rx="4" fill="#22c55e"/>
+                  <path d="M9 16l5 5 9-10" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                </svg>
+                <div>
+                  <div class="integration-title">Alertas — Quais enviar</div>
+                  <div class="integration-sub">Desmarque o que não quer receber por e-mail. Vale para qualquer transporte (relay ou SMTP). O sino continua registrando tudo.</div>
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:12px">
+              <div id="alertas-tipos-lista" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:4px">
+                <div style="color:var(--text-muted);font-size:12px">Carregando...</div>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:10px">
+                <button type="button" class="btn-rep secondary" onclick="salvarAlertasTipos()">💾 Salvar seleção</button>
+              </div>
+            </div>
+          </div>
+
           <!-- Relay SMTP do Mailing de Comunicados — propositalmente SEPARADO do card de
                E-mail (SMTP) acima: é a config de envio dos Comunicados em massa, nunca a dos
                Alertas. Sem campo de senha de propósito — relay anônimo, autorizado por IP de
