@@ -459,7 +459,7 @@ export const getLogAnalyticsCustoObservabilidade = (mes?: string, spId?: number 
 
 /** Andamento de uma das três coletas desta tela. */
 export interface LogAnalyticsExecucao {
-  tipo: 'coleta' | 'diagnostic' | 'ingestao_recurso'
+  tipo: 'coleta' | 'diagnostic' | 'ingestao_recurso' | 'backfill_volume'
   /** Texto curto do que está acontecendo ("descobrindo workspaces", "concluído", "falhou"). */
   fase: string
   atual: number
@@ -481,6 +481,14 @@ export const getProgressoLogAnalytics = () =>
 
 export const forcarColetaLogAnalytics = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/coleta/forcar')
+
+// Backfill de volume sob demanda (2026-10-21, pedido do usuário: "gostaria de poder coletar
+// dados antigo para deixar no banco") — aceita período maior que os 30 dias padrão de
+// forcarColetaLogAnalytics. O teto real é a retenção de cada workspace na Azure, não um limite
+// deste sistema: pedir mais do que existe simplesmente devolve menos, e o resumo da coleta
+// (campo `detalhe` do progresso) informa quantos workspaces vieram truncados.
+export const backfillVolumeLogAnalytics = (dias: number) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/backfill-volume', { dias })
 
 // Etapa separada e mais cara (1 chamada por recurso monitorável do tenant) — cadência própria
 // (semanal), disparo manual independente do "Atualizar agora" de cima.

@@ -6,6 +6,7 @@ import {
   getLogAnalyticsRecursosVolume, getLogAnalyticsExportSemWorkspace, getLogAnalyticsCustoObservabilidade,
   forcarColetaLogAnalytics, forcarColetaDiagnosticSettings, forcarColetaIngestaoRecurso, detalharRecursoTabela,
   baixarLogAnalyticsExcel, baixarLogAnalyticsDashboardHtml, habilitarAuditoriaConsultas,
+  backfillVolumeLogAnalytics, getProgressoLogAnalytics,
   type LogAnalyticsSeveridade, type LogAnalyticsWorkspace, type LogAnalyticsRecursoDetalhado,
   type LogAnalyticsRankingItem,
 } from '../api/logAnalytics'
@@ -109,6 +110,10 @@ export default function LogAnalyticsView() {
   const [filtroSeveridade, setFiltroSeveridade] = useState<LogAnalyticsSeveridade | undefined>(undefined)
   const [exportando, setExportando] = useState(false)
   const [gerandoDashboard, setGerandoDashboard] = useState(false)
+  // Backfill de volume — dias pedidos pelo usuário (2026-10-21). O teto real é a retenção de
+  // cada workspace na Azure, não um limite daqui; 90 é só um valor inicial razoável (a maior
+  // parte dos workspaces desta base retém 90 dias de Usage).
+  const [backfillDias, setBackfillDias] = useState(90)
   const [workspaceClicado, setWorkspaceClicado] = useState<LogAnalyticsWorkspace | null>(null)
 
   const [detalheRecurso, setDetalheRecurso] = useState<{ tabela: string; recursos: LogAnalyticsRecursoDetalhado[]; janelaDias: number; limite: number } | null>(null)
@@ -196,6 +201,42 @@ export default function LogAnalyticsView() {
     },
     onError: (e: Error) => window.showToast?.(e.message, 'error'),
   })
+
+  // Backfill de volume (2026-10-21, pedido do usuário: "gostaria de poder coletar dados antigo
+  // para deixar no banco"). Separada de `coletaMutation` porque aceita um período, e invalida só
+  // as consultas que o volume alimenta — não dispara o restante do pipeline de workspace, que é
+  // o que torna este backfill mais rápido que "Atualizar agora" mesmo pedindo mais dias.
+  const backfillMutation = useMutation({
+    mutationFn: () => backfillVolumeLogAnalytics(backfillDias),
+    onSuccess: (r) => {
+      window.showToast?.(r.message, 'success')
+      // Sem setTimeout fixo como as outras: a barra de progresso já avisa quando terminou,
+      // então a invalidação roda só depois (ver efeito abaixo que observa `em_execucao`).
+    },
+    onError: (e: Error) => window.showToast?.(e.message, 'error'),
+  })
+
+  // Mesma queryKey que LogAnalyticsProgressoBar usa — React Query dedupe: as duas consultas
+  // compartilham cache e disparo de rede, não dobra a chamada. Observa quando o backfill
+  // termina pra invalidar as três consultas que leem log_analytics_ingestao_diaria (a tabela
+  // que o backfill escreve): resumo, workspaces e tabelas por workspace. Diferente das outras
+  // mutações desta tela (que usam um `setTimeout` chutado), aqui a duração varia muito com o
+  // período pedido — 90 dias podem levar bem mais que os ~5s/60s fixos das demais.
+  const progressoLogAnalyticsQuery = useQuery({
+    queryKey: ['log-analytics-progresso'],
+    queryFn: getProgressoLogAnalytics,
+    refetchInterval: (query) => query.state.data?.execucoes?.some((e) => e.em_execucao) ? 2000 : 15000,
+  })
+  const backfillConcluidoEmRef = useRef<string | null>(null)
+  useEffect(() => {
+    const exec = progressoLogAnalyticsQuery.data?.execucoes?.find((e) => e.tipo === 'backfill_volume')
+    if (!exec || exec.em_execucao || !exec.concluido_em) return
+    if (exec.concluido_em === backfillConcluidoEmRef.current) return
+    backfillConcluidoEmRef.current = exec.concluido_em
+    queryClient.invalidateQueries({ queryKey: ['log-analytics-resumo'] })
+    queryClient.invalidateQueries({ queryKey: ['log-analytics-workspaces'] })
+    queryClient.invalidateQueries({ queryKey: ['log-analytics-tabelas'] })
+  }, [progressoLogAnalyticsQuery.data, queryClient])
 
   const coletaDiagMutation = useMutation({
     mutationFn: forcarColetaDiagnosticSettings,
@@ -409,6 +450,31 @@ export default function LogAnalyticsView() {
           title="Recalcula quais recursos geraram os GB de cada workspace (consulta KQL por tabela) — alimenta 'Recursos por volume'">
           {coletaIngestaoRecursoMutation.isPending ? 'Coletando...' : '📍 Atualizar atribuição por recurso'}
         </button>
+        {/* Backfill de volume (2026-10-21) — visualmente separado dos três "Atualizar" acima,
+            de propósito: aqueles sempre olham os últimos dias fixos; este pede um PERÍODO.
+            O teto real é a retenção de cada workspace na Azure, não um limite daqui — pedir
+            mais do que existe simplesmente devolve menos, e o resumo da coleta (visível na
+            barra de progresso) informa quantos workspaces vieram truncados pela retenção. */}
+        <div
+          style={{ display: 'flex', alignItems: 'center', gap: 4, border: '1px solid var(--border)', borderRadius: 6, padding: '2px 4px 2px 8px' }}
+          title="Coleta volume de um período maior que os 30 dias padrão — limitado pela retenção real de cada workspace na Azure"
+        >
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Backfill de volume:</span>
+          <input
+            type="number" min={1} max={365} value={backfillDias === 0 ? '' : backfillDias} aria-label="Dias para backfill de volume"
+            // Campo vazio vira 0 em vez de forçar pra 1: snapar pra 1 a cada tecla apagada
+            // atrapalhava digitar um valor novo (limpar e teclar "45" virava "145" — o "1"
+            // reaparecia entre as teclas). O botão fica desabilitado enquanto vazio/0; quem
+            // disparar mesmo assim cai no clamp de _MIN_ dentro do próprio clique.
+            onChange={(e) => setBackfillDias(Math.max(0, Math.min(365, e.target.valueAsNumber || 0)))}
+            style={{ width: 56, fontSize: 12, padding: '5px 6px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--text)' }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>dias</span>
+          <button className="btn-ghost" style={{ padding: '7px 10px', fontSize: 12 }}
+            disabled={backfillMutation.isPending || backfillDias < 1} onClick={() => backfillMutation.mutate()}>
+            {backfillMutation.isPending ? 'Coletando...' : '📥 Coletar'}
+          </button>
+        </div>
         <button className="btn-export" disabled={exportando} onClick={exportar}>
           <svg viewBox="0 0 16 16" fill="none" width={14} height={14}><path d="M2 12v2h12v-2M8 2v8M5 7l3 3 3-3" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" /></svg>
           {exportando ? 'Exportando...' : 'Exportar Excel'}

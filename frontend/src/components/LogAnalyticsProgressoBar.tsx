@@ -15,6 +15,7 @@ const ROTULO: Record<LogAnalyticsExecucao['tipo'], string> = {
   coleta: 'Coleta geral',
   diagnostic: 'Diagnostic Settings',
   ingestao_recurso: 'Atribuição por recurso',
+  backfill_volume: 'Backfill de volume',
 }
 
 function duracao(segundos: number) {

@@ -301,6 +301,27 @@ describe('LogAnalyticsView', () => {
     await waitFor(() => expect(window.showToast).toHaveBeenCalledWith('Coleta iniciada', 'success'))
   })
 
+  // Backfill de volume (2026-10-21, pedido do usuário: "gostaria de poder coletar dados antigo
+  // para deixar no banco") — campo próprio de dias, separado do botão "Atualizar agora" que
+  // sempre olha os últimos 30 dias fixos.
+  it('"Backfill de volume" envia o número de dias digitado', async () => {
+    vi.mocked(logAnalyticsApi.backfillVolumeLogAnalytics).mockResolvedValue({ ok: true, message: 'Backfill de 90 dia(s) iniciado' })
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('rg-shared')
+
+    // 90 é o valor inicial do campo — clicar sem digitar já dispara com ele.
+    await user.click(screen.getByRole('button', { name: '📥 Coletar' }))
+    await waitFor(() => expect(logAnalyticsApi.backfillVolumeLogAnalytics).toHaveBeenCalledWith(90))
+    await waitFor(() => expect(window.showToast).toHaveBeenCalledWith('Backfill de 90 dia(s) iniciado', 'success'))
+
+    const campo = screen.getByLabelText('Dias para backfill de volume')
+    await user.clear(campo)
+    await user.type(campo, '45')
+    await user.click(screen.getByRole('button', { name: '📥 Coletar' }))
+    await waitFor(() => expect(logAnalyticsApi.backfillVolumeLogAnalytics).toHaveBeenCalledWith(45))
+  })
+
   it('"Exportar Excel" baixa com o mês e os workspaces do FILTRO — clicar na linha só abre o detalhe, não recorta o export', async () => {
     vi.mocked(logAnalyticsApi.baixarLogAnalyticsExcel).mockResolvedValue(undefined)
     const user = userEvent.setup()

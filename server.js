@@ -17686,9 +17686,32 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
 
 // UMA query KQL por workspace cobre as 5 regras (ingestão por tabela × dia, 30d) — ver
 // _avaliarRegrasLogAnalytics. Plano de dados — exige "Log Analytics Reader" na SP.
-async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
+// Retenção INTERATIVA (não a total com arquivo) da tabela `Usage` num workspace — é o teto real
+// de quanto dá pra pedir pela Query API usada aqui. `retencao_total_dias` inclui o arquivo
+// (Archive Tier), que exige um mecanismo totalmente diferente (search job, assíncrono, custo por
+// GB varrido) fora do escopo desta coleta — usar o total aqui faria o backfill prometer um
+// alcance que a consulta não entrega, e o sintoma seria resultado vazio sem explicação.
+// null quando a tabela ainda não foi inventariada (_coletarTabelasWorkspace nunca rodou pra este
+// workspace) — nesse caso não há teto conhecido pra aplicar, a consulta segue sem clamp.
+async function _laRetencaoUsage(workspaceGuid) {
+  const r = await pool.query(
+    `SELECT retencao_dias FROM log_analytics_tabelas WHERE workspace_guid = $1 AND tabela = 'Usage'`,
+    [workspaceGuid]
+  );
+  return r.rows[0]?.retencao_dias ?? null;
+}
+
+// `diasJanela`: 30 no caminho de todo dia (chamador não passa nada); maior quando vem de um
+// backfill explícito (ver _backfillVolumeLogAnalytics). SEMPRE comparado contra a retenção real
+// da tabela antes de consultar — pedir mais do que a Azure ainda guarda não dá erro, devolve
+// resultado vazio pros dias que já saíram da janela, e isso pareceria "consumo zero" em vez de
+// "não sabemos". O retorno carrega `diasEfetivos`/`truncado` pra quem chama poder avisar o
+// usuário, em vez de silenciar a diferença entre pedido e entregue.
+async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken, diasJanela = 30) {
+  const retencao = await _laRetencaoUsage(ws.workspace_guid);
+  const diasEfetivos = retencao ? Math.min(diasJanela, retencao) : diasJanela;
   const token = await getLogAnalyticsToken();
-  const kql = `Usage | where TimeGenerated > ago(30d) | summarize GB = sum(Quantity)/1024 by DataType, bin(TimeGenerated, 1d)`;
+  const kql = `Usage | where TimeGenerated > ago(${diasEfetivos}d) | summarize GB = sum(Quantity)/1024 by DataType, bin(TimeGenerated, 1d)`;
   const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
   const resp = await _cbFetch(url, {
     method: 'POST',
@@ -17704,7 +17727,8 @@ async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
   }
   const data = await _safeRespJson(resp);
   const table = data.tables?.[0];
-  if (!table || !table.rows?.length) return [];
+  const meta = { diasSolicitados: diasJanela, diasEfetivos, retencaoConhecida: retencao !== null, truncado: diasEfetivos < diasJanela };
+  if (!table || !table.rows?.length) return Object.assign([], meta);
   const cols = table.columns.map(c => c.name);
   const iGB = cols.indexOf('GB'), iTipo = cols.indexOf('DataType'), iDia = cols.indexOf('TimeGenerated');
   const linhas = table.rows.map(r => ({ tabela: r[iTipo], dia: String(r[iDia]).slice(0, 10), gb: Number(r[iGB]) || 0 }));
@@ -17721,7 +17745,7 @@ async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
     }
     await c.query('COMMIT');
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
-  return linhas;
+  return Object.assign(linhas, meta);
 }
 
 // Config de retenção por tabela — plano de gerência (ARM), MESMO token do
@@ -18523,6 +18547,59 @@ async function _avaliarCommitmentTier(ws) {
     await c.query('COMMIT');
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
   return recos;
+}
+
+// ── Backfill de volume (2026-10-21, pedido do usuário: "gostaria de poder coletar dados
+// antigo para deixar no banco") ──────────────────────────────────────────────────────────────
+// Só a coleta de VOLUME (`Usage`, por tabela/dia), não o pipeline inteiro de workspace. Decisão
+// de escopo: `Usage` devolve poucas centenas de linhas mesmo em 90 dias (medido), então uma
+// consulta só basta — sem fatiar por semana nem retentativa por página, ao contrário da
+// atribuição por recurso (que itera tabela por tabela e fica fora deste backfill de propósito;
+// ampliar aquela janela é mudança maior, avaliada à parte).
+//
+// Função separada de `_coletarLogAnalyticsTudo` DE propósito: a coleta diária/agendada
+// continua chamando `_coletarIngestaoWorkspace` com o padrão de 30 dias, sem risco de o
+// backfill manual interferir no caminho automático.
+let _laBackfillVolumeEmExecucao = false;
+async function _backfillVolumeLogAnalytics(diasSolicitados) {
+  if (_laBackfillVolumeEmExecucao) return { ok: false, motivo: 'backfill de volume já em execução' };
+  _laBackfillVolumeEmExecucao = true;
+  _laProgIniciar('backfill_volume', 'descobrindo workspaces');
+  try {
+    const workspaces = await _descobrirLogAnalyticsWorkspaces();
+    _laProgAtualizar('backfill_volume', { fase: `coletando ${diasSolicitados} dia(s)`, total: workspaces.length });
+    const { escopos } = await _getInventarioEscopos();
+    const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
+    let sucesso = 0, totalLinhas = 0;
+    const truncados = [];
+    const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
+      try {
+        const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+        if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
+        const linhas = await _coletarIngestaoWorkspace(ws, escopo.getLogAnalyticsToken, diasSolicitados);
+        sucesso++;
+        totalLinhas += linhas.length;
+        // Retenção menor que o pedido: a Azure já expurgou parte do período — reportado, não
+        // silenciado (ver comentário de _coletarIngestaoWorkspace sobre null vs zero).
+        if (linhas.truncado) truncados.push({ workspace: ws.nome, retencao_dias: linhas.diasEfetivos });
+      } finally {
+        _laProgAvancar('backfill_volume', ws.nome || ws.workspace_guid);
+      }
+    });
+    const falhas = resultados.filter((r) => r.status === 'rejected').length;
+    const detalhe = `${sucesso} de ${workspaces.length} workspace(s), ${totalLinhas} linha(s)`
+      + (truncados.length ? `, ${truncados.length} limitado(s) pela retenção real` : '')
+      + (falhas ? `, ${falhas} falha(s)` : '');
+    _laProgFinalizar('backfill_volume', { detalhe });
+    console.log(`[LogAnalytics] Backfill de volume (${diasSolicitados}d): ${detalhe}`);
+    return { ok: true, workspaces: workspaces.length, sucesso, falhas, totalLinhas, truncados };
+  } catch (e) {
+    _laProgFinalizar('backfill_volume', { erro: e.message });
+    console.warn('[LogAnalytics] Backfill de volume falhou:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _laBackfillVolumeEmExecucao = false;
+  }
 }
 
 let _logAnalyticsColetaEmExecucao = false;
@@ -19602,6 +19679,21 @@ app.post('/api/log-analytics/coleta/forcar', authMiddleware, dbMiddleware, async
   if (_logAnalyticsColetaEmExecucao) return res.status(409).json({ error: 'Coleta de Log Analytics já em execução' });
   res.status(202).json({ ok: true, message: 'Coleta de Log Analytics iniciada — pode levar alguns minutos' });
   _coletarLogAnalyticsTudo('manual').catch(e => console.error('[LogAnalytics] Erro na coleta manual:', e.message));
+});
+
+// Backfill de volume sob demanda (2026-10-21) — separado de /coleta/forcar de propósito: este
+// aceita um período maior que os 30 dias padrão, aquele não. `dias` validado entre 1 e 365; o
+// teto REAL fica a cargo da retenção de cada workspace (ver _laRetencaoUsage) — pedir 365 só
+// devolve mais do que a Azure ainda guarda se algum workspace tiver retenção de 365 dias
+// configurada (existem 3 nesta base); o resto vem truncado e o resumo reporta quantos.
+app.post('/api/log-analytics/backfill-volume', authMiddleware, dbMiddleware, async (req, res) => {
+  const dias = Number(req.body?.dias);
+  if (!Number.isInteger(dias) || dias < 1 || dias > 365) {
+    return res.status(400).json({ error: 'dias deve ser um inteiro entre 1 e 365' });
+  }
+  if (_laBackfillVolumeEmExecucao) return res.status(409).json({ error: 'Backfill de volume já em execução' });
+  res.status(202).json({ ok: true, message: `Backfill de ${dias} dia(s) iniciado — acompanhe na barra de progresso` });
+  _backfillVolumeLogAnalytics(dias).catch(e => console.error('[LogAnalytics] Erro no backfill de volume:', e.message));
 });
 
 // Separado da coleta principal de propósito — é uma chamada de API por recurso monitorável do
