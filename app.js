@@ -1968,6 +1968,16 @@ async function openSettingsModal() {
           });
           const secureEl = document.getElementById('mailing-relay-secure');
           if (secureEl) secureEl.checked = !!i.config.secure;
+        } else if (i.tipo === 'alertas_relay') {
+          // Também sem senha. Tem `destinatarios_padrao` (o do Mailing não tem: lá os
+          // destinatários vêm do cadastro de contatos, não de um campo de texto).
+          const map = { host:'host', port:'port', 'remetente-nome':'remetente_nome', 'remetente-email':'remetente_email', destinatarios:'destinatarios_padrao' };
+          Object.keys(map).forEach(k => {
+            const el = document.getElementById('alertas_relay-' + k);
+            if (el) el.value = i.config[map[k]] || '';
+          });
+          const secureEl = document.getElementById('alertas_relay-secure');
+          if (secureEl) secureEl.checked = !!i.config.secure;
         }
       }
     });
@@ -3444,6 +3454,14 @@ async function salvarIntegracao(tipo) {
       secure:document.getElementById('mailing-relay-secure').checked,
       remetente_nome:document.getElementById('mailing-relay-remetente-nome').value,
       remetente_email:document.getElementById('mailing-relay-remetente-email').value };
+  } else if (tipo==='alertas_relay') {
+    // Sem senha, igual ao do Mailing — mas com `destinatarios_padrao` próprio, que é
+    // justamente o que separa o destino dos alertas do destino dos comunicados.
+    config = { host:document.getElementById('alertas_relay-host').value, port:document.getElementById('alertas_relay-port').value||25,
+      secure:document.getElementById('alertas_relay-secure').checked,
+      remetente_nome:document.getElementById('alertas_relay-remetente-nome').value,
+      remetente_email:document.getElementById('alertas_relay-remetente-email').value,
+      destinatarios_padrao:document.getElementById('alertas_relay-destinatarios').value };
   }
   const ativo = document.getElementById('toggle-'+tipo).checked;
   try { await api('POST','/integrations/'+tipo,{config,ativo}); showToast('Configuração salva!','success'); }
@@ -3512,6 +3530,17 @@ async function testarConexao(type) {
     showToast('Enviando e-mail de teste pelo relay...','success');
     try { const r=await api('POST','/mailing/relay/testar',{host,port,secure,remetente_nome,remetente_email},45000); showToast(r.message||'E-mail de teste enviado!','success'); }
     catch(e) { showToast('Falha: '+e.message+' — se esta máquina não estiver na rede liberada pelo relay, isso é esperado.','error'); }
+  } else if (type==='alertas_relay') {
+    const host=document.getElementById('alertas_relay-host').value, port=document.getElementById('alertas_relay-port').value||25;
+    const secure=document.getElementById('alertas_relay-secure').checked;
+    const remetente_nome=document.getElementById('alertas_relay-remetente-nome').value, remetente_email=document.getElementById('alertas_relay-remetente-email').value;
+    // Manda a lista junto: o teste vai pro PRIMEIRO destinatário real quando houver, não só
+    // pro remetente — assim valida a caixa que vai receber os alertas, não apenas a conexão.
+    const destinatarios_padrao=document.getElementById('alertas_relay-destinatarios').value;
+    if (!host||!remetente_email) { showToast('Preencha host e e-mail do remetente para testar','error'); return; }
+    showToast('Enviando e-mail de teste pelo relay de alertas...','success');
+    try { const r=await api('POST','/integrations/alertas-relay/testar',{host,port,secure,remetente_nome,remetente_email,destinatarios_padrao},45000); showToast(r.message||'E-mail de teste enviado!','success'); carregarSmtpLog(); }
+    catch(e) { showToast('Falha: '+e.message+' — se esta máquina não estiver na rede liberada pelo relay, isso é esperado.','error'); carregarSmtpLog(); }
   } else {
     showToast('Para testar Entra ID, configure e use o botão na tela de login','success');
   }

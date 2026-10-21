@@ -962,6 +962,42 @@ app.post('/api/integrations/smtp/testar', authMiddleware, adminMiddleware, async
   }
 });
 
+// Testa o relay de ALERTAS ainda não salvo — mesmo padrão da rota de SMTP acima e da do Mailing
+// (o erro cru É o propósito da rota), mas SEM senha: relay anônimo, autorizado por IP de origem.
+// Envia pro destinatário informado, ou pro próprio remetente quando nenhum for passado, pra dar
+// pra validar a caixa de destino real e não só a conexão.
+//
+// Loga no MESMO ring buffer de `_sendEmail` — a tela de Integrações mostra teste e envio real na
+// mesma lista, que é o que serve pra diagnosticar.
+app.post('/api/integrations/alertas-relay/testar', authMiddleware, adminMiddleware, async (req, res) => {
+  const { host, port, secure, remetente_email, remetente_nome, destinatarios_padrao } = req.body;
+  const destino = _parseDestinatarios(destinatarios_padrao)[0] || remetente_email;
+  try {
+    if (!host || !remetente_email) {
+      return res.status(400).json({ error: 'Preencha host e e-mail do remetente antes de testar.' });
+    }
+    const transporter = nodemailer.createTransport({
+      host, port: parseInt(port, 10) || 25, secure: !!secure,
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 10_000,
+    });
+    await transporter.sendMail({
+      from: `"${remetente_nome || 'FinOps Manager'}" <${remetente_email}>`,
+      to: destino,
+      subject: '✅ Teste de conexão — Relay de Alertas',
+      html: _emailTemplate('Teste de conexão — Relay de Alertas',
+        '<p>Se você está lendo isso, o relay de Alertas está funcionando e esta caixa recebe as notificações do sistema.</p>'
+        + '<p style="color:#6b7280;font-size:12px">Relay anônimo, autorizado por IP de origem — sem usuário e senha.</p>'),
+    });
+    _logEmailAttempt({ tipo: 'teste', destinatarios: destino, assunto: 'Teste de conexão — Relay de Alertas', ok: true });
+    res.json({ ok: true, message: `E-mail de teste enviado para ${destino}.` });
+  } catch (e) {
+    _logEmailAttempt({ tipo: 'teste', destinatarios: destino, assunto: 'Teste de conexão — Relay de Alertas', ok: false, erro: e.message });
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // Log das últimas tentativas de e-mail (teste manual + envios reais) — ring buffer em memória,
 // ver `_logEmailAttempt` acima. Serve a UI de Integrações (card SMTP) pra diagnosticar sem
 // precisar de acesso a `pm2 logs`.
@@ -7880,14 +7916,43 @@ async function _destinatariosPara(identificador, padrao) {
   }
 }
 
+// Config de envio dos ALERTAS, com precedência (2026-10-21, pedido do usuário: "quero usar
+// todas as notificações para SMTP relay, porém a configuração das notificações será
+// destinatário diferente do Mailing"):
+//
+//   1. `alertas_relay` — relay anônimo (sem usuário/senha, autorizado por IP), com lista de
+//      destinatários PRÓPRIA, separada da do Mailing.
+//   2. `smtp` — o autenticado legado, mantido como fallback.
+//
+// Precedência em vez de substituição de propósito: desligar o relay faz voltar ao caminho
+// anterior sem deploy, então a migração é reversível. Os 13 pontos que chamam esta função
+// recebem o mesmo formato nos dois casos e não precisaram mudar.
+//
+// Separado do relay do MAILING (`mailing_relay`) pela mesma razão que já valia antes: relay
+// corporativo trata envio em massa e transacional com limites e reputação diferentes, e um
+// comunicado que estoure limite não pode derrubar o alerta de custo. Nada impede os dois
+// apontarem pro mesmo host — é configuração, não código.
 async function _getSmtpConfig() {
   if (!pool) return null;
   try {
-    const r = await pool.query(`SELECT config, ativo FROM integracoes WHERE tipo='smtp'`);
-    if (!r.rows.length || !r.rows[0].ativo) return null;
-    const cfg = r.rows[0].config || {};
-    if (!cfg.host || !cfg.usuario || !cfg.senha) return null;
-    return { ...cfg, senha: _safeDecrypt(cfg.senha) };
+    const r = await pool.query(
+      `SELECT tipo, config, ativo FROM integracoes WHERE tipo IN ('alertas_relay','smtp')`
+    );
+    const porTipo = new Map(r.rows.map((x) => [x.tipo, x]));
+
+    const relay = porTipo.get('alertas_relay');
+    if (relay?.ativo) {
+      const cfg = relay.config || {};
+      // Sem senha pra validar nem decifrar: o relay autoriza pela rede de origem.
+      if (cfg.host && cfg.remetente_email) return { ...cfg, usuario: null, senha: null };
+    }
+
+    const smtp = porTipo.get('smtp');
+    if (smtp?.ativo) {
+      const cfg = smtp.config || {};
+      if (cfg.host && cfg.usuario && cfg.senha) return { ...cfg, senha: _safeDecrypt(cfg.senha) };
+    }
+    return null;
   } catch (_) { return null; }
 }
 
@@ -7930,11 +7995,14 @@ async function _sendEmail({ to, subject, html }) {
     // porta bloqueada, credencial errada). 10s por fase é generoso pra uma conexão real e curto
     // o bastante pra devolver o erro de verdade do nodemailer (ECONNREFUSED/ETIMEDOUT/EAUTH)
     // antes de qualquer timeout do lado do cliente.
+    // `auth` só quando HÁ credencial: o relay de alertas é anônimo, autorizado por IP de
+    // origem, e mandar um bloco `auth` vazio faz o nodemailer tentar AUTH e o relay recusar.
+    // É o que destrava o caminho de alerta pra relay sem quebrar o SMTP autenticado legado.
     const transporter = nodemailer.createTransport({
       host: cfg.host,
       port: parseInt(cfg.port, 10) || 587,
       secure: !!cfg.secure,
-      auth: { user: cfg.usuario, pass: cfg.senha },
+      ...(cfg.usuario && cfg.senha ? { auth: { user: cfg.usuario, pass: cfg.senha } } : {}),
       connectionTimeout: 10_000,
       greetingTimeout: 10_000,
       socketTimeout: 10_000,

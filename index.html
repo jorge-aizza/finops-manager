@@ -3333,6 +3333,50 @@
             </div>
           </div>
 
+          <!-- Relay SMTP dos ALERTAS (2026-10-21) — tem PRECEDÊNCIA sobre o card de E-mail
+               (SMTP) acima: com este ligado e preenchido, os alertas saem por aqui; desligou,
+               voltam pro SMTP autenticado sem precisar de deploy. Destinatários próprios, nunca
+               os do Mailing — é o ponto do pedido do usuário. Sem campo de senha de propósito:
+               relay anônimo, autorizado por IP de origem (ver `_getSmtpConfig` em server.js). -->
+          <div class="integration-card">
+            <div class="integration-header" style="justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:10px">
+                <svg class="integration-logo" viewBox="0 0 32 32" fill="none">
+                  <rect width="32" height="32" rx="4" fill="#ff8c42"/>
+                  <path d="M16 7v10M16 21v2" stroke="white" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M8 24h16l-2-4v-5a6 6 0 10-12 0v5l-2 4z" stroke="white" stroke-width="1.5" fill="none"/>
+                </svg>
+                <div>
+                  <div class="integration-title">Alertas — Relay SMTP</div>
+                  <div class="integration-sub">Envio dos alertas por relay anônimo (sem usuário/senha, liberado por IP). Tem precedência sobre o E-mail (SMTP) acima — destinatários próprios, separados do Mailing.</div>
+                </div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-alertas_relay" onchange="toggleIntegration('alertas_relay')">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="config-alertas_relay" style="display:none">
+              <div class="form-grid-2" style="margin-top:12px">
+                <div class="form-group"><label>Host do relay</label><input type="text" id="alertas_relay-host" placeholder="relay.suaempresa.com.br"></div>
+                <div class="form-group"><label>Porta</label><input type="number" id="alertas_relay-port" placeholder="25" value="25"></div>
+                <div class="form-group"><label>Nome do remetente</label><input type="text" id="alertas_relay-remetente-nome" placeholder="FinOps Manager"></div>
+                <div class="form-group"><label>E-mail do remetente</label><input type="text" id="alertas_relay-remetente-email" placeholder="finops-alertas@suaempresa.com.br"></div>
+                <div class="form-group" style="grid-column:1/-1"><label>Destinatários padrão dos alertas (separados por vírgula)</label><input type="text" id="alertas_relay-destinatarios" placeholder="time-finops@empresa.com, ti@empresa.com"></div>
+                <div class="form-group"><label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="alertas_relay-secure" style="width:auto"> Conexão segura (SSL/TLS na porta, ex: 465)</label></div>
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+                Sem usuário/senha — este relay autoriza pela rede de origem, não por credencial. Se o "Testar Conexão" falhar com
+                timeout/recusa daqui, verifique se esta máquina está na rede/IP liberado pelo relay (pode funcionar só a partir do servidor de produção).
+                Alerta continua indo também para o responsável quando houver (orçamento, ação, reserva) — esta lista é o destino padrão.
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button type="button" class="btn-primary" onclick="testarConexao('alertas_relay')">Testar Conexão</button>
+                <button type="button" class="btn-rep secondary" onclick="salvarIntegracao('alertas_relay')">💾 Salvar Configuração</button>
+              </div>
+            </div>
+          </div>
+
           <!-- Relay SMTP do Mailing de Comunicados — propositalmente SEPARADO do card de
                E-mail (SMTP) acima: é a config de envio dos Comunicados em massa, nunca a dos
                Alertas. Sem campo de senha de propósito — relay anônimo, autorizado por IP de
