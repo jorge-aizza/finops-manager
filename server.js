@@ -17567,7 +17567,15 @@ function _motivoFalhaIngestao(status, corpo) {
   return `HTTP ${status}: ${txt.slice(0, 300)}`;
 }
 
-async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
+// `diasJanela`: 3 no caminho de toda coleta (chamador não passa nada); maior quando vem de um
+// backfill explícito (ver _backfillAtribuicaoRecursoLogAnalytics). Clampada por TABELA, não por
+// workspace — cada tabela do top-N pode ter retenção própria (confirmado: 91% das tabelas desta
+// base retêm só 30 dias, mas há exceções de 90/365 no mesmo workspace), e usar um teto único
+// pro workspace inteiro ou superestimaria o alcance de algumas tabelas ou subestimaria o de
+// outras. Mesma razão de null-vs-zero do backfill de volume: pedir mais do que a tabela retém
+// não dá erro, só devolve menos, e silenciar essa diferença pareceria "não há recurso nenhum"
+// em vez de "não sabemos mais".
+async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken, diasJanela = _LA_RECURSO_JANELA_DIAS) {
   // As maiores tabelas saem do que já foi coletado — nada de descobrir isso com KQL.
   // Tabela que já se provou inatribuível não ocupa vaga: são 10 por workspace, e em
   // LA-SharedServices-PROD metade ia pra tabela que nunca produz linha. Pular libera as vagas
@@ -17614,8 +17622,13 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
   const token = await getLogAnalyticsToken();
   const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
   let totalLinhas = 0;
+  let tabelasTruncadas = 0;
 
   for (const { tabela, gb: gbTabela } of tabelas) {
+    const retencao = await _laRetencaoTabela(ws.workspace_guid, tabela);
+    const diasEfetivos = retencao ? Math.min(diasJanela, retencao) : diasJanela;
+    const truncada = diasEfetivos < diasJanela;
+    if (truncada) tabelasTruncadas++;
     // `_ResourceId` vem vazio em tabela alimentada por agente (Syslog de VM fora do ARM, por
     // exemplo) — essas linhas são descartadas em vez de virarem um recurso "" no ranking.
     // Consulta única. Cheguei a tentar uma cadeia de variantes mais simples, supondo que a
@@ -17625,7 +17638,7 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
     // e tabela em plano Basic, cuja API recusa agregação.
     //
     // `bin()` e não `startofday()`: é a forma que a coleta por tabela já usa em produção.
-    const kql = `${tabela} | where TimeGenerated > ago(${_LA_RECURSO_JANELA_DIAS}d) | where isnotempty(_ResourceId)`
+    const kql = `${tabela} | where TimeGenerated > ago(${diasEfetivos}d) | where isnotempty(_ResourceId)`
       + ` | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId, dia = bin(TimeGenerated, 1d)`;
     let resp;
     try {
@@ -17644,12 +17657,20 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
       await anotar(tabela, 'erro', _motivoFalhaIngestao(resp.status, corpo), 0, gbTabela);
       continue;
     }
-    data = await _safeRespJson(resp);
+    // `const`, não global implícita: o arquivo tem BOM + código executável antes do
+    // 'use strict' da linha 3, o que anula a diretiva (confirmado lendo os bytes) — o
+    // `data = ...` sem declaração aqui NUNCA lançou em produção, só virou global solta.
+    // Testado sob concorrência real (8 workspaces simultâneos, jitter aleatório, 3 rodadas)
+    // sem corrupção cruzada: a leitura de `data.tables` é copiada pra `t` (local) no mesmo
+    // trecho síncrono da continuação, antes de qualquer outra chamada concorrente ter chance
+    // de rodar. Inofensivo na prática, mas sem motivo pra deixar assim.
+    const data = await _safeRespJson(resp);
     const t = data.tables?.[0];
+    const notaTruncado = truncada ? ` (janela limitada a ${diasEfetivos}d pela retenção real, não ${diasJanela}d pedidos)` : '';
     if (!t?.rows?.length) {
       // Consulta passou e não veio nada: a tabela existe mas ninguém carimba `_ResourceId`
       // nela, tipicamente dado de agente. Não é erro, é limite do dado.
-      await anotar(tabela, 'vazio', 'consulta ok, nenhuma linha com _ResourceId', 0, gbTabela);
+      await anotar(tabela, 'vazio', `consulta ok, nenhuma linha com _ResourceId${notaTruncado}`, 0, gbTabela);
       continue;
     }
     const cols = t.columns.map((c) => c.name);
@@ -17674,32 +17695,34 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
         totalLinhas++;
       }
       await c.query('COMMIT');
-      await anotar(tabela, 'ok', null, t.rows.length, gbTabela);
+      await anotar(tabela, 'ok', truncada ? notaTruncado.trim() : null, t.rows.length, gbTabela);
     } catch (e) {
       await c.query('ROLLBACK').catch(() => {});
       console.warn(`[LogAnalytics] gravação da ingestão por recurso falhou em ${ws.nome}/${tabela}:`, e.message);
       await anotar(tabela, 'erro', `gravação: ${e.message}`, 0, gbTabela);
     } finally { c.release(); }
   }
-  return { tabelas: tabelas.length, linhas: totalLinhas };
+  return { tabelas: tabelas.length, linhas: totalLinhas, tabelasTruncadas };
+}
+
+// Retenção INTERATIVA (não a total com arquivo) de uma tabela num workspace — é o teto real de
+// quanto dá pra pedir pela Query API. `retencao_total_dias` inclui o arquivo (Archive Tier), que
+// exige um mecanismo totalmente diferente (search job, assíncrono, custo por GB varrido) fora do
+// escopo desta coleta — usar o total faria um backfill prometer um alcance que a consulta não
+// entrega, e o sintoma seria resultado vazio sem explicação.
+// null quando a tabela ainda não foi inventariada (_coletarTabelasWorkspace nunca rodou pra este
+// workspace/tabela) — nesse caso não há teto conhecido pra aplicar, a consulta segue sem clamp.
+async function _laRetencaoTabela(workspaceGuid, tabela) {
+  const r = await pool.query(
+    `SELECT retencao_dias FROM log_analytics_tabelas WHERE workspace_guid = $1 AND tabela = $2`,
+    [workspaceGuid, tabela]
+  );
+  return r.rows[0]?.retencao_dias ?? null;
 }
 
 // UMA query KQL por workspace cobre as 5 regras (ingestão por tabela × dia, 30d) — ver
 // _avaliarRegrasLogAnalytics. Plano de dados — exige "Log Analytics Reader" na SP.
-// Retenção INTERATIVA (não a total com arquivo) da tabela `Usage` num workspace — é o teto real
-// de quanto dá pra pedir pela Query API usada aqui. `retencao_total_dias` inclui o arquivo
-// (Archive Tier), que exige um mecanismo totalmente diferente (search job, assíncrono, custo por
-// GB varrido) fora do escopo desta coleta — usar o total aqui faria o backfill prometer um
-// alcance que a consulta não entrega, e o sintoma seria resultado vazio sem explicação.
-// null quando a tabela ainda não foi inventariada (_coletarTabelasWorkspace nunca rodou pra este
-// workspace) — nesse caso não há teto conhecido pra aplicar, a consulta segue sem clamp.
-async function _laRetencaoUsage(workspaceGuid) {
-  const r = await pool.query(
-    `SELECT retencao_dias FROM log_analytics_tabelas WHERE workspace_guid = $1 AND tabela = 'Usage'`,
-    [workspaceGuid]
-  );
-  return r.rows[0]?.retencao_dias ?? null;
-}
+const _laRetencaoUsage = (workspaceGuid) => _laRetencaoTabela(workspaceGuid, 'Usage');
 
 // `diasJanela`: 30 no caminho de todo dia (chamador não passa nada); maior quando vem de um
 // backfill explícito (ver _backfillVolumeLogAnalytics). SEMPRE comparado contra a retenção real
@@ -18599,6 +18622,52 @@ async function _backfillVolumeLogAnalytics(diasSolicitados) {
     return { ok: false, motivo: e.message };
   } finally {
     _laBackfillVolumeEmExecucao = false;
+  }
+}
+
+// ── Backfill de atribuição por recurso (2026-10-21, pedido do usuário — opção escolhida entre
+// três: backfill sob demanda, igual ao de volume, SEM mudar o padrão automático de 3 dias). Mais
+// caro que o de volume: itera tabela por tabela (até _LA_RECURSO_TOP_TABELAS por workspace), uma
+// consulta KQL por tabela, com clamp de retenção POR TABELA dentro de
+// _coletarIngestaoPorRecurso — cada tabela do top-N pode ter retenção diferente, então o resumo
+// aqui soma `tabelasTruncadas` por workspace em vez de tratar o workspace como uma unidade só.
+let _laBackfillAtribuicaoEmExecucao = false;
+async function _backfillAtribuicaoRecursoLogAnalytics(diasSolicitados) {
+  if (_laBackfillAtribuicaoEmExecucao) return { ok: false, motivo: 'backfill de atribuição por recurso já em execução' };
+  _laBackfillAtribuicaoEmExecucao = true;
+  _laProgIniciar('backfill_atribuicao', 'descobrindo workspaces');
+  try {
+    const workspaces = await _descobrirLogAnalyticsWorkspaces();
+    _laProgAtualizar('backfill_atribuicao', { fase: `coletando ${diasSolicitados} dia(s)`, total: workspaces.length });
+    const { escopos } = await _getInventarioEscopos();
+    const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
+    let sucesso = 0, totalLinhas = 0, totalTabelas = 0, tabelasTruncadas = 0;
+    const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
+      try {
+        const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+        if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
+        const r = await _coletarIngestaoPorRecurso(ws, escopo.getLogAnalyticsToken, diasSolicitados);
+        sucesso++;
+        totalLinhas += r.linhas;
+        totalTabelas += r.tabelas;
+        tabelasTruncadas += r.tabelasTruncadas || 0;
+      } finally {
+        _laProgAvancar('backfill_atribuicao', ws.nome || ws.workspace_guid);
+      }
+    });
+    const falhas = resultados.filter((r) => r.status === 'rejected').length;
+    const detalhe = `${sucesso} de ${workspaces.length} workspace(s), ${totalTabelas} tabela(s), ${totalLinhas} linha(s)`
+      + (tabelasTruncadas ? `, ${tabelasTruncadas} tabela(s) limitada(s) pela retenção real` : '')
+      + (falhas ? `, ${falhas} falha(s)` : '');
+    _laProgFinalizar('backfill_atribuicao', { detalhe });
+    console.log(`[LogAnalytics] Backfill de atribuição por recurso (${diasSolicitados}d): ${detalhe}`);
+    return { ok: true, workspaces: workspaces.length, sucesso, falhas, totalTabelas, totalLinhas, tabelasTruncadas };
+  } catch (e) {
+    _laProgFinalizar('backfill_atribuicao', { erro: e.message });
+    console.warn('[LogAnalytics] Backfill de atribuição por recurso falhou:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _laBackfillAtribuicaoEmExecucao = false;
   }
 }
 
@@ -19694,6 +19763,19 @@ app.post('/api/log-analytics/backfill-volume', authMiddleware, dbMiddleware, asy
   if (_laBackfillVolumeEmExecucao) return res.status(409).json({ error: 'Backfill de volume já em execução' });
   res.status(202).json({ ok: true, message: `Backfill de ${dias} dia(s) iniciado — acompanhe na barra de progresso` });
   _backfillVolumeLogAnalytics(dias).catch(e => console.error('[LogAnalytics] Erro no backfill de volume:', e.message));
+});
+
+// Backfill de atribuição por recurso sob demanda (2026-10-21) — mesmo padrão do de volume, mas
+// mais caro (itera tabela por tabela). Validação de `dias` idêntica à do de volume; o teto real
+// de cada tabela é aplicado dentro de _coletarIngestaoPorRecurso, não aqui.
+app.post('/api/log-analytics/backfill-atribuicao', authMiddleware, dbMiddleware, async (req, res) => {
+  const dias = Number(req.body?.dias);
+  if (!Number.isInteger(dias) || dias < 1 || dias > 365) {
+    return res.status(400).json({ error: 'dias deve ser um inteiro entre 1 e 365' });
+  }
+  if (_laBackfillAtribuicaoEmExecucao) return res.status(409).json({ error: 'Backfill de atribuição por recurso já em execução' });
+  res.status(202).json({ ok: true, message: `Backfill de ${dias} dia(s) iniciado — acompanhe na barra de progresso` });
+  _backfillAtribuicaoRecursoLogAnalytics(dias).catch(e => console.error('[LogAnalytics] Erro no backfill de atribuição por recurso:', e.message));
 });
 
 // Separado da coleta principal de propósito — é uma chamada de API por recurso monitorável do

@@ -311,15 +311,36 @@ describe('LogAnalyticsView', () => {
     await screen.findByText('rg-shared')
 
     // 90 é o valor inicial do campo — clicar sem digitar já dispara com ele.
-    await user.click(screen.getByRole('button', { name: '📥 Coletar' }))
+    await user.click(screen.getByRole('button', { name: '📥 Coletar volume' }))
     await waitFor(() => expect(logAnalyticsApi.backfillVolumeLogAnalytics).toHaveBeenCalledWith(90))
     await waitFor(() => expect(window.showToast).toHaveBeenCalledWith('Backfill de 90 dia(s) iniciado', 'success'))
 
     const campo = screen.getByLabelText('Dias para backfill de volume')
     await user.clear(campo)
     await user.type(campo, '45')
-    await user.click(screen.getByRole('button', { name: '📥 Coletar' }))
+    await user.click(screen.getByRole('button', { name: '📥 Coletar volume' }))
     await waitFor(() => expect(logAnalyticsApi.backfillVolumeLogAnalytics).toHaveBeenCalledWith(45))
+  })
+
+  // Backfill de atribuição por recurso (2026-10-21) — campo e botão próprios, valor inicial
+  // diferente do de volume (30, não 90) porque a maioria das tabelas desta base retém só 30 dias.
+  it('"Backfill de atribuição" envia o número de dias digitado, separado do de volume', async () => {
+    vi.mocked(logAnalyticsApi.backfillAtribuicaoRecursoLogAnalytics).mockResolvedValue({ ok: true, message: 'Backfill de 30 dia(s) iniciado' })
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('rg-shared')
+
+    await user.click(screen.getByRole('button', { name: '📥 Coletar atribuição' }))
+    await waitFor(() => expect(logAnalyticsApi.backfillAtribuicaoRecursoLogAnalytics).toHaveBeenCalledWith(30))
+    await waitFor(() => expect(window.showToast).toHaveBeenCalledWith('Backfill de 30 dia(s) iniciado', 'success'))
+    // Não deve ter acionado o de volume por engano — são mutations independentes.
+    expect(logAnalyticsApi.backfillVolumeLogAnalytics).not.toHaveBeenCalled()
+
+    const campo = screen.getByLabelText('Dias para backfill de atribuição por recurso')
+    await user.clear(campo)
+    await user.type(campo, '15')
+    await user.click(screen.getByRole('button', { name: '📥 Coletar atribuição' }))
+    await waitFor(() => expect(logAnalyticsApi.backfillAtribuicaoRecursoLogAnalytics).toHaveBeenCalledWith(15))
   })
 
   it('"Exportar Excel" baixa com o mês e os workspaces do FILTRO — clicar na linha só abre o detalhe, não recorta o export', async () => {

@@ -459,7 +459,7 @@ export const getLogAnalyticsCustoObservabilidade = (mes?: string, spId?: number 
 
 /** Andamento de uma das três coletas desta tela. */
 export interface LogAnalyticsExecucao {
-  tipo: 'coleta' | 'diagnostic' | 'ingestao_recurso' | 'backfill_volume'
+  tipo: 'coleta' | 'diagnostic' | 'ingestao_recurso' | 'backfill_volume' | 'backfill_atribuicao'
   /** Texto curto do que está acontecendo ("descobrindo workspaces", "concluído", "falhou"). */
   fase: string
   atual: number
@@ -489,6 +489,12 @@ export const forcarColetaLogAnalytics = () =>
 // (campo `detalhe` do progresso) informa quantos workspaces vieram truncados.
 export const backfillVolumeLogAnalytics = (dias: number) =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/backfill-volume', { dias })
+
+// Mesmo padrão do backfill de volume, mas cobre "quem gerou os GB" (log_analytics_ingestao_
+// recurso) — etapa mais cara, itera tabela por tabela. Não muda o padrão automático de 3 dias
+// da coleta diária, só este disparo sob demanda.
+export const backfillAtribuicaoRecursoLogAnalytics = (dias: number) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/backfill-atribuicao', { dias })
 
 // Etapa separada e mais cara (1 chamada por recurso monitorável do tenant) — cadência própria
 // (semanal), disparo manual independente do "Atualizar agora" de cima.

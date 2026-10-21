@@ -6,7 +6,7 @@ import {
   getLogAnalyticsRecursosVolume, getLogAnalyticsExportSemWorkspace, getLogAnalyticsCustoObservabilidade,
   forcarColetaLogAnalytics, forcarColetaDiagnosticSettings, forcarColetaIngestaoRecurso, detalharRecursoTabela,
   baixarLogAnalyticsExcel, baixarLogAnalyticsDashboardHtml, habilitarAuditoriaConsultas,
-  backfillVolumeLogAnalytics, getProgressoLogAnalytics,
+  backfillVolumeLogAnalytics, backfillAtribuicaoRecursoLogAnalytics, getProgressoLogAnalytics,
   type LogAnalyticsSeveridade, type LogAnalyticsWorkspace, type LogAnalyticsRecursoDetalhado,
   type LogAnalyticsRankingItem,
 } from '../api/logAnalytics'
@@ -114,6 +114,9 @@ export default function LogAnalyticsView() {
   // cada workspace na Azure, não um limite daqui; 90 é só um valor inicial razoável (a maior
   // parte dos workspaces desta base retém 90 dias de Usage).
   const [backfillDias, setBackfillDias] = useState(90)
+  // Backfill de atribuição por recurso — campo próprio porque a maioria das tabelas desta base
+  // retém só 30 dias (contra os 90 do volume), então o valor inicial razoável é outro.
+  const [backfillAtribuicaoDias, setBackfillAtribuicaoDias] = useState(30)
   const [workspaceClicado, setWorkspaceClicado] = useState<LogAnalyticsWorkspace | null>(null)
 
   const [detalheRecurso, setDetalheRecurso] = useState<{ tabela: string; recursos: LogAnalyticsRecursoDetalhado[]; janelaDias: number; limite: number } | null>(null)
@@ -216,26 +219,46 @@ export default function LogAnalyticsView() {
     onError: (e: Error) => window.showToast?.(e.message, 'error'),
   })
 
+  // Backfill de atribuição por recurso (2026-10-21) — mesma ideia do de volume acima, opção
+  // escolhida entre três quando perguntado: sob demanda, SEM mudar o padrão automático de
+  // 3 dias (que fica rápido de propósito). Mais caro que o de volume: itera tabela por tabela.
+  const backfillAtribuicaoMutation = useMutation({
+    mutationFn: () => backfillAtribuicaoRecursoLogAnalytics(backfillAtribuicaoDias),
+    onSuccess: (r) => window.showToast?.(r.message, 'success'),
+    onError: (e: Error) => window.showToast?.(e.message, 'error'),
+  })
+
   // Mesma queryKey que LogAnalyticsProgressoBar usa — React Query dedupe: as duas consultas
-  // compartilham cache e disparo de rede, não dobra a chamada. Observa quando o backfill
-  // termina pra invalidar as três consultas que leem log_analytics_ingestao_diaria (a tabela
-  // que o backfill escreve): resumo, workspaces e tabelas por workspace. Diferente das outras
-  // mutações desta tela (que usam um `setTimeout` chutado), aqui a duração varia muito com o
-  // período pedido — 90 dias podem levar bem mais que os ~5s/60s fixos das demais.
+  // compartilham cache e disparo de rede, não dobra a chamada. Observa quando cada backfill
+  // termina pra invalidar as consultas que ele alimenta. Diferente das outras mutações desta
+  // tela (que usam um `setTimeout` chutado), aqui a duração varia muito com o período pedido —
+  // o de atribuição em especial é bem mais lento que o de volume, porque itera tabela por
+  // tabela em vez de uma consulta só por workspace.
   const progressoLogAnalyticsQuery = useQuery({
     queryKey: ['log-analytics-progresso'],
     queryFn: getProgressoLogAnalytics,
     refetchInterval: (query) => query.state.data?.execucoes?.some((e) => e.em_execucao) ? 2000 : 15000,
   })
   const backfillConcluidoEmRef = useRef<string | null>(null)
+  const backfillAtribuicaoConcluidoEmRef = useRef<string | null>(null)
   useEffect(() => {
-    const exec = progressoLogAnalyticsQuery.data?.execucoes?.find((e) => e.tipo === 'backfill_volume')
-    if (!exec || exec.em_execucao || !exec.concluido_em) return
-    if (exec.concluido_em === backfillConcluidoEmRef.current) return
-    backfillConcluidoEmRef.current = exec.concluido_em
-    queryClient.invalidateQueries({ queryKey: ['log-analytics-resumo'] })
-    queryClient.invalidateQueries({ queryKey: ['log-analytics-workspaces'] })
-    queryClient.invalidateQueries({ queryKey: ['log-analytics-tabelas'] })
+    const execucoes = progressoLogAnalyticsQuery.data?.execucoes ?? []
+
+    const volume = execucoes.find((e) => e.tipo === 'backfill_volume')
+    if (volume && !volume.em_execucao && volume.concluido_em && volume.concluido_em !== backfillConcluidoEmRef.current) {
+      backfillConcluidoEmRef.current = volume.concluido_em
+      queryClient.invalidateQueries({ queryKey: ['log-analytics-resumo'] })
+      queryClient.invalidateQueries({ queryKey: ['log-analytics-workspaces'] })
+      queryClient.invalidateQueries({ queryKey: ['log-analytics-tabelas'] })
+    }
+
+    // log_analytics_ingestao_recurso só alimenta uma consulta nesta tela: o detalhe de
+    // "Recursos por volume" de um workspace aberto.
+    const atribuicao = execucoes.find((e) => e.tipo === 'backfill_atribuicao')
+    if (atribuicao && !atribuicao.em_execucao && atribuicao.concluido_em && atribuicao.concluido_em !== backfillAtribuicaoConcluidoEmRef.current) {
+      backfillAtribuicaoConcluidoEmRef.current = atribuicao.concluido_em
+      queryClient.invalidateQueries({ queryKey: ['log-analytics-recursos-volume'] })
+    }
   }, [progressoLogAnalyticsQuery.data, queryClient])
 
   const coletaDiagMutation = useMutation({
@@ -472,7 +495,27 @@ export default function LogAnalyticsView() {
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>dias</span>
           <button className="btn-ghost" style={{ padding: '7px 10px', fontSize: 12 }}
             disabled={backfillMutation.isPending || backfillDias < 1} onClick={() => backfillMutation.mutate()}>
-            {backfillMutation.isPending ? 'Coletando...' : '📥 Coletar'}
+            {backfillMutation.isPending ? 'Coletando...' : '📥 Coletar volume'}
+          </button>
+        </div>
+        {/* Backfill de atribuição por recurso (2026-10-21) — mesmo padrão do de volume acima,
+            campo de dias separado porque a maioria das tabelas desta base retém só 30 dias
+            (contra os 90 do volume). Bem mais lento: itera tabela por tabela, não uma consulta
+            só por workspace — o título avisa disso. */}
+        <div
+          style={{ display: 'flex', alignItems: 'center', gap: 4, border: '1px solid var(--border)', borderRadius: 6, padding: '2px 4px 2px 8px' }}
+          title="Coleta 'quem gerou os GB' de um período maior que os 3 dias padrão — bem mais lento que o backfill de volume (itera tabela por tabela), limitado pela retenção real de cada tabela"
+        >
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Backfill de atribuição:</span>
+          <input
+            type="number" min={1} max={365} value={backfillAtribuicaoDias === 0 ? '' : backfillAtribuicaoDias} aria-label="Dias para backfill de atribuição por recurso"
+            onChange={(e) => setBackfillAtribuicaoDias(Math.max(0, Math.min(365, e.target.valueAsNumber || 0)))}
+            style={{ width: 56, fontSize: 12, padding: '5px 6px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--text)' }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>dias</span>
+          <button className="btn-ghost" style={{ padding: '7px 10px', fontSize: 12 }}
+            disabled={backfillAtribuicaoMutation.isPending || backfillAtribuicaoDias < 1} onClick={() => backfillAtribuicaoMutation.mutate()}>
+            {backfillAtribuicaoMutation.isPending ? 'Coletando...' : '📥 Coletar atribuição'}
           </button>
         </div>
         <button className="btn-export" disabled={exportando} onClick={exportar}>
