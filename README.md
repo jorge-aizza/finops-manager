@@ -55,6 +55,23 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - Medido amostrando 300 recursos vivos de cada tipo contra o faturamento: **NIC 0/300** faturam; IP público 287/300; disco 293/300; snapshot 273/300; Load Balancer 245/246. Só NIC saiu
 - Disco e snapshot **sem custo identificado continuam na lista**, com aviso — filtrar por custo nulo esconderia 182 itens reais, um deles órfão há 1242 dias
 
+### 📜 Log Analytics — acompanhamento e coleta de período
+
+- **Barra de progresso** nas três coletas da tela (geral, Diagnostic Settings, atribuição por recurso). Antes o botão só virava "Coletando..." e a tela não dizia mais nada por minutos — e essas coletas são longas: a geral levou **83 min** num startup e os Diagnostic Settings, **456s**. Agora mostra fase, contagem (`72 de 191`), percentual, tempo e o item em processamento; erro aparece na tela, não só no log
+- Enquanto a descoberta não termina não existe total, então a barra fica **indeterminada** em vez de exibir 0% — percentual inventado passaria impressão de travado. A execução concluída permanece visível por 10 min: sumir no instante do fim é indistinguível de "a tela perdeu o estado"
+- **Backfill de volume** sob demanda (campo de dias + botão), separado do "Atualizar agora" que sempre olha os 30 dias fixos. Uma consulta por workspace, sem fatiar — `Usage` devolve poucas centenas de linhas mesmo em 90 dias
+- **Backfill de atribuição por recurso** sob demanda, para "quem gerou os GB". Bem mais caro: itera tabela por tabela. Medido: **190 de 191 workspaces em ~23 min** para uma janela de 45 dias, contra **81s** do backfill de volume para 120 dias. Por isso é sob demanda e **não mudou** o padrão automático de 3 dias da coleta diária
+
+> **O limite não é o sistema, é a retenção da Azure.** Dado anterior à retenção configurada já foi
+> expurgado lá, e nenhuma mudança aqui recupera isso. Medido nesta base: **91% das tabelas
+> (122.424 de 134.337) retêm só 30 dias**; a tabela `Usage`, que alimenta o volume, retém 90 dias
+> em 188 workspaces e 365 em 3.
+
+- Pedir mais dias do que existe **não dá erro** — a Query API devolve vazio para o período já expurgado, o que pareceria "consumo zero" em vez de "não sabemos". Por isso a consulta é **limitada à retenção real** antes de sair, e o resumo informa quantos vieram truncados
+- O limite do volume é por workspace; o da atribuição é **por tabela**, porque cada tabela do top-N tem retenção própria. Verificado com um pedido de 45 dias: tabelas de 30 dias pararam em 30, as de 31 em 31, e as de 90/365 receberam os 45 completos
+- Usa a **retenção interativa**, não a total com arquivo: o Archive Tier exige *search job* assíncrono e cobrado por GB varrido, fora do escopo desta coleta — usar o total prometeria um alcance que a consulta não entrega
+- Cobertura resultante: volume de 52 → **121 dias**; atribuição por recurso de 16 → **46 dias**
+
 ### 🔔 Alertas por e-mail — volume e roteamento
 - **Mudança de propriedade de infra virou só sino.** Disparava uma vez por propriedade alterada dentro da coleta, sem nenhum controle de repetição, numa coleta que processa 150 a 200 mil eventos por dia
 - **Anomalias de crescimento viraram um resumo único**, ordenado por Z-score. Eram ~157 e-mails por dia para um destinatário, e de forma recorrente: o dedup libera a chave a cada 24h e a janela de detecção são 35 dias
@@ -69,6 +86,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - `[TagRollup] invalid input syntax for type date: "null-01"` — faltava filtrar `cost_date` nulo ao montar a lista de meses. Há **56 mil linhas** de `azure_costs` sem data, invisíveis para toda consulta recortada por mês
 - Microsoft Graph: checagem da claim `roles` antes de chamar, já que sem `Directory.Read.All` a API responde 200 com lista vazia em vez de erro
 - Segredo que não decifra com a `MASTER_KEY` atual passa a avisar, em vez de usar o texto cifrado como se fosse a senha
+- **`server.js` roda em modo não-estrito, apesar do `'use strict'`.** O arquivo começa com BOM e com uma linha executável (`process.env.TZ = ...`) **antes** da diretiva na linha 3 — e diretiva só vale se for a primeira instrução. Consequência prática: variável sem `const`/`let` vira global solta em vez de lançar `ReferenceError`. Havia uma assim na coleta de atribuição por recurso (corrigida); testada sob concorrência de 8 workspaces sem corrupção cruzada, mas sem motivo para continuar assim
 
 ## O que há de novo na v4.2.0
 
@@ -1486,8 +1504,11 @@ parâmetro (`?workspace_guid=a,b` ou `?workspace_guid=a&workspace_guid=b`).
 | GET | `/api/log-analytics/recomendacoes` | Recomendações consolidadas (downgrade pra Basic, retenção, fan-out) |
 | GET | `/api/log-analytics/export/excel` | Export Excel da análise |
 | GET | `/api/log-analytics/export/dashboard` | Dashboard HTML autocontido |
-| POST | `/api/log-analytics/coleta/forcar` | Força coleta do inventário de Log Analytics |
-| POST | `/api/log-analytics/ingestao-recurso/forcar` | Força a coleta de ingestão por recurso |
+| GET | `/api/log-analytics/progresso` | Andamento das coletas em curso (fase, atual/total, item atual, erro) — barato, feito pra poll de 2s |
+| POST | `/api/log-analytics/coleta/forcar` | Força coleta do inventário de Log Analytics (janela fixa de 30 dias) |
+| POST | `/api/log-analytics/backfill-volume` | Backfill de volume por período — `{ dias }` de 1 a 365, limitado pela retenção real de cada workspace |
+| POST | `/api/log-analytics/backfill-atribuicao` | Backfill de "quem gerou os GB" por período — `{ dias }`, limitado pela retenção real de **cada tabela** |
+| POST | `/api/log-analytics/ingestao-recurso/forcar` | Força a coleta de ingestão por recurso (janela fixa de 3 dias) |
 | POST | `/api/log-analytics/diagnostic-settings/forcar` | Força a coleta de Diagnostic Settings |
 | POST | `/api/log-analytics/workspaces/:guid/auditoria-consultas/habilitar` | Habilita `LAQueryLogs` (⚠️ escreve na Azure) |
 | POST | `/api/log-analytics/workspaces/:guid/tabelas/:tabela/detalhar-recurso` | Lista os recursos que alimentam uma tabela |

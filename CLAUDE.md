@@ -47,6 +47,8 @@ npm start                # Prod: node server.js
 | **Multi-SP (v4.2)** | Coleta simultânea por Service Principal, filtro global de Tenant | `_getInventarioEscopos()`, `_coletasEmExecucao` |
 | **Mailing de Comunicados** | Broadcast corporativo via relay SMTP anônimo, cadastro único de contatos, editor visual (TipTap), acompanhamento por destinatário | `server.js` ("MAILING DE COMUNICADOS" block), `frontend/src/views/Mailing*` |
 | **Economia realizada** | Órfão identificado + excluído + custo faturado = saving auditável | `_apurarSavingOrfaos()`, `_resumoSavingOrfaos()`, `azure_desperdicio_saving` |
+| **Progresso de coleta (LA)** | Fase/atual/total por tipo, consultado de 2 em 2s pela tela | `_laProgresso` (Map), `GET /log-analytics/progresso`, `LogAnalyticsProgressoBar.tsx` |
+| **Backfill sob demanda (LA)** | Período maior que o padrão, limitado pela retenção real da Azure | `_backfillVolumeLogAnalytics()`, `_backfillAtribuicaoRecursoLogAnalytics()` |
 | **Deployment** | Docker, PM2, systemd | 10-DEPLOYMENT |
 
 ---
@@ -74,7 +76,26 @@ O operador `~` e `regexp_match()` tratam `\d` como `d` literal. Use `[0-9]`. Uma
 `_janelaLogAnalytics()` é `async` e termina no `_ultimoDiaCustoFechado()`, não em hoje — o billing da Azure atrasa. Qualquer tela nova que some custo precisa usar a mesma janela, senão os números não fecham entre cards.
 
 **A coleta própria de GB (`log_analytics_ingestao_diaria`) começou em 30/08/2026.**
-Meses anteriores têm cobertura parcial. Número em GB para mês antigo é parcial, não baixo — a tela avisa via `dias_com_gb` vs `dias_janela`.
+Meses anteriores têm cobertura parcial. Número em GB para mês antigo é parcial, não baixo — a tela
+avisa via `dias_com_gb` vs `dias_janela`. Dá pra ampliar até onde a Azure ainda guarda, pelo
+backfill sob demanda da tela (ver armadilha de retenção abaixo).
+
+**Pedir período maior que a retenção NÃO dá erro — devolve vazio.**
+É a armadilha central de qualquer coleta de Log Analytics: a Query API não reclama de um período
+já expurgado, só retorna menos, e isso vira "consumo zero" quando o certo é "não sabemos" (mesma
+família do `null` vs zero acima). Toda consulta com janela parametrizável precisa passar pelo
+clamp contra a retenção REAL antes de sair — `_laRetencaoTabela()`. Medido: 91% das tabelas desta
+base retêm 30 dias, `Usage` retém 90 em 188 workspaces e 365 em 3. Use `retencao_dias`
+(interativa), nunca `retencao_total_dias`: o total inclui Archive Tier, que exige search job
+assíncrono e cobrado por GB varrido — usá-lo prometeria alcance que a consulta não entrega.
+O clamp do volume é por workspace; o da atribuição por recurso é **por tabela**, porque cada
+tabela do top-N tem retenção própria dentro do mesmo workspace.
+
+**`server.js` NÃO roda em modo estrito, apesar do `'use strict'` na linha 3.**
+O arquivo começa com BOM e com código executável (`process.env.TZ = ...`) antes da diretiva — e
+diretiva só vale como primeira instrução. Confirmado lendo os bytes (`od -c`). Consequência:
+variável sem `const`/`let` vira global solta em vez de lançar `ReferenceError`, então esse tipo
+de erro passa despercebido por anos. `node --check` também não pega.
 
 **`frontend/dist/` é gitignored.** Deploy sem `npm run frontend:build` serve tela em branco.
 
