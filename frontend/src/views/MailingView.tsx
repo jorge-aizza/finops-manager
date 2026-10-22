@@ -36,11 +36,17 @@ export default function MailingView() {
         <div className="view-hero-sub">Cadastro único de destinatários, composer visual e acompanhamento de envio</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, margin: '16px 20px 14px' }}>
-        <button className={tab === 'destinatarios' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('destinatarios')}>
+      {/* Barra de abas no padrao do sistema (.view-tabs, igual a Inventario e Databricks).
+          Antes eram dois .btn-primary/.btn-ghost de 34px logo abaixo da faixa roxa, que
+          disputavam atencao com o botao de acao do card ("Importar lista") a poucos pixels
+          dali — exatamente o que o comentario do .view-tabs no styles.css diz que essa
+          fileira compacta existe para evitar. O espacamento (16px acima, 16px abaixo) vem
+          da propria classe, entao acompanha as outras telas sozinho. */}
+      <div className="view-tabs" role="tablist" aria-label="Seções do Mailing" style={{ marginTop: 16 }}>
+        <button role="tab" aria-current={tab === 'destinatarios' ? 'page' : undefined} onClick={() => setTab('destinatarios')}>
           Destinatários
         </button>
-        <button className={tab === 'campanhas' ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab('campanhas')}>
+        <button role="tab" aria-current={tab === 'campanhas' ? 'page' : undefined} onClick={() => setTab('campanhas')}>
           Comunicados
         </button>
       </div>
@@ -95,7 +101,7 @@ function DestinatariosTab() {
   const ativos = contatos.filter((c) => c.status === 'ativo').length
 
   return (
-    <div style={{ margin: '0 20px' }}>
+    <div style={{ padding: '12px 20px 0' }}>
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-header">
           <span className="card-title">Cadastro de Destinatários</span>
@@ -225,7 +231,7 @@ function CampanhasTab() {
   const campanhas = campanhasQuery.data || []
 
   return (
-    <div style={{ margin: '0 20px' }}>
+    <div style={{ padding: '12px 20px 0' }}>
       <div className="card">
         <div className="card-header">
           <span className="card-title">Comunicados</span>

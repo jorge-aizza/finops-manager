@@ -112,7 +112,7 @@ describe('MailingView — Destinatários', () => {
 
 describe('MailingView — Comunicados', () => {
   async function abrirAbaComunicados(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(screen.getByRole('button', { name: 'Comunicados' }))
+    await user.click(screen.getByRole('tab', { name: 'Comunicados' }))
     await screen.findByText('Comunicado de Outubro')
   }
 
