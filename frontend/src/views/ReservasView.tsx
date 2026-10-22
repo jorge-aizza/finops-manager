@@ -280,7 +280,7 @@ export default function ReservasView() {
                   <StatusBadge status={r.status} />
                 </td>
                 <td style={{ fontSize: 12 }} title={r.sincronizado_em ? 'Sincronizada em ' + new Date(r.sincronizado_em).toLocaleString('pt-BR') : undefined}>
-                  {r.origem === 'azure' ? 'Azure' : 'Manual'}
+                  {r.origem === 'azure' ? 'Azure (SP)' : r.origem === 'storage' ? 'Azure (Storage)' : 'Manual'}
                 </td>
                 <td style={{ textAlign: 'right' }}>{formatBRL(r.custo_mensal)}</td>
                 <td>

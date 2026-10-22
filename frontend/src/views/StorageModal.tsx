@@ -9,12 +9,13 @@ interface FormState {
   storage_container: string
   storage_prefix: string
   price_list_prefix: string
+  reservas_prefix: string
   sp_id: string
   ativo: boolean
 }
 
 function emptyForm(): FormState {
-  return { nome: '', storage_account: '', storage_container: '', storage_prefix: '', price_list_prefix: '', sp_id: '', ativo: true }
+  return { nome: '', storage_account: '', storage_container: '', storage_prefix: '', price_list_prefix: '', reservas_prefix: '', sp_id: '', ativo: true }
 }
 
 function fromStorage(s: StorageConfig): FormState {
@@ -24,6 +25,7 @@ function fromStorage(s: StorageConfig): FormState {
     storage_container: s.storage_container || '',
     storage_prefix: s.storage_prefix || '',
     price_list_prefix: s.price_list_prefix || '',
+    reservas_prefix: s.reservas_prefix || '',
     sp_id: s.sp_id != null ? String(s.sp_id) : '',
     ativo: s.ativo,
   }
@@ -63,6 +65,7 @@ export default function StorageModal({ storage, onClose }: StorageModalProps) {
       storage_container: form.storage_container,
       storage_prefix: form.storage_prefix,
       price_list_prefix: form.price_list_prefix,
+      reservas_prefix: form.reservas_prefix,
       sp_id: form.sp_id ? parseInt(form.sp_id, 10) : null,
       ativo: form.ativo,
     })
@@ -96,6 +99,15 @@ export default function StorageModal({ storage, onClose }: StorageModalProps) {
             <div className="form-group">
               <label htmlFor="storage-pl-prefix">Prefixo do Price List</label>
               <input id="storage-pl-prefix" type="text" value={form.price_list_prefix} onChange={(e) => setForm({ ...form, price_list_prefix: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label htmlFor="storage-rsv-prefix">Prefixo de Reservas</label>
+              <input id="storage-rsv-prefix" type="text" value={form.reservas_prefix} onChange={(e) => setForm({ ...form, reservas_prefix: e.target.value })} />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                Export agendado em Cost Management → Exports, dataset &ldquo;Reservations&rdquo;, pro
+                mesmo Storage Account. Opcional — sem preencher, Reservas continua só via
+                Sincronizar com Azure (SP) na tela de Reservas.
+              </div>
             </div>
             <div className="form-group">
               <label htmlFor="storage-sp-id">Service Principal</label>

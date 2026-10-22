@@ -179,6 +179,9 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - Botão **Sincronizar com Azure** na tela de Reservas importa reservas e Savings Plans usando a Service Principal configurada (Coleta Azure); o cadastro manual continua disponível
 - Permissões da SP: **Reservations Reader** (escopo `/providers/Microsoft.Capacity`) e **Savings plan Reader**
 - Custos digitados manualmente são preservados nas próximas sincronizações
+- **Segundo caminho (2026-10-22): via Storage.** Campo "Prefixo de Reservas" na tela de Storage Account (Coleta Azure) lê o export agendado em Cost Management → Exports, dataset **Reservations**, do mesmo Storage Account já usado para Custo/Price List. Opcional — sem preenchê-lo, Reservas continua só pelo botão de sincronização direta. Cobre quem não quer dar `Reservations Reader` à SP, ou quer um histórico gravado automaticamente sem depender de disparar a sincronização manual
+- **Sem Savings Plans**: o export "Reservations" é só a grade de Reservas — quem usa somente a importação via Storage não vê Savings Plans até também sincronizar por SP
+- A mesma reserva vinda pelos dois caminhos vira **uma linha só** (upsert pelo mesmo id interno), nunca duplica — e um valor que só a sincronização por SP sabe (forma de pagamento) não é apagado por um reimport via Storage que não traz essa informação
 
 ### 🔤 Fontes e UI (v2.0+)
 - IBM Plex Sans/Mono self-hosted (zero dependência externa)

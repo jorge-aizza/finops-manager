@@ -43,6 +43,7 @@ npm start                # Prod: node server.js
 | **Alerts** | SMTP, dedup, smart triggers | 07-EMAIL-ALERTS |
 | **Transporte de alertas** | Relay anônimo (`alertas_relay`) com precedência sobre o SMTP autenticado; destinatários próprios | `_getSmtpConfig()`, `_sendEmail()` |
 | **Liga/desliga por alerta** | 11 alertas, guarda no envio de e-mail (sino segue registrando) | `_ALERTAS_CATALOGO`, `_alertaAtivo()`, `GET/POST /api/alertas-tipos` |
+| **Reservas via Storage (v4.2.1)** | Export "Reservations" (Cost Management → Exports) lido do mesmo Storage da coleta de Custo; colide com a sync por SP em vez de duplicar | `_importReservasFromCSV()`, `mapReservationRelatorio()` (`azureReservas.js`) |
 | **Frontend** | React (Vite), Strangler fig pattern | 08-FRONTEND-REACT |
 | **Cost Rules** | RN-* financial formulas | 09-CALCULADORA |
 | **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, Auditoria de Consultas KQL, Sentinel e Commitment Tier separados, sugestão de tier | `server.js` ("LOG ANALYTICS FINOPS" block) |
@@ -175,6 +176,26 @@ lembrar de marcá-lo. Qualquer falha de leitura devolve `true` pelo mesmo motivo
 Relay e SMTP mostram o bloco `.js-alertas-tipos`; `carregarAlertasTipos()` renderiza em todos de
 uma vez, marcar num espelha no outro na hora, e `salvarAlertasTipos(botão)` lê o bloco DO BOTÃO —
 nunca um id fixo, senão salvar por um card ignoraria o que foi marcado no outro.
+
+**Reserva vinda via Storage precisa colidir com a mesma reserva vinda via SP, não duplicar.**
+`mapReservationRelatorio()` (`azureReservas.js`) reconstrói o `azure_id` do jeito que a API ARM
+grava (`/providers/microsoft.capacity/reservationorders/{order}/reservations/{id}`, minúsculo) a
+partir das colunas "Reservation Id" + "Reservation order Id" do export. É o MESMO índice único
+(`uq_reservas_azure_id`) que a sincronização por SP já usa — por isso as duas vias convergem numa
+linha só em vez de criar duplicata. Se um dia aparecer uma 3ª via de importação (AWS/GCP/Oracle,
+ou outro relatório Azure), ela só evita duplicar reservas que a SP também vê se reconstruir o
+MESMO formato de id — senão nasce uma 2ª linha para a mesma reserva física. Pelo mesmo motivo,
+`opcao_pagamento` fica de fora do `UPDATE SET` do upsert via Storage: o relatório nunca traz essa
+coluna, e incluí-la apagaria um valor que a sincronização por SP já tinha preenchido.
+
+**Cabeçalho de export Azure é confirmado; VALORES de Status/Term/Scope são suposição defensiva.**
+`mapReservationRelatorio()` foi calibrado com o cabeçalho real que o usuário enviou
+(2026-10-22), não com linhas de dado — não há amostra de como "Succeeded"/"Expired"/"1 Year"
+aparecem de fato nessa coluna. Por isso o casamento é por substring (`/cancel|fail/`,
+`/subscription/`...), nunca igualdade exata, e Status cai no mesmo fallback por data que o
+caminho ARM (`mapStatus`) já usa quando o texto não bate com nada conhecido — a Expiration date é
+a fonte de verdade, a coluna Status só cobre os casos óbvios. Se o primeiro import real em
+produção mostrar reserva com status/escopo errado, é aqui que ajustar, não um bug de lógica.
 
 **E-mail só para o que é acionável, com prazo, em volume limitado e para quem pode agir.**
 Os quatro critérios juntos. Alerta por item dentro de laço de coleta vira rajada sem teto — foi o

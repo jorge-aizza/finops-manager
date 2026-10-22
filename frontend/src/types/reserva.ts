@@ -19,7 +19,7 @@ export interface Reserva {
   observacoes: string | null
   criado_por: number | null
   criado_por_nome?: string | null
-  origem?: string | null // 'manual' | 'azure'
+  origem?: string | null // 'manual' | 'azure' (sync por SP) | 'storage' (export agendado no Storage Account)
   azure_id?: string | null
   sincronizado_em?: string | null
   criado_em: string

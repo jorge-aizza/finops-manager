@@ -136,4 +136,128 @@ function mapSavingsPlan(sp, hoje = new Date().toISOString().slice(0, 10)) {
   };
 }
 
-module.exports = { mapReservation, mapSavingsPlan, mapEscopo, mapStatus, mapPrazo, mapPagamento };
+// ── Relatório "Reservations" exportado pela Azure (Cost Management → Exports, ou o
+// botão Export da tela Reservations do portal) ──────────────────────────────────────
+// Cabeçalho real (2026-10-22, enviado pelo usuário):
+//   Name | Reservation Id | Reservation order Id | Status | Expiration date |
+//   Purchase date | Term | Scope | Scope subscription | Scope resource group | Type |
+//   Product name | Region | Quantity | Utilization % 1 Day | Utilization % 7 Day |
+//   Utilization % 30 Day | Deep link to reservation
+//
+// Vocabulário DIFERENTE do retorno da API ARM (mapReservation acima): aqui "Status"/
+// "Term"/"Scope" vêm como texto de tela, não os enums da API (provisioningState/P1Y/
+// appliedScopeType). Casamento é por substring, nunca igualdade exata — não há amostra
+// de VALORES reais (só o cabeçalho), então o texto exato de cada estado é incerto; a
+// data de vencimento é a fonte de verdade para Ativa/Expirada (mesmo fallback de
+// mapStatus), o texto da coluna Status só cobre os casos óbvios (cancelada/falha).
+//
+// SEM Savings Plans: este relatório é só a grade "Reservations" — Savings Plans têm
+// tela e export próprios no portal, não cobertos aqui. Quem usa só a importação via
+// Storage (sem sync por SP) não vê Savings Plans na tela até sincronizar também por SP.
+//
+// Utilization %, Region e o link ficam DE FORA do que é gravado: a tabela não tem essas
+// colunas, e "observacoes" é campo de dono humano — a sincronização por SP nunca escreve
+// nele (nem no UPDATE do ON CONFLICT), então a importação por Storage segue a mesma regra
+// em vez de poluir um campo que é do usuário.
+const _RSV_REL_TIPO_SLUG = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// Mesmo lookup case/espaço-insensível que `_mapRowCSV` (server.js) já usa para o CSV de
+// custo — cabeçalho pode variar capitalização/espaçamento entre exports sem quebrar.
+function _relatorioCi(row) {
+  const porSlug = Object.keys(row || {}).reduce((m, k) => {
+    m[k.toLowerCase().replace(/[^a-z0-9]/g, '')] = k;
+    return m;
+  }, {});
+  return (...slugs) => {
+    for (const s of slugs) {
+      const k = porSlug[s];
+      if (k != null) {
+        const v = row[k];
+        if (v != null && String(v).trim() !== '') return String(v).trim();
+      }
+    }
+    return null;
+  };
+}
+
+function mapStatusRelatorio(statusTexto, dataVencimento, hoje) {
+  const s = String(statusTexto || '').toLowerCase();
+  if (/cancel|fail|expired?.?by|merged|split/.test(s)) {
+    return /expir/.test(s) ? 'Expirada' : 'Cancelada';
+  }
+  if (/expir/.test(s)) return 'Expirada';
+  // "Succeeded"/"Active"/"Processing" ou qualquer texto não reconhecido: a data manda,
+  // mesmo fallback de mapStatus() para o caminho ARM.
+  return dataVencimento && dataVencimento < hoje ? 'Expirada' : 'Ativa';
+}
+
+function mapPrazoRelatorio(termoTexto) {
+  if (!termoTexto) return null;
+  const iso = /^P(\d+)Y$/i.exec(termoTexto.trim());
+  if (iso) return iso[1] === '1' ? '1 ano' : iso[1] + ' anos';
+  return /3/.test(termoTexto) ? '3 anos' : '1 ano';
+}
+
+function mapEscopoRelatorio(escopoTexto, subTexto, rgTexto) {
+  const s = String(escopoTexto || '').toLowerCase();
+  let tipo_escopo = 'Shared';
+  if (/resource.?group/.test(s)) tipo_escopo = 'Resource Group';
+  else if (/management/.test(s)) tipo_escopo = 'Management Group';
+  else if (/subscription/.test(s)) tipo_escopo = 'Subscription';
+  return {
+    tipo_escopo,
+    // "Scope subscription" no relatório é o NOME da assinatura (texto de tela), não o
+    // GUID que a sincronização por SP grava em subscription_id — a tela já cai para
+    // mostrar o valor cru quando não encontra o id na lista de assinaturas conhecidas
+    // (ReservasView.tsx, subRgDisplay), então o campo funciona nos dois casos, só que
+    // sem o link automático para o nome oficial da assinatura.
+    subscription_id: tipo_escopo === 'Shared' ? null : (subTexto || null),
+    resource_group_name: tipo_escopo === 'Resource Group' ? (rgTexto || null) : null,
+  };
+}
+
+// Uma linha do relatório → mesmo formato de saída de mapReservation/mapSavingsPlan.
+// `hoje` é injetável para teste determinístico (mesma convenção das funções ARM acima).
+// Retorna null quando falta o mínimo pra identificar a reserva (nome ou vencimento).
+function mapReservationRelatorio(row, hoje = new Date().toISOString().slice(0, 10)) {
+  const ci = _relatorioCi(row);
+  const nome = ci('name');
+  const vencimento = toDate(ci('expirationdate', 'expiration'));
+  if (!nome || !vencimento) return null;
+
+  const reservationId = ci('reservationid');
+  const orderId = ci('reservationorderid', 'reservationorderid');
+  // Mesmo formato de azure_id que mapReservation() grava — reconstruído a partir dos
+  // dois ids do relatório. Importante: faz a linha importada via Storage colidir (ON
+  // CONFLICT) com a MESMA reserva trazida por sincronização via SP, em vez de duplicar.
+  // Confirmado pela própria URL que o sync por SP usa pra listar reservas de uma ordem
+  // (`${ordem.id}/reservations`, acima): o id de uma reserva é
+  // `{id da ordem}/reservations/{id da reserva}`.
+  const azure_id = (orderId && reservationId)
+    ? `/providers/microsoft.capacity/reservationorders/${orderId.toLowerCase()}/reservations/${reservationId.toLowerCase()}`
+    : (reservationId ? `relatorio:${reservationId.toLowerCase()}` : null);
+
+  const tipoBruto = _RSV_REL_TIPO_SLUG(ci('type'));
+
+  return {
+    azure_id,
+    cloud: 'Azure',
+    nome_reserva: nome,
+    ...mapEscopoRelatorio(ci('scope'), ci('scopesubscription'), ci('scoperesourcegroup')),
+    tipo_recurso: TIPO_RECURSO[tipoBruto] || ci('type') || 'Reserved VM Instances',
+    instancia: ci('productname'),
+    quantidade: (() => { const n = parseInt(ci('quantity'), 10); return Number.isFinite(n) && n > 0 ? n : 1; })(),
+    prazo: mapPrazoRelatorio(ci('term')),
+    opcao_pagamento: null, // relatório não traz forma de pagamento
+    custo_total: null,
+    custo_mensal: null,
+    data_inicio: toDate(ci('purchasedate')),
+    data_vencimento: vencimento,
+    status: mapStatusRelatorio(ci('status'), vencimento, hoje),
+  };
+}
+
+module.exports = {
+  mapReservation, mapSavingsPlan, mapEscopo, mapStatus, mapPrazo, mapPagamento,
+  mapReservationRelatorio, mapStatusRelatorio, mapPrazoRelatorio, mapEscopoRelatorio,
+};

@@ -3092,6 +3092,63 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false, r
   return { total, inserted, skipped, errors };
 }
 
+// ── Reservas via Export de Storage (Cost Management → Exports, dataset "Reservations",
+// agendado pro mesmo Storage Account de Custo/Price List) ───────────────────────────
+// Ao contrário do Price List (546 mil linhas, exige streaming), um export de Reservations
+// tem no máximo algumas centenas — cabe inteiro em memória. Sem a complexidade de ZIP
+// recursivo/streaming do _importPriceListFromCSV: _lerArquivoRows já resolve CSV/Parquet/
+// ZIP (inclusive ZIP com múltiplos arquivos dentro) numa chamada só.
+//
+// ON CONFLICT mira o MESMO índice único da sincronização via SP (uq_reservas_azure_id):
+// mapReservationRelatorio() reconstrói o azure_id a partir de Reservation Id + Reservation
+// order Id no mesmo formato que a API ARM usa, então a MESMA reserva trazida pelos dois
+// caminhos vira uma linha só, nunca duplica — testado em tests/azureReservas.test.js.
+async function _importReservasFromCSV(filePath, filename) {
+  await ensureAzureColetaTable();
+  const rows = await _lerArquivoRows(filePath, filename);
+  const hoje = new Date().toISOString().slice(0, 10);
+  const { mapReservationRelatorio } = require('./azureReservas');
+
+  let inseridas = 0, atualizadas = 0, invalidas = 0;
+  const avisos = [];
+  for (const row of rows) {
+    let m;
+    try { m = mapReservationRelatorio(row, hoje); }
+    catch (e) { invalidas++; if (avisos.length < 10) avisos.push(`Linha com erro: ${e.message}`); continue; }
+    if (!m) { invalidas++; continue; }
+    try {
+      const up = await pool.query(
+        `INSERT INTO reservas_cloud
+           (cloud, nome_reserva, tipo_escopo, subscription_id, resource_group_name, tipo_recurso,
+            instancia, quantidade, prazo, opcao_pagamento, custo_total, custo_mensal,
+            data_inicio, data_vencimento, status, origem, azure_id, sincronizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'storage',$16,NOW())
+         ON CONFLICT (azure_id) WHERE azure_id IS NOT NULL DO UPDATE SET
+           nome_reserva=EXCLUDED.nome_reserva, tipo_escopo=EXCLUDED.tipo_escopo,
+           subscription_id=EXCLUDED.subscription_id, resource_group_name=EXCLUDED.resource_group_name,
+           tipo_recurso=EXCLUDED.tipo_recurso, instancia=EXCLUDED.instancia, quantidade=EXCLUDED.quantidade,
+           prazo=EXCLUDED.prazo,
+           -- opcao_pagamento de propósito FORA do SET: o relatório não traz essa coluna (sempre
+           -- null em m.opcao_pagamento); se um sync por SP ou edição manual já souber o valor,
+           -- um re-import via Storage da mesma reserva não pode apagá-lo.
+           custo_total=COALESCE(EXCLUDED.custo_total, reservas_cloud.custo_total),
+           custo_mensal=COALESCE(EXCLUDED.custo_mensal, reservas_cloud.custo_mensal),
+           data_inicio=EXCLUDED.data_inicio, data_vencimento=EXCLUDED.data_vencimento,
+           status=EXCLUDED.status, origem=EXCLUDED.origem, sincronizado_em=NOW(), atualizado_em=NOW()
+         RETURNING (xmax = 0) AS inserida`,
+        [m.cloud, m.nome_reserva, m.tipo_escopo, m.subscription_id, m.resource_group_name, m.tipo_recurso,
+         m.instancia, m.quantidade, m.prazo, m.opcao_pagamento, m.custo_total, m.custo_mensal,
+         m.data_inicio, m.data_vencimento, m.status, m.azure_id]
+      );
+      if (up.rows[0].inserida) inseridas++; else atualizadas++;
+    } catch (e) {
+      invalidas++;
+      if (avisos.length < 10) avisos.push(`"${m.nome_reserva}": ${e.message.slice(0, 120)}`);
+    }
+  }
+  return { total: rows.length, inseridas, atualizadas, invalidas, avisos };
+}
+
 // ── Helpers de importação ────────────────────────────────────────────────────
 const _uploadDir = require('path').join(__dirname, 'uploads_tmp');
 if (!require('fs').existsSync(_uploadDir)) require('fs').mkdirSync(_uploadDir, { recursive: true });
@@ -6663,6 +6720,10 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS dias_semana        TEXT`);
   await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS sp_id              INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL`);
   await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS price_list_prefix  VARCHAR(500)`);
+  // Export "Reservations" do Cost Management/portal, agendado pro mesmo Storage Account —
+  // mesmo padrão do price_list_prefix acima: prefixo opcional, dataset próprio, falha
+  // isolada (não derruba a coleta de Custo nem a de Price List do mesmo Storage).
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS reservas_prefix    VARCHAR(500)`);
 
   // ── azure_coleta_historico ────────────────────────────────────────────────
   await pool.query(`
@@ -17062,7 +17123,78 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       }
     }
 
-    const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros${plMsg}`;
+    // ── Reservas via Storage (opcional) ─────────────────────────────────────────
+    // Mesmo padrão do bloco de Price List acima: dataset opcional, histórico próprio,
+    // falha isolada — um export de Reservations ausente/malformado não derruba Custo
+    // nem Price List do mesmo Storage. Export esperado: Cost Management → Exports →
+    // dataset "Reservations" (ou o botão Export da tela Reservations do portal).
+    let rsvMsg = '';
+    if (stg.reservas_prefix?.trim()) {
+      const rsvPrefix = stg.reservas_prefix.trim();
+      let rsvHistId, rsvLog = [];
+      const _logRsv = msg => { _logColeta(`[RSV] ${msg}`, _coletaProgresso); rsvLog.push(msg); };
+      try {
+        const rsvHistR = await pool.query(
+          `INSERT INTO azure_coleta_historico (status,tipo,sp_id,origem) VALUES ('executando','reservas',$1,$2) RETURNING id`,
+          [sp.id || null, origemDb]
+        );
+        rsvHistId = rsvHistR.rows[0].id;
+      } catch (_) {}
+      _coletaProgresso.fase = 'Coletando Reservas do Storage...';
+      _logRsv(`Listando em ${storageAccount}/${container}/${rsvPrefix}`);
+      let rsvIns = 0, rsvUpd = 0, rsvInv = 0, rsvBlobs = [];
+      const rsvAvisos = [];
+      try {
+        rsvBlobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, rsvPrefix);
+        rsvBlobs = rsvBlobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
+        _logRsv(`${rsvBlobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`);
+        for (const rb of rsvBlobs) {
+          if (isCancelada()) break;
+          let rsvTmp;
+          try {
+            let rsvTok = await getStorageToken();
+            try {
+              rsvTmp = await _storageDownloadBlob(rsvTok, storageAccount, container, rb.name);
+            } catch (e401rsv) {
+              if (e401rsv.message.includes('(401)')) {
+                rsvTok = await getStorageToken(true);
+                rsvTmp = await _storageDownloadBlob(rsvTok, storageAccount, container, rb.name);
+              } else throw e401rsv;
+            }
+            const rsvR = await _importReservasFromCSV(rsvTmp, rb.name.split('/').pop());
+            rsvIns += rsvR.inseridas;
+            rsvUpd += rsvR.atualizadas;
+            rsvInv += rsvR.invalidas;
+            rsvAvisos.push(...rsvR.avisos);
+            _logRsv(`${rb.name.split('/').pop()} → ${rsvR.total} linha(s) · ins:${rsvR.inseridas} upd:${rsvR.atualizadas} inv:${rsvR.invalidas}`);
+          } catch (rsvBlobErr) {
+            _logRsv(`ERRO ${rb.name.split('/').pop()}: ${rsvBlobErr.message.slice(0, 60)}`);
+            rsvInv++;
+          } finally {
+            const fs = require('fs');
+            if (rsvTmp) try { fs.unlinkSync(rsvTmp); } catch (_) {}
+          }
+        }
+        rsvMsg = ` · Reservas: ${rsvBlobs.length} arquivo(s) · ins:${rsvIns} upd:${rsvUpd} inv:${rsvInv}`;
+        _logRsv(`Concluída${rsvMsg}`);
+        if (rsvAvisos.length) _logRsv(`Avisos: ${rsvAvisos.slice(0, 5).join(' | ')}`);
+        if (rsvHistId) await pool.query(
+          `UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+          [rsvIns, rsvUpd, rsvInv,
+           `Reservas via Storage · ${rsvBlobs.length} arquivo(s) · ${rsvIns} inseridas · ${rsvUpd} atualizadas · ${rsvInv} inválidas`,
+           JSON.stringify({ tipo: 'reservas', modo, log: rsvLog, avisos: rsvAvisos }), rsvHistId]
+        ).catch(() => {});
+      } catch (rsvListErr) {
+        _logRsv(`Erro ao listar: ${rsvListErr.message.slice(0, 80)}`);
+        rsvMsg = ` · Reservas: erro (${rsvListErr.message.slice(0, 40)})`;
+        if (rsvHistId) await pool.query(
+          `UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',linhas_erro=1,mensagem=$1,detalhes=$2 WHERE id=$3`,
+          [rsvListErr.message, JSON.stringify({ tipo: 'reservas', modo, log: rsvLog }), rsvHistId]
+        ).catch(() => {});
+      }
+    }
+
+    const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros${plMsg}${rsvMsg}`;
     _coletaProgresso.fase = 'Concluída';
     _logColeta('Concluída: ' + msg, _coletaProgresso);
     _finalizarColetaEntry('storage', idChave, 'concluido');
@@ -17306,12 +17438,12 @@ app.get('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (_req,
 
 app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, ativo, sp_id } = req.body;
     await ensureAzureColetaTable();
     if (!storage_account?.trim() || !storage_container?.trim()) return res.status(400).json({ error: 'Storage Account e Container são obrigatórios' });
     const r = await pool.query(
-      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,price_list_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null]
+      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,price_list_prefix,reservas_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null, ativo ?? true, sp_id || null]
     );
     res.json({ ok: true, id: r.rows[0].id });
   } catch (e) { _dbErr(res, e); }
@@ -17319,10 +17451,10 @@ app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req,
 
 app.put('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, ativo, sp_id } = req.body;
     await pool.query(
-      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,price_list_prefix=$5,ativo=$6,sp_id=$7,atualizado_em=NOW() WHERE id=$8`,
-      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
+      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,price_list_prefix=$5,reservas_prefix=$6,ativo=$7,sp_id=$8,atualizado_em=NOW() WHERE id=$9`,
+      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }

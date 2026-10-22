@@ -191,6 +191,7 @@ export const setStorageAtivo = (storage: StorageConfig, ativo: boolean) =>
     storage_container: storage.storage_container,
     storage_prefix: storage.storage_prefix || '',
     price_list_prefix: storage.price_list_prefix || '',
+    reservas_prefix: storage.reservas_prefix || '',
     sp_id: storage.sp_id,
     ativo,
   })
