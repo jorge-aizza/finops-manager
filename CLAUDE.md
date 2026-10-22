@@ -127,6 +127,20 @@ usado para não contar a mesma economia duas vezes) e `primeira_deteccao_em` sã
 da detecção/apuração justamente por isso — e `primeira_deteccao_em` fica congelado: "dias como
 órfão na data da exclusão" é fato histórico, não algo que deva mudar depois.
 
+**Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).**
+O corpo do comunicado sai do editor com `src="http://<host-do-finops>/mailing-uploads/x.png"`,
+montado no navegador a partir de `window.location.origin`. Isso obriga o cliente de e-mail a
+ALCANÇAR este servidor na hora de abrir — e no Outlook Web e no celular quem busca a imagem é o
+proxy da Microsoft, que não tem rota para host interno. O sintoma é ícone de imagem quebrada, e
+marcar o remetente como confiável NÃO resolve: confiar só autoriza o download, não cria rota.
+`_mailingEmbutirImagens()` troca todo `src` de `/mailing-uploads/` por anexo `cid:` dentro de
+`_sendMailingEmail()` — ponto único, vale para a campanha e para o envio de teste. Deixa em paz
+URL externa, `data:` e arquivo que sumiu do disco (URL quebrada é melhor que envio que falha).
+Consequência de peso: o arquivo vai em CADA mensagem, então imagem de template é dimensionada
+para o e-mail (banner 1280px JPG, 62 KB) e não no tamanho original (era PNG 1920px, 1 MB — dava
+1,1 MB por destinatário, ~556 MB num disparo para 500). O `.png` continua versionado porque
+campanhas já salvas no banco apontam para ele.
+
 **Rota literal depois de rota com `:param` no mesmo prefixo é engolida em silêncio.**
 `POST /api/integrations/alertas-tipos` nunca executou: `/api/integrations/:tipo`, registrado
 antes, casava primeiro e gravava uma linha solta com `tipo='alertas-tipos'`, devolvendo

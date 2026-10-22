@@ -146,7 +146,10 @@ describe('MailingCampanhaModal', () => {
       await user.click(screen.getByText('Modelo FinOps — Governança de Recursos Órfãos'))
 
       const editor = screen.getByLabelText('corpo-html-mock') as HTMLTextAreaElement
-      expect(editor.value).toContain('finops-banner-comunicado.png')
+      // Banner em .jpg desde que as imagens passaram a viajar embutidas no e-mail: o
+      // .png de 1 MB iria dentro de CADA mensagem. O .png segue no repositório porque
+      // campanhas antigas salvas no banco ainda apontam para ele.
+      expect(editor.value).toContain('finops-banner-comunicado.jpg')
       expect(editor.value).toContain('Como funcionará o processo?')
     });
 

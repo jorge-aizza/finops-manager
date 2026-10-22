@@ -15,6 +15,19 @@
 // mesmo mecanismo que as imagens que o usuário sobe pelo composer, só que com nome fixo
 // em vez de timestamp, porque são reaproveitadas em todo comunicado, não de um upload só.
 //
+// A URL com `window.location.origin` vale só DENTRO do editor, para a pré-visualização.
+// No envio o servidor troca todo `src` de /mailing-uploads/ por um anexo `cid:`
+// (`_mailingEmbutirImagens` em server.js), porque e-mail com imagem remota depende de o
+// cliente alcançar este servidor na hora de abrir — e no Outlook Web/celular quem busca é
+// o proxy da Microsoft, sem rota para host interno. Por isso NÃO adianta trocar essa URL
+// por caminho relativo nem por IP: o que resolve é a imagem viajar junto.
+//
+// Banner em JPG, não PNG: medido, o PNG tinha 1920px e 1.066 KB para renderizar a 640px,
+// com canal alpha 100% opaco (nenhum pixel transparente em 21.725 amostrados). Como agora
+// o arquivo vai embutido em CADA mensagem, isso custaria ~1,4 MB por e-mail. A 1280px
+// (2× para tela retina) em JPG q85 são 62 KB — 94% menor, sem artefato visível. O logo
+// continua PNG porque ali a transparência é real e usada.
+//
 // Tamanho do logo via atributo `width`, não `style`: o editor descarta `style` solto de
 // imagem/cor ao carregar HTML pronto, só preserva o que a extensão configurada em
 // MailingComposer.tsx entende — `width` é um desses (ver ImageComTamanho ali) e também
@@ -31,7 +44,7 @@
 export function buildTemplatePadraoFinOps(): string {
   const base = window.location.origin
   return `
-<p style="text-align:center"><img src="${base}/mailing-uploads/finops-banner-comunicado.png" alt="Comunicado FinOps" style="max-width:100%;height:auto"></p>
+<p style="text-align:center"><img src="${base}/mailing-uploads/finops-banner-comunicado.jpg" alt="Comunicado FinOps" width="640" style="max-width:100%;height:auto"></p>
 <p>Olá, pessoal!</p>
 <p>Com o objetivo de fortalecer a governança dos ambientes em nuvem e otimizar os custos de infraestrutura, estamos reforçando o processo de identificação e tratamento de recursos órfãos nos provedores de cloud <strong>Azure, Google Cloud Platform (GCP) e Oracle Cloud Infrastructure (OCI)</strong>.</p>
 <p>Esse processo será conduzido em conjunto pelas equipes de <strong>FinOps</strong> e <strong>Cloud Engineer</strong>, que realizarão, de forma periódica, o monitoramento de recursos de armazenamento e demais componentes sem utilização ou sem associação a recursos ativos. A iniciativa visa garantir maior controle dos ativos em nuvem, aumentar a eficiência operacional e promover o uso adequado dos recursos contratados.</p>

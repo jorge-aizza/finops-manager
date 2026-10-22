@@ -9339,11 +9339,50 @@ function _mailingTransporter(cfg) {
   });
 }
 
+// Imagens do corpo viajam DENTRO da mensagem, como anexo `cid:` — nunca por URL.
+// Antes o HTML saía com src="http://<host-do-finops>/mailing-uploads/x.png", montado no
+// navegador a partir de `window.location.origin` (ver mailingTemplatePadrao.ts e
+// MailingComposer.tsx). Isso obriga o cliente de e-mail a ALCANÇAR o servidor pela rede na
+// hora de abrir a mensagem — e no Outlook Web e no celular quem busca a imagem é o proxy da
+// Microsoft, que não tem rota para um host interno. Resultado: ícone de imagem quebrada,
+// e marcar o remetente como confiável não resolve, porque confiar só AUTORIZA o download,
+// não cria rota. Embutido, não há busca nenhuma: a imagem já chegou junto.
+const _MAILING_UPLOADS_DIR = path.join(__dirname, 'mailing_uploads');
+
+function _mailingEmbutirImagens(html) {
+  const attachments = [];
+  const cidPorArquivo = new Map();   // mesmo arquivo citado duas vezes = um anexo só
+  const corpo = String(html || '').replace(
+    /(<img\b[^>]*?\bsrc\s*=\s*["'])([^"']*\/mailing-uploads\/([^"'?#\/]+)[^"']*)(["'])/gi,
+    (inteiro, antes, _url, arquivo, depois) => {
+      let nome;
+      try { nome = decodeURIComponent(arquivo); } catch (e) { return inteiro; }
+      const destino = path.resolve(_MAILING_UPLOADS_DIR, nome);
+      // Trava de caminho: só arquivo direto da pasta, nunca `..` subindo para o disco.
+      if (path.dirname(destino) !== path.resolve(_MAILING_UPLOADS_DIR)) return inteiro;
+      // Arquivo sumiu? Deixa a URL remota como estava — imagem quebrada é melhor que
+      // mensagem que não sai, e o src original ainda pode funcionar dentro da rede.
+      if (!fs.existsSync(destino)) return inteiro;
+      let cid = cidPorArquivo.get(destino);
+      if (!cid) {
+        cid = `img${cidPorArquivo.size + 1}@finops.vivo`;
+        cidPorArquivo.set(destino, cid);
+        attachments.push({ filename: nome, path: destino, cid });
+      }
+      return `${antes}cid:${cid}${depois}`;
+    }
+  );
+  return { corpo, attachments };
+}
+
 async function _sendMailingEmail(cfg, { to, subject, html }) {
   const transporter = _mailingTransporter(cfg);
+  // Ponto único: vale para o disparo da campanha e para o envio de teste.
+  const { corpo, attachments } = _mailingEmbutirImagens(html);
   await transporter.sendMail({
     from: `"${cfg.remetente_nome || 'Vivo FinOps'}" <${cfg.remetente_email}>`,
-    to, subject, html,
+    to, subject, html: corpo,
+    ...(attachments.length ? { attachments } : {}),
   });
 }
 

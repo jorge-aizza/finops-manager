@@ -35,5 +35,7 @@ skills-lock.json
 # Imagens de marca do modelo padrão de Comunicado (Mailing) — mesmo motivo do
 # finops-logo.png acima: não são upload de usuário, são parte do próprio
 # template (mailingTemplatePadrao.ts), precisam estar no deploy.
+!mailing_uploads/finops-banner-comunicado.jpg
+# O .png fica versionado tambem: campanhas ja salvas no banco apontam para ele.
 !mailing_uploads/finops-banner-comunicado.png
 !mailing_uploads/finops-logo-assinatura.png
