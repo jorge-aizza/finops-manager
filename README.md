@@ -1,4 +1,4 @@
-# FinOps Manager — v4.2.0
+# FinOps Manager — v4.3.0
 
 Sistema web corporativo para gestão FinOps com inventário de recursos Azure, alocação de custos por tag, dashboard Databricks, e calculadora de custos Azure em tempo real.
 
@@ -8,7 +8,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 
 ## Índice
 
-1. [O que há de novo desde a v4.2.0](#o-que-há-de-novo-desde-a-v420)
+1. [O que há de novo na v4.3.0](#o-que-há-de-novo-na-v430)
 2. [O que há de novo na v4.2.0](#o-que-há-de-novo-na-v420)
 3. [Pré-requisitos](#pré-requisitos)
 4. [⚠️ Pré-produção — passo a passo obrigatório](#️-pré-produção--passo-a-passo-obrigatório)
@@ -27,10 +27,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 
 ---
 
-## O que há de novo desde a v4.2.0
-
-> Ainda não cortado como versão. O `package.json` segue em 4.2.0 — se for virar release, basta
-> renomear esta seção e bumpar a versão.
+## O que há de novo na v4.3.0
 
 ### ✉️ Mailing de Comunicados (Novo)
 - **Broadcast corporativo** separado do SMTP de Alertas, de ponta a ponta: configuração própria (`integracoes` tipo `mailing_relay`), transporter próprio e estado de execução próprio. Mexer num não afeta o outro
@@ -71,6 +68,14 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - O limite do volume é por workspace; o da atribuição é **por tabela**, porque cada tabela do top-N tem retenção própria. Verificado com um pedido de 45 dias: tabelas de 30 dias pararam em 30, as de 31 em 31, e as de 90/365 receberam os 45 completos
 - Usa a **retenção interativa**, não a total com arquivo: o Archive Tier exige *search job* assíncrono e cobrado por GB varrido, fora do escopo desta coleta — usar o total prometeria um alcance que a consulta não entrega
 - Cobertura resultante: volume de 52 → **121 dias**; atribuição por recurso de 16 → **46 dias**
+
+### 🔁 Reservas — segundo caminho de sincronização (Novo)
+- **Export "Reservations" lido do Storage**, somado à sincronização por Service Principal que já existia. O campo "Prefixo de Reservas", na tela de Storage Account, aponta para o export agendado em Cost Management → Exports, no mesmo Storage Account já usado para Custo e Price List
+- Atende quem **não quer conceder `Reservations Reader`** à SP, ou prefere o registro atualizado automaticamente sem depender de alguém disparar a sincronização manual
+- A **mesma reserva vinda pelos dois caminhos vira uma linha só**: o `azure_id` é reconstruído a partir de "Reservation Id" + "Reservation order Id" no formato exato que a API ARM grava, caindo no mesmo índice único. Um valor que só a sincronização por SP conhece (forma de pagamento) não é apagado por um reimport que não traz essa coluna
+- **Sem Savings Plans**: o export é só a grade de Reservas. Quem usa apenas esse caminho não os enxerga até sincronizar também por SP
+- Falha isolada: export de Reservas ausente ou malformado não derruba a coleta de Custo nem a de Price List do mesmo Storage
+- Mapeamento calibrado contra um export real de produção, não contra suposição — inclusive o tipo `AVS` (Azure VMware Solution), que não estava no dicionário
 
 ### 🔔 Alertas por e-mail — volume e roteamento
 - **Mudança de propriedade de infra virou só sino.** Disparava uma vez por propriedade alterada dentro da coleta, sem nenhum controle de repetição, numa coleta que processa 150 a 200 mil eventos por dia

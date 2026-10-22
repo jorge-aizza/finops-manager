@@ -1,4 +1,4 @@
-# CLAUDE.md — FinOps Manager v4.2
+# CLAUDE.md — FinOps Manager v4.3
 
 **Quick reference.** Full docs: `MODULES/` | Memory: `~/.claude/projects/.../memory/MEMORY.md`
 
