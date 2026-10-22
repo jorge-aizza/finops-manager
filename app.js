@@ -1968,11 +1968,22 @@ async function openSettingsModal() {
           });
           const secureEl = document.getElementById('mailing-relay-secure');
           if (secureEl) secureEl.checked = !!i.config.secure;
+        } else if (i.tipo === 'alertas_relay') {
+          // Também sem senha. Tem `destinatarios_padrao` (o do Mailing não tem: lá os
+          // destinatários vêm do cadastro de contatos, não de um campo de texto).
+          const map = { host:'host', port:'port', 'remetente-nome':'remetente_nome', 'remetente-email':'remetente_email', destinatarios:'destinatarios_padrao' };
+          Object.keys(map).forEach(k => {
+            const el = document.getElementById('alertas_relay-' + k);
+            if (el) el.value = i.config[map[k]] || '';
+          });
+          const secureEl = document.getElementById('alertas_relay-secure');
+          if (secureEl) secureEl.checked = !!i.config.secure;
         }
       }
     });
   } catch {}
   carregarSmtpLog();
+  carregarAlertasTipos();
 }
 
 function switchSettingsTab(tab) {
@@ -3415,10 +3426,33 @@ async function toggleAtivo(id, ativo) {
   } catch(e) { showToast('Erro: '+e.message,'error'); }
 }
 
-function toggleIntegration(type) {
-  const checked = document.getElementById('toggle-'+type).checked;
+// O toggle PERSISTE na hora (2026-10-21, bug relatado pelo usuário: desligar não salvava).
+// Antes só mostrava/escondia o painel, e o botão "Salvar Configuração" fica DENTRO dele —
+// desligar escondia justamente o botão que gravaria o desligamento.
+//
+// Só é chamado por clique real: o carregamento da tela seta `toggle.checked` por código, e
+// atribuir `.checked` não dispara `onchange`. Sem isso, abrir Configurações regravaria tudo.
+async function toggleIntegration(type) {
+  const el = document.getElementById('toggle-'+type);
+  const checked = el.checked;
   const cfg = document.getElementById('config-'+type);
   if (cfg) cfg.style.display = checked ? 'block' : 'none';
+  try {
+    const r = await api('PATCH','/integrations/'+type+'/ativo',{ativo:checked});
+    // `persistido:false` = integração nunca configurada, não há linha pra atualizar. O painel
+    // abre mesmo assim pra pessoa preencher; avisar aqui que "salvou" seria mentira.
+    if (r && r.persistido === false) {
+      if (checked) showToast('Preencha e salve a configuração para ativar','success');
+      else showToast('Nada a salvar — esta integração ainda não foi configurada','success');
+      return;
+    }
+    showToast(checked ? 'Integração ativada' : 'Integração desativada','success');
+  } catch(e) {
+    // Reverte o botão: deixar ligado na tela e desligado no banco é pior que não alternar.
+    el.checked = !checked;
+    if (cfg) cfg.style.display = el.checked ? 'block' : 'none';
+    showToast('Erro ao salvar: '+e.message,'error');
+  }
 }
 
 async function salvarIntegracao(tipo) {
@@ -3444,6 +3478,14 @@ async function salvarIntegracao(tipo) {
       secure:document.getElementById('mailing-relay-secure').checked,
       remetente_nome:document.getElementById('mailing-relay-remetente-nome').value,
       remetente_email:document.getElementById('mailing-relay-remetente-email').value };
+  } else if (tipo==='alertas_relay') {
+    // Sem senha, igual ao do Mailing — mas com `destinatarios_padrao` próprio, que é
+    // justamente o que separa o destino dos alertas do destino dos comunicados.
+    config = { host:document.getElementById('alertas_relay-host').value, port:document.getElementById('alertas_relay-port').value||25,
+      secure:document.getElementById('alertas_relay-secure').checked,
+      remetente_nome:document.getElementById('alertas_relay-remetente-nome').value,
+      remetente_email:document.getElementById('alertas_relay-remetente-email').value,
+      destinatarios_padrao:document.getElementById('alertas_relay-destinatarios').value };
   }
   const ativo = document.getElementById('toggle-'+tipo).checked;
   try { await api('POST','/integrations/'+tipo,{config,ativo}); showToast('Configuração salva!','success'); }
@@ -3456,6 +3498,73 @@ async function salvarIntegracao(tipo) {
 // pelo botão "Testar Conexão" quanto pelos envios reais (alertas periódicos, coleta com erro
 // etc.) — um só lugar pra ver os dois em ordem cronológica, já que "Testar Conexão" funcionar
 // não garante que os envios reais (que usam a config SALVA) também funcionem.
+// Quais alertas enviar (2026-10-21, pedido do usuário) — o servidor devolve o catálogo inteiro
+// com o estado de cada um, então a tela não precisa conhecer a lista de alertas. Alerta novo
+// aparece aqui sozinho, já marcado (o padrão é "tudo ligado", ver `_alertaAtivo` em server.js).
+// A MESMA seleção aparece em dois cards (Relay de Alertas e E-mail SMTP), porque vale pros
+// dois transportes. Renderiza em todos os `.js-alertas-tipos` de uma vez — se um terceiro
+// lugar precisar dela depois, basta a classe, sem mexer aqui.
+async function carregarAlertasTipos() {
+  const boxes = Array.from(document.querySelectorAll('.js-alertas-tipos'));
+  if (!boxes.length) return;
+  try {
+    const r = await api('GET','/alertas-tipos');
+    const itens = (r && r.alertas) || [];
+    const html = itens.length
+      ? itens.map(a =>
+          '<label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:400;padding:4px 0;cursor:pointer">'
+          + '<input type="checkbox" style="width:auto" data-alerta="' + a.chave + '"' + (a.ativo ? ' checked' : '') + '>'
+          + '<span>' + a.label + '</span></label>'
+        ).join('')
+      : '<div style="color:var(--text-muted);font-size:12px">Nenhum alerta disponível.</div>';
+    boxes.forEach(b => { b.innerHTML = html; });
+    // Marcar num card reflete no outro NA HORA. Sem isso, editar no card de Relay e clicar
+    // "Salvar" no card de SMTP descartaria a edicao em silencio, porque cada botao le o bloco
+    // dele. Atribuicao programatica de .checked nao dispara 'change', logo nao ha laco.
+    boxes.forEach(b => {
+      if (b.dataset.espelhoLigado) return;   // carregarAlertasTipos roda de novo a cada save:
+      b.dataset.espelhoLigado = '1';         // sem a trava, empilharia um listener por chamada.
+      b.addEventListener('change', (ev) => {
+        const chave = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-alerta');
+        if (!chave) return;
+        // Consulta o DOM agora, nao a lista do render: assim nao segura referencia velha.
+        document.querySelectorAll('.js-alertas-tipos').forEach(outro => {
+          if (outro === b) return;
+          const par = outro.querySelector('input[data-alerta="' + chave + '"]');
+          if (par) par.checked = ev.target.checked;
+        });
+      });
+    });
+  } catch (e) {
+    boxes.forEach(b => {
+      b.innerHTML = '<div style="color:var(--text-muted);font-size:12px">Não foi possível carregar: ' + e.message + '</div>';
+    });
+  }
+}
+
+// `origem` é o botão clicado: a leitura sai do bloco DELE, não de um id fixo — com a lista
+// duplicada em dois cards, um id fixo leria sempre o mesmo bloco e ignoraria o que a pessoa
+// acabou de marcar no outro.
+async function salvarAlertasTipos(origem) {
+  let box = null;
+  for (let el = origem; el && !box; el = el.parentElement) {
+    box = el.querySelector ? el.querySelector('.js-alertas-tipos') : null;
+  }
+  if (!box) box = document.querySelector('.js-alertas-tipos');
+  if (!box) return;
+  // Grava o que está DESMARCADO: o servidor guarda a lista de desativados, pra que alerta novo
+  // nasça ligado em vez de ficar mudo até alguém lembrar de marcá-lo.
+  const desativados = Array.from(box.querySelectorAll('input[data-alerta]'))
+    .filter(el => !el.checked).map(el => el.getAttribute('data-alerta'));
+  try {
+    await api('POST','/alertas-tipos',{desativados});
+    showToast(desativados.length ? desativados.length + ' alerta(s) desativado(s)' : 'Todos os alertas ativos','success');
+    // Re-renderiza TODOS os blocos: sem isso, o card que não foi editado continuaria
+    // mostrando o estado antigo da mesma configuração.
+    carregarAlertasTipos();
+  } catch(e) { showToast('Erro: '+e.message,'error'); }
+}
+
 async function carregarSmtpLog() {
   const el = document.getElementById('smtp-log');
   if (!el) return;
@@ -3512,6 +3621,17 @@ async function testarConexao(type) {
     showToast('Enviando e-mail de teste pelo relay...','success');
     try { const r=await api('POST','/mailing/relay/testar',{host,port,secure,remetente_nome,remetente_email},45000); showToast(r.message||'E-mail de teste enviado!','success'); }
     catch(e) { showToast('Falha: '+e.message+' — se esta máquina não estiver na rede liberada pelo relay, isso é esperado.','error'); }
+  } else if (type==='alertas_relay') {
+    const host=document.getElementById('alertas_relay-host').value, port=document.getElementById('alertas_relay-port').value||25;
+    const secure=document.getElementById('alertas_relay-secure').checked;
+    const remetente_nome=document.getElementById('alertas_relay-remetente-nome').value, remetente_email=document.getElementById('alertas_relay-remetente-email').value;
+    // Manda a lista junto: o teste vai pro PRIMEIRO destinatário real quando houver, não só
+    // pro remetente — assim valida a caixa que vai receber os alertas, não apenas a conexão.
+    const destinatarios_padrao=document.getElementById('alertas_relay-destinatarios').value;
+    if (!host||!remetente_email) { showToast('Preencha host e e-mail do remetente para testar','error'); return; }
+    showToast('Enviando e-mail de teste pelo relay de alertas...','success');
+    try { const r=await api('POST','/integrations/alertas-relay/testar',{host,port,secure,remetente_nome,remetente_email,destinatarios_padrao},45000); showToast(r.message||'E-mail de teste enviado!','success'); carregarSmtpLog(); }
+    catch(e) { showToast('Falha: '+e.message+' — se esta máquina não estiver na rede liberada pelo relay, isso é esperado.','error'); carregarSmtpLog(); }
   } else {
     showToast('Para testar Entra ID, configure e use o botão na tela de login','success');
   }

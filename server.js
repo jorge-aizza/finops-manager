@@ -60,6 +60,7 @@ const crypto   = require('crypto');
 const fs       = require('fs');
 const jwksRsa  = require('jwks-rsa');
 const nodemailer = require('nodemailer');
+const { diasOrfaoNaExclusao } = require('./savingOrfaos');
 
 const JWT_SECRET  = process.env.JWT_SECRET  || 'finops-secret-2024';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '8h';
@@ -928,6 +929,29 @@ app.post('/api/integrations/:tipo', authMiddleware, adminMiddleware, async (req,
   } catch (err) { _dbErr(res, err); }
 });
 
+// Liga/desliga uma integração sem tocar na configuração (2026-10-21, bug relatado pelo usuário:
+// "quando desativo uma configuração na tela de integração ele não salva").
+//
+// A causa era estrutural, não um erro de gravação: o botão "Salvar Configuração" vive DENTRO do
+// painel `#config-<tipo>`, que o próprio toggle esconde ao desligar. Desligar escondia o botão
+// que gravaria o desligamento, então o estado "inativo" era impossível de persistir pela tela.
+//
+// UPDATE puro, nunca INSERT: se a integração ainda não foi configurada não há o que ativar, e
+// criar linha com config vazia só produziria uma integração "ligada" que não envia nada. Quem
+// configura pela primeira vez passa pelo POST acima, que grava config e `ativo` juntos.
+app.patch('/api/integrations/:tipo/ativo', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE integracoes SET ativo = $2, atualizado_em = NOW() WHERE tipo = $1 RETURNING tipo, ativo`,
+      [req.params.tipo, !!req.body?.ativo]
+    );
+    // Sem linha: nada foi salvo, e a tela precisa saber pra não dizer "salvo" a quem só
+    // alternou o botão de uma integração nunca configurada.
+    if (!r.rows.length) return res.json({ ok: true, persistido: false });
+    res.json({ ok: true, persistido: true, ativo: r.rows[0].ativo });
+  } catch (err) { _dbErr(res, err); }
+});
+
 // Testa credenciais SMTP ainda não salvas (mesmo padrão de POST /api/azure-coleta/sps/:id/testar
 // — o erro cru É o propósito da rota) — envia um e-mail de teste pro próprio remetente.
 // Timeouts explícitos de 10s por fase (2026-09-02) — mesmo motivo de `_sendEmail`: sem isso, um
@@ -958,6 +982,42 @@ app.post('/api/integrations/smtp/testar', authMiddleware, adminMiddleware, async
     res.json({ ok: true, message: `E-mail de teste enviado para ${remetente_email}.` });
   } catch (e) {
     _logEmailAttempt({ tipo: 'teste', destinatarios: remetente_email, assunto: 'Teste de conexão SMTP', ok: false, erro: e.message });
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Testa o relay de ALERTAS ainda não salvo — mesmo padrão da rota de SMTP acima e da do Mailing
+// (o erro cru É o propósito da rota), mas SEM senha: relay anônimo, autorizado por IP de origem.
+// Envia pro destinatário informado, ou pro próprio remetente quando nenhum for passado, pra dar
+// pra validar a caixa de destino real e não só a conexão.
+//
+// Loga no MESMO ring buffer de `_sendEmail` — a tela de Integrações mostra teste e envio real na
+// mesma lista, que é o que serve pra diagnosticar.
+app.post('/api/integrations/alertas-relay/testar', authMiddleware, adminMiddleware, async (req, res) => {
+  const { host, port, secure, remetente_email, remetente_nome, destinatarios_padrao } = req.body;
+  const destino = _parseDestinatarios(destinatarios_padrao)[0] || remetente_email;
+  try {
+    if (!host || !remetente_email) {
+      return res.status(400).json({ error: 'Preencha host e e-mail do remetente antes de testar.' });
+    }
+    const transporter = nodemailer.createTransport({
+      host, port: parseInt(port, 10) || 25, secure: !!secure,
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 10_000,
+    });
+    await transporter.sendMail({
+      from: `"${remetente_nome || 'FinOps Manager'}" <${remetente_email}>`,
+      to: destino,
+      subject: '✅ Teste de conexão — Relay de Alertas',
+      html: _emailTemplate('Teste de conexão — Relay de Alertas',
+        '<p>Se você está lendo isso, o relay de Alertas está funcionando e esta caixa recebe as notificações do sistema.</p>'
+        + '<p style="color:#6b7280;font-size:12px">Relay anônimo, autorizado por IP de origem — sem usuário e senha.</p>'),
+    });
+    _logEmailAttempt({ tipo: 'teste', destinatarios: destino, assunto: 'Teste de conexão — Relay de Alertas', ok: true });
+    res.json({ ok: true, message: `E-mail de teste enviado para ${destino}.` });
+  } catch (e) {
+    _logEmailAttempt({ tipo: 'teste', destinatarios: destino, assunto: 'Teste de conexão — Relay de Alertas', ok: false, erro: e.message });
     res.status(400).json({ error: e.message });
   }
 });
@@ -3030,6 +3090,63 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false, r
   const ts = new Date().toISOString();
   await _gravaMeta('last_result_USD_global', { ok: true, total, pages: 1, currency: 'USD', region: ARM_REGION_FALLBACK, ts, source: 'csv', filename });
   return { total, inserted, skipped, errors };
+}
+
+// ── Reservas via Export de Storage (Cost Management → Exports, dataset "Reservations",
+// agendado pro mesmo Storage Account de Custo/Price List) ───────────────────────────
+// Ao contrário do Price List (546 mil linhas, exige streaming), um export de Reservations
+// tem no máximo algumas centenas — cabe inteiro em memória. Sem a complexidade de ZIP
+// recursivo/streaming do _importPriceListFromCSV: _lerArquivoRows já resolve CSV/Parquet/
+// ZIP (inclusive ZIP com múltiplos arquivos dentro) numa chamada só.
+//
+// ON CONFLICT mira o MESMO índice único da sincronização via SP (uq_reservas_azure_id):
+// mapReservationRelatorio() reconstrói o azure_id a partir de Reservation Id + Reservation
+// order Id no mesmo formato que a API ARM usa, então a MESMA reserva trazida pelos dois
+// caminhos vira uma linha só, nunca duplica — testado em tests/azureReservas.test.js.
+async function _importReservasFromCSV(filePath, filename) {
+  await ensureAzureColetaTable();
+  const rows = await _lerArquivoRows(filePath, filename);
+  const hoje = new Date().toISOString().slice(0, 10);
+  const { mapReservationRelatorio } = require('./azureReservas');
+
+  let inseridas = 0, atualizadas = 0, invalidas = 0;
+  const avisos = [];
+  for (const row of rows) {
+    let m;
+    try { m = mapReservationRelatorio(row, hoje); }
+    catch (e) { invalidas++; if (avisos.length < 10) avisos.push(`Linha com erro: ${e.message}`); continue; }
+    if (!m) { invalidas++; continue; }
+    try {
+      const up = await pool.query(
+        `INSERT INTO reservas_cloud
+           (cloud, nome_reserva, tipo_escopo, subscription_id, resource_group_name, tipo_recurso,
+            instancia, quantidade, prazo, opcao_pagamento, custo_total, custo_mensal,
+            data_inicio, data_vencimento, status, origem, azure_id, sincronizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'storage',$16,NOW())
+         ON CONFLICT (azure_id) WHERE azure_id IS NOT NULL DO UPDATE SET
+           nome_reserva=EXCLUDED.nome_reserva, tipo_escopo=EXCLUDED.tipo_escopo,
+           subscription_id=EXCLUDED.subscription_id, resource_group_name=EXCLUDED.resource_group_name,
+           tipo_recurso=EXCLUDED.tipo_recurso, instancia=EXCLUDED.instancia, quantidade=EXCLUDED.quantidade,
+           prazo=EXCLUDED.prazo,
+           -- opcao_pagamento de propósito FORA do SET: o relatório não traz essa coluna (sempre
+           -- null em m.opcao_pagamento); se um sync por SP ou edição manual já souber o valor,
+           -- um re-import via Storage da mesma reserva não pode apagá-lo.
+           custo_total=COALESCE(EXCLUDED.custo_total, reservas_cloud.custo_total),
+           custo_mensal=COALESCE(EXCLUDED.custo_mensal, reservas_cloud.custo_mensal),
+           data_inicio=EXCLUDED.data_inicio, data_vencimento=EXCLUDED.data_vencimento,
+           status=EXCLUDED.status, origem=EXCLUDED.origem, sincronizado_em=NOW(), atualizado_em=NOW()
+         RETURNING (xmax = 0) AS inserida`,
+        [m.cloud, m.nome_reserva, m.tipo_escopo, m.subscription_id, m.resource_group_name, m.tipo_recurso,
+         m.instancia, m.quantidade, m.prazo, m.opcao_pagamento, m.custo_total, m.custo_mensal,
+         m.data_inicio, m.data_vencimento, m.status, m.azure_id]
+      );
+      if (up.rows[0].inserida) inseridas++; else atualizadas++;
+    } catch (e) {
+      invalidas++;
+      if (avisos.length < 10) avisos.push(`"${m.nome_reserva}": ${e.message.slice(0, 120)}`);
+    }
+  }
+  return { total: rows.length, inseridas, atualizadas, invalidas, avisos };
 }
 
 // ── Helpers de importação ────────────────────────────────────────────────────
@@ -6603,6 +6720,10 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS dias_semana        TEXT`);
   await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS sp_id              INTEGER REFERENCES azure_coleta_config(id) ON DELETE SET NULL`);
   await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS price_list_prefix  VARCHAR(500)`);
+  // Export "Reservations" do Cost Management/portal, agendado pro mesmo Storage Account —
+  // mesmo padrão do price_list_prefix acima: prefixo opcional, dataset próprio, falha
+  // isolada (não derruba a coleta de Custo nem a de Price List do mesmo Storage).
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS reservas_prefix    VARCHAR(500)`);
 
   // ── azure_coleta_historico ────────────────────────────────────────────────
   await pool.query(`
@@ -7135,9 +7256,11 @@ async function ensureAzureColetaTable() {
       resource_id_upper    TEXT PRIMARY KEY,
       categoria            VARCHAR(30),
       primeira_deteccao_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      ultima_deteccao_em   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      ultima_deteccao_em   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      desde_orfao_em       TIMESTAMPTZ
     )
   `);
+  await pool.query(`ALTER TABLE azure_desperdicio_deteccao ADD COLUMN IF NOT EXISTS desde_orfao_em TIMESTAMPTZ`).catch(() => {});
   // Origem do snapshot (sourceResourceId do ARG) — guardada na DETECÇÃO porque depois que o
   // snapshot é excluído ele some do Resource Graph e o vínculo com o disco que o gerou seria
   // perdido. É esse vínculo que evita contar economia duas vezes na apuração de saving
@@ -7164,6 +7287,7 @@ async function ensureAzureColetaTable() {
       excluido_por        VARCHAR(300),
       custo_mensal        NUMERIC(14,4),
       dias_observados     INTEGER,
+      desde_orfao_em      TIMESTAMPTZ,
       apurado_em          TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
@@ -7175,6 +7299,7 @@ async function ensureAzureColetaTable() {
   // congelado no momento da apuração, não algo que deva mudar depois. É o sinal que separa
   // economia de rotatividade: na base real, as NICs excluídas tinham 0 dias como órfãs.
   await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS primeira_deteccao_em TIMESTAMPTZ`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS desde_orfao_em TIMESTAMPTZ`).catch(() => {});
   // Preenche o que já foi apurado antes desta coluna existir, enquanto a detecção ainda
   // tiver a linha. Roda uma vez: depois do UPDATE não sobra candidato.
   await pool.query(`
@@ -7182,6 +7307,26 @@ async function ensureAzureColetaTable() {
     FROM azure_desperdicio_deteccao d
     WHERE d.resource_id_upper = s.resource_id_upper AND s.primeira_deteccao_em IS NULL
   `).catch(() => {});
+  await pool.query(`
+    UPDATE azure_desperdicio_saving s
+    SET desde_orfao_em = COALESCE(d.desde_orfao_em, s.primeira_deteccao_em, d.primeira_deteccao_em)
+    FROM azure_desperdicio_deteccao d
+    WHERE d.resource_id_upper = s.resource_id_upper AND s.desde_orfao_em IS NULL
+  `).catch(() => {});
+  // Exceção manual (2026-10-20): o piso de dias resolve o caso dominante, mas não todos —
+  // um disco órfão há 45 dias pode ter sido apagado pelo time da aplicação, não pelo
+  // processo de FinOps, e nenhuma regra automática distingue isso. Daí poder marcar item a
+  // item pela tela. Grava QUEM, QUANDO e POR QUÊ de propósito: é override manual sobre um
+  // número que vai para a diretoria, então precisa de trilha — sem isso alguém pode remover
+  // item inconveniente e ninguém percebe.
+  //
+  // Marcar nunca APAGA a linha: o item continua no detalhe, riscado e com o motivo à vista,
+  // e dá pra voltar atrás. Economia realizada é fato histórico; o que muda é a
+  // classificação dele, não a existência.
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado_por VARCHAR(300)`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado_em TIMESTAMPTZ`).catch(() => {});
+  await pool.query(`ALTER TABLE azure_desperdicio_saving ADD COLUMN IF NOT EXISTS ignorado_motivo TEXT`).catch(() => {});
   // NOTA pra quem for mexer na apuração de saving: a tentação é criar um índice funcional
   // só em LOWER(resource_id) aqui (o que existe é composto, com subscription_id na frente).
   // Foi testado — 287 MB, e o planner NUNCA o escolheu: continuou usando o composto, com o
@@ -7866,14 +8011,43 @@ async function _destinatariosPara(identificador, padrao) {
   }
 }
 
+// Config de envio dos ALERTAS, com precedência (2026-10-21, pedido do usuário: "quero usar
+// todas as notificações para SMTP relay, porém a configuração das notificações será
+// destinatário diferente do Mailing"):
+//
+//   1. `alertas_relay` — relay anônimo (sem usuário/senha, autorizado por IP), com lista de
+//      destinatários PRÓPRIA, separada da do Mailing.
+//   2. `smtp` — o autenticado legado, mantido como fallback.
+//
+// Precedência em vez de substituição de propósito: desligar o relay faz voltar ao caminho
+// anterior sem deploy, então a migração é reversível. Os 13 pontos que chamam esta função
+// recebem o mesmo formato nos dois casos e não precisaram mudar.
+//
+// Separado do relay do MAILING (`mailing_relay`) pela mesma razão que já valia antes: relay
+// corporativo trata envio em massa e transacional com limites e reputação diferentes, e um
+// comunicado que estoure limite não pode derrubar o alerta de custo. Nada impede os dois
+// apontarem pro mesmo host — é configuração, não código.
 async function _getSmtpConfig() {
   if (!pool) return null;
   try {
-    const r = await pool.query(`SELECT config, ativo FROM integracoes WHERE tipo='smtp'`);
-    if (!r.rows.length || !r.rows[0].ativo) return null;
-    const cfg = r.rows[0].config || {};
-    if (!cfg.host || !cfg.usuario || !cfg.senha) return null;
-    return { ...cfg, senha: _safeDecrypt(cfg.senha) };
+    const r = await pool.query(
+      `SELECT tipo, config, ativo FROM integracoes WHERE tipo IN ('alertas_relay','smtp')`
+    );
+    const porTipo = new Map(r.rows.map((x) => [x.tipo, x]));
+
+    const relay = porTipo.get('alertas_relay');
+    if (relay?.ativo) {
+      const cfg = relay.config || {};
+      // Sem senha pra validar nem decifrar: o relay autoriza pela rede de origem.
+      if (cfg.host && cfg.remetente_email) return { ...cfg, usuario: null, senha: null };
+    }
+
+    const smtp = porTipo.get('smtp');
+    if (smtp?.ativo) {
+      const cfg = smtp.config || {};
+      if (cfg.host && cfg.usuario && cfg.senha) return { ...cfg, senha: _safeDecrypt(cfg.senha) };
+    }
+    return null;
   } catch (_) { return null; }
 }
 
@@ -7916,11 +8090,14 @@ async function _sendEmail({ to, subject, html }) {
     // porta bloqueada, credencial errada). 10s por fase é generoso pra uma conexão real e curto
     // o bastante pra devolver o erro de verdade do nodemailer (ECONNREFUSED/ETIMEDOUT/EAUTH)
     // antes de qualquer timeout do lado do cliente.
+    // `auth` só quando HÁ credencial: o relay de alertas é anônimo, autorizado por IP de
+    // origem, e mandar um bloco `auth` vazio faz o nodemailer tentar AUTH e o relay recusar.
+    // É o que destrava o caminho de alerta pra relay sem quebrar o SMTP autenticado legado.
     const transporter = nodemailer.createTransport({
       host: cfg.host,
       port: parseInt(cfg.port, 10) || 587,
       secure: !!cfg.secure,
-      auth: { user: cfg.usuario, pass: cfg.senha },
+      ...(cfg.usuario && cfg.senha ? { auth: { user: cfg.usuario, pass: cfg.senha } } : {}),
       connectionTimeout: 10_000,
       greetingTimeout: 10_000,
       socketTimeout: 10_000,
@@ -7985,10 +8162,69 @@ async function _tentarClaimAlerta(tipo, chave) {
   return r.rows.length > 0;
 }
 
+// ── Quais alertas enviar (2026-10-21, pedido do usuário) ────────────────────────────────────
+// Catálogo dos alertas que mandam e-mail. A chave é o que fica gravado; o rótulo alimenta a
+// tela de Integrações. Alerta que só vai pro sino (mudança de propriedade) não entra aqui —
+// não há e-mail pra ligar ou desligar.
+const _ALERTAS_CATALOGO = [
+  { chave: 'orcamento_databricks', label: 'Orçamento Databricks estourado ou em alerta' },
+  { chave: 'anomalia_databricks', label: 'Anomalia de custo e de consumo no Databricks' },
+  { chave: 'reserva_vencendo', label: 'Reserva cloud vencendo ou expirada' },
+  { chave: 'acao_vencendo', label: 'Ação FinOps com prazo vencendo' },
+  { chave: 'gap_coleta', label: 'Gap de coleta — inventário pausado' },
+  { chave: 'anomalia_crescimento', label: 'Crescimento anômalo de recursos (resumo único)' },
+  { chave: 'orcamento_inventario', label: 'Orçamento de Inventário estourado ou em alerta' },
+  { chave: 'relatorio_semanal', label: 'Relatório semanal de Inventário' },
+  { chave: 'relatorio_diario', label: 'Relatório diário de Inventário' },
+  { chave: 'coleta_erro', label: 'Erro em coleta' },
+  { chave: 'estimativa_status', label: 'Estimativa aprovada ou reprovada' },
+];
+
+// Guarda a lista do que está DESLIGADO, não do que está ligado: assim o padrão é "tudo
+// habilitado" e quem nunca mexeu na tela continua recebendo o que já recebia — alerta novo
+// também nasce ligado, em vez de ficar mudo até alguém lembrar de habilitar.
+//
+// Sem cache: estas funções rodam em agendador, não em caminho de requisição, e uma consulta
+// indexada por execução é barata perto de alertar errado por causa de cache velho.
+async function _alertaAtivo(chave) {
+  if (!pool) return true;
+  try {
+    const r = await pool.query(`SELECT config FROM integracoes WHERE tipo='alertas_tipos'`);
+    const desativados = r.rows[0]?.config?.desativados;
+    return !(Array.isArray(desativados) && desativados.includes(chave));
+  } catch (_) {
+    return true; // falha de consulta não pode silenciar alerta
+  }
+}
+
+app.get('/api/alertas-tipos', authMiddleware, adminMiddleware, async (_req, res) => {
+  try {
+    const r = await pool.query(`SELECT config FROM integracoes WHERE tipo='alertas_tipos'`);
+    const desativados = Array.isArray(r.rows[0]?.config?.desativados) ? r.rows[0].config.desativados : [];
+    res.json({ alertas: _ALERTAS_CATALOGO.map((a) => ({ ...a, ativo: !desativados.includes(a.chave) })) });
+  } catch (err) { _dbErr(res, err); }
+});
+
+app.post('/api/alertas-tipos', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const validas = new Set(_ALERTAS_CATALOGO.map((a) => a.chave));
+    // Filtra por chave conhecida: sem isso, uma chave inventada ficaria gravada para sempre
+    // sem corresponder a alerta nenhum, e ninguém descobriria por que não aparece na tela.
+    const desativados = (Array.isArray(req.body?.desativados) ? req.body.desativados : []).filter((c) => validas.has(c));
+    await pool.query(
+      `INSERT INTO integracoes (tipo, config, ativo) VALUES ('alertas_tipos', $1, true)
+       ON CONFLICT (tipo) DO UPDATE SET config = EXCLUDED.config, atualizado_em = NOW()`,
+      [JSON.stringify({ desativados })]
+    );
+    res.json({ ok: true, desativados });
+  } catch (err) { _dbErr(res, err); }
+});
+
 // Orçamento Databricks estourado (≥75%) — chave inclui o mês (YYYY-MM) pra
 // reavisar todo mês se continuar estourado, em vez de nunca mais alertar depois
 // da primeira vez. Reaproveita a mesma regra de severidade da rota do dashboard.
 async function _checkOrcamentosDatabricks() {
+  if (!(await _alertaAtivo('orcamento_databricks'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8021,6 +8257,7 @@ async function _checkOrcamentosDatabricks() {
 // cooldown de 24h já cobre "continua anômalo → reavisa todo dia enquanto persistir",
 // mesmo padrão de reserva/ação vencendo acima).
 async function _checkAnomaliasDatabricks() {
+  if (!(await _alertaAtivo('anomalia_databricks'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8060,6 +8297,7 @@ async function _checkAnomaliasDatabricks() {
 // (checkRsvAlertsPopup, app.js). Destinatário: dono real (criado_por → usuarios.email)
 // quando existir; sem isso, lista padrão configurada no SMTP.
 async function _checkReservasVencendo() {
+  if (!(await _alertaAtivo('reserva_vencendo'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8091,6 +8329,7 @@ async function _checkReservasVencendo() {
 // match é feito no sentido contrário, req.user.nome ILIKE responsavel); sem
 // match, cai pra lista padrão.
 async function _checkAcoesVencendo() {
+  if (!(await _alertaAtivo('acao_vencendo'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const padrao = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8158,7 +8397,9 @@ async function _checkGapColetaInventario() {
       'inventario:auditoria'
     );
 
-    if (destinatarios.length) {
+    // Trava só o E-MAIL, não o sino: o registro em notificacoes_sistema acima vale mesmo com
+    // o alerta desligado — desligar aqui é "pare de me mandar e-mail disso", não "esconda".
+    if (destinatarios.length && await _alertaAtivo('gap_coleta')) {
       await _sendEmail({
         to: destinatarios,
         subject: `⚠️ Gap de coleta — Inventário pausado por ${diasDesdeUltima || '?'} dias`,
@@ -8225,7 +8466,9 @@ async function _checkAnomaliasCrescimentoInventario() {
   }
 
   // Resumo único, já ordenado pela anomalia mais forte.
-  if (destinatarios.length && novas.length) {
+  // Trava só o E-MAIL, não o sino: o registro em notificacoes_sistema acima vale mesmo com
+  // o alerta desligado — desligar aqui é "pare de me mandar e-mail disso", não "esconda".
+  if (destinatarios.length && novas.length && await _alertaAtivo('anomalia_crescimento')) {
     novas.sort((x, y) => y.severidade - x.severidade);
     const linhas = novas.map((x) => `<li style="margin-bottom:6px"><strong>${_escHtmlServer(x.escopoTxt)}</strong> — ${new Date(x.dia).toLocaleDateString('pt-BR')}: ${x.partesHtml.join(' e ')}</li>`).join('');
     await _sendEmail({
@@ -8245,6 +8488,7 @@ async function _checkAnomaliasCrescimentoInventario() {
 // "continua estourado → reavisa todo dia enquanto persistir" (mesmo padrão de reserva/
 // ação vencendo).
 async function _checkOrcamentosInventario() {
+  if (!(await _alertaAtivo('orcamento_inventario'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8273,6 +8517,7 @@ async function _checkOrcamentosInventario() {
 // data nova) — muda exatamente a cada 7 dias, então dispara no máximo 1x por semana
 // mesmo com o tick horário rodando o tempo todo.
 async function _checkRelatorioSemanalInventario() {
+  if (!(await _alertaAtivo('relatorio_semanal'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8395,6 +8640,7 @@ async function _computeRelatorioDiarioInventario(subsFiltro = null) {
 }
 
 async function _checkRelatorioDiarioInventario() {
+  if (!(await _alertaAtivo('relatorio_diario'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8453,6 +8699,7 @@ function _iniciarAlertasEmail() {
 // Chamada ao lado de cada _registrarNotificacaoColeta(...,'coleta_erro') — não
 // duplica a lógica de notificação in-app, só soma o envio por e-mail.
 async function _alertarColetaComErro(titulo, mensagem) {
+  if (!(await _alertaAtivo('coleta_erro'))) return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
@@ -8489,6 +8736,7 @@ async function _alertarMudancaPropriedade(nomeRecurso, resourceGroup, p, autor, 
 // dedup (dispara 1x por troca real de status). `responsavel` é texto livre —
 // mesma tentativa de casar com usuarios.nome usada em _checkAcoesVencendo.
 async function _alertarEstimativaStatus(estimativa) {
+  if (!(await _alertaAtivo('estimativa_status'))) return;
   if (estimativa.status !== 'Aprovado' && estimativa.status !== 'Nao Aprovado') return;
   const cfg = await _getSmtpConfig();
   if (!cfg) return;
@@ -9163,11 +9411,50 @@ function _mailingTransporter(cfg) {
   });
 }
 
+// Imagens do corpo viajam DENTRO da mensagem, como anexo `cid:` — nunca por URL.
+// Antes o HTML saía com src="http://<host-do-finops>/mailing-uploads/x.png", montado no
+// navegador a partir de `window.location.origin` (ver mailingTemplatePadrao.ts e
+// MailingComposer.tsx). Isso obriga o cliente de e-mail a ALCANÇAR o servidor pela rede na
+// hora de abrir a mensagem — e no Outlook Web e no celular quem busca a imagem é o proxy da
+// Microsoft, que não tem rota para um host interno. Resultado: ícone de imagem quebrada,
+// e marcar o remetente como confiável não resolve, porque confiar só AUTORIZA o download,
+// não cria rota. Embutido, não há busca nenhuma: a imagem já chegou junto.
+const _MAILING_UPLOADS_DIR = path.join(__dirname, 'mailing_uploads');
+
+function _mailingEmbutirImagens(html) {
+  const attachments = [];
+  const cidPorArquivo = new Map();   // mesmo arquivo citado duas vezes = um anexo só
+  const corpo = String(html || '').replace(
+    /(<img\b[^>]*?\bsrc\s*=\s*["'])([^"']*\/mailing-uploads\/([^"'?#\/]+)[^"']*)(["'])/gi,
+    (inteiro, antes, _url, arquivo, depois) => {
+      let nome;
+      try { nome = decodeURIComponent(arquivo); } catch (e) { return inteiro; }
+      const destino = path.resolve(_MAILING_UPLOADS_DIR, nome);
+      // Trava de caminho: só arquivo direto da pasta, nunca `..` subindo para o disco.
+      if (path.dirname(destino) !== path.resolve(_MAILING_UPLOADS_DIR)) return inteiro;
+      // Arquivo sumiu? Deixa a URL remota como estava — imagem quebrada é melhor que
+      // mensagem que não sai, e o src original ainda pode funcionar dentro da rede.
+      if (!fs.existsSync(destino)) return inteiro;
+      let cid = cidPorArquivo.get(destino);
+      if (!cid) {
+        cid = `img${cidPorArquivo.size + 1}@finops.vivo`;
+        cidPorArquivo.set(destino, cid);
+        attachments.push({ filename: nome, path: destino, cid });
+      }
+      return `${antes}cid:${cid}${depois}`;
+    }
+  );
+  return { corpo, attachments };
+}
+
 async function _sendMailingEmail(cfg, { to, subject, html }) {
   const transporter = _mailingTransporter(cfg);
+  // Ponto único: vale para o disparo da campanha e para o envio de teste.
+  const { corpo, attachments } = _mailingEmbutirImagens(html);
   await transporter.sendMail({
     from: `"${cfg.remetente_nome || 'Vivo FinOps'}" <${cfg.remetente_email}>`,
-    to, subject, html,
+    to, subject, html: corpo,
+    ...(attachments.length ? { attachments } : {}),
   });
 }
 
@@ -11733,6 +12020,41 @@ async function _getDesperdicioCached(subscriptionIds, diasSnapshot) {
   return p;
 }
 
+// Marca (ou desmarca) um item de economia como "não é economia nossa" — a exceção manual
+// para o que o piso de dias não pega: disco órfão o bastante, mas apagado pelo time da
+// aplicação e não pelo processo de FinOps.
+//
+// `resource_id` vai no corpo, não na URL: é um caminho da Azure cheio de barras, que como
+// parâmetro de rota seria interpretado como segmentos.
+//
+// Grava quem marcou a partir do token, nunca do corpo da requisição — se o cliente
+// pudesse dizer quem foi, a trilha de auditoria não valeria nada.
+app.post('/api/azure-inventario/saving/ignorar', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const { resource_id, ignorar, motivo } = req.body || {};
+    if (!resource_id) return res.status(400).json({ error: "resource_id é obrigatório" });
+    const marcar = ignorar !== false;
+    // Motivo obrigatório pra marcar, dispensável pra desmarcar: a decisão que tira dinheiro
+    // do número precisa de justificativa; voltar atrás é restaurar o padrão.
+    const just = String(motivo || "").trim();
+    if (marcar && !just) return res.status(400).json({ error: "Informe o motivo de não contabilizar" });
+    const quem = req.user?.email || req.user?.usuario || `usuario:${req.user?.id ?? "?"}`;
+    const r = await pool.query(
+      `UPDATE azure_desperdicio_saving
+          SET ignorado = $2,
+              ignorado_por = CASE WHEN $2 THEN $3 ELSE NULL END,
+              ignorado_em = CASE WHEN $2 THEN NOW() ELSE NULL END,
+              ignorado_motivo = CASE WHEN $2 THEN $4 ELSE NULL END
+        WHERE resource_id_upper = UPPER($1)
+        RETURNING resource_id_upper, ignorado, ignorado_por, ignorado_em, ignorado_motivo`,
+      [resource_id, marcar, quem, just || null]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: "Item de economia não encontrado" });
+    console.log(`[Saving Órfãos] ${marcar ? "ignorado" : "voltou a contar"}: ${r.rows[0].resource_id_upper} por ${quem}${just ? " — " + just : ""}`);
+    res.json(r.rows[0]);
+  } catch (e) { _dbErr(res, e); }
+});
+
 app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const t0Desp = Date.now();
@@ -11768,14 +12090,15 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     // recurso foi reaproveitado e depois abandonado de novo — reinicia a contagem.
     if (itens.length) {
       const up = await pool.query(
-        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria, origem_resource_id)
-         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat, u.origem FROM unnest($1::text[], $2::text[], $3::text[]) AS u(id, cat, origem)
+        `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria, origem_resource_id, desde_orfao_em)
+         SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat, u.origem, u.desde FROM unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[]) AS u(id, cat, origem, desde)
          ON CONFLICT (resource_id_upper) DO UPDATE SET
            primeira_deteccao_em = CASE WHEN azure_desperdicio_deteccao.ultima_deteccao_em < NOW() - INTERVAL '3 days' THEN NOW() ELSE azure_desperdicio_deteccao.primeira_deteccao_em END,
            ultima_deteccao_em = NOW(), categoria = EXCLUDED.categoria,
-           origem_resource_id = COALESCE(EXCLUDED.origem_resource_id, azure_desperdicio_deteccao.origem_resource_id)
+           origem_resource_id = COALESCE(EXCLUDED.origem_resource_id, azure_desperdicio_deteccao.origem_resource_id),
+           desde_orfao_em = EXCLUDED.desde_orfao_em
          RETURNING resource_id_upper, primeira_deteccao_em`,
-        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria), itens.map((x) => x.origem_resource_id || null)]
+        [itens.map((x) => x.resource_id), itens.map((x) => x.categoria), itens.map((x) => x.origem_resource_id || null), itens.map((x) => x.marcado_orfao_em || null)]
       );
       const primeira = new Map(up.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
       for (const it of itens) {
@@ -11870,6 +12193,11 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
 // estava sendo abatido, e ele nunca fez parte do desperdício original — foi criado pelo
 // próprio processo de limpeza).
 const _SAVING_JANELA_DIAS = 30;
+// Quantos dias o recurso precisa ter ficado órfão para a exclusão contar como economia do
+// processo. 30 vem do fluxo real de vocês — o time espera esse prazo antes de agir, então
+// exclusão mais rápida veio de outra coisa. Mesmo número que o portal público já usava como
+// piso para disco (_DIAS_MIN_DISCO_PUBLICO), agora valendo para todas as categorias.
+const _SAVING_DIAS_MIN_ORFAO = 30;
 
 // Custo faturado por recurso, cada um na SUA janela (cada exclusão tem data diferente).
 // Uma passada só com unnest de 3 colunas em vez de uma consulta por recurso.
@@ -11915,7 +12243,8 @@ async function _apurarSavingOrfaos(idsVivos) {
   // LEFT JOIN + IS NULL em vez de `NOT ... = ANY(array)`: com milhares de elementos o
   // segundo degrada pra seq scan (armadilha já documentada neste arquivo).
   const sumidos = await pool.query(
-    `SELECT d.resource_id_upper, d.categoria, d.origem_resource_id, d.primeira_deteccao_em
+    `SELECT d.resource_id_upper, d.categoria, d.origem_resource_id, d.primeira_deteccao_em,
+            COALESCE(d.desde_orfao_em, d.primeira_deteccao_em) AS desde_orfao_em
      FROM azure_desperdicio_deteccao d
      LEFT JOIN unnest($1::text[]) AS v(rid) ON v.rid = d.resource_id_upper
      LEFT JOIN azure_desperdicio_saving s
@@ -11982,14 +12311,15 @@ async function _apurarSavingOrfaos(idsVivos) {
       `INSERT INTO azure_desperdicio_saving
          (resource_id_upper, tipo, categoria, subscription_id, resource_group, nome,
           origem_resource_id, criado_em, excluido_em, excluido_por, custo_mensal, dias_observados,
-          primeira_deteccao_em)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           primeira_deteccao_em, desde_orfao_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        ON CONFLICT (resource_id_upper) DO UPDATE SET
          custo_mensal = EXCLUDED.custo_mensal, dias_observados = EXCLUDED.dias_observados,
-         tipo = EXCLUDED.tipo, apurado_em = NOW()`,
+         tipo = EXCLUDED.tipo, primeira_deteccao_em = EXCLUDED.primeira_deteccao_em,
+         desde_orfao_em = EXCLUDED.desde_orfao_em, apurado_em = NOW()`,
       [c.resource_id_upper, ehDesconto ? 'desconto' : 'economia', c.categoria, c.subscription_id,
        c.resource_group, c.nome, origemUpper, c.criado_em, c.excluido_em, c.excluido_por,
-       custoMensal, obs ? obs.dias : 0, c.primeira_deteccao_em || null]
+       custoMensal, obs ? obs.dias : 0, c.primeira_deteccao_em || null, c.desde_orfao_em || null]
     );
     gravados++;
   }
@@ -12016,62 +12346,76 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
   );
   // Recurso que voltou a existir com o mesmo id não é economia — alguém recriou.
   //
-  // Os dois portais contam BASES DIFERENTES, de propósito (decisão do usuário, 2026-10-18):
+  // PISO DE TEMPO COMO ÓRFÃO (2026-10-19, informado pelo usuário): o fluxo de vocês espera
+  // 30 dias com o recurso órfão antes de agir. Exclusão mais rápida que isso não pode ter
+  // vindo do processo — foi o ciclo de vida da própria infra. Vale para TODAS as categorias
+  // por decisão do usuário: uma regra só é mais fácil de explicar, e afrouxar depois é
+  // seguro, enquanto apertar obrigaria a revisar número já reportado à diretoria.
   //
-  //   PRIVADO  — conta tudo que foi excluído, inclusive disco de PVC/AKS e ASR. Quem olha
-  //              essa tela tem contexto para julgar, e o detalhe expõe a evidência (quem
-  //              excluiu, quando, há quantos dias era órfão) para a decisão ser dela.
+  // Na base em que foi medido, isso zera o total: as 20 NICs tinham 0 dias (Private Endpoint
+  // recriado no mesmo dia) e o disco PVC tinha 6. Resultado severo, mas honesto — nada do
+  // que foi excluído até aqui passou pelo fluxo de 30 dias.
   //
-  //   PÚBLICO  — só o que aquele portal de fato publicou, com os mesmos 5 filtros de
-  //              /api/public/orfaos. Sem isso o card anunciava economia de recurso que
-  //              nunca apareceu lá: dos 21 apurados, 20 eram NIC (categoria que o público
-  //              não publica) e 1 era PVC com 6 dias de órfão (o público exige 30+).
+  // `null` (sem data de detecção) NÃO passa, mesma convenção do endpoint público: "não
+  // sabemos há quanto tempo" é diferente de "sabemos que é 30+".
+  //
+  // Os dois portais contam bases diferentes (decisão do usuário, 2026-10-18):
+  //   PRIVADO — conta inclusive disco de PVC/AKS e ASR; quem olha tem contexto pra julgar,
+  //             e o detalhe expõe a evidência (quem excluiu, quando, dias como órfão).
+  //   PÚBLICO — só o que aquele portal publicou, com os mesmos filtros de /api/public/orfaos.
   const pub = !!opcoes.publico;
   const cats = opcoes.categorias instanceof Set ? opcoes.categorias : null;
   const rgs = opcoes.resourceGroups instanceof Set ? opcoes.resourceGroups : null;
-  const diasOrfao = (x) => (x.primeira_deteccao_em && x.excluido_em)
-    ? Math.max(0, Math.floor((new Date(x.excluido_em).getTime() - new Date(x.primeira_deteccao_em).getTime()) / 86400000))
-    : null;
+  const diasOrfao = diasOrfaoNaExclusao;
   const paraValidacao = (x) =>
     x.categoria === 'disco_orfao' && !!_classificarDiscoValidacao({ name: x.nome });
-  // Filtros do fluxo público, aplicados só quando `publico`. Disco exige 30+ dias de órfão
-  // CONFIRMADOS: `null` (sem data conhecida) não passa, mesma convenção do endpoint público
-  // — "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 30+".
+  const cumpriuPiso = (x) => { const d = diasOrfao(x); return d !== null && d >= _SAVING_DIAS_MIN_ORFAO; };
   const noFluxoPublico = (x) => {
-    // Espelha o filtro da própria rota pública: categoria que não gera custo por estar órfã
-    // não aparece lá, então também não pode contar como economia dela.
-    if (_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria)) return false;
     if (cats && !cats.has(x.categoria)) return false;
     if (rgs && rgs.size && !(x.resource_group && rgs.has(String(x.resource_group).toUpperCase()))) return false;
     if (paraValidacao(x)) return false;
-    if (x.categoria === 'disco_orfao') { const d = diasOrfao(x); if (d === null || d < 30) return false; }
     return true;
   };
-  const visivel = (x) => !x.recriado && (pub ? noFluxoPublico(x) : true);
-  const linhas = r.rows.filter(visivel);
-  // Só o privado separa "em validação": no público eles já saíram pelo filtro acima.
-  const emValidacao = pub ? [] : r.rows.filter((x) => !x.recriado && paraValidacao(x));
+  // Categoria que não gera custo ao ficar órfã sai dos DOIS modos. Antes só o público a
+  // filtrava, e o card privado dizia "21 recursos eliminados" enquanto a lista de
+  // desperdício ao lado não mostrava nenhuma NIC — as duas telas em bases diferentes,
+  // exatamente o problema que o usuário já tinha apontado no caso do PVC.
+  const naVisao = (x) => !x.recriado && !_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria)
+    && (pub ? noFluxoPublico(x) : true);
+  const linhas = r.rows.filter(naVisao);
   const agora = Date.now();
   const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
 
-  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0;
+  let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0, barradosPeloPiso = 0, ignorados = 0;
   const itens = [];
   for (const x of linhas.filter((l) => l.tipo === 'economia')) {
     const c = x.custo_mensal === null ? null : Number(x.custo_mensal);
-    if (c === null) { semCusto++; } else {
+    // Dois motivos distintos para não contar, e a tela precisa diferenciá-los: o piso é
+    // regra automática e revisável; a exceção manual é decisão de uma pessoa, com trilha.
+    // A manual tem precedência — se alguém marcou, o porquê dela é que deve aparecer.
+    const motivoFora = x.ignorado ? 'ignorado' : (cumpriuPiso(x) ? null : 'piso');
+    const conta = motivoFora === null;
+    if (motivoFora === 'ignorado') ignorados++;
+    else if (motivoFora === 'piso') barradosPeloPiso++;
+    else if (c === null) semCusto++;
+    else {
       mensalBruta += c;
       acumuladaBruta += c * meses(x.excluido_em, agora);
     }
-    // Campos de evidência para o detalhe da tela privada: quem excluiu, quando, e há quantos
-    // dias o recurso já era órfão naquele momento. O tempo como órfão é o que separa
-    // economia do processo de rotatividade normal de infra — Private Endpoint recriado no
-    // mesmo dia aparece com 0 dias e não deve ser lido como resultado.
+    // O detalhe lista TAMBÉM o que não contabilizou, com o motivo — some da soma, não da
+    // tela. "Não contabilizamos" é diferente de "não economizamos", e sem ver o item
+    // barrado ninguém consegue conferir se a regra está calibrada nem auditar a exceção.
     itens.push({
       resource_id: x.resource_id_upper, categoria: x.categoria, nome: x.nome,
       subscription_id: x.subscription_id, resource_group: x.resource_group,
       excluido_em: x.excluido_em, excluido_por: x.excluido_por, custo_mensal: c,
       dias_orfao: diasOrfao(x),
       motivo_validacao: x.categoria === 'disco_orfao' ? _classificarDiscoValidacao({ name: x.nome }) : null,
+      contabilizado: conta,
+      motivo_fora: motivoFora,
+      ignorado_por: x.ignorado_por || null,
+      ignorado_em: x.ignorado_em || null,
+      ignorado_motivo: x.ignorado_motivo || null,
     });
   }
 
@@ -12091,23 +12435,31 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
     acumuladaDesconto += s.custo_mensal_estimado * meses(s.criado_em || agora, agora);
   }
 
+  const contabilizados = itens.filter((x) => x.contabilizado);
   return {
     economia_mensal: Math.max(0, mensalBruta - descontoMensal),
     economia_mensal_bruta: mensalBruta,
     desconto_mensal_snapshots: descontoMensal,
     economia_acumulada: Math.max(0, acumuladaBruta - acumuladaDesconto),
-    recursos_eliminados: itens.length,
+    // Só o que de fato entrou na conta. `itens` traz mais que isso — inclui os barrados,
+    // para o detalhe poder mostrar por que ficaram de fora.
+    recursos_eliminados: contabilizados.length,
     sem_custo_conhecido: semCusto,
-    // Quantos dos contabilizados são disco de PVC/AKS ou ASR. No privado eles ENTRAM no
-    // total (decisão do usuário) — isto aqui é sinalização, não exclusão: serve pra tela
-    // avisar que parte do número depende de validação. No público é sempre 0, porque lá
-    // esses discos nem passam do filtro.
-    para_validacao: emValidacao.length,
-    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
-    // Quantos foram excluídos com menos de 7 dias como órfãos: forte indício de rotatividade
-    // de infra, não de ação do processo de FinOps.
-    eliminados_recentes: itens.filter((x) => x.dias_orfao !== null && x.dias_orfao < 7).length,
-    para_validacao_custo_mensal: emValidacao.reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
+    // Excluídos antes de completar o piso de dias como órfão. Não entram no total, mas
+    // aparecem no detalhe: é o número que permite conferir se o piso está calibrado.
+    nao_contabilizados_piso: barradosPeloPiso,
+    // Marcados manualmente como "não é economia nossa". Separado do piso de propósito: um
+    // é regra, o outro é decisão humana — misturar os dois esconderia quanto do número
+    // depende de julgamento.
+    nao_contabilizados_manual: ignorados,
+    dias_min_orfao: _SAVING_DIAS_MIN_ORFAO,
+    // Quantos dos CONTABILIZADOS são disco de PVC/AKS ou ASR. No privado eles entram no
+    // total (decisão do usuário) — isto é sinalização de que parte do número depende de
+    // validação, não exclusão. No público é sempre 0: lá esses discos nem passam do filtro.
+    para_validacao: contabilizados.filter((x) => x.motivo_validacao).length,
+    para_validacao_custo_mensal: contabilizados
+      .filter((x) => x.motivo_validacao)
+      .reduce((a, x) => a + (x.custo_mensal === null ? 0 : Number(x.custo_mensal)), 0),
     itens,
   };
 }
@@ -16771,7 +17123,78 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       }
     }
 
-    const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros${plMsg}`;
+    // ── Reservas via Storage (opcional) ─────────────────────────────────────────
+    // Mesmo padrão do bloco de Price List acima: dataset opcional, histórico próprio,
+    // falha isolada — um export de Reservations ausente/malformado não derruba Custo
+    // nem Price List do mesmo Storage. Export esperado: Cost Management → Exports →
+    // dataset "Reservations" (ou o botão Export da tela Reservations do portal).
+    let rsvMsg = '';
+    if (stg.reservas_prefix?.trim()) {
+      const rsvPrefix = stg.reservas_prefix.trim();
+      let rsvHistId, rsvLog = [];
+      const _logRsv = msg => { _logColeta(`[RSV] ${msg}`, _coletaProgresso); rsvLog.push(msg); };
+      try {
+        const rsvHistR = await pool.query(
+          `INSERT INTO azure_coleta_historico (status,tipo,sp_id,origem) VALUES ('executando','reservas',$1,$2) RETURNING id`,
+          [sp.id || null, origemDb]
+        );
+        rsvHistId = rsvHistR.rows[0].id;
+      } catch (_) {}
+      _coletaProgresso.fase = 'Coletando Reservas do Storage...';
+      _logRsv(`Listando em ${storageAccount}/${container}/${rsvPrefix}`);
+      let rsvIns = 0, rsvUpd = 0, rsvInv = 0, rsvBlobs = [];
+      const rsvAvisos = [];
+      try {
+        rsvBlobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, rsvPrefix);
+        rsvBlobs = rsvBlobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
+        _logRsv(`${rsvBlobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`);
+        for (const rb of rsvBlobs) {
+          if (isCancelada()) break;
+          let rsvTmp;
+          try {
+            let rsvTok = await getStorageToken();
+            try {
+              rsvTmp = await _storageDownloadBlob(rsvTok, storageAccount, container, rb.name);
+            } catch (e401rsv) {
+              if (e401rsv.message.includes('(401)')) {
+                rsvTok = await getStorageToken(true);
+                rsvTmp = await _storageDownloadBlob(rsvTok, storageAccount, container, rb.name);
+              } else throw e401rsv;
+            }
+            const rsvR = await _importReservasFromCSV(rsvTmp, rb.name.split('/').pop());
+            rsvIns += rsvR.inseridas;
+            rsvUpd += rsvR.atualizadas;
+            rsvInv += rsvR.invalidas;
+            rsvAvisos.push(...rsvR.avisos);
+            _logRsv(`${rb.name.split('/').pop()} → ${rsvR.total} linha(s) · ins:${rsvR.inseridas} upd:${rsvR.atualizadas} inv:${rsvR.invalidas}`);
+          } catch (rsvBlobErr) {
+            _logRsv(`ERRO ${rb.name.split('/').pop()}: ${rsvBlobErr.message.slice(0, 60)}`);
+            rsvInv++;
+          } finally {
+            const fs = require('fs');
+            if (rsvTmp) try { fs.unlinkSync(rsvTmp); } catch (_) {}
+          }
+        }
+        rsvMsg = ` · Reservas: ${rsvBlobs.length} arquivo(s) · ins:${rsvIns} upd:${rsvUpd} inv:${rsvInv}`;
+        _logRsv(`Concluída${rsvMsg}`);
+        if (rsvAvisos.length) _logRsv(`Avisos: ${rsvAvisos.slice(0, 5).join(' | ')}`);
+        if (rsvHistId) await pool.query(
+          `UPDATE azure_coleta_historico SET concluido_em=NOW(),status='concluido',linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+          [rsvIns, rsvUpd, rsvInv,
+           `Reservas via Storage · ${rsvBlobs.length} arquivo(s) · ${rsvIns} inseridas · ${rsvUpd} atualizadas · ${rsvInv} inválidas`,
+           JSON.stringify({ tipo: 'reservas', modo, log: rsvLog, avisos: rsvAvisos }), rsvHistId]
+        ).catch(() => {});
+      } catch (rsvListErr) {
+        _logRsv(`Erro ao listar: ${rsvListErr.message.slice(0, 80)}`);
+        rsvMsg = ` · Reservas: erro (${rsvListErr.message.slice(0, 40)})`;
+        if (rsvHistId) await pool.query(
+          `UPDATE azure_coleta_historico SET concluido_em=NOW(),status='erro',linhas_erro=1,mensagem=$1,detalhes=$2 WHERE id=$3`,
+          [rsvListErr.message, JSON.stringify({ tipo: 'reservas', modo, log: rsvLog }), rsvHistId]
+        ).catch(() => {});
+      }
+    }
+
+    const msg = `Storage · ${blobs.length} arquivo(s) · ${totalIns} inseridos · ${totalUpd} atualizados · ${totalErr} erros${plMsg}${rsvMsg}`;
     _coletaProgresso.fase = 'Concluída';
     _logColeta('Concluída: ' + msg, _coletaProgresso);
     _finalizarColetaEntry('storage', idChave, 'concluido');
@@ -17015,12 +17438,12 @@ app.get('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (_req,
 
 app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, ativo, sp_id } = req.body;
     await ensureAzureColetaTable();
     if (!storage_account?.trim() || !storage_container?.trim()) return res.status(400).json({ error: 'Storage Account e Container são obrigatórios' });
     const r = await pool.query(
-      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,price_list_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null]
+      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,price_list_prefix,reservas_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null, ativo ?? true, sp_id || null]
     );
     res.json({ ok: true, id: r.rows[0].id });
   } catch (e) { _dbErr(res, e); }
@@ -17028,10 +17451,10 @@ app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req,
 
 app.put('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, ativo, sp_id } = req.body;
     await pool.query(
-      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,price_list_prefix=$5,ativo=$6,sp_id=$7,atualizado_em=NOW() WHERE id=$8`,
-      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
+      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,price_list_prefix=$5,reservas_prefix=$6,ativo=$7,sp_id=$8,atualizado_em=NOW() WHERE id=$9`,
+      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
@@ -17489,7 +17912,15 @@ function _motivoFalhaIngestao(status, corpo) {
   return `HTTP ${status}: ${txt.slice(0, 300)}`;
 }
 
-async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
+// `diasJanela`: 3 no caminho de toda coleta (chamador não passa nada); maior quando vem de um
+// backfill explícito (ver _backfillAtribuicaoRecursoLogAnalytics). Clampada por TABELA, não por
+// workspace — cada tabela do top-N pode ter retenção própria (confirmado: 91% das tabelas desta
+// base retêm só 30 dias, mas há exceções de 90/365 no mesmo workspace), e usar um teto único
+// pro workspace inteiro ou superestimaria o alcance de algumas tabelas ou subestimaria o de
+// outras. Mesma razão de null-vs-zero do backfill de volume: pedir mais do que a tabela retém
+// não dá erro, só devolve menos, e silenciar essa diferença pareceria "não há recurso nenhum"
+// em vez de "não sabemos mais".
+async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken, diasJanela = _LA_RECURSO_JANELA_DIAS) {
   // As maiores tabelas saem do que já foi coletado — nada de descobrir isso com KQL.
   // Tabela que já se provou inatribuível não ocupa vaga: são 10 por workspace, e em
   // LA-SharedServices-PROD metade ia pra tabela que nunca produz linha. Pular libera as vagas
@@ -17536,8 +17967,13 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
   const token = await getLogAnalyticsToken();
   const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
   let totalLinhas = 0;
+  let tabelasTruncadas = 0;
 
   for (const { tabela, gb: gbTabela } of tabelas) {
+    const retencao = await _laRetencaoTabela(ws.workspace_guid, tabela);
+    const diasEfetivos = retencao ? Math.min(diasJanela, retencao) : diasJanela;
+    const truncada = diasEfetivos < diasJanela;
+    if (truncada) tabelasTruncadas++;
     // `_ResourceId` vem vazio em tabela alimentada por agente (Syslog de VM fora do ARM, por
     // exemplo) — essas linhas são descartadas em vez de virarem um recurso "" no ranking.
     // Consulta única. Cheguei a tentar uma cadeia de variantes mais simples, supondo que a
@@ -17547,7 +17983,7 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
     // e tabela em plano Basic, cuja API recusa agregação.
     //
     // `bin()` e não `startofday()`: é a forma que a coleta por tabela já usa em produção.
-    const kql = `${tabela} | where TimeGenerated > ago(${_LA_RECURSO_JANELA_DIAS}d) | where isnotempty(_ResourceId)`
+    const kql = `${tabela} | where TimeGenerated > ago(${diasEfetivos}d) | where isnotempty(_ResourceId)`
       + ` | summarize GB = sum(_BilledSize)/1024.0/1024/1024 by _ResourceId, dia = bin(TimeGenerated, 1d)`;
     let resp;
     try {
@@ -17566,12 +18002,20 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
       await anotar(tabela, 'erro', _motivoFalhaIngestao(resp.status, corpo), 0, gbTabela);
       continue;
     }
-    data = await _safeRespJson(resp);
+    // `const`, não global implícita: o arquivo tem BOM + código executável antes do
+    // 'use strict' da linha 3, o que anula a diretiva (confirmado lendo os bytes) — o
+    // `data = ...` sem declaração aqui NUNCA lançou em produção, só virou global solta.
+    // Testado sob concorrência real (8 workspaces simultâneos, jitter aleatório, 3 rodadas)
+    // sem corrupção cruzada: a leitura de `data.tables` é copiada pra `t` (local) no mesmo
+    // trecho síncrono da continuação, antes de qualquer outra chamada concorrente ter chance
+    // de rodar. Inofensivo na prática, mas sem motivo pra deixar assim.
+    const data = await _safeRespJson(resp);
     const t = data.tables?.[0];
+    const notaTruncado = truncada ? ` (janela limitada a ${diasEfetivos}d pela retenção real, não ${diasJanela}d pedidos)` : '';
     if (!t?.rows?.length) {
       // Consulta passou e não veio nada: a tabela existe mas ninguém carimba `_ResourceId`
       // nela, tipicamente dado de agente. Não é erro, é limite do dado.
-      await anotar(tabela, 'vazio', 'consulta ok, nenhuma linha com _ResourceId', 0, gbTabela);
+      await anotar(tabela, 'vazio', `consulta ok, nenhuma linha com _ResourceId${notaTruncado}`, 0, gbTabela);
       continue;
     }
     const cols = t.columns.map((c) => c.name);
@@ -17596,21 +18040,46 @@ async function _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken) {
         totalLinhas++;
       }
       await c.query('COMMIT');
-      await anotar(tabela, 'ok', null, t.rows.length, gbTabela);
+      await anotar(tabela, 'ok', truncada ? notaTruncado.trim() : null, t.rows.length, gbTabela);
     } catch (e) {
       await c.query('ROLLBACK').catch(() => {});
       console.warn(`[LogAnalytics] gravação da ingestão por recurso falhou em ${ws.nome}/${tabela}:`, e.message);
       await anotar(tabela, 'erro', `gravação: ${e.message}`, 0, gbTabela);
     } finally { c.release(); }
   }
-  return { tabelas: tabelas.length, linhas: totalLinhas };
+  return { tabelas: tabelas.length, linhas: totalLinhas, tabelasTruncadas };
+}
+
+// Retenção INTERATIVA (não a total com arquivo) de uma tabela num workspace — é o teto real de
+// quanto dá pra pedir pela Query API. `retencao_total_dias` inclui o arquivo (Archive Tier), que
+// exige um mecanismo totalmente diferente (search job, assíncrono, custo por GB varrido) fora do
+// escopo desta coleta — usar o total faria um backfill prometer um alcance que a consulta não
+// entrega, e o sintoma seria resultado vazio sem explicação.
+// null quando a tabela ainda não foi inventariada (_coletarTabelasWorkspace nunca rodou pra este
+// workspace/tabela) — nesse caso não há teto conhecido pra aplicar, a consulta segue sem clamp.
+async function _laRetencaoTabela(workspaceGuid, tabela) {
+  const r = await pool.query(
+    `SELECT retencao_dias FROM log_analytics_tabelas WHERE workspace_guid = $1 AND tabela = $2`,
+    [workspaceGuid, tabela]
+  );
+  return r.rows[0]?.retencao_dias ?? null;
 }
 
 // UMA query KQL por workspace cobre as 5 regras (ingestão por tabela × dia, 30d) — ver
 // _avaliarRegrasLogAnalytics. Plano de dados — exige "Log Analytics Reader" na SP.
-async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
+const _laRetencaoUsage = (workspaceGuid) => _laRetencaoTabela(workspaceGuid, 'Usage');
+
+// `diasJanela`: 30 no caminho de todo dia (chamador não passa nada); maior quando vem de um
+// backfill explícito (ver _backfillVolumeLogAnalytics). SEMPRE comparado contra a retenção real
+// da tabela antes de consultar — pedir mais do que a Azure ainda guarda não dá erro, devolve
+// resultado vazio pros dias que já saíram da janela, e isso pareceria "consumo zero" em vez de
+// "não sabemos". O retorno carrega `diasEfetivos`/`truncado` pra quem chama poder avisar o
+// usuário, em vez de silenciar a diferença entre pedido e entregue.
+async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken, diasJanela = 30) {
+  const retencao = await _laRetencaoUsage(ws.workspace_guid);
+  const diasEfetivos = retencao ? Math.min(diasJanela, retencao) : diasJanela;
   const token = await getLogAnalyticsToken();
-  const kql = `Usage | where TimeGenerated > ago(30d) | summarize GB = sum(Quantity)/1024 by DataType, bin(TimeGenerated, 1d)`;
+  const kql = `Usage | where TimeGenerated > ago(${diasEfetivos}d) | summarize GB = sum(Quantity)/1024 by DataType, bin(TimeGenerated, 1d)`;
   const url = `https://api.loganalytics.io/v1/workspaces/${ws.workspace_guid}/query`;
   const resp = await _cbFetch(url, {
     method: 'POST',
@@ -17626,7 +18095,8 @@ async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
   }
   const data = await _safeRespJson(resp);
   const table = data.tables?.[0];
-  if (!table || !table.rows?.length) return [];
+  const meta = { diasSolicitados: diasJanela, diasEfetivos, retencaoConhecida: retencao !== null, truncado: diasEfetivos < diasJanela };
+  if (!table || !table.rows?.length) return Object.assign([], meta);
   const cols = table.columns.map(c => c.name);
   const iGB = cols.indexOf('GB'), iTipo = cols.indexOf('DataType'), iDia = cols.indexOf('TimeGenerated');
   const linhas = table.rows.map(r => ({ tabela: r[iTipo], dia: String(r[iDia]).slice(0, 10), gb: Number(r[iGB]) || 0 }));
@@ -17643,7 +18113,7 @@ async function _coletarIngestaoWorkspace(ws, getLogAnalyticsToken) {
     }
     await c.query('COMMIT');
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
-  return linhas;
+  return Object.assign(linhas, meta);
 }
 
 // Config de retenção por tabela — plano de gerência (ARM), MESMO token do
@@ -17971,10 +18441,46 @@ async function _coletarAppInsightsTudo() {
 // então usamos o Resource Graph só pra ENUMERAR candidatos (rápido, tabela `resources` é
 // confiável) e chamamos a API oficial recurso a recurso, em paralelo. Por isso cadência
 // própria (semanal + botão manual), não entra no loop diário de 24h da coleta principal.
+// ── Progresso das coletas de Log Analytics ──────────────────────────────────
+// As três coletas desta tela são longas (medido no startup: 83 min a principal, 456s os
+// Diagnostic Settings) e até aqui só existia um booleano "em execução". A tela disparava,
+// mostrava um toast e invalidava as consultas por tempo fixo — o usuário não tinha como
+// saber se estava andando, travado ou já terminado.
+//
+// Mesma ideia do `_coletasEmExecucao` da coleta Azure: Map por tipo com o progresso dentro.
+// A entrada NÃO é apagada ao concluir, só sobrescrita no próximo disparo — assim a tela
+// mostra o resultado final (e o erro, quando houve) até o usuário sair dela.
+const _LA_PROGRESSO_TTL_MS = 10 * 60_000; // tempo que uma execução concluída continua visível
+const _laProgresso = new Map(); // tipo -> { fase, atual, total, detalhe, iniciadoEm, concluidoEm, erro }
+
+function _laProgIniciar(tipo, fase, total = 0) {
+  _laProgresso.set(tipo, { fase, atual: 0, total, detalhe: null, iniciadoEm: new Date(), concluidoEm: null, erro: null });
+}
+// `total` pode chegar depois da fase de descoberta (só aí se sabe quantos workspaces há).
+function _laProgAtualizar(tipo, campos) {
+  const p = _laProgresso.get(tipo);
+  if (p) Object.assign(p, campos);
+}
+function _laProgAvancar(tipo, detalhe) {
+  const p = _laProgresso.get(tipo);
+  if (!p) return;
+  p.atual++;
+  if (detalhe !== undefined) p.detalhe = detalhe;
+}
+function _laProgFinalizar(tipo, { erro = null, detalhe = null } = {}) {
+  const p = _laProgresso.get(tipo);
+  if (!p) return;
+  p.concluidoEm = new Date();
+  p.erro = erro ? String(erro) : null;
+  if (detalhe) p.detalhe = detalhe;
+  p.fase = erro ? "falhou" : "concluído";
+}
+
 let _logAnalyticsDiagEmExecucao = false;
 async function _coletarDiagnosticSettingsTudo() {
   if (_logAnalyticsDiagEmExecucao) return { ok: false, motivo: 'coleta de Diagnostic Settings já em execução' };
   _logAnalyticsDiagEmExecucao = true;
+  _laProgIniciar('diagnostic', 'descobrindo recursos monitoráveis');
   const t0 = Date.now();
   try {
     await ensureLogAnalyticsTable();
@@ -17987,6 +18493,7 @@ async function _coletarDiagnosticSettingsTudo() {
     const tiposClause = _LOG_ANALYTICS_TIPOS_MONITORAVEIS.map(t => `'${t}'`).join(', ');
     const kql = `resources | where type in (${tiposClause}) | project id, type, subscriptionId`;
     const candidatos = await _resourceGraphQueryTodasSps(kql);
+    _laProgAtualizar('diagnostic', { fase: 'consultando Diagnostic Settings', total: candidatos.length });
     console.log(`[LogAnalytics] Diagnostic Settings: ${candidatos.length} recurso(s) candidato(s) de ${_LOG_ANALYTICS_TIPOS_MONITORAVEIS.length} tipo(s) monitorados.`);
 
     const linhas = [];
@@ -18007,6 +18514,7 @@ async function _coletarDiagnosticSettingsTudo() {
         resp = await _cbFetch(url, { headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 20_000 });
       } catch (e) { outrasFalhas++; anotar(`rede: ${e.message}`.slice(0, 60)); return; }
       checados++;
+      _laProgAvancar('diagnostic');
       if (resp.status === 404) { naoEncontrados++; return; } // recurso efêmero (ex.: VM de cluster auto-scaling), já não existe
       if (!resp.ok) {
         outrasFalhas++;
@@ -18076,9 +18584,11 @@ async function _coletarDiagnosticSettingsTudo() {
       for (const [motivo, n] of top) console.log(`    ${String(n).padStart(5)}  ${motivo}`);
       if (motivosFalha.size > 30) console.log(`    ... mais ${motivosFalha.size - 30} causa(s) distinta(s)`);
     }
+    _laProgFinalizar('diagnostic', { detalhe: `${checados} de ${candidatos.length} recurso(s) checado(s), ${linhas.length} configuração(ões) encontrada(s)` });
     return { ok: true, candidatos: candidatos.length, checados, configuracoes: linhas.length, fanout };
   } catch (e) {
     console.warn('[LogAnalytics] Falha geral na coleta de Diagnostic Settings:', e.message);
+    _laProgFinalizar('diagnostic', { erro: e.message });
     return { ok: false, motivo: e.message };
   } finally {
     _logAnalyticsDiagEmExecucao = false;
@@ -18407,14 +18917,115 @@ async function _avaliarCommitmentTier(ws) {
   return recos;
 }
 
+// ── Backfill de volume (2026-10-21, pedido do usuário: "gostaria de poder coletar dados
+// antigo para deixar no banco") ──────────────────────────────────────────────────────────────
+// Só a coleta de VOLUME (`Usage`, por tabela/dia), não o pipeline inteiro de workspace. Decisão
+// de escopo: `Usage` devolve poucas centenas de linhas mesmo em 90 dias (medido), então uma
+// consulta só basta — sem fatiar por semana nem retentativa por página, ao contrário da
+// atribuição por recurso (que itera tabela por tabela e fica fora deste backfill de propósito;
+// ampliar aquela janela é mudança maior, avaliada à parte).
+//
+// Função separada de `_coletarLogAnalyticsTudo` DE propósito: a coleta diária/agendada
+// continua chamando `_coletarIngestaoWorkspace` com o padrão de 30 dias, sem risco de o
+// backfill manual interferir no caminho automático.
+let _laBackfillVolumeEmExecucao = false;
+async function _backfillVolumeLogAnalytics(diasSolicitados) {
+  if (_laBackfillVolumeEmExecucao) return { ok: false, motivo: 'backfill de volume já em execução' };
+  _laBackfillVolumeEmExecucao = true;
+  _laProgIniciar('backfill_volume', 'descobrindo workspaces');
+  try {
+    const workspaces = await _descobrirLogAnalyticsWorkspaces();
+    _laProgAtualizar('backfill_volume', { fase: `coletando ${diasSolicitados} dia(s)`, total: workspaces.length });
+    const { escopos } = await _getInventarioEscopos();
+    const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
+    let sucesso = 0, totalLinhas = 0;
+    const truncados = [];
+    const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
+      try {
+        const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+        if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
+        const linhas = await _coletarIngestaoWorkspace(ws, escopo.getLogAnalyticsToken, diasSolicitados);
+        sucesso++;
+        totalLinhas += linhas.length;
+        // Retenção menor que o pedido: a Azure já expurgou parte do período — reportado, não
+        // silenciado (ver comentário de _coletarIngestaoWorkspace sobre null vs zero).
+        if (linhas.truncado) truncados.push({ workspace: ws.nome, retencao_dias: linhas.diasEfetivos });
+      } finally {
+        _laProgAvancar('backfill_volume', ws.nome || ws.workspace_guid);
+      }
+    });
+    const falhas = resultados.filter((r) => r.status === 'rejected').length;
+    const detalhe = `${sucesso} de ${workspaces.length} workspace(s), ${totalLinhas} linha(s)`
+      + (truncados.length ? `, ${truncados.length} limitado(s) pela retenção real` : '')
+      + (falhas ? `, ${falhas} falha(s)` : '');
+    _laProgFinalizar('backfill_volume', { detalhe });
+    console.log(`[LogAnalytics] Backfill de volume (${diasSolicitados}d): ${detalhe}`);
+    return { ok: true, workspaces: workspaces.length, sucesso, falhas, totalLinhas, truncados };
+  } catch (e) {
+    _laProgFinalizar('backfill_volume', { erro: e.message });
+    console.warn('[LogAnalytics] Backfill de volume falhou:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _laBackfillVolumeEmExecucao = false;
+  }
+}
+
+// ── Backfill de atribuição por recurso (2026-10-21, pedido do usuário — opção escolhida entre
+// três: backfill sob demanda, igual ao de volume, SEM mudar o padrão automático de 3 dias). Mais
+// caro que o de volume: itera tabela por tabela (até _LA_RECURSO_TOP_TABELAS por workspace), uma
+// consulta KQL por tabela, com clamp de retenção POR TABELA dentro de
+// _coletarIngestaoPorRecurso — cada tabela do top-N pode ter retenção diferente, então o resumo
+// aqui soma `tabelasTruncadas` por workspace em vez de tratar o workspace como uma unidade só.
+let _laBackfillAtribuicaoEmExecucao = false;
+async function _backfillAtribuicaoRecursoLogAnalytics(diasSolicitados) {
+  if (_laBackfillAtribuicaoEmExecucao) return { ok: false, motivo: 'backfill de atribuição por recurso já em execução' };
+  _laBackfillAtribuicaoEmExecucao = true;
+  _laProgIniciar('backfill_atribuicao', 'descobrindo workspaces');
+  try {
+    const workspaces = await _descobrirLogAnalyticsWorkspaces();
+    _laProgAtualizar('backfill_atribuicao', { fase: `coletando ${diasSolicitados} dia(s)`, total: workspaces.length });
+    const { escopos } = await _getInventarioEscopos();
+    const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
+    let sucesso = 0, totalLinhas = 0, totalTabelas = 0, tabelasTruncadas = 0;
+    const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
+      try {
+        const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+        if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
+        const r = await _coletarIngestaoPorRecurso(ws, escopo.getLogAnalyticsToken, diasSolicitados);
+        sucesso++;
+        totalLinhas += r.linhas;
+        totalTabelas += r.tabelas;
+        tabelasTruncadas += r.tabelasTruncadas || 0;
+      } finally {
+        _laProgAvancar('backfill_atribuicao', ws.nome || ws.workspace_guid);
+      }
+    });
+    const falhas = resultados.filter((r) => r.status === 'rejected').length;
+    const detalhe = `${sucesso} de ${workspaces.length} workspace(s), ${totalTabelas} tabela(s), ${totalLinhas} linha(s)`
+      + (tabelasTruncadas ? `, ${tabelasTruncadas} tabela(s) limitada(s) pela retenção real` : '')
+      + (falhas ? `, ${falhas} falha(s)` : '');
+    _laProgFinalizar('backfill_atribuicao', { detalhe });
+    console.log(`[LogAnalytics] Backfill de atribuição por recurso (${diasSolicitados}d): ${detalhe}`);
+    return { ok: true, workspaces: workspaces.length, sucesso, falhas, totalTabelas, totalLinhas, tabelasTruncadas };
+  } catch (e) {
+    _laProgFinalizar('backfill_atribuicao', { erro: e.message });
+    console.warn('[LogAnalytics] Backfill de atribuição por recurso falhou:', e.message);
+    return { ok: false, motivo: e.message };
+  } finally {
+    _laBackfillAtribuicaoEmExecucao = false;
+  }
+}
+
 let _logAnalyticsColetaEmExecucao = false;
 async function _coletarLogAnalyticsTudo(origem = 'agendado') {
   if (_logAnalyticsColetaEmExecucao) return { ok: false, motivo: 'coleta já em execução' };
   _logAnalyticsColetaEmExecucao = true;
+  _laProgIniciar('coleta', 'descobrindo workspaces');
   const t0 = Date.now();
   try {
     await ensureLogAnalyticsTable();
     const workspaces = await _descobrirLogAnalyticsWorkspaces();
+    _laProgAtualizar('coleta', { fase: 'coletando workspaces', total: workspaces.length });
     const { escopos } = await _getInventarioEscopos();
     // Cada workspace é consultado com a credencial da SP dona da sua assinatura — com mais de
     // uma SP cadastrada, o token de uma devolve 403 nos workspaces da outra.
@@ -18425,22 +19036,28 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
       (await pool.query(`SELECT workspace_guid FROM log_analytics_workspaces WHERE auditoria_consultas_habilitada = true`)).rows.map(r => r.workspace_guid)
     );
     const resultados = await _mapLimitSettled(workspaces, 4, async (ws) => {
-      const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
-      if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
-      const { getToken, getLogAnalyticsToken } = escopo;
-      await _coletarIngestaoWorkspace(ws, getLogAnalyticsToken);
-      await _coletarTabelasWorkspace(ws, getToken);
-      if (comAuditoria.has(ws.workspace_guid)) {
-        try { await _coletarConsultasPorTabela(ws, getLogAnalyticsToken); }
-        catch (e) { console.warn(`[LogAnalytics] Falha ao coletar LAQueryLogs de ${ws.nome}:`, e.message); }
+      // `finally` para o contador andar mesmo quando o workspace lança (SP sem acesso, por
+      // exemplo) — senão a barra trava antes de 100% com a coleta já encerrada.
+      try {
+        const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
+        if (!escopo) throw new Error(`Workspace ${ws.nome}: assinatura ${ws.subscription_id} não pertence a nenhuma SP ativa`);
+        const { getToken, getLogAnalyticsToken } = escopo;
+        await _coletarIngestaoWorkspace(ws, getLogAnalyticsToken);
+        await _coletarTabelasWorkspace(ws, getToken);
+        if (comAuditoria.has(ws.workspace_guid)) {
+          try { await _coletarConsultasPorTabela(ws, getLogAnalyticsToken); }
+          catch (e) { console.warn(`[LogAnalytics] Falha ao coletar LAQueryLogs de ${ws.nome}:`, e.message); }
+        }
+        await _avaliarRegrasLogAnalytics(ws);
+        try { await _avaliarCommitmentTier(ws); }
+        catch (e) { console.warn(`[LogAnalytics] Falha ao avaliar Commitment Tier de ${ws.nome}:`, e.message); }
+        // Quem gerou o volume, não só quanto cada tabela ingeriu. É a etapa mais cara da coleta
+        // (uma consulta KQL por tabela grande), por isso vem por último e nunca derruba o resto.
+        try { await _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken); }
+        catch (e) { console.warn(`[LogAnalytics] Falha na ingestão por recurso de ${ws.nome}:`, e.message); }
+      } finally {
+        _laProgAvancar('coleta', ws.nome || ws.workspace_guid);
       }
-      await _avaliarRegrasLogAnalytics(ws);
-      try { await _avaliarCommitmentTier(ws); }
-      catch (e) { console.warn(`[LogAnalytics] Falha ao avaliar Commitment Tier de ${ws.nome}:`, e.message); }
-      // Quem gerou o volume, não só quanto cada tabela ingeriu. É a etapa mais cara da coleta
-      // (uma consulta KQL por tabela grande), por isso vem por último e nunca derruba o resto.
-      try { await _coletarIngestaoPorRecurso(ws, getLogAnalyticsToken); }
-      catch (e) { console.warn(`[LogAnalytics] Falha na ingestão por recurso de ${ws.nome}:`, e.message); }
     });
     // DCR é barato (1 chamada por subscription, não por recurso) — entra na coleta diária.
     // Diagnostic Settings NÃO entra aqui (etapa cara, 1 chamada por recurso do tenant inteiro)
@@ -18461,9 +19078,11 @@ async function _coletarLogAnalyticsTudo(origem = 'agendado') {
     const falhas = resultados.filter(r => r.status === 'rejected');
     console.log(`[LogAnalytics] ${origem}: ${workspaces.length} workspace(s), ${falhas.length} falha(s) em ${Math.round((Date.now() - t0) / 1000)}s`);
     if (falhas.length) console.warn('[LogAnalytics] Primeira falha:', falhas[0].reason?.message);
+    _laProgFinalizar('coleta', { detalhe: `${workspaces.length} workspace(s), ${falhas.length} falha(s)` });
     return { ok: true, workspaces: workspaces.length, falhas: falhas.length };
   } catch (e) {
     console.warn('[LogAnalytics] Falha geral na coleta:', e.message);
+    _laProgFinalizar('coleta', { erro: e.message });
     return { ok: false, motivo: e.message };
   } finally {
     _logAnalyticsColetaEmExecucao = false;
@@ -19442,10 +20061,66 @@ app.get('/api/log-analytics/recomendacoes', authMiddleware, dbMiddleware, async 
   } catch (e) { _dbErr(res, e); }
 });
 
+// Progresso das três coletas desta tela. Consulta barata (lê um Map em memória), feita pra
+// ser chamada de segundo em segundo enquanto houver algo rodando.
+//
+// Devolve também o que ACABOU de terminar, por _LA_PROGRESSO_TTL_MS: sem isso a barra some
+// no instante da conclusão e o usuário nunca vê o resultado — só o sumiço, que é
+// indistinguível de "a tela perdeu o estado".
+app.get('/api/log-analytics/progresso', authMiddleware, async (_req, res) => {
+  const agora = Date.now();
+  const execucoes = [];
+  for (const [tipo, p] of _laProgresso) {
+    const fim = p.concluidoEm ? new Date(p.concluidoEm).getTime() : null;
+    if (fim && agora - fim > _LA_PROGRESSO_TTL_MS) { _laProgresso.delete(tipo); continue; }
+    execucoes.push({
+      tipo,
+      fase: p.fase,
+      atual: p.atual,
+      total: p.total,
+      detalhe: p.detalhe,
+      iniciado_em: p.iniciadoEm,
+      concluido_em: p.concluidoEm,
+      erro: p.erro,
+      em_execucao: !p.concluidoEm,
+      segundos: Math.round((( fim || agora) - new Date(p.iniciadoEm).getTime()) / 1000),
+    });
+  }
+  res.json({ execucoes });
+});
+
 app.post('/api/log-analytics/coleta/forcar', authMiddleware, dbMiddleware, async (_req, res) => {
   if (_logAnalyticsColetaEmExecucao) return res.status(409).json({ error: 'Coleta de Log Analytics já em execução' });
   res.status(202).json({ ok: true, message: 'Coleta de Log Analytics iniciada — pode levar alguns minutos' });
   _coletarLogAnalyticsTudo('manual').catch(e => console.error('[LogAnalytics] Erro na coleta manual:', e.message));
+});
+
+// Backfill de volume sob demanda (2026-10-21) — separado de /coleta/forcar de propósito: este
+// aceita um período maior que os 30 dias padrão, aquele não. `dias` validado entre 1 e 365; o
+// teto REAL fica a cargo da retenção de cada workspace (ver _laRetencaoUsage) — pedir 365 só
+// devolve mais do que a Azure ainda guarda se algum workspace tiver retenção de 365 dias
+// configurada (existem 3 nesta base); o resto vem truncado e o resumo reporta quantos.
+app.post('/api/log-analytics/backfill-volume', authMiddleware, dbMiddleware, async (req, res) => {
+  const dias = Number(req.body?.dias);
+  if (!Number.isInteger(dias) || dias < 1 || dias > 365) {
+    return res.status(400).json({ error: 'dias deve ser um inteiro entre 1 e 365' });
+  }
+  if (_laBackfillVolumeEmExecucao) return res.status(409).json({ error: 'Backfill de volume já em execução' });
+  res.status(202).json({ ok: true, message: `Backfill de ${dias} dia(s) iniciado — acompanhe na barra de progresso` });
+  _backfillVolumeLogAnalytics(dias).catch(e => console.error('[LogAnalytics] Erro no backfill de volume:', e.message));
+});
+
+// Backfill de atribuição por recurso sob demanda (2026-10-21) — mesmo padrão do de volume, mas
+// mais caro (itera tabela por tabela). Validação de `dias` idêntica à do de volume; o teto real
+// de cada tabela é aplicado dentro de _coletarIngestaoPorRecurso, não aqui.
+app.post('/api/log-analytics/backfill-atribuicao', authMiddleware, dbMiddleware, async (req, res) => {
+  const dias = Number(req.body?.dias);
+  if (!Number.isInteger(dias) || dias < 1 || dias > 365) {
+    return res.status(400).json({ error: 'dias deve ser um inteiro entre 1 e 365' });
+  }
+  if (_laBackfillAtribuicaoEmExecucao) return res.status(409).json({ error: 'Backfill de atribuição por recurso já em execução' });
+  res.status(202).json({ ok: true, message: `Backfill de ${dias} dia(s) iniciado — acompanhe na barra de progresso` });
+  _backfillAtribuicaoRecursoLogAnalytics(dias).catch(e => console.error('[LogAnalytics] Erro no backfill de atribuição por recurso:', e.message));
 });
 
 // Separado da coleta principal de propósito — é uma chamada de API por recurso monitorável do
@@ -19726,23 +20401,33 @@ app.post('/api/log-analytics/ingestao-recurso/forcar', authMiddleware, dbMiddlew
   if (_laIngRecursoEmExecucao) return res.status(409).json({ error: 'Coleta de ingestão por recurso já em execução' });
   res.status(202).json({ ok: true, message: 'Coleta de ingestão por recurso iniciada — leva vários minutos' });
   _laIngRecursoEmExecucao = true;
+  _laProgIniciar('ingestao_recurso', 'descobrindo workspaces');
   (async () => {
     const t0 = Date.now();
     try {
       const workspaces = await _descobrirLogAnalyticsWorkspaces();
+      _laProgAtualizar('ingestao_recurso', { fase: 'consultando ingestão por recurso', total: workspaces.length });
       const { escopos } = await _getInventarioEscopos();
       const escopoPorSub = new Map(escopos.map((e) => [e.subscriptionId.toLowerCase(), e]));
       let tabelas = 0, linhas = 0;
       const r = await _mapLimitSettled(workspaces, 4, async (ws) => {
         const escopo = escopoPorSub.get(String(ws.subscription_id || '').toLowerCase());
-        if (!escopo) return;
-        const x = await _coletarIngestaoPorRecurso(ws, escopo.getLogAnalyticsToken);
-        tabelas += x.tabelas; linhas += x.linhas;
+        // `finally` para o contador andar inclusive no workspace pulado por falta de escopo
+        // e no que lançou — senão a barra trava antes de 100% sem nada estar errado.
+        try {
+          if (!escopo) return;
+          const x = await _coletarIngestaoPorRecurso(ws, escopo.getLogAnalyticsToken);
+          tabelas += x.tabelas; linhas += x.linhas;
+        } finally {
+          _laProgAvancar('ingestao_recurso', ws.nome || ws.workspace_guid);
+        }
       });
       const falhas = r.filter((x) => x.status === 'rejected').length;
       console.log(`[LogAnalytics] Ingestão por recurso: ${workspaces.length} workspace(s), ${tabelas} tabela(s), ${linhas} linha(s), ${falhas} falha(s) em ${Math.round((Date.now() - t0) / 1000)}s`);
+      _laProgFinalizar('ingestao_recurso', { detalhe: `${workspaces.length} workspace(s), ${tabelas} tabela(s), ${linhas} linha(s)` });
     } catch (e) {
       console.warn('[LogAnalytics] Ingestão por recurso falhou:', e.message);
+      _laProgFinalizar('ingestao_recurso', { erro: e.message });
     } finally { _laIngRecursoEmExecucao = false; }
   })();
 });

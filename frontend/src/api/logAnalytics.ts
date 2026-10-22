@@ -457,8 +457,44 @@ export const getLogAnalyticsCustoObservabilidade = (mes?: string, spId?: number 
   return apiFetch<LogAnalyticsCustoObservabilidade>('GET', '/log-analytics/custo-observabilidade' + (q.toString() ? '?' + q : ''))
 }
 
+/** Andamento de uma das três coletas desta tela. */
+export interface LogAnalyticsExecucao {
+  tipo: 'coleta' | 'diagnostic' | 'ingestao_recurso' | 'backfill_volume' | 'backfill_atribuicao'
+  /** Texto curto do que está acontecendo ("descobrindo workspaces", "concluído", "falhou"). */
+  fase: string
+  atual: number
+  /** 0 enquanto a fase de descoberta não terminou — só depois dá pra saber quantos são. */
+  total: number
+  /** Último item processado (nome do workspace, por exemplo). */
+  detalhe: string | null
+  iniciado_em: string
+  concluido_em: string | null
+  erro: string | null
+  em_execucao: boolean
+  segundos: number
+}
+
+// Barato (lê um Map em memória) — feito pra ser chamado de segundo em segundo enquanto houver
+// coleta rodando. Inclui o que acabou de terminar, pra barra não sumir no instante da conclusão.
+export const getProgressoLogAnalytics = () =>
+  apiFetch<{ execucoes: LogAnalyticsExecucao[] }>('GET', '/log-analytics/progresso')
+
 export const forcarColetaLogAnalytics = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/coleta/forcar')
+
+// Backfill de volume sob demanda (2026-10-21, pedido do usuário: "gostaria de poder coletar
+// dados antigo para deixar no banco") — aceita período maior que os 30 dias padrão de
+// forcarColetaLogAnalytics. O teto real é a retenção de cada workspace na Azure, não um limite
+// deste sistema: pedir mais do que existe simplesmente devolve menos, e o resumo da coleta
+// (campo `detalhe` do progresso) informa quantos workspaces vieram truncados.
+export const backfillVolumeLogAnalytics = (dias: number) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/backfill-volume', { dias })
+
+// Mesmo padrão do backfill de volume, mas cobre "quem gerou os GB" (log_analytics_ingestao_
+// recurso) — etapa mais cara, itera tabela por tabela. Não muda o padrão automático de 3 dias
+// da coleta diária, só este disparo sob demanda.
+export const backfillAtribuicaoRecursoLogAnalytics = (dias: number) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/log-analytics/backfill-atribuicao', { dias })
 
 // Etapa separada e mais cara (1 chamada por recurso monitorável do tenant) — cadência própria
 // (semanal), disparo manual independente do "Atualizar agora" de cima.

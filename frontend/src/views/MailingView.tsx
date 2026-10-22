@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { CSSProperties } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   atualizarContato, cancelarCampanha, criarContato, enviarCampanha, excluirCampanha, excluirContato,
@@ -16,21 +17,36 @@ const STATUS_CAMP_LABEL: Record<string, { label: string; color: string }> = {
   concluida: { label: '✅ Concluída', color: '#22c55e' },
 }
 
+// Botoes de barra (cabecalho de card e de acompanhamento): so o corpo da letra e
+// uniformizado. A ALTURA vem do CSS e nao se mexe aqui — dentro de um flex os botoes
+// esticam para a altura do mais alto, que e o `.btn-primary` (34px fixo), entao forcar
+// altura nesta tela so a faria divergir das outras sem corrigir nada.
+const BTN_BARRA: CSSProperties = { fontSize: 12 }
+// Ja a linha de cadastro usa `align-items: flex-end`, onde nao ha esticamento: ali input
+// e botao precisam de uma altura explicita em comum para encostarem na mesma base.
+const ALTURA_CAMPO = 32
+
 export default function MailingView() {
   const [tab, setTab] = useState<Tab>('destinatarios')
 
   return (
     <div>
       <div className="view-hero">
-        <div className="view-hero-title">📣 Mailing de Comunicados</div>
+        <div className="page-title">📣 Mailing de Comunicados</div>
         <div className="view-hero-sub">Cadastro único de destinatários, composer visual e acompanhamento de envio</div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, padding: '0 20px', marginBottom: 12 }}>
-        <button className={tab === 'destinatarios' ? 'btn-primary' : 'btn-ghost'} style={{ fontSize: 13 }} onClick={() => setTab('destinatarios')}>
+      {/* Barra de abas no padrao do sistema (.view-tabs, igual a Inventario e Databricks).
+          Antes eram dois .btn-primary/.btn-ghost de 34px logo abaixo da faixa roxa, que
+          disputavam atencao com o botao de acao do card ("Importar lista") a poucos pixels
+          dali — exatamente o que o comentario do .view-tabs no styles.css diz que essa
+          fileira compacta existe para evitar. O espacamento (16px acima, 16px abaixo) vem
+          da propria classe, entao acompanha as outras telas sozinho. */}
+      <div className="view-tabs" role="tablist" aria-label="Seções do Mailing" style={{ marginTop: 16 }}>
+        <button role="tab" aria-current={tab === 'destinatarios' ? 'page' : undefined} onClick={() => setTab('destinatarios')}>
           Destinatários
         </button>
-        <button className={tab === 'campanhas' ? 'btn-primary' : 'btn-ghost'} style={{ fontSize: 13 }} onClick={() => setTab('campanhas')}>
+        <button role="tab" aria-current={tab === 'campanhas' ? 'page' : undefined} onClick={() => setTab('campanhas')}>
           Comunicados
         </button>
       </div>
@@ -85,16 +101,16 @@ function DestinatariosTab() {
   const ativos = contatos.filter((c) => c.status === 'ativo').length
 
   return (
-    <div style={{ margin: '0 20px' }}>
+    <div style={{ padding: '12px 20px 0' }}>
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-header">
           <span className="card-title">Cadastro de Destinatários</span>
           <span className="badge">{ativos} ativo(s) de {contatos.length}</span>
-          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => setVerLotes((v) => !v)}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginLeft: 'auto' }}>
+            <button className="btn-ghost" style={BTN_BARRA} onClick={() => setVerLotes((v) => !v)}>
               📋 Histórico de importações
             </button>
-            <button className="btn-primary" style={{ fontSize: 12 }} onClick={() => setImportOpen(true)}>
+            <button className="btn-primary" style={BTN_BARRA} onClick={() => setImportOpen(true)}>
               📥 Importar lista
             </button>
           </div>
@@ -118,14 +134,14 @@ function DestinatariosTab() {
           <div style={{ flex: '1 1 160px' }}>
             <label htmlFor="mc-novo-nome" style={{ fontSize: 11, color: 'var(--text-muted)' }}>Nome (opcional)</label>
             <input id="mc-novo-nome" type="text" value={novoNome} onChange={(e) => setNovoNome(e.target.value)}
-              style={{ width: '100%', fontSize: 12, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)' }} />
+              style={{ width: '100%', fontSize: 12, height: ALTURA_CAMPO, padding: '0 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)' }} />
           </div>
           <div style={{ flex: '1 1 220px' }}>
             <label htmlFor="mc-novo-email" style={{ fontSize: 11, color: 'var(--text-muted)' }}>E-mail</label>
             <input id="mc-novo-email" type="email" value={novoEmail} onChange={(e) => setNovoEmail(e.target.value)}
-              style={{ width: '100%', fontSize: 12, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)' }} />
+              style={{ width: '100%', fontSize: 12, height: ALTURA_CAMPO, padding: '0 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)' }} />
           </div>
-          <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 16px' }} disabled={!novoEmail.trim() || addMutation.isPending}
+          <button className="btn-ghost" style={{ fontSize: 12, height: ALTURA_CAMPO, padding: '0 16px' }} disabled={!novoEmail.trim() || addMutation.isPending}
             onClick={() => addMutation.mutate()}>
             + Adicionar
           </button>
@@ -215,12 +231,12 @@ function CampanhasTab() {
   const campanhas = campanhasQuery.data || []
 
   return (
-    <div style={{ margin: '0 20px' }}>
+    <div style={{ padding: '12px 20px 0' }}>
       <div className="card">
         <div className="card-header">
           <span className="card-title">Comunicados</span>
           <span className="badge">{campanhas.length}</span>
-          <button className="btn-primary" style={{ marginLeft: 'auto', fontSize: 12 }} onClick={() => setModalCampanha('nova')}>
+          <button className="btn-primary" style={{ ...BTN_BARRA, marginLeft: 'auto' }} onClick={() => setModalCampanha('nova')}>
             + Novo Comunicado
           </button>
         </div>
@@ -316,14 +332,14 @@ function CampanhaDetalhe({ campanhaId }: { campanhaId: number }) {
         <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
           Acompanhamento — {campanha.assunto}
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
           {campanha.status === 'enviando' && (
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px', color: 'var(--danger)' }} onClick={() => cancelarMutation.mutate()}>
+            <button className="btn-ghost" style={{ ...BTN_BARRA, color: 'var(--danger)' }} onClick={() => cancelarMutation.mutate()}>
               Cancelar envio
             </button>
           )}
           {campanha.status === 'concluida' && falhas.length > 0 && (
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px', borderColor: 'var(--accent)', color: 'var(--accent)' }}
+            <button className="btn-ghost" style={{ ...BTN_BARRA, borderColor: 'var(--accent)', color: 'var(--accent)' }}
               disabled={reenviarMutation.isPending} onClick={() => reenviarMutation.mutate()}>
               🔁 Reenviar {falhas.length} falha(s)
             </button>

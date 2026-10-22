@@ -8,7 +8,7 @@ export const TIPOS_RECURSO: Record<Cloud, string[]> = {
   Azure: [
     'Reserved VM Instances', 'Azure Savings Plan (Compute)', 'Azure Savings Plan (VMs)',
     'SQL Database', 'Cosmos DB', 'App Service Plan', 'Azure Databricks',
-    'Redis Cache', 'PostgreSQL Flexible', 'MySQL Flexible',
+    'Redis Cache', 'PostgreSQL Flexible', 'MySQL Flexible', 'Azure VMware Solution',
   ],
   AWS: [
     'EC2 Reserved Instances', 'Savings Plan - Compute', 'Savings Plan - EC2 Instance',

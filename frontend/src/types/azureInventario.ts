@@ -554,6 +554,8 @@ export interface AzureSavingOrfaos {
   /** Quanto os snapshots dos 90 dias ainda estão custando. */
   desconto_mensal_snapshots: number
   economia_acumulada: number
+  /** Só os que entraram na conta. `itens` traz mais que isso: inclui os barrados pelo piso
+   *  de dias como órfão, para o detalhe poder mostrar por que ficaram de fora. */
   recursos_eliminados: number
   /** Excluídos sem billing conhecido — não entram na soma (null nunca vira zero). */
   sem_custo_conhecido: number
@@ -562,9 +564,15 @@ export interface AzureSavingOrfaos {
    *  No portal público é sempre 0: lá esses discos nem passam do filtro. */
   para_validacao: number
   para_validacao_custo_mensal: number
-  /** Excluídos com menos de 7 dias como órfãos. Indício de rotatividade normal de infra
-   *  (Private Endpoint recriado, por exemplo), não de ação do processo de FinOps. */
-  eliminados_recentes: number
+  /** Excluídos antes de completar o piso de dias como órfão — fora do total, mas visíveis
+   *  no detalhe: é o número que permite conferir se o piso está calibrado. */
+  nao_contabilizados_piso: number
+  /** Marcados manualmente como "não é economia nossa". Separado do piso de propósito: um é
+   *  regra automática, o outro é decisão humana — misturar esconderia quanto do número
+   *  depende de julgamento. */
+  nao_contabilizados_manual: number
+  /** O piso em dias que o backend aplicou (hoje 30, o prazo do fluxo real). */
+  dias_min_orfao: number
   itens: {
     resource_id: string
     categoria: AzureDesperdicioCategoria
@@ -579,6 +587,14 @@ export interface AzureSavingOrfaos {
     dias_orfao: number | null
     /** Preenchido só em disco que precisa de validação manual antes de creditar. */
     motivo_validacao: 'aks_pvc' | 'asr' | null
+    /** false quando o item ficou de fora dos totais — aparece no detalhe mesmo assim. */
+    contabilizado: boolean
+    /** Por que ficou de fora: 'piso' é a regra automática de dias como órfão, 'ignorado' é
+     *  marcação manual. null quando está contabilizado. */
+    motivo_fora: 'piso' | 'ignorado' | null
+    ignorado_por: string | null
+    ignorado_em: string | null
+    ignorado_motivo: string | null
   }[]
 }
 export interface AzureDesperdicioResposta {

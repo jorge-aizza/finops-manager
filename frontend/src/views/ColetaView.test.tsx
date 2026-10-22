@@ -24,7 +24,7 @@ const mockSPs: ServicePrincipal[] = [
 const mockStorages: StorageConfig[] = [
   {
     id: 1, nome: 'Storage Principal', storage_account: 'stfinops', storage_container: 'billing',
-    storage_prefix: '', price_list_prefix: null, ativo: true, sp_id: 1,
+    storage_prefix: '', price_list_prefix: null, reservas_prefix: null, ativo: true, sp_id: 1,
     criado_em: '2026-01-01T00:00:00.000Z', atualizado_em: '2026-01-01T00:00:00.000Z',
   },
 ]

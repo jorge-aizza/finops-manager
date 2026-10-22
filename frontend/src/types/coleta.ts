@@ -50,6 +50,7 @@ export interface StorageConfig {
   storage_container: string
   storage_prefix: string | null
   price_list_prefix: string | null
+  reservas_prefix: string | null
   ativo: boolean
   sp_id: number | null
   criado_em: string
@@ -62,6 +63,7 @@ export interface StorageConfigInput {
   storage_container: string
   storage_prefix: string
   price_list_prefix: string
+  reservas_prefix: string
   sp_id: number | null
   ativo: boolean
 }

@@ -8,23 +8,89 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 
 ## Índice
 
-1. [O que há de novo na v4.2.0](#o-que-há-de-novo-na-v420)
-2. [Pré-requisitos](#pré-requisitos)
-3. [⚠️ Pré-produção — passo a passo obrigatório](#️-pré-produção--passo-a-passo-obrigatório)
-4. [Variáveis de Ambiente](#variáveis-de-ambiente)
-5. [Windows (local / on-premise)](#windows-local--on-premise)
-6. [Linux (Ubuntu / Debian)](#linux-ubuntu--debian)
-7. [Docker](#docker)
-8. [Azure (App Service + PostgreSQL Flexible)](#azure)
-9. [AWS (EC2 + RDS)](#aws)
-10. [GCP (Cloud Run + Cloud SQL)](#gcp)
-11. [SaaS — Railway · Render · Fly.io](#saas)
-12. [SSL / Proxy reverso (Nginx)](#ssl--proxy-reverso)
-13. [Segurança em produção](#segurança-em-produção)
-14. [APIs Externas — Liberação de Firewall](#apis-externas--liberação-de-firewall)
-15. [API Endpoints](#api-endpoints)
+1. [O que há de novo desde a v4.2.0](#o-que-há-de-novo-desde-a-v420)
+2. [O que há de novo na v4.2.0](#o-que-há-de-novo-na-v420)
+3. [Pré-requisitos](#pré-requisitos)
+4. [⚠️ Pré-produção — passo a passo obrigatório](#️-pré-produção--passo-a-passo-obrigatório)
+5. [Variáveis de Ambiente](#variáveis-de-ambiente)
+6. [Windows (local / on-premise)](#windows-local--on-premise)
+7. [Linux (Ubuntu / Debian)](#linux-ubuntu--debian)
+8. [Docker](#docker)
+9. [Azure (App Service + PostgreSQL Flexible)](#azure)
+10. [AWS (EC2 + RDS)](#aws)
+11. [GCP (Cloud Run + Cloud SQL)](#gcp)
+12. [SaaS — Railway · Render · Fly.io](#saas)
+13. [SSL / Proxy reverso (Nginx)](#ssl--proxy-reverso)
+14. [Segurança em produção](#segurança-em-produção)
+15. [APIs Externas — Liberação de Firewall](#apis-externas--liberação-de-firewall)
+16. [API Endpoints](#api-endpoints)
 
 ---
+
+## O que há de novo desde a v4.2.0
+
+> Ainda não cortado como versão. O `package.json` segue em 4.2.0 — se for virar release, basta
+> renomear esta seção e bumpar a versão.
+
+### ✉️ Mailing de Comunicados (Novo)
+- **Broadcast corporativo** separado do SMTP de Alertas, de ponta a ponta: configuração própria (`integracoes` tipo `mailing_relay`), transporter próprio e estado de execução próprio. Mexer num não afeta o outro
+- **Relay SMTP anônimo** — sem usuário/senha, autorizado por IP de origem. Não existe campo de senha neste módulo. O "Testar Conexão" pode falhar na estação e funcionar em produção: é liberação de rede, não configuração errada
+- **Cadastro único de contatos** com importação em massa de Excel/CSV, relatório por lote e descadastro público via token HMAC autoverificável
+- **Editor visual** (TipTap) com modelo padrão de Comunicado FinOps e biblioteca de modelos salvos. A assinatura usa tabela de verdade para pôr o logo ao lado do texto — imagem dentro de parágrafo é bloco e nunca fica lado a lado
+- **Um e-mail individual por pessoa**, nunca cópia coletiva: ninguém vê o endereço dos outros e cada um recebe o próprio link de descadastro. Envio em lotes de 20 em paralelo com pausa de 2s, com registro de status por destinatário e reenvio só das falhas
+- **Limitação assumida**: SMTP não dá webhook de entrega nem bounce. O que se registra é "o servidor entregou ao relay", não "a pessoa recebeu"
+
+### 💰 Economia realizada com órfãos excluídos (Novo)
+- Cruza três fatos que já existiam separados: o recurso **foi identificado** como órfão, **foi excluído** em tal data por tal pessoa (Activity Log) e **custava** tanto de verdade (faturamento, não preço de tabela)
+- Custo apurado na janela de 30 dias **antes** da exclusão — depois dela o recurso não fatura, e uma janela corrente devolveria zero
+- **Piso de 30 dias como órfão**, o prazo do fluxo real: exclusão mais rápida veio do ciclo de vida da infra, não do processo. Vale para todas as categorias
+- **Snapshot de retenção abatido** enquanto existir, já que ele ainda custa nos 90 dias — e quando é excluído não vira economia própria, senão a mesma economia contaria duas vezes
+- **Detalhe auditável** no portal privado: recurso, resource group, data, quem excluiu, dias como órfão, selo AKS/PVC ou ASR e custo. Quem não cumpre o piso aparece marcado, não some — esconder impediria calibrar a regra
+- **Exceção manual** para o que a regra não pega (disco órfão o bastante, apagado pelo time da aplicação): motivo obrigatório, autor vindo do token, e tudo visível na linha para auditoria posterior
+- **Bases distintas nos dois portais**, de propósito: o privado conta tudo e expõe as ressalvas; o público só mostra o que aquele portal de fato publicou, com os mesmos filtros de `/api/public/orfaos`
+- Tabela materializada (`azure_desperdicio_saving`) em vez de recalculada por join: economia realizada é fato histórico e não pode cair sozinha quando a retenção de excluídos do inventário ou um expurgo de custos levar a origem embora
+
+### 🗑️ Desperdício — visão de FinOps
+- A lista passa a mostrar **só o que gera custo por estar órfão**. O recorte é por **tipo de recurso**, nunca por custo nulo: `null` neste sistema significa "não achamos o billing", não "é grátis"
+- Medido amostrando 300 recursos vivos de cada tipo contra o faturamento: **NIC 0/300** faturam; IP público 287/300; disco 293/300; snapshot 273/300; Load Balancer 245/246. Só NIC saiu
+- Disco e snapshot **sem custo identificado continuam na lista**, com aviso — filtrar por custo nulo esconderia 182 itens reais, um deles órfão há 1242 dias
+
+### 📜 Log Analytics — acompanhamento e coleta de período
+
+- **Barra de progresso** nas três coletas da tela (geral, Diagnostic Settings, atribuição por recurso). Antes o botão só virava "Coletando..." e a tela não dizia mais nada por minutos — e essas coletas são longas: a geral levou **83 min** num startup e os Diagnostic Settings, **456s**. Agora mostra fase, contagem (`72 de 191`), percentual, tempo e o item em processamento; erro aparece na tela, não só no log
+- Enquanto a descoberta não termina não existe total, então a barra fica **indeterminada** em vez de exibir 0% — percentual inventado passaria impressão de travado. A execução concluída permanece visível por 10 min: sumir no instante do fim é indistinguível de "a tela perdeu o estado"
+- **Backfill de volume** sob demanda (campo de dias + botão), separado do "Atualizar agora" que sempre olha os 30 dias fixos. Uma consulta por workspace, sem fatiar — `Usage` devolve poucas centenas de linhas mesmo em 90 dias
+- **Backfill de atribuição por recurso** sob demanda, para "quem gerou os GB". Bem mais caro: itera tabela por tabela. Medido: **190 de 191 workspaces em ~23 min** para uma janela de 45 dias, contra **81s** do backfill de volume para 120 dias. Por isso é sob demanda e **não mudou** o padrão automático de 3 dias da coleta diária
+
+> **O limite não é o sistema, é a retenção da Azure.** Dado anterior à retenção configurada já foi
+> expurgado lá, e nenhuma mudança aqui recupera isso. Medido nesta base: **91% das tabelas
+> (122.424 de 134.337) retêm só 30 dias**; a tabela `Usage`, que alimenta o volume, retém 90 dias
+> em 188 workspaces e 365 em 3.
+
+- Pedir mais dias do que existe **não dá erro** — a Query API devolve vazio para o período já expurgado, o que pareceria "consumo zero" em vez de "não sabemos". Por isso a consulta é **limitada à retenção real** antes de sair, e o resumo informa quantos vieram truncados
+- O limite do volume é por workspace; o da atribuição é **por tabela**, porque cada tabela do top-N tem retenção própria. Verificado com um pedido de 45 dias: tabelas de 30 dias pararam em 30, as de 31 em 31, e as de 90/365 receberam os 45 completos
+- Usa a **retenção interativa**, não a total com arquivo: o Archive Tier exige *search job* assíncrono e cobrado por GB varrido, fora do escopo desta coleta — usar o total prometeria um alcance que a consulta não entrega
+- Cobertura resultante: volume de 52 → **121 dias**; atribuição por recurso de 16 → **46 dias**
+
+### 🔔 Alertas por e-mail — volume e roteamento
+- **Mudança de propriedade de infra virou só sino.** Disparava uma vez por propriedade alterada dentro da coleta, sem nenhum controle de repetição, numa coleta que processa 150 a 200 mil eventos por dia
+- **Anomalias de crescimento viraram um resumo único**, ordenado por Z-score. Eram ~157 e-mails por dia para um destinatário, e de forma recorrente: o dedup libera a chave a cada 24h e a janela de detecção são 35 dias
+- **Roteamento por responsável** (`_destinatariosPara()`): casa por nome ou e-mail, exige usuário ativo e cai na lista global quando não identifica. Aplicado ao orçamento Databricks, que tinha a coluna e não a usava
+- **Liga/desliga por alerta** — os 11 alertas do catálogo (`_ALERTAS_CATALOGO`) podem ser desativados um a um na tela de Integrações. O banco guarda a lista de **desativados**, não a de ativos: alerta novo nasce ligado em vez de ficar mudo até alguém lembrar de marcá-lo. Falha ao ler a configuração devolve "ativo" — indisponibilidade de banco não deve silenciar alerta
+- **Onde o liga/desliga NÃO vale**: a guarda fica no trecho que manda e-mail, não na detecção. Mudança de propriedade e anomalia de crescimento continuam registrando no sino com o alerta desmarcado — "não quero o e-mail" é diferente de "não quero saber"
+- **Alertas podem sair por relay SMTP anônimo** (`integracoes` tipo `alertas_relay`), com destinatários próprios, separados do Mailing. A precedência é: relay ativo e configurado primeiro, SMTP autenticado como alternativa, e `null` se nenhum dos dois estiver pronto. Sem transporte configurado **nenhum alerta sai** — hoje é exatamente esse o estado desta base (`smtp` inativo, `alertas_relay` sem cadastro)
+- A seleção de alertas aparece **nos dois cards** (relay e SMTP) porque é a mesma configuração e vale para os dois transportes: marcar num reflete no outro na hora, e salvar por qualquer um grava o mesmo
+
+### 🔐 Documentação de segredos corrigida
+- O `.env.example` afirmava *"SECRETS NEVER GO IN THE DATABASE"* — o oposto do que o sistema faz. Credenciais de aplicação ficam no banco, cifradas com a `MASTER_KEY`, e são cadastradas pelas telas
+- Das 58 variáveis do arquivo, **só 12 eram lidas**. As outras 46 (SMTP_*, LDAP_*, ENTRA_*, AZURE_*, DATABRICKS_*, PORTAL_*, FEATURE_*…) não tinham nenhum leitor — segredo real em arquivo que ninguém lê é risco sem contrapartida
+
+### ⚡ Correções
+- `[LogAnalytics] Falha ao coletar DCRs: subs is not defined` — `ReferenceError` real que derrubava a coleta de DCR inteira a cada execução
+- `[TagRollup] invalid input syntax for type date: "null-01"` — faltava filtrar `cost_date` nulo ao montar a lista de meses. Há **56 mil linhas** de `azure_costs` sem data, invisíveis para toda consulta recortada por mês
+- Microsoft Graph: checagem da claim `roles` antes de chamar, já que sem `Directory.Read.All` a API responde 200 com lista vazia em vez de erro
+- Segredo que não decifra com a `MASTER_KEY` atual passa a avisar, em vez de usar o texto cifrado como se fosse a senha
+- **`server.js` roda em modo não-estrito, apesar do `'use strict'`.** O arquivo começa com BOM e com uma linha executável (`process.env.TZ = ...`) **antes** da diretiva na linha 3 — e diretiva só vale se for a primeira instrução. Consequência prática: variável sem `const`/`let` vira global solta em vez de lançar `ReferenceError`. Havia uma assim na coleta de atribuição por recurso (corrigida); testada sob concorrência de 8 workspaces sem corrupção cruzada, mas sem motivo para continuar assim
 
 ## O que há de novo na v4.2.0
 
@@ -103,7 +169,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - Badges por severidade: Expirada / Crítico / Atenção / Aviso
 
 ### 🔐 Segurança & Secrets (v4.0.0)
-- **Secrets em `.env`, nunca no banco** — todas as credenciais (Azure, Databricks, SMTP, Entra ID) carregadas em boot
+- ~~**Secrets em `.env`, nunca no banco** — todas as credenciais (Azure, Databricks, SMTP, Entra ID) carregadas em boot~~ — **não vale mais**: hoje as credenciais de aplicação ficam no banco, cifradas com a `MASTER_KEY`, cadastradas pelas telas (ver "Documentação de segredos corrigida" e "Onde ficam os segredos")
 - `MASTER_KEY` para criptografia AES-256-GCM de dados sensíveis
 - SSO via Microsoft Entra ID + OAuth 2.0 completo
 - Controle de acesso (`adminMiddleware`) em rotas de administração
@@ -113,6 +179,9 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - Botão **Sincronizar com Azure** na tela de Reservas importa reservas e Savings Plans usando a Service Principal configurada (Coleta Azure); o cadastro manual continua disponível
 - Permissões da SP: **Reservations Reader** (escopo `/providers/Microsoft.Capacity`) e **Savings plan Reader**
 - Custos digitados manualmente são preservados nas próximas sincronizações
+- **Segundo caminho (2026-10-22): via Storage.** Campo "Prefixo de Reservas" na tela de Storage Account (Coleta Azure) lê o export agendado em Cost Management → Exports, dataset **Reservations**, do mesmo Storage Account já usado para Custo/Price List. Opcional — sem preenchê-lo, Reservas continua só pelo botão de sincronização direta. Cobre quem não quer dar `Reservations Reader` à SP, ou quer um histórico gravado automaticamente sem depender de disparar a sincronização manual
+- **Sem Savings Plans**: o export "Reservations" é só a grade de Reservas — quem usa somente a importação via Storage não vê Savings Plans até também sincronizar por SP
+- A mesma reserva vinda pelos dois caminhos vira **uma linha só** (upsert pelo mesmo id interno), nunca duplica — e um valor que só a sincronização por SP sabe (forma de pagamento) não é apagado por um reimport via Storage que não traz essa informação
 
 ### 🔤 Fontes e UI (v2.0+)
 - IBM Plex Sans/Mono self-hosted (zero dependência externa)
@@ -162,11 +231,26 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
    - Contains no real secrets, only variable names and docs
    - Helps AI systems understand what variables are available
 
-### All Possible Variables
+### Onde ficam os segredos
 
-See **`.env.example`** in the project root for the complete list of supported environment variables, including optional features like LDAP, Entra ID SSO, and feature flags.
+Dois lugares, com papéis diferentes — e confundi-los já custou um SMTP quebrado sem ninguém perceber.
 
-For detailed documentation on the environment secrets strategy, see `CLAUDE.md` section "**Environment Secrets Strategy**".
+| | O quê | Como |
+|---|---|---|
+| **Banco** | Service Principals da Azure (`azure_coleta_config`), senha do SMTP de Alertas e relay do Mailing (`integracoes`) | Cifrados com a `MASTER_KEY`, cadastrados **pelas telas do sistema** |
+| **`.env`** | Conexão com o banco, `JWT_SECRET`, `MASTER_KEY`, `PORT`, `TZ`, `ALLOWED_ORIGIN` | Texto puro (ou `.env.enc` + `.env.key`), lido na subida do processo |
+
+Editar credencial de aplicação no `.env` **não tem efeito nenhum** — nenhuma linha do código lê
+essas variáveis. Use as telas.
+
+**Consequência operacional:** a `MASTER_KEY` faz parte do backup, junto com o dump do banco. Sem
+ela, o dump não recupera credencial alguma — todas precisam ser recadastradas uma a uma. O sintoma
+de chave trocada é `[Cripto] FALHA ao decifrar um segredo` no log de startup, seguido de falhas de
+envio com `535 Incorrect authentication data`.
+
+O `.env.example` lista **apenas as variáveis que o código realmente lê**. Em 2026-10-18 ele tinha
+58 entradas das quais só 12 eram usadas; as demais eram resquício de quando a configuração vinha
+daquele arquivo, e foram removidas.
 
 ### Generate Secrets
 
@@ -1427,8 +1511,43 @@ parâmetro (`?workspace_guid=a,b` ou `?workspace_guid=a&workspace_guid=b`).
 | GET | `/api/log-analytics/recomendacoes` | Recomendações consolidadas (downgrade pra Basic, retenção, fan-out) |
 | GET | `/api/log-analytics/export/excel` | Export Excel da análise |
 | GET | `/api/log-analytics/export/dashboard` | Dashboard HTML autocontido |
-| POST | `/api/log-analytics/coleta/forcar` | Força coleta do inventário de Log Analytics |
-| POST | `/api/log-analytics/ingestao-recurso/forcar` | Força a coleta de ingestão por recurso |
+| GET | `/api/log-analytics/progresso` | Andamento das coletas em curso (fase, atual/total, item atual, erro) — barato, feito pra poll de 2s |
+| POST | `/api/log-analytics/coleta/forcar` | Força coleta do inventário de Log Analytics (janela fixa de 30 dias) |
+| POST | `/api/log-analytics/backfill-volume` | Backfill de volume por período — `{ dias }` de 1 a 365, limitado pela retenção real de cada workspace |
+| POST | `/api/log-analytics/backfill-atribuicao` | Backfill de "quem gerou os GB" por período — `{ dias }`, limitado pela retenção real de **cada tabela** |
+| POST | `/api/log-analytics/ingestao-recurso/forcar` | Força a coleta de ingestão por recurso (janela fixa de 3 dias) |
 | POST | `/api/log-analytics/diagnostic-settings/forcar` | Força a coleta de Diagnostic Settings |
 | POST | `/api/log-analytics/workspaces/:guid/auditoria-consultas/habilitar` | Habilita `LAQueryLogs` (⚠️ escreve na Azure) |
 | POST | `/api/log-analytics/workspaces/:guid/tabelas/:tabela/detalhar-recurso` | Lista os recursos que alimentam uma tabela |
+
+### Mailing de Comunicados
+
+Relay próprio, **separado do SMTP de Alertas** — ver "Onde ficam os segredos".
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET/POST | `/api/mailing/contatos` | Listar / criar contato (cadastro único por e-mail) |
+| PATCH/DELETE | `/api/mailing/contatos/:id` | Atualizar / excluir contato |
+| POST | `/api/mailing/contatos/import` | Importação em massa de Excel/CSV |
+| GET | `/api/mailing/import-lotes` | Relatório dos lotes importados |
+| GET/POST | `/api/mailing/campanhas` | Listar / criar campanha |
+| GET/PUT/DELETE | `/api/mailing/campanhas/:id` | Ler / atualizar / excluir campanha |
+| POST | `/api/mailing/campanhas/:id/enviar-teste` | Envio de teste para um endereço |
+| POST | `/api/mailing/campanhas/:id/enviar` | Dispara o envio (snapshot dos contatos ativos) |
+| POST | `/api/mailing/campanhas/:id/reenviar-falhas` | Reprocessa só os destinatários que falharam |
+| POST | `/api/mailing/campanhas/:id/cancelar` | Cancela o envio em andamento (efetivo entre lotes) |
+| GET | `/api/mailing/campanhas/:id/progresso` | Progresso do envio |
+| GET | `/api/mailing/campanhas/:id/envios` | Status por destinatário |
+| GET/POST/DELETE | `/api/mailing/templates` | Biblioteca de modelos |
+| POST | `/api/mailing/upload-imagem` | Upload de imagem para o corpo do comunicado |
+| POST | `/api/mailing/relay/testar` | Testa o relay (admin) — sem senha, autorizado por IP |
+| GET | `/api/public/mailing/descadastro` | ❌ Descadastro público, token HMAC autoverificável |
+
+### Economia realizada (órfãos excluídos)
+
+O resumo vem embutido em `GET /api/azure-inventario/desperdicio` (campo `saving`) e, só com os
+totais, em `GET /api/public/orfaos`.
+
+| Método | Rota | Descrição |
+|---|---|---|
+| POST | `/api/azure-inventario/saving/ignorar` | Marca/desmarca um item como "não é economia nossa". `resource_id` no corpo (é caminho com barras); motivo obrigatório para marcar; autor vem do token |
