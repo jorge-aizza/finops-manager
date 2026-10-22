@@ -148,3 +148,19 @@ recapturar linhas da outra. Inofensivo (o valor gravado é o mesmo), só menos p
 ---
 
 See **01-STARTUP.md** for token refresh strategy; **03-AUTHENTICATION.md** for how Service Principal credentials are stored.
+
+## Armadilhas conhecidas
+
+Coisas que já custaram bug em produção. O índice resumido de todas fica em `CLAUDE.md`.
+
+**Multi-SP — o token de uma SP devolve 403 nas assinaturas de outra.**
+`_getInventarioEscopos()` é a abstração central: devolve uma entrada por assinatura carregando a credencial da SP dona. Nunca misture assinaturas de SPs diferentes numa só chamada ARM/Resource Graph. Para rodar a mesma consulta em todas, use `_resourceGraphQueryTodasSps()`.
+
+**Atribuição de SP é por `subscription_id`, nunca por `sp_id`.**
+`azure_costs` não tem coluna de SP. As SPs não compartilham assinaturas, então o `subscription_id` já identifica a dona (ver `TenantFilterContext.tsx` e `_subsDaSp()`).
+
+**Coletas simultâneas: estado por execução, não global.**
+`_coletasEmExecucao` é um Map com chave `tipo:id` (`api:7`, `storage:3`). Os getters globais (`_coletaProgresso`, `_coletaCancelada`) existem só para compatibilidade e resolvem para a **primeira entrada do Map** — usá-los dentro do fluxo de coleta mistura o progresso de uma SP com o de outra. Toda função auxiliar (`_gerarRelatorioAPI`, `_importarArquivosAPI`, `_comRetentativa`) recebe `progresso`/`isCancelada` por parâmetro; `_logColeta(msg, progresso)` exige o segundo argumento.
+
+**`azure_price_list` está inteiro em USD — `retail_price_brl` é NULL nas 546 mil linhas.**
+Nunca escreva "R$" na frente de `retail_price`. Esta conta tem desconto de contrato muito abaixo da tabela pública (medido: ~31% na ingestão, ~68% no Sentinel), então o catálogo só serve para a **forma** da escada de preço; a escala vem da fatura (ver `_sugerirCommitmentTier`, que calibra pelo preço real por GB).

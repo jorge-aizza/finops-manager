@@ -120,3 +120,22 @@ See `server.js` error handling section for try/catch patterns.
 ---
 
 Reference: Full startup sequence in **01-STARTUP.md**, auth flows in **03-AUTHENTICATION.md**, database schema in **06-DATABASE.md**.
+
+## Armadilhas conhecidas
+
+Coisas que já custaram bug em produção. O índice resumido de todas fica em `CLAUDE.md`.
+
+**`server.js` NÃO roda em modo estrito, apesar do `'use strict'` na linha 3.**
+O arquivo começa com BOM e com código executável (`process.env.TZ = ...`) antes da diretiva — e
+diretiva só vale como primeira instrução. Confirmado lendo os bytes (`od -c`). Consequência:
+variável sem `const`/`let` vira global solta em vez de lançar `ReferenceError`, então esse tipo
+de erro passa despercebido por anos. `node --check` também não pega.
+
+**`frontend/dist/` é gitignored.** Deploy sem `npm run frontend:build` serve tela em branco.
+
+**Rota literal depois de rota com `:param` no mesmo prefixo é engolida em silêncio.**
+`POST /api/integrations/alertas-tipos` nunca executou: `/api/integrations/:tipo`, registrado
+antes, casava primeiro e gravava uma linha solta com `tipo='alertas-tipos'`, devolvendo
+`{ok:true}` sem salvar nada. Por isso o endpoint hoje é `/api/alertas-tipos`, fora do prefixo.
+Express casa por ordem de registro, então o sintoma é "salvou e não persistiu" — só aparece em
+teste que RELÊ o estado depois de gravar.

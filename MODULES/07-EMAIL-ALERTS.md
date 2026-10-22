@@ -97,3 +97,33 @@ _logEmailAttempt({ type, destinatarios, error });
 ---
 
 See **01-STARTUP.md** for timer lifecycle; **03-AUTHENTICATION.md** for how credentials are stored securely.
+
+## Armadilhas conhecidas
+
+Coisas que já custaram bug em produção. O índice resumido de todas fica em `CLAUDE.md`.
+
+**Sem transporte configurado, NENHUM alerta sai — e nada na tela diz isso.**
+`_getSmtpConfig()` devolve `null` quando o relay (`alertas_relay`) não está cadastrado/ativo E o
+`smtp` está inativo; aí todo `_sendEmail` é no-op silencioso. Estado atual desta base: é
+exatamente esse. Antes de investigar "por que o alerta X não chegou", confira os dois tipos em
+`integracoes` — a causa quase sempre é transporte, não a regra do alerta.
+
+**O liga/desliga de alerta vale no ENVIO, não na detecção.**
+A guarda `_alertaAtivo(chave)` fica no trecho que manda e-mail. Em mudança de propriedade e
+anomalia de crescimento ela cobre só o ramo de e-mail, porque o sino precisa continuar
+registrando: "não quero o e-mail" é diferente de "não quero saber". E o banco guarda os
+**desativados**, não os ativos — alerta novo nasce ligado, em vez de ficar mudo até alguém
+lembrar de marcá-lo. Qualquer falha de leitura devolve `true` pelo mesmo motivo.
+
+**A seleção de alertas aparece em dois cards e é a MESMA configuração.**
+Relay e SMTP mostram o bloco `.js-alertas-tipos`; `carregarAlertasTipos()` renderiza em todos de
+uma vez, marcar num espelha no outro na hora, e `salvarAlertasTipos(botão)` lê o bloco DO BOTÃO —
+nunca um id fixo, senão salvar por um card ignoraria o que foi marcado no outro.
+
+**E-mail só para o que é acionável, com prazo, em volume limitado e para quem pode agir.**
+Os quatro critérios juntos. Alerta por item dentro de laço de coleta vira rajada sem teto — foi o
+caso de mudança de propriedade (hoje só sino) e de anomalia de crescimento (hoje um resumo único;
+eram ~157/dia para um destinatário, e de forma recorrente, porque o dedup libera a chave a cada
+24h e a janela de detecção são 35 dias). Para rotear ao responsável use `_destinatariosPara()`.
+
+---

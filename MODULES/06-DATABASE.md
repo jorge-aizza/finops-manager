@@ -125,3 +125,10 @@ See **10-DEPLOYMENT.md** for per-platform backup checklist.
 ---
 
 Schema reference: `.env.example` lists all DB_* variables. The schema itself lives only in `server.js` (`CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, idempotent, run on startup) — there are no separate `.sql` migration files to keep in sync; a prior set of `schema.sql`/`init.sql`/etc. files (v1.0/v2.0, with diverging column types) was removed to avoid someone running an out-of-date script against a production database.
+
+## Armadilhas conhecidas
+
+Coisas que já custaram bug em produção. O índice resumido de todas fica em `CLAUDE.md`.
+
+**Regex no Postgres é POSIX, não PCRE.**
+O operador `~` e `regexp_match()` tratam `\d` como `d` literal. Use `[0-9]`. Uma junção com `\d` casa zero linhas em silêncio.
