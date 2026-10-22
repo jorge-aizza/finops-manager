@@ -210,3 +210,55 @@ test('relatório: Quantity ausente ou inválida vira 1 (nunca 0 nem NaN)', () =>
   assert.equal(mapReservationRelatorio({ 'Name': 'x', 'Expiration date': '2028-01-10', 'Quantity': '0' }, HOJE).quantidade, 1);
   assert.equal(mapReservationRelatorio({ 'Name': 'x', 'Expiration date': '2028-01-10', 'Quantity': 'n/a' }, HOJE).quantidade, 1);
 });
+
+// Linha REAL enviada pelo usuário (2026-10-22, export de produção) — regressão: calibra o
+// mapper contra dado de verdade, não só contra suposição. O "Deep link to reservation"
+// desta linha confirmou que o azure_id reconstruído bate exatamente com o path que a
+// própria Azure usa, incluindo Type="AVS" (Azure VMware Solution), que não estava no
+// dicionário até este teste existir.
+test('relatório: linha real (AVS, export de produção) mapeia tudo corretamente', () => {
+  const r = mapReservationRelatorio({
+    'Name': 'AVS_RI_AV36P',
+    'Reservation Id': 'c1d6ba12-58c6-4ac5-8e19-9860859f7e52',
+    'Reservation order Id': '472e41e2-f5f1-4a2c-80bc-11caa996df65',
+    'Status': 'Expired',
+    'Expiration date': '05/09/2025',
+    'Purchase date': '05/09/2024',
+    'Term': 'P1Y',
+    'Scope': 'Shared',
+    'Scope subscription': 'All subscriptions',
+    'Scope resource group': 'All resource groups',
+    'Type': 'AVS',
+    'Product name': 'AV36P',
+    'Region': 'eastus2',
+    'Quantity': '3',
+    'Utilization % 1 Day': '-', 'Utilization % 7 Day': '-', 'Utilization % 30 Day': '-',
+    'Deep link to reservation': 'https://portal.azure.com#resource/providers/microsoft.capacity/reservationOrders/472e41e2-f5f1-4a2c-80bc-11caa996df65/reservations/c1d6ba12-58c6-4ac5-8e19-9860859f7e52/overview',
+  }, '2026-10-22');
+  assert.equal(r.azure_id, '/providers/microsoft.capacity/reservationorders/472e41e2-f5f1-4a2c-80bc-11caa996df65/reservations/c1d6ba12-58c6-4ac5-8e19-9860859f7e52');
+  assert.equal(r.nome_reserva, 'AVS_RI_AV36P');
+  assert.equal(r.tipo_escopo, 'Shared');
+  assert.equal(r.subscription_id, null); // Shared nunca carrega subscription_id, mesmo com "All subscriptions" na célula
+  assert.equal(r.tipo_recurso, 'Azure VMware Solution');
+  assert.equal(r.instancia, 'AV36P');
+  assert.equal(r.quantidade, 3);
+  assert.equal(r.prazo, '1 ano');
+  assert.equal(r.data_inicio, '2024-05-09');
+  assert.equal(r.data_vencimento, '2025-05-09');
+  assert.equal(r.status, 'Expirada');
+});
+
+// A linha real acima tem Compra e Vencimento com o MESMO par dia/mês ("05/09"), então "bate
+// 1 ano" é verdade nas duas leituras possíveis (MM/DD e DD/MM) — não prova qual é a certa.
+// Este caso tem dia > 12, que desempata sozinho: só pode ser dia, nunca mês.
+test('relatório: data ambígua (dia e mês ≤ 12) usa MM/DD; dia > 12 desempata sozinho', () => {
+  // "05/09/2025" — ambíguo: pode ser 9 de maio OU 5 de setembro. Convenção MM/DD (mesma de
+  // server.js _toDate para o CSV de custo): mês=05, dia=09 → maio.
+  assert.equal(mapReservationRelatorio({ 'Name': 'x', 'Expiration date': '05/09/2025' }, HOJE).data_vencimento, '2025-05-09');
+  // "13/02/2025" — 13 não existe como mês: só pode ser dia. Desempata para 13 de fevereiro,
+  // não importa a ordem dos campos no export.
+  assert.equal(mapReservationRelatorio({ 'Name': 'x', 'Expiration date': '13/02/2025' }, HOJE).data_vencimento, '2025-02-13');
+  // Mesmo caso com o dia>12 na OUTRA posição (mês='02', dia='13' viria como "02/13/2025" se
+  // o export já estivesse em MM/DD) — ainda desempata certo.
+  assert.equal(mapReservationRelatorio({ 'Name': 'x', 'Expiration date': '02/13/2025' }, HOJE).data_vencimento, '2025-02-13');
+});

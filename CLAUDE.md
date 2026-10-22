@@ -188,14 +188,30 @@ MESMO formato de id — senão nasce uma 2ª linha para a mesma reserva física.
 `opcao_pagamento` fica de fora do `UPDATE SET` do upsert via Storage: o relatório nunca traz essa
 coluna, e incluí-la apagaria um valor que a sincronização por SP já tinha preenchido.
 
-**Cabeçalho de export Azure é confirmado; VALORES de Status/Term/Scope são suposição defensiva.**
-`mapReservationRelatorio()` foi calibrado com o cabeçalho real que o usuário enviou
-(2026-10-22), não com linhas de dado — não há amostra de como "Succeeded"/"Expired"/"1 Year"
-aparecem de fato nessa coluna. Por isso o casamento é por substring (`/cancel|fail/`,
-`/subscription/`...), nunca igualdade exata, e Status cai no mesmo fallback por data que o
-caminho ARM (`mapStatus`) já usa quando o texto não bate com nada conhecido — a Expiration date é
-a fonte de verdade, a coluna Status só cobre os casos óbvios. Se o primeiro import real em
-produção mostrar reserva com status/escopo errado, é aqui que ajustar, não um bug de lógica.
+**Cabeçalho + uma linha real do export Azure estão confirmados; o resto ainda é defensivo.**
+Confirmado contra uma linha real (2026-10-22, teste `linha real (AVS, export de produção)`):
+`Status: Expired` → Expirada, `Term: P1Y` (formato ISO, não texto "1 Year") → "1 ano", `Scope:
+Shared` com "All subscriptions"/"All resource groups" nas colunas de escopo (texto, não vazio —
+por isso `mapEscopoRelatorio` ignora essas colunas quando o escopo é Shared, nunca lê como se
+fossem um valor real). O link da própria Azure confirmou também que o `azure_id` reconstruído
+bate exatamente com o formato real. Ainda SEM amostra real: `Status` com outros textos
+("Succeeded"/"Active"/"Cancelled"), e `Scope: Single subscription`/`Single resource group`/
+`Management group` — esses continuam por casamento de substring com fallback pela data, não
+igualdade exata. Tipo de recurso novo encontrado: `AVS` (Azure VMware Solution), já adicionado
+ao dicionário (`TIPO_RECURSO` em `azureReservas.js` + `TIPOS_RECURSO.Azure` no frontend) — é o
+padrão a seguir quando aparecer outro tipo não mapeado: aparece como texto cru, não quebra, mas
+cadastra no dicionário dos dois lados assim que confirmado, senão o formulário manual não
+reconhece a reserva importada ao editar.
+
+**`azureReservas.js` tem seu PRÓPRIO desempate de data M/D vs D/M — não é o mesmo código do `_toDate()` em `server.js`.**
+O módulo é deliberadamente "puro, sem I/O" (comentário no topo do arquivo), então a lógica de
+desambiguação (lado >12 só pode ser dia; ambíguo → padrão MM/DD) foi PORTADA, não importada —
+existem duas cópias. Mudar o comportamento numa não muda a outra. A prova de que isso importava:
+numa linha real de reserva, Compra e Vencimento tinham o mesmo par dia/mês ("05/09"), então
+"bate 1 ano certinho" era verdade nas duas leituras possíveis — não dava pra confirmar o formato
+só por consistência interna, por isso a função antes usava `new Date(v)` cru (parsing
+implementation-defined da engine para string não-ISO, funcionava no V8 por coincidência, não por
+garantia).
 
 **E-mail só para o que é acionável, com prazo, em volume limitado e para quem pode agir.**
 Os quatro critérios juntos. Alerta por item dentro de laço de coleta vira rajada sem teto — foi o

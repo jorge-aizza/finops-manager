@@ -15,12 +15,29 @@ const TIPO_RECURSO = {
   rediscache: 'Redis Cache',
   postgresql: 'PostgreSQL Flexible',
   mysql: 'MySQL Flexible',
+  avs: 'Azure VMware Solution', // confirmado em export real (2026-10-22): Type="AVS"
 };
 
 const HORAS_MES = 730;
 
+// Mesma data em M/D/YYYY vs D/M/YYYY vira dia diferente — ISO (ARM API) nunca é ambíguo,
+// mas o relatório exportado usa barra. Mesmo desempate que `_toDate()` em server.js já
+// usa para o CSV de custo: o lado > 12 só pode ser o dia; quando os dois são ≤ 12 (ex.:
+// "05/09/2025"), cai no padrão americano MM/DD — mesma convenção, não reinventada aqui.
+// Sem isso, `new Date(v)` dependeria do parsing implícito do motor JS para string não-ISO,
+// que a spec deixa em aberto (funciona no V8 por coincidência, não por garantia).
 function toDate(v) {
   if (!v) return null;
+  if (typeof v === 'string') {
+    const slash = v.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (slash) {
+      const a = parseInt(slash[1], 10), b = parseInt(slash[2], 10);
+      const [month, day] = b > 12 ? [slash[1], slash[2]] : a > 12 ? [slash[2], slash[1]] : [slash[1], slash[2]];
+      const iso = `${slash[3]}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+      const d = new Date(iso);
+      return isNaN(d.getTime()) ? null : iso;
+    }
+  }
   const d = new Date(v);
   return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
@@ -182,10 +199,10 @@ function _relatorioCi(row) {
 
 function mapStatusRelatorio(statusTexto, dataVencimento, hoje) {
   const s = String(statusTexto || '').toLowerCase();
-  if (/cancel|fail|expired?.?by|merged|split/.test(s)) {
-    return /expir/.test(s) ? 'Expirada' : 'Cancelada';
-  }
+  // "Expired" confirmado em export real (2026-10-22) — checado ANTES de cancel/fail
+  // porque é o caso mais comum e não precisa do fallback por data.
   if (/expir/.test(s)) return 'Expirada';
+  if (/cancel|fail|merged|split/.test(s)) return 'Cancelada';
   // "Succeeded"/"Active"/"Processing" ou qualquer texto não reconhecido: a data manda,
   // mesmo fallback de mapStatus() para o caminho ARM.
   return dataVencimento && dataVencimento < hoje ? 'Expirada' : 'Ativa';
