@@ -49,7 +49,7 @@ Uma linha por subsistema; os detalhes (funções, tabelas, decisões) ficam no m
 | **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, auditoria KQL, Sentinel e Commitment Tier separados, sugestão de tier, progresso e backfill | `11-LOG-ANALYTICS` |
 | **Desperdício & Economia** | Órfão identificado + excluído + custo faturado = saving auditável | `12-DESPERDICIO-ECONOMIA` |
 | **Mailing de Comunicados** | Broadcast via relay SMTP próprio, cadastro único de contatos, editor visual (TipTap), acompanhamento por destinatário | `13-MAILING` |
-| **Reservas** | Reservas e Savings Plans; cadastro manual, sync por SP e export via Storage convergindo na mesma linha | `14-RESERVAS` |
+| **Reservas** | Reservas e Savings Plans; cadastro manual, sync por SP, export via Storage e upload de CSV pela tela convergindo na mesma linha | `14-RESERVAS` |
 
 ---
 
@@ -87,7 +87,7 @@ cada uma ficam no módulo indicado, não aqui.
 - **Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).** `_mailingEmbutirImagens()` dentro de `_sendMailingEmail()`. Marcar o remetente como confiável NÃO resolve: confiar autoriza o download, não cria rota. Como o arquivo vai em CADA mensagem, imagem de template é dimensionada para o e-mail.
 
 **Reservas** — `MODULES/14-RESERVAS.md`
-- **Reserva vinda via Storage precisa colidir com a mesma reserva vinda via SP, não duplicar.** O `azure_id` é reconstruído no formato da API ARM para cair no mesmo `uq_reservas_azure_id`. Uma 3ª via de importação só evita duplicar se reconstruir o MESMO formato de id.
+- **Reserva vinda de relatório precisa colidir com a mesma reserva vinda via SP, não duplicar.** Vale para o export lido do Storage e para o CSV subido pela tela — os dois usam o mesmo mapeador, que reconstrói o `azure_id` no formato da API ARM para cair no mesmo `uq_reservas_azure_id`. Via nova de importação só evita duplicar se reconstruir o MESMO formato de id.
 - **Do export Azure, só o cabeçalho e uma linha real estão confirmados.** `Status`/`Scope` fora dos casos já vistos seguem por casamento de substring com fallback pela data — ajuste ali, não é bug de lógica.
 - **`azureReservas.js` tem seu PRÓPRIO desempate de data M/D vs D/M** — é uma cópia portada, não o `_toDate()` de `server.js`. Mudar uma não muda a outra.
 

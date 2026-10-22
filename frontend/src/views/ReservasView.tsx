@@ -1,6 +1,9 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { listReservas, sincronizarReservasAzure, type SincronizarAzureResult } from '../api/reservas'
+import {
+  importarReservasCSV, listReservas, sincronizarReservasAzure,
+  type ImportarReservasResult, type SincronizarAzureResult,
+} from '../api/reservas'
 import { listSPs } from '../api/coleta'
 import { listSubscriptions } from '../api/azure'
 import { CLOUD_COLORS, CLOUDS, SCOPE_CONFIG, STATUS_COLORS, type Cloud } from '../config/reservaScopes'
@@ -56,11 +59,36 @@ export default function ReservasView() {
   const spsAtivas = (spsQuery.data || []).filter((sp) => sp.ativo)
   const [spId, setSpId] = useState('')
   const [syncResult, setSyncResult] = useState<SincronizarAzureResult | null>(null)
+  const [importResult, setImportResult] = useState<ImportarReservasResult | null>(null)
+  const arquivoRef = useRef<HTMLInputElement>(null)
+
+  const importMutation = useMutation({
+    mutationFn: (file: File) => importarReservasCSV(file),
+    onSuccess: (r) => {
+      setImportResult(r)
+      setSyncResult(null)
+      queryClient.invalidateQueries({ queryKey: ['reservas'] })
+      window.showToast?.(`Importado: ${r.inseridas} nova(s), ${r.atualizadas} atualizada(s).`, 'success')
+    },
+    onError: (e: Error) => {
+      setImportResult(null)
+      window.showToast?.(e.message, 'error')
+    },
+  })
+
+  function handleArquivo(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    // Limpa o input ANTES de disparar: sem isso, escolher o mesmo arquivo duas vezes
+    // seguidas não dispara o onChange de novo (o value não mudou).
+    e.target.value = ''
+    if (file) importMutation.mutate(file)
+  }
 
   const syncMutation = useMutation({
     mutationFn: () => sincronizarReservasAzure(spId ? Number(spId) : undefined),
     onSuccess: (r) => {
       setSyncResult(r)
+      setImportResult(null)
       queryClient.invalidateQueries({ queryKey: ['reservas'] })
       window.showToast?.(`Azure sincronizada: ${r.inseridas} nova(s), ${r.atualizadas} atualizada(s).`, 'success')
     },
@@ -192,6 +220,22 @@ export default function ReservasView() {
         >
           {syncMutation.isPending ? 'Sincronizando...' : 'Sincronizar com Azure'}
         </button>
+        <button
+          className="btn-ghost"
+          disabled={importMutation.isPending}
+          title='Subir o export "Reservations" do Azure (CSV) direto do seu computador'
+          onClick={() => arquivoRef.current?.click()}
+        >
+          {importMutation.isPending ? 'Importando...' : 'Importar CSV'}
+        </button>
+        <input
+          ref={arquivoRef}
+          type="file"
+          accept=".csv,.txt,text/csv"
+          style={{ display: 'none' }}
+          aria-label="Arquivo de reservas"
+          onChange={handleArquivo}
+        />
         <button className="btn-primary" onClick={openNew}>
           Nova Reserva
         </button>
@@ -213,6 +257,34 @@ export default function ReservasView() {
               ))}
             </div>
             <button className="btn-icon" title="Fechar" onClick={() => setSyncResult(null)}>
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {importResult && (
+        <div className="integration-card" style={{ marginBottom: 12 }} role="status">
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <div>
+              <strong>Importação de arquivo ({importResult.arquivo})</strong>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                {importResult.total} linha(s) lida(s) — {importResult.inseridas} nova(s), {importResult.atualizadas} atualizada(s)
+                {importResult.invalidas > 0 && `, ${importResult.invalidas} ignorada(s)`}.
+                Reserva que já existia pela sincronização com Azure foi atualizada, não duplicada.
+              </div>
+              {importResult.invalidas > 0 && (
+                <div style={{ fontSize: 12, color: '#ff8c42', marginTop: 4 }}>
+                  ⚠ Linha ignorada é a que não tem "Name" ou "Expiration date" — as duas colunas são obrigatórias.
+                </div>
+              )}
+              {importResult.avisos?.map((a) => (
+                <div key={a} style={{ fontSize: 12, color: '#ff8c42', marginTop: 4 }}>
+                  ⚠ {a}
+                </div>
+              ))}
+            </div>
+            <button className="btn-icon" title="Fechar" onClick={() => setImportResult(null)}>
               ✕
             </button>
           </div>
@@ -280,7 +352,10 @@ export default function ReservasView() {
                   <StatusBadge status={r.status} />
                 </td>
                 <td style={{ fontSize: 12 }} title={r.sincronizado_em ? 'Sincronizada em ' + new Date(r.sincronizado_em).toLocaleString('pt-BR') : undefined}>
-                  {r.origem === 'azure' ? 'Azure (SP)' : r.origem === 'storage' ? 'Azure (Storage)' : 'Manual'}
+                  {r.origem === 'azure' ? 'Azure (SP)'
+                    : r.origem === 'storage' ? 'Azure (Storage)'
+                    : r.origem === 'import' ? 'Azure (arquivo)'
+                    : 'Manual'}
                 </td>
                 <td style={{ textAlign: 'right' }}>{formatBRL(r.custo_mensal)}</td>
                 <td>

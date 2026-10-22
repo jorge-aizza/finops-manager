@@ -131,4 +131,55 @@ describe('ReservasView', () => {
     await user.type(screen.getByPlaceholderText('Buscar reserva...'), 'inexistente')
     expect(await screen.findByText('Nenhuma reserva encontrada')).toBeInTheDocument()
   });
+
+  it('importa um CSV e mostra o resumo do que entrou', async () => {
+    const user = userEvent.setup()
+    vi.mocked(reservasApi.importarReservasCSV).mockResolvedValue({
+      ok: true, arquivo: 'reservations.csv', total: 3, inseridas: 2, atualizadas: 1, invalidas: 0, avisos: [],
+    })
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+    const chamadasAntes = vi.mocked(reservasApi.listReservas).mock.calls.length
+
+    const arquivo = new File(['Name,Expiration date\nX,01/01/2030\n'], 'reservations.csv', { type: 'text/csv' })
+    await user.upload(screen.getByLabelText('Arquivo de reservas'), arquivo)
+
+    await waitFor(() => expect(reservasApi.importarReservasCSV).toHaveBeenCalledWith(arquivo))
+    expect(await screen.findByText(/reservations\.csv/)).toBeInTheDocument()
+    expect(screen.getByText(/3 linha\(s\) lida\(s\)/)).toBeInTheDocument()
+    // A lista precisa recarregar, senão a tela mostra o resumo e a tabela velha
+    await waitFor(() => expect(reservasApi.listReservas).toHaveBeenCalledTimes(chamadasAntes + 1))
+  });
+
+  it('avisa quando o arquivo tem linha ignorada', async () => {
+    const user = userEvent.setup()
+    vi.mocked(reservasApi.importarReservasCSV).mockResolvedValue({
+      ok: true, arquivo: 'parcial.csv', total: 5, inseridas: 3, atualizadas: 0, invalidas: 2, avisos: [],
+    })
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+
+    await user.upload(
+      screen.getByLabelText('Arquivo de reservas'),
+      new File(['x'], 'parcial.csv', { type: 'text/csv' }),
+    )
+
+    expect(await screen.findByText(/2 ignorada\(s\)/)).toBeInTheDocument()
+    expect(screen.getByText(/"Name" ou "Expiration date"/)).toBeInTheDocument()
+  });
+
+  it('mostra a origem de cada reserva — SP, Storage, arquivo ou manual', async () => {
+    vi.mocked(reservasApi.listReservas).mockResolvedValue([
+      { ...mockReservas[0], id: 1, nome_reserva: 'R-SP', origem: 'azure' },
+      { ...mockReservas[0], id: 2, nome_reserva: 'R-STG', origem: 'storage' },
+      { ...mockReservas[0], id: 3, nome_reserva: 'R-CSV', origem: 'import' },
+      { ...mockReservas[0], id: 4, nome_reserva: 'R-MAN', origem: 'manual' },
+    ])
+    renderWithClient()
+
+    expect((await screen.findByText('R-SP')).closest('tr')).toHaveTextContent('Azure (SP)')
+    expect(screen.getByText('R-STG').closest('tr')).toHaveTextContent('Azure (Storage)')
+    expect(screen.getByText('R-CSV').closest('tr')).toHaveTextContent('Azure (arquivo)')
+    expect(screen.getByText('R-MAN').closest('tr')).toHaveTextContent('Manual')
+  });
 });

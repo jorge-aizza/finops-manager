@@ -76,6 +76,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - **Sem Savings Plans**: o export é só a grade de Reservas. Quem usa apenas esse caminho não os enxerga até sincronizar também por SP
 - Falha isolada: export de Reservas ausente ou malformado não derruba a coleta de Custo nem a de Price List do mesmo Storage
 - Mapeamento calibrado contra um export real de produção, não contra suposição — inclusive o tipo `AVS` (Azure VMware Solution), que não estava no dicionário
+- **Importar CSV pela tela** de Reservas, para quem não tem export agendado no Azure ou quer subir um relatório pontual sem esperar a próxima coleta. Mesmo parser do caminho via Storage; a coluna Origem distingue as quatro procedências (manual, SP, Storage, arquivo)
 
 ### 🔔 Alertas por e-mail — volume e roteamento
 - **Mudança de propriedade de infra virou só sino.** Disparava uma vez por propriedade alterada dentro da coleta, sem nenhum controle de repetição, numa coleta que processa 150 a 200 mil eventos por dia

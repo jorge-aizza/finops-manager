@@ -3103,7 +3103,7 @@ async function _importPriceListFromCSV(csvPath, filename, clearBefore = false, r
 // mapReservationRelatorio() reconstrói o azure_id a partir de Reservation Id + Reservation
 // order Id no mesmo formato que a API ARM usa, então a MESMA reserva trazida pelos dois
 // caminhos vira uma linha só, nunca duplica — testado em tests/azureReservas.test.js.
-async function _importReservasFromCSV(filePath, filename) {
+async function _importReservasFromCSV(filePath, filename, origem = 'storage') {
   await ensureAzureColetaTable();
   const rows = await _lerArquivoRows(filePath, filename);
   const hoje = new Date().toISOString().slice(0, 10);
@@ -3122,7 +3122,7 @@ async function _importReservasFromCSV(filePath, filename) {
            (cloud, nome_reserva, tipo_escopo, subscription_id, resource_group_name, tipo_recurso,
             instancia, quantidade, prazo, opcao_pagamento, custo_total, custo_mensal,
             data_inicio, data_vencimento, status, origem, azure_id, sincronizado_em)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'storage',$16,NOW())
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
          ON CONFLICT (azure_id) WHERE azure_id IS NOT NULL DO UPDATE SET
            nome_reserva=EXCLUDED.nome_reserva, tipo_escopo=EXCLUDED.tipo_escopo,
            subscription_id=EXCLUDED.subscription_id, resource_group_name=EXCLUDED.resource_group_name,
@@ -3138,7 +3138,7 @@ async function _importReservasFromCSV(filePath, filename) {
          RETURNING (xmax = 0) AS inserida`,
         [m.cloud, m.nome_reserva, m.tipo_escopo, m.subscription_id, m.resource_group_name, m.tipo_recurso,
          m.instancia, m.quantidade, m.prazo, m.opcao_pagamento, m.custo_total, m.custo_mensal,
-         m.data_inicio, m.data_vencimento, m.status, m.azure_id]
+         m.data_inicio, m.data_vencimento, m.status, origem, m.azure_id]
       );
       if (up.rows[0].inserida) inseridas++; else atualizadas++;
     } catch (e) {
@@ -6531,6 +6531,57 @@ app.post('/api/reservas/sincronizar-azure', authMiddleware, dbMiddleware, async 
     res.status(502).json({ error: 'Falha ao sincronizar com a Azure: ' + err.message });
   }
 });
+
+// ── Importação manual do relatório de Reservas (upload pela tela) ─────────────────────
+// Mesmo parser do caminho via Storage (`_importReservasFromCSV`), só que o arquivo chega
+// por upload em vez de ser lido do Storage Account. Serve para quem não tem export
+// agendado no Azure, ou quer subir um relatório pontual sem esperar a próxima coleta.
+//
+// `origem='import'` distingue de `'storage'` (export agendado) e `'azure'` (sync por SP):
+// são três proveniências diferentes para o mesmo dado, e saber qual foi importa na hora de
+// auditar de onde veio uma linha. O upsert é o mesmo — a MESMA reserva subida por arquivo
+// colide com a que veio por SP em vez de duplicar (ver `uq_reservas_azure_id`).
+//
+// Rota literal registrada DEPOIS de `/api/reservas/:id` (PUT/DELETE), mas sem conflito:
+// não existe `POST /api/reservas/:id`, então nada a engole. Ver a armadilha de ordem de
+// registro do Express em MODULES/02-ARCHITECTURE.md antes de mover isto de lugar.
+if (_multer) {
+  const _rsvUploadDir = path.join(__dirname, 'uploads_tmp', 'reservas');
+  try { fs.mkdirSync(_rsvUploadDir, { recursive: true }); } catch (_) {}
+  const _rsvUpload = _multer({ dest: _rsvUploadDir, limits: { fileSize: 20 * 1024 * 1024 } });
+
+  app.post('/api/reservas/importar', authMiddleware, dbMiddleware, (req, res, next) => {
+    _rsvUpload.single('arquivo')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      next();
+    });
+  }, async (req, res) => {
+    if (req.user?.perfil === 'reader') {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      return res.status(403).json({ error: 'Perfil somente leitura não pode importar reservas.' });
+    }
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+    try {
+      const r = await _importReservasFromCSV(req.file.path, req.file.originalname, 'import');
+      if (!r.total) {
+        return res.status(400).json({ error: 'O arquivo não tem nenhuma linha de dados. Esperado o export "Reservations" do Azure (CSV), com cabeçalho na primeira linha.' });
+      }
+      if (!r.inseridas && !r.atualizadas) {
+        return res.status(400).json({
+          error: `Nenhuma linha pôde ser importada (${r.invalidas} inválida(s)). Confira se é o export "Reservations" do Azure — são obrigatórias as colunas "Name" e "Expiration date".`,
+          avisos: r.avisos,
+        });
+      }
+      res.json({ ok: true, arquivo: req.file.originalname, ...r });
+    } catch (e) {
+      console.error('[reservas] importar:', e);
+      res.status(500).json({ error: 'Falha ao importar o arquivo: ' + e.message });
+    } finally {
+      fs.unlink(req.file.path, () => {});
+    }
+  });
+}
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // COLETA AUTOMÁTICA — Azure Cost Management API (MCA) — MULTI-TENANT (v4.2+)

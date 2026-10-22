@@ -4,17 +4,23 @@ Compromissos de reserva/savings plan com vigência, custo e vencimento. Tabela `
 rotas `/api/reservas`. O cadastro manual cobre Azure, AWS, GCP, Oracle e Multicloud; a
 sincronização automática hoje é só Azure.
 
-## Três caminhos de entrada, uma tabela
+## Quatro caminhos de entrada, uma tabela
 
 | Caminho | `origem` | Como |
 |---|---|---|
 | Cadastro manual pela tela | `manual` | `azure_id` fica NULL |
 | Sincronização por Service Principal (ARM) | `azure` | `POST /api/reservas/sincronizar-azure` — traz Reservas **e** Savings Plans |
 | Export "Reservations" lido do Storage | `storage` | prefixo `reservas_prefix` em `azure_storage_config`, dentro da coleta por Storage |
+| Upload do CSV pela tela de Reservas | `import` | `POST /api/reservas/importar` (multipart, campo `arquivo`) — botão "Importar CSV" |
 
-Os dois caminhos automáticos convergem na MESMA linha pelo índice único
+Os três caminhos automáticos convergem na MESMA linha pelo índice único
 `uq_reservas_azure_id` — a primeira armadilha abaixo é o motivo de isso funcionar, e o que
-quebraria se alguém adicionar uma 3ª via de importação.
+quebraria se alguém adicionar uma 4ª via de importação.
+
+**Upload e Storage usam o MESMO parser** (`_importReservasFromCSV`): o que muda é só de onde
+vem o arquivo e o valor de `origem`, passado por parâmetro. A separação dos dois valores é
+deliberada — "veio do export agendado" e "alguém subiu um arquivo" respondem diferente na hora
+de auditar de onde saiu uma linha. A tela mostra isso na coluna Origem, com rótulos distintos.
 
 ## Peças principais
 
@@ -23,7 +29,8 @@ quebraria se alguém adicionar uma 3ª via de importação.
 | Mapeadores puros (sem I/O), testáveis isoladamente | `azureReservas.js` |
 | Da API ARM → formato da tabela | `mapReservation()`, `mapSavingsPlan()` |
 | Do relatório exportado → formato da tabela | `mapReservationRelatorio()` |
-| Importação do CSV/Parquet/ZIP vindo do Storage | `_importReservasFromCSV()` (`server.js`) |
+| Importação do arquivo — Storage e upload usam esta mesma função | `_importReservasFromCSV(caminho, nome, origem)` (`server.js`) |
+| Upload pela tela (multer, 20 MB, arquivo temporário apagado sempre) | `POST /api/reservas/importar` |
 | Dicionário de tipo de recurso — os DOIS lados precisam casar | `TIPO_RECURSO` (backend) + `TIPOS_RECURSO.Azure` (`frontend/src/config/reservaScopes.ts`) |
 | Permissões exigidas da SP | **Reservations Reader** (`/providers/Microsoft.Capacity`) e **Savings plan Reader** |
 
@@ -36,12 +43,14 @@ apenas esse caminho não vê Savings Plans até sincronizar também por SP.
 `mapReservationRelatorio()` (`azureReservas.js`) reconstrói o `azure_id` do jeito que a API ARM
 grava (`/providers/microsoft.capacity/reservationorders/{order}/reservations/{id}`, minúsculo) a
 partir das colunas "Reservation Id" + "Reservation order Id" do export. É o MESMO índice único
-(`uq_reservas_azure_id`) que a sincronização por SP já usa — por isso as duas vias convergem numa
-linha só em vez de criar duplicata. Se um dia aparecer uma 3ª via de importação (AWS/GCP/Oracle,
-ou outro relatório Azure), ela só evita duplicar reservas que a SP também vê se reconstruir o
-MESMO formato de id — senão nasce uma 2ª linha para a mesma reserva física. Pelo mesmo motivo,
-`opcao_pagamento` fica de fora do `UPDATE SET` do upsert via Storage: o relatório nunca traz essa
-coluna, e incluí-la apagaria um valor que a sincronização por SP já tinha preenchido.
+(`uq_reservas_azure_id`) que a sincronização por SP já usa — por isso as vias convergem numa
+linha só em vez de criar duplicata. O upload pela tela (`origem='import'`) herda isso de graça
+porque usa o MESMO mapeador; é também o motivo de ele não precisar de índice próprio. Se um dia
+aparecer uma via nova de importação (AWS/GCP/Oracle, ou outro relatório Azure), ela só evita
+duplicar reservas que a SP também vê se reconstruir o MESMO formato de id — senão nasce uma 2ª
+linha para a mesma reserva física. Pelo mesmo motivo, `opcao_pagamento` fica de fora do
+`UPDATE SET` do upsert vindo de relatório: o arquivo nunca traz essa coluna, e incluí-la
+apagaria um valor que a sincronização por SP já tinha preenchido.
 
 **Cabeçalho + uma linha real do export Azure estão confirmados; o resto ainda é defensivo.**
 Confirmado contra uma linha real (2026-10-22, teste `linha real (AVS, export de produção)`):
