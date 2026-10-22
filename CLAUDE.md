@@ -127,6 +127,16 @@ usado para não contar a mesma economia duas vezes) e `primeira_deteccao_em` sã
 da detecção/apuração justamente por isso — e `primeira_deteccao_em` fica congelado: "dias como
 órfão na data da exclusão" é fato histórico, não algo que deva mudar depois.
 
+**"Dias como órfão" usa `desde_orfao_em`, nunca `primeira_deteccao_em` direto.**
+Fix aplicado direto em prod em 19/10/2026 (mesclado depois): `primeira_deteccao_em` é quando
+NOSSO coletor viu o recurso pela primeira vez, que pode ser bem depois do Resource Graph já tê-lo
+marcado órfão — e isso subestimava os dias, podendo barrar pelo piso de 30 dias (`_SAVING_DIAS_MIN_ORFAO`)
+um recurso que na verdade já tinha cumprido. `desde_orfao_em` (`azure_desperdicio_deteccao` e
+`azure_desperdicio_saving`) guarda a data REAL do portal (`marcado_orfao_em`, gravada na
+detecção, mesmo raciocínio do parágrafo acima), com fallback pra `primeira_deteccao_em` quando
+essa data não existe. A leitura é por `diasOrfaoNaExclusao()` (`savingOrfaos.js`) — não reabrir a
+conta na mão em `_resumoSavingOrfaos` nem em tela nova, é a função que decide a precedência.
+
 **Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).**
 O corpo do comunicado sai do editor com `src="http://<host-do-finops>/mailing-uploads/x.png"`,
 montado no navegador a partir de `window.location.origin`. Isso obriga o cliente de e-mail a
