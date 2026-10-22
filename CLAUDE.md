@@ -41,6 +41,8 @@ npm start                # Prod: node server.js
 | **Databricks** | OAuth M2M, System Tables | 05-DATABRICKS-API (setup não-técnico: 05-DATABRICKS-SETUP-GUIA) |
 | **Database** | PostgreSQL, partitioned tables | 06-DATABASE |
 | **Alerts** | SMTP, dedup, smart triggers | 07-EMAIL-ALERTS |
+| **Transporte de alertas** | Relay anônimo (`alertas_relay`) com precedência sobre o SMTP autenticado; destinatários próprios | `_getSmtpConfig()`, `_sendEmail()` |
+| **Liga/desliga por alerta** | 11 alertas, guarda no envio de e-mail (sino segue registrando) | `_ALERTAS_CATALOGO`, `_alertaAtivo()`, `GET/POST /api/alertas-tipos` |
 | **Frontend** | React (Vite), Strangler fig pattern | 08-FRONTEND-REACT |
 | **Cost Rules** | RN-* financial formulas | 09-CALCULADORA |
 | **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, Auditoria de Consultas KQL, Sentinel e Commitment Tier separados, sugestão de tier | `server.js` ("LOG ANALYTICS FINOPS" block) |
@@ -124,6 +126,31 @@ Depois que o recurso é excluído ele some do ARG. `origem_resource_id` (disco q
 usado para não contar a mesma economia duas vezes) e `primeira_deteccao_em` são gravados na hora
 da detecção/apuração justamente por isso — e `primeira_deteccao_em` fica congelado: "dias como
 órfão na data da exclusão" é fato histórico, não algo que deva mudar depois.
+
+**Rota literal depois de rota com `:param` no mesmo prefixo é engolida em silêncio.**
+`POST /api/integrations/alertas-tipos` nunca executou: `/api/integrations/:tipo`, registrado
+antes, casava primeiro e gravava uma linha solta com `tipo='alertas-tipos'`, devolvendo
+`{ok:true}` sem salvar nada. Por isso o endpoint hoje é `/api/alertas-tipos`, fora do prefixo.
+Express casa por ordem de registro, então o sintoma é "salvou e não persistiu" — só aparece em
+teste que RELÊ o estado depois de gravar.
+
+**Sem transporte configurado, NENHUM alerta sai — e nada na tela diz isso.**
+`_getSmtpConfig()` devolve `null` quando o relay (`alertas_relay`) não está cadastrado/ativo E o
+`smtp` está inativo; aí todo `_sendEmail` é no-op silencioso. Estado atual desta base: é
+exatamente esse. Antes de investigar "por que o alerta X não chegou", confira os dois tipos em
+`integracoes` — a causa quase sempre é transporte, não a regra do alerta.
+
+**O liga/desliga de alerta vale no ENVIO, não na detecção.**
+A guarda `_alertaAtivo(chave)` fica no trecho que manda e-mail. Em mudança de propriedade e
+anomalia de crescimento ela cobre só o ramo de e-mail, porque o sino precisa continuar
+registrando: "não quero o e-mail" é diferente de "não quero saber". E o banco guarda os
+**desativados**, não os ativos — alerta novo nasce ligado, em vez de ficar mudo até alguém
+lembrar de marcá-lo. Qualquer falha de leitura devolve `true` pelo mesmo motivo.
+
+**A seleção de alertas aparece em dois cards e é a MESMA configuração.**
+Relay e SMTP mostram o bloco `.js-alertas-tipos`; `carregarAlertasTipos()` renderiza em todos de
+uma vez, marcar num espelha no outro na hora, e `salvarAlertasTipos(botão)` lê o bloco DO BOTÃO —
+nunca um id fixo, senão salvar por um card ignoraria o que foi marcado no outro.
 
 **E-mail só para o que é acionável, com prazo, em volume limitado e para quem pode agir.**
 Os quatro critérios juntos. Alerta por item dentro de laço de coleta vira rajada sem teto — foi o

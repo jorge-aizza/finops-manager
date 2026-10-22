@@ -3501,25 +3501,56 @@ async function salvarIntegracao(tipo) {
 // Quais alertas enviar (2026-10-21, pedido do usuário) — o servidor devolve o catálogo inteiro
 // com o estado de cada um, então a tela não precisa conhecer a lista de alertas. Alerta novo
 // aparece aqui sozinho, já marcado (o padrão é "tudo ligado", ver `_alertaAtivo` em server.js).
+// A MESMA seleção aparece em dois cards (Relay de Alertas e E-mail SMTP), porque vale pros
+// dois transportes. Renderiza em todos os `.js-alertas-tipos` de uma vez — se um terceiro
+// lugar precisar dela depois, basta a classe, sem mexer aqui.
 async function carregarAlertasTipos() {
-  const box = document.getElementById('alertas-tipos-lista');
-  if (!box) return;
+  const boxes = Array.from(document.querySelectorAll('.js-alertas-tipos'));
+  if (!boxes.length) return;
   try {
     const r = await api('GET','/alertas-tipos');
     const itens = (r && r.alertas) || [];
-    if (!itens.length) { box.innerHTML = '<div style="color:var(--text-muted);font-size:12px">Nenhum alerta disponível.</div>'; return; }
-    box.innerHTML = itens.map(a =>
-      '<label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:400;padding:4px 0;cursor:pointer">'
-      + '<input type="checkbox" style="width:auto" data-alerta="' + a.chave + '"' + (a.ativo ? ' checked' : '') + '>'
-      + '<span>' + a.label + '</span></label>'
-    ).join('');
+    const html = itens.length
+      ? itens.map(a =>
+          '<label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:400;padding:4px 0;cursor:pointer">'
+          + '<input type="checkbox" style="width:auto" data-alerta="' + a.chave + '"' + (a.ativo ? ' checked' : '') + '>'
+          + '<span>' + a.label + '</span></label>'
+        ).join('')
+      : '<div style="color:var(--text-muted);font-size:12px">Nenhum alerta disponível.</div>';
+    boxes.forEach(b => { b.innerHTML = html; });
+    // Marcar num card reflete no outro NA HORA. Sem isso, editar no card de Relay e clicar
+    // "Salvar" no card de SMTP descartaria a edicao em silencio, porque cada botao le o bloco
+    // dele. Atribuicao programatica de .checked nao dispara 'change', logo nao ha laco.
+    boxes.forEach(b => {
+      if (b.dataset.espelhoLigado) return;   // carregarAlertasTipos roda de novo a cada save:
+      b.dataset.espelhoLigado = '1';         // sem a trava, empilharia um listener por chamada.
+      b.addEventListener('change', (ev) => {
+        const chave = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-alerta');
+        if (!chave) return;
+        // Consulta o DOM agora, nao a lista do render: assim nao segura referencia velha.
+        document.querySelectorAll('.js-alertas-tipos').forEach(outro => {
+          if (outro === b) return;
+          const par = outro.querySelector('input[data-alerta="' + chave + '"]');
+          if (par) par.checked = ev.target.checked;
+        });
+      });
+    });
   } catch (e) {
-    box.innerHTML = '<div style="color:var(--text-muted);font-size:12px">Não foi possível carregar: ' + e.message + '</div>';
+    boxes.forEach(b => {
+      b.innerHTML = '<div style="color:var(--text-muted);font-size:12px">Não foi possível carregar: ' + e.message + '</div>';
+    });
   }
 }
 
-async function salvarAlertasTipos() {
-  const box = document.getElementById('alertas-tipos-lista');
+// `origem` é o botão clicado: a leitura sai do bloco DELE, não de um id fixo — com a lista
+// duplicada em dois cards, um id fixo leria sempre o mesmo bloco e ignoraria o que a pessoa
+// acabou de marcar no outro.
+async function salvarAlertasTipos(origem) {
+  let box = null;
+  for (let el = origem; el && !box; el = el.parentElement) {
+    box = el.querySelector ? el.querySelector('.js-alertas-tipos') : null;
+  }
+  if (!box) box = document.querySelector('.js-alertas-tipos');
   if (!box) return;
   // Grava o que está DESMARCADO: o servidor guarda a lista de desativados, pra que alerta novo
   // nasça ligado em vez de ficar mudo até alguém lembrar de marcá-lo.
@@ -3528,6 +3559,9 @@ async function salvarAlertasTipos() {
   try {
     await api('POST','/alertas-tipos',{desativados});
     showToast(desativados.length ? desativados.length + ' alerta(s) desativado(s)' : 'Todos os alertas ativos','success');
+    // Re-renderiza TODOS os blocos: sem isso, o card que não foi editado continuaria
+    // mostrando o estado antigo da mesma configuração.
+    carregarAlertasTipos();
   } catch(e) { showToast('Erro: '+e.message,'error'); }
 }
 

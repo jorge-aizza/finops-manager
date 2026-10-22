@@ -76,6 +76,10 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - **Mudança de propriedade de infra virou só sino.** Disparava uma vez por propriedade alterada dentro da coleta, sem nenhum controle de repetição, numa coleta que processa 150 a 200 mil eventos por dia
 - **Anomalias de crescimento viraram um resumo único**, ordenado por Z-score. Eram ~157 e-mails por dia para um destinatário, e de forma recorrente: o dedup libera a chave a cada 24h e a janela de detecção são 35 dias
 - **Roteamento por responsável** (`_destinatariosPara()`): casa por nome ou e-mail, exige usuário ativo e cai na lista global quando não identifica. Aplicado ao orçamento Databricks, que tinha a coluna e não a usava
+- **Liga/desliga por alerta** — os 11 alertas do catálogo (`_ALERTAS_CATALOGO`) podem ser desativados um a um na tela de Integrações. O banco guarda a lista de **desativados**, não a de ativos: alerta novo nasce ligado em vez de ficar mudo até alguém lembrar de marcá-lo. Falha ao ler a configuração devolve "ativo" — indisponibilidade de banco não deve silenciar alerta
+- **Onde o liga/desliga NÃO vale**: a guarda fica no trecho que manda e-mail, não na detecção. Mudança de propriedade e anomalia de crescimento continuam registrando no sino com o alerta desmarcado — "não quero o e-mail" é diferente de "não quero saber"
+- **Alertas podem sair por relay SMTP anônimo** (`integracoes` tipo `alertas_relay`), com destinatários próprios, separados do Mailing. A precedência é: relay ativo e configurado primeiro, SMTP autenticado como alternativa, e `null` se nenhum dos dois estiver pronto. Sem transporte configurado **nenhum alerta sai** — hoje é exatamente esse o estado desta base (`smtp` inativo, `alertas_relay` sem cadastro)
+- A seleção de alertas aparece **nos dois cards** (relay e SMTP) porque é a mesma configuração e vale para os dois transportes: marcar num reflete no outro na hora, e salvar por qualquer um grava o mesmo
 
 ### 🔐 Documentação de segredos corrigida
 - O `.env.example` afirmava *"SECRETS NEVER GO IN THE DATABASE"* — o oposto do que o sistema faz. Credenciais de aplicação ficam no banco, cifradas com a `MASTER_KEY`, e são cadastradas pelas telas
@@ -165,7 +169,7 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 - Badges por severidade: Expirada / Crítico / Atenção / Aviso
 
 ### 🔐 Segurança & Secrets (v4.0.0)
-- **Secrets em `.env`, nunca no banco** — todas as credenciais (Azure, Databricks, SMTP, Entra ID) carregadas em boot
+- ~~**Secrets em `.env`, nunca no banco** — todas as credenciais (Azure, Databricks, SMTP, Entra ID) carregadas em boot~~ — **não vale mais**: hoje as credenciais de aplicação ficam no banco, cifradas com a `MASTER_KEY`, cadastradas pelas telas (ver "Documentação de segredos corrigida" e "Onde ficam os segredos")
 - `MASTER_KEY` para criptografia AES-256-GCM de dados sensíveis
 - SSO via Microsoft Entra ID + OAuth 2.0 completo
 - Controle de acesso (`adminMiddleware`) em rotas de administração
