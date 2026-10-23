@@ -1,4 +1,4 @@
-# CLAUDE.md — FinOps Manager v4.2
+# CLAUDE.md — FinOps Manager v4.3
 
 **Quick reference.** Full docs: `MODULES/` | Memory: `~/.claude/projects/.../memory/MEMORY.md`
 
@@ -25,7 +25,7 @@ npm start                # Prod: node server.js
 | `calculadora.js` | Cost calculator logic & formulas |
 | `encrypt-env.js` | Environment variable encryption utility |
 | `frontend/` | React app (Vite) — main UI, replaces legacy |
-| `MODULES/` | Detailed architecture docs (01–10) |
+| `MODULES/` | Documentação detalhada por subsistema (01–15) |
 | `tests/` | Jest/Playwright test suite |
 | `fonts/`, `libs/` | Static assets & libraries |
 
@@ -33,191 +33,71 @@ npm start                # Prod: node server.js
 
 ## 🏗️ System Layers
 
-| Component | Tech | Module |
-|-----------|------|--------|
-| **Backend API** | Node.js + Express | 01-STARTUP, 02-ARCHITECTURE |
-| **Authentication** | JWT, LDAP, Entra ID | 03-AUTHENTICATION |
-| **Azure Integration** | Resource Manager, Cost API, Graph | 04-AZURE-API |
-| **Databricks** | OAuth M2M, System Tables | 05-DATABRICKS-API (setup não-técnico: 05-DATABRICKS-SETUP-GUIA) |
-| **Database** | PostgreSQL, partitioned tables | 06-DATABASE |
-| **Alerts** | SMTP, dedup, smart triggers | 07-EMAIL-ALERTS |
-| **Transporte de alertas** | Relay anônimo (`alertas_relay`) com precedência sobre o SMTP autenticado; destinatários próprios | `_getSmtpConfig()`, `_sendEmail()` |
-| **Liga/desliga por alerta** | 11 alertas, guarda no envio de e-mail (sino segue registrando) | `_ALERTAS_CATALOGO`, `_alertaAtivo()`, `GET/POST /api/alertas-tipos` |
-| **Reservas via Storage (v4.2.1)** | Export "Reservations" (Cost Management → Exports) lido do mesmo Storage da coleta de Custo; colide com a sync por SP em vez de duplicar | `_importReservasFromCSV()`, `mapReservationRelatorio()` (`azureReservas.js`) |
-| **Frontend** | React (Vite), Strangler fig pattern | 08-FRONTEND-REACT |
-| **Cost Rules** | RN-* financial formulas | 09-CALCULADORA |
-| **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, Auditoria de Consultas KQL, Sentinel e Commitment Tier separados, sugestão de tier | `server.js` ("LOG ANALYTICS FINOPS" block) |
-| **Multi-SP (v4.2)** | Coleta simultânea por Service Principal, filtro global de Tenant | `_getInventarioEscopos()`, `_coletasEmExecucao` |
-| **Mailing de Comunicados** | Broadcast corporativo via relay SMTP anônimo, cadastro único de contatos, editor visual (TipTap), acompanhamento por destinatário | `server.js` ("MAILING DE COMUNICADOS" block), `frontend/src/views/Mailing*` |
-| **Economia realizada** | Órfão identificado + excluído + custo faturado = saving auditável | `_apurarSavingOrfaos()`, `_resumoSavingOrfaos()`, `azure_desperdicio_saving` |
-| **Progresso de coleta (LA)** | Fase/atual/total por tipo, consultado de 2 em 2s pela tela | `_laProgresso` (Map), `GET /log-analytics/progresso`, `LogAnalyticsProgressoBar.tsx` |
-| **Backfill sob demanda (LA)** | Período maior que o padrão, limitado pela retenção real da Azure | `_backfillVolumeLogAnalytics()`, `_backfillAtribuicaoRecursoLogAnalytics()` |
-| **Deployment** | Docker, PM2, systemd | 10-DEPLOYMENT |
+Uma linha por subsistema; os detalhes (funções, tabelas, decisões) ficam no módulo.
+
+| Component | Tech / escopo | Módulo |
+|-----------|---------------|--------|
+| **Backend API** | Node.js + Express | `01-STARTUP`, `02-ARCHITECTURE` |
+| **Authentication** | JWT, LDAP, Entra ID | `03-AUTHENTICATION` |
+| **Azure Integration** | Resource Manager, Cost API, Resource Graph; coleta por API e por Storage; multi-SP com coleta simultânea e filtro global de Tenant | `04-AZURE-API` |
+| **Databricks** | OAuth M2M, System Tables | `05-DATABRICKS-API` (setup não-técnico: `05-DATABRICKS-SETUP-GUIA`) |
+| **Database** | PostgreSQL, tabelas particionadas | `06-DATABASE` |
+| **Alerts** | SMTP e relay anônimo, dedup, gatilhos; liga/desliga por alerta | `07-EMAIL-ALERTS` |
+| **Frontend** | React (Vite), Strangler fig pattern | `08-FRONTEND-REACT` |
+| **Cost Rules** | Fórmulas RN-* | `09-CALCULADORA` |
+| **Deployment** | Docker, PM2, systemd | `10-DEPLOYMENT` |
+| **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, auditoria KQL, Sentinel e Commitment Tier separados, sugestão de tier, progresso e backfill | `11-LOG-ANALYTICS` |
+| **Desperdício & Economia** | Órfão identificado + excluído + custo faturado = saving auditável | `12-DESPERDICIO-ECONOMIA` |
+| **Mailing de Comunicados** | Broadcast via relay SMTP próprio, cadastro único de contatos, editor visual (TipTap), acompanhamento por destinatário | `13-MAILING` |
+| **Reservas** | Reservas e Savings Plans; cadastro manual, sync por SP, export via Storage e upload de CSV pela tela convergindo na mesma linha | `14-RESERVAS` |
 
 ---
 
 ## ⚠️ Armadilhas conhecidas
 
-Coisas que já custaram bug em produção — confira antes de mexer nas áreas correspondentes.
+Coisas que já custaram bug em produção. Cada linha abaixo é o **gatilho** — se for mexer na
+área, pare e leia o módulo antes. O porquê, a medição que sustenta a regra e o histórico de
+cada uma ficam no módulo indicado, não aqui.
 
-**Multi-SP — o token de uma SP devolve 403 nas assinaturas de outra.**
-`_getInventarioEscopos()` é a abstração central: devolve uma entrada por assinatura carregando a credencial da SP dona. Nunca misture assinaturas de SPs diferentes numa só chamada ARM/Resource Graph. Para rodar a mesma consulta em todas, use `_resourceGraphQueryTodasSps()`.
+**Coleta Azure & Multi-SP** — `MODULES/04-AZURE-API.md`
+- **O token de uma SP devolve 403 nas assinaturas de outra.** Nunca misture assinaturas de SPs diferentes numa só chamada ARM/Resource Graph: `_getInventarioEscopos()`, ou `_resourceGraphQueryTodasSps()` para rodar em todas.
+- **Atribuição de SP é por `subscription_id`, nunca por `sp_id`.** `azure_costs` não tem coluna de SP.
+- **Coletas simultâneas: estado por execução, não global.** `_coletasEmExecucao` é um Map (`api:7`, `storage:3`); os getters globais resolvem para a PRIMEIRA entrada. Passe `progresso`/`isCancelada` por parâmetro — `_logColeta(msg, progresso)` exige o 2º argumento.
+- **`azure_price_list` está inteiro em USD** (`retail_price_brl` é NULL nas 546 mil linhas). Nunca escreva "R$" na frente de `retail_price`; o catálogo só serve para a FORMA da escada de preço, a escala vem da fatura.
 
-**Atribuição de SP é por `subscription_id`, nunca por `sp_id`.**
-`azure_costs` não tem coluna de SP. As SPs não compartilham assinaturas, então o `subscription_id` já identifica a dona (ver `TenantFilterContext.tsx` e `_subsDaSp()`).
+**Log Analytics** — `MODULES/11-LOG-ANALYTICS.md`
+- **Pedir período maior que a retenção NÃO dá erro — devolve vazio.** Toda janela parametrizável passa pelo clamp de `_laRetencaoTabela()` antes de sair. Use `retencao_dias`, nunca `retencao_total_dias`. Clamp do volume é por workspace; o da atribuição por recurso é por TABELA.
+- **A janela do mês corrente corta no último dia com custo fechado**, não em hoje (`_janelaLogAnalytics()`, `async`). Tela nova que soma custo precisa usar a MESMA janela.
+- **A coleta própria de GB começou em 30/08/2026.** Mês anterior é cobertura parcial, não consumo baixo — a tela avisa via `dias_com_gb` vs `dias_janela`.
 
-**Coletas simultâneas: estado por execução, não global.**
-`_coletasEmExecucao` é um Map com chave `tipo:id` (`api:7`, `storage:3`). Os getters globais (`_coletaProgresso`, `_coletaCancelada`) existem só para compatibilidade e resolvem para a **primeira entrada do Map** — usá-los dentro do fluxo de coleta mistura o progresso de uma SP com o de outra. Toda função auxiliar (`_gerarRelatorioAPI`, `_importarArquivosAPI`, `_comRetentativa`) recebe `progresso`/`isCancelada` por parâmetro; `_logColeta(msg, progresso)` exige o segundo argumento.
+**Desperdício & Economia** — `MODULES/12-DESPERDICIO-ECONOMIA.md`
+- **Métrica nova tem que usar a MESMA base de recorte da métrica irmã.** Divergência proposital se expõe na tela, não se omite.
+- **`custo_mensal_estimado === null` é "não achamos o billing", NUNCA "é grátis".** O recorte é por TIPO que não fatura (`_DESP_CATEGORIAS_SEM_CUSTO`), não por custo nulo.
+- **Economia só conta exclusão após 30 dias como órfão** (`_SAVING_DIAS_MIN_ORFAO`). Quem não cumpre o piso continua visível no detalhe, marcado.
+- **Dado que só existe no Resource Graph precisa ser gravado na DETECÇÃO** — depois de excluído, o recurso some do ARG.
+- **"Dias como órfão" usa `desde_orfao_em`, nunca `primeira_deteccao_em` direto.** A leitura é por `diasOrfaoNaExclusao()` (`savingOrfaos.js`) — não reabra a conta na mão.
 
-**`azure_price_list` está inteiro em USD — `retail_price_brl` é NULL nas 546 mil linhas.**
-Nunca escreva "R$" na frente de `retail_price`. Esta conta tem desconto de contrato muito abaixo da tabela pública (medido: ~31% na ingestão, ~68% no Sentinel), então o catálogo só serve para a **forma** da escada de preço; a escala vem da fatura (ver `_sugerirCommitmentTier`, que calibra pelo preço real por GB).
+**Alertas por e-mail** — `MODULES/07-EMAIL-ALERTS.md`
+- **Sem transporte configurado, NENHUM alerta sai — e nada na tela diz isso.** Antes de investigar "por que o alerta X não chegou", confira `alertas_relay` e `smtp` em `integracoes`.
+- **O liga/desliga de alerta vale no ENVIO, não na detecção** — o sino continua registrando. E o banco guarda os DESATIVADOS, para alerta novo nascer ligado.
+- **A seleção de alertas aparece em dois cards e é a MESMA configuração.** `salvarAlertasTipos(botão)` lê o bloco DO BOTÃO, nunca um id fixo.
+- **E-mail só para o que é acionável, com prazo, em volume limitado e para quem pode agir** — os quatro critérios juntos. Alerta por item dentro de laço vira rajada sem teto.
 
-**Regex no Postgres é POSIX, não PCRE.**
-O operador `~` e `regexp_match()` tratam `\d` como `d` literal. Use `[0-9]`. Uma junção com `\d` casa zero linhas em silêncio.
+**Mailing de Comunicados** — `MODULES/13-MAILING.md`
+- **Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).** `_mailingEmbutirImagens()` dentro de `_sendMailingEmail()`. Marcar o remetente como confiável NÃO resolve: confiar autoriza o download, não cria rota. Como o arquivo vai em CADA mensagem, imagem de template é dimensionada para o e-mail.
 
-**A janela do mês corrente corta no último dia com custo fechado.**
-`_janelaLogAnalytics()` é `async` e termina no `_ultimoDiaCustoFechado()`, não em hoje — o billing da Azure atrasa. Qualquer tela nova que some custo precisa usar a mesma janela, senão os números não fecham entre cards.
+**Reservas** — `MODULES/14-RESERVAS.md`
+- **Reserva vinda de relatório precisa colidir com a mesma reserva vinda via SP, não duplicar.** Vale para o export lido do Storage e para o CSV subido pela tela — os dois usam o mesmo mapeador, que reconstrói o `azure_id` no formato da API ARM para cair no mesmo `uq_reservas_azure_id`. Via nova de importação só evita duplicar se reconstruir o MESMO formato de id.
+- **Do export Azure, só o cabeçalho e uma linha real estão confirmados.** `Status`/`Scope` fora dos casos já vistos seguem por casamento de substring com fallback pela data — ajuste ali, não é bug de lógica.
+- **`azureReservas.js` tem seu PRÓPRIO desempate de data M/D vs D/M** — é uma cópia portada, não o `_toDate()` de `server.js`. Mudar uma não muda a outra.
 
-**A coleta própria de GB (`log_analytics_ingestao_diaria`) começou em 30/08/2026.**
-Meses anteriores têm cobertura parcial. Número em GB para mês antigo é parcial, não baixo — a tela
-avisa via `dias_com_gb` vs `dias_janela`. Dá pra ampliar até onde a Azure ainda guarda, pelo
-backfill sob demanda da tela (ver armadilha de retenção abaixo).
+**Plataforma** — `MODULES/02-ARCHITECTURE.md`
+- **`server.js` NÃO roda em modo estrito**, apesar do `'use strict'` na linha 3 (BOM + código antes da diretiva). Variável sem `const`/`let` vira global solta em silêncio; `node --check` não pega.
+- **Rota literal depois de rota com `:param` no mesmo prefixo é engolida em silêncio.** Express casa por ordem de registro — o sintoma é "salvou e não persistiu", só aparece em teste que RELÊ o estado.
+- **`frontend/dist/` é gitignored.** Deploy sem `npm run frontend:build` serve tela em branco.
 
-**Pedir período maior que a retenção NÃO dá erro — devolve vazio.**
-É a armadilha central de qualquer coleta de Log Analytics: a Query API não reclama de um período
-já expurgado, só retorna menos, e isso vira "consumo zero" quando o certo é "não sabemos" (mesma
-família do `null` vs zero acima). Toda consulta com janela parametrizável precisa passar pelo
-clamp contra a retenção REAL antes de sair — `_laRetencaoTabela()`. Medido: 91% das tabelas desta
-base retêm 30 dias, `Usage` retém 90 em 188 workspaces e 365 em 3. Use `retencao_dias`
-(interativa), nunca `retencao_total_dias`: o total inclui Archive Tier, que exige search job
-assíncrono e cobrado por GB varrido — usá-lo prometeria alcance que a consulta não entrega.
-O clamp do volume é por workspace; o da atribuição por recurso é **por tabela**, porque cada
-tabela do top-N tem retenção própria dentro do mesmo workspace.
-
-**`server.js` NÃO roda em modo estrito, apesar do `'use strict'` na linha 3.**
-O arquivo começa com BOM e com código executável (`process.env.TZ = ...`) antes da diretiva — e
-diretiva só vale como primeira instrução. Confirmado lendo os bytes (`od -c`). Consequência:
-variável sem `const`/`let` vira global solta em vez de lançar `ReferenceError`, então esse tipo
-de erro passa despercebido por anos. `node --check` também não pega.
-
-**`frontend/dist/` é gitignored.** Deploy sem `npm run frontend:build` serve tela em branco.
-
-**Métrica nova tem que usar a MESMA base de recorte da métrica irmã.**
-O usuário pegou isto antes dos testes: o card de economia contava disco de PVC/AKS que a tela de
-desperdício ao lado já excluía, e o único recurso com custo apurado era justamente um
-`pvc-*` num RG `mc_*` — 100% do número exibido estava errado. Antes de mostrar qualquer número
-novo, procure a métrica irmã, veja que filtros ela aplica, e ou aplique os mesmos ou explique na
-tela por que não. Divergência proposital se expõe ("1 em validação dentro do total"), não se omite.
-
-**`custo_mensal_estimado === null` é "não achamos o billing", NUNCA "é grátis".**
-Por isso o recorte do que aparece na visão de FinOps é por TIPO de recurso que não fatura
-(`_DESP_CATEGORIAS_SEM_CUSTO`, hoje só `nic_orfa`), não por custo nulo. Medido amostrando 300
-recursos vivos de cada tipo: NIC 0/300 faturam; IP público 287/300; disco 293/300; snapshot
-273/300. Filtrar por `null` esconderia 182 discos e snapshots reais, um deles órfão há 1242 dias.
-
-**Economia só conta exclusão após 30 dias como órfão (`_SAVING_DIAS_MIN_ORFAO`).**
-É o prazo do fluxo real: o time espera isso antes de agir, então exclusão mais rápida veio do
-ciclo de vida da infra, não do processo. Vale para todas as categorias. Quem não cumpre o piso
-continua visível no detalhe, marcado — "não contabilizamos" é diferente de "não economizamos", e
-esconder impediria calibrar o piso. Exceções que a regra não pega têm marcação manual, com motivo
-e autor obrigatórios (`ignorado_*` em `azure_desperdicio_saving`).
-
-**Dado que só existe no Resource Graph precisa ser gravado na DETECÇÃO.**
-Depois que o recurso é excluído ele some do ARG. `origem_resource_id` (disco que gerou o snapshot,
-usado para não contar a mesma economia duas vezes) e `primeira_deteccao_em` são gravados na hora
-da detecção/apuração justamente por isso — e `primeira_deteccao_em` fica congelado: "dias como
-órfão na data da exclusão" é fato histórico, não algo que deva mudar depois.
-
-**"Dias como órfão" usa `desde_orfao_em`, nunca `primeira_deteccao_em` direto.**
-Fix aplicado direto em prod em 19/10/2026 (mesclado depois): `primeira_deteccao_em` é quando
-NOSSO coletor viu o recurso pela primeira vez, que pode ser bem depois do Resource Graph já tê-lo
-marcado órfão — e isso subestimava os dias, podendo barrar pelo piso de 30 dias (`_SAVING_DIAS_MIN_ORFAO`)
-um recurso que na verdade já tinha cumprido. `desde_orfao_em` (`azure_desperdicio_deteccao` e
-`azure_desperdicio_saving`) guarda a data REAL do portal (`marcado_orfao_em`, gravada na
-detecção, mesmo raciocínio do parágrafo acima), com fallback pra `primeira_deteccao_em` quando
-essa data não existe. A leitura é por `diasOrfaoNaExclusao()` (`savingOrfaos.js`) — não reabrir a
-conta na mão em `_resumoSavingOrfaos` nem em tela nova, é a função que decide a precedência.
-
-**Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).**
-O corpo do comunicado sai do editor com `src="http://<host-do-finops>/mailing-uploads/x.png"`,
-montado no navegador a partir de `window.location.origin`. Isso obriga o cliente de e-mail a
-ALCANÇAR este servidor na hora de abrir — e no Outlook Web e no celular quem busca a imagem é o
-proxy da Microsoft, que não tem rota para host interno. O sintoma é ícone de imagem quebrada, e
-marcar o remetente como confiável NÃO resolve: confiar só autoriza o download, não cria rota.
-`_mailingEmbutirImagens()` troca todo `src` de `/mailing-uploads/` por anexo `cid:` dentro de
-`_sendMailingEmail()` — ponto único, vale para a campanha e para o envio de teste. Deixa em paz
-URL externa, `data:` e arquivo que sumiu do disco (URL quebrada é melhor que envio que falha).
-Consequência de peso: o arquivo vai em CADA mensagem, então imagem de template é dimensionada
-para o e-mail (banner 1280px JPG, 62 KB) e não no tamanho original (era PNG 1920px, 1 MB — dava
-1,1 MB por destinatário, ~556 MB num disparo para 500). O `.png` continua versionado porque
-campanhas já salvas no banco apontam para ele.
-
-**Rota literal depois de rota com `:param` no mesmo prefixo é engolida em silêncio.**
-`POST /api/integrations/alertas-tipos` nunca executou: `/api/integrations/:tipo`, registrado
-antes, casava primeiro e gravava uma linha solta com `tipo='alertas-tipos'`, devolvendo
-`{ok:true}` sem salvar nada. Por isso o endpoint hoje é `/api/alertas-tipos`, fora do prefixo.
-Express casa por ordem de registro, então o sintoma é "salvou e não persistiu" — só aparece em
-teste que RELÊ o estado depois de gravar.
-
-**Sem transporte configurado, NENHUM alerta sai — e nada na tela diz isso.**
-`_getSmtpConfig()` devolve `null` quando o relay (`alertas_relay`) não está cadastrado/ativo E o
-`smtp` está inativo; aí todo `_sendEmail` é no-op silencioso. Estado atual desta base: é
-exatamente esse. Antes de investigar "por que o alerta X não chegou", confira os dois tipos em
-`integracoes` — a causa quase sempre é transporte, não a regra do alerta.
-
-**O liga/desliga de alerta vale no ENVIO, não na detecção.**
-A guarda `_alertaAtivo(chave)` fica no trecho que manda e-mail. Em mudança de propriedade e
-anomalia de crescimento ela cobre só o ramo de e-mail, porque o sino precisa continuar
-registrando: "não quero o e-mail" é diferente de "não quero saber". E o banco guarda os
-**desativados**, não os ativos — alerta novo nasce ligado, em vez de ficar mudo até alguém
-lembrar de marcá-lo. Qualquer falha de leitura devolve `true` pelo mesmo motivo.
-
-**A seleção de alertas aparece em dois cards e é a MESMA configuração.**
-Relay e SMTP mostram o bloco `.js-alertas-tipos`; `carregarAlertasTipos()` renderiza em todos de
-uma vez, marcar num espelha no outro na hora, e `salvarAlertasTipos(botão)` lê o bloco DO BOTÃO —
-nunca um id fixo, senão salvar por um card ignoraria o que foi marcado no outro.
-
-**Reserva vinda via Storage precisa colidir com a mesma reserva vinda via SP, não duplicar.**
-`mapReservationRelatorio()` (`azureReservas.js`) reconstrói o `azure_id` do jeito que a API ARM
-grava (`/providers/microsoft.capacity/reservationorders/{order}/reservations/{id}`, minúsculo) a
-partir das colunas "Reservation Id" + "Reservation order Id" do export. É o MESMO índice único
-(`uq_reservas_azure_id`) que a sincronização por SP já usa — por isso as duas vias convergem numa
-linha só em vez de criar duplicata. Se um dia aparecer uma 3ª via de importação (AWS/GCP/Oracle,
-ou outro relatório Azure), ela só evita duplicar reservas que a SP também vê se reconstruir o
-MESMO formato de id — senão nasce uma 2ª linha para a mesma reserva física. Pelo mesmo motivo,
-`opcao_pagamento` fica de fora do `UPDATE SET` do upsert via Storage: o relatório nunca traz essa
-coluna, e incluí-la apagaria um valor que a sincronização por SP já tinha preenchido.
-
-**Cabeçalho + uma linha real do export Azure estão confirmados; o resto ainda é defensivo.**
-Confirmado contra uma linha real (2026-10-22, teste `linha real (AVS, export de produção)`):
-`Status: Expired` → Expirada, `Term: P1Y` (formato ISO, não texto "1 Year") → "1 ano", `Scope:
-Shared` com "All subscriptions"/"All resource groups" nas colunas de escopo (texto, não vazio —
-por isso `mapEscopoRelatorio` ignora essas colunas quando o escopo é Shared, nunca lê como se
-fossem um valor real). O link da própria Azure confirmou também que o `azure_id` reconstruído
-bate exatamente com o formato real. Ainda SEM amostra real: `Status` com outros textos
-("Succeeded"/"Active"/"Cancelled"), e `Scope: Single subscription`/`Single resource group`/
-`Management group` — esses continuam por casamento de substring com fallback pela data, não
-igualdade exata. Tipo de recurso novo encontrado: `AVS` (Azure VMware Solution), já adicionado
-ao dicionário (`TIPO_RECURSO` em `azureReservas.js` + `TIPOS_RECURSO.Azure` no frontend) — é o
-padrão a seguir quando aparecer outro tipo não mapeado: aparece como texto cru, não quebra, mas
-cadastra no dicionário dos dois lados assim que confirmado, senão o formulário manual não
-reconhece a reserva importada ao editar.
-
-**`azureReservas.js` tem seu PRÓPRIO desempate de data M/D vs D/M — não é o mesmo código do `_toDate()` em `server.js`.**
-O módulo é deliberadamente "puro, sem I/O" (comentário no topo do arquivo), então a lógica de
-desambiguação (lado >12 só pode ser dia; ambíguo → padrão MM/DD) foi PORTADA, não importada —
-existem duas cópias. Mudar o comportamento numa não muda a outra. A prova de que isso importava:
-numa linha real de reserva, Compra e Vencimento tinham o mesmo par dia/mês ("05/09"), então
-"bate 1 ano certinho" era verdade nas duas leituras possíveis — não dava pra confirmar o formato
-só por consistência interna, por isso a função antes usava `new Date(v)` cru (parsing
-implementation-defined da engine para string não-ISO, funcionava no V8 por coincidência, não por
-garantia).
-
-**E-mail só para o que é acionável, com prazo, em volume limitado e para quem pode agir.**
-Os quatro critérios juntos. Alerta por item dentro de laço de coleta vira rajada sem teto — foi o
-caso de mudança de propriedade (hoje só sino) e de anomalia de crescimento (hoje um resumo único;
-eram ~157/dia para um destinatário, e de forma recorrente, porque o dedup libera a chave a cada
-24h e a janela de detecção são 35 dias). Para rotear ao responsável use `_destinatariosPara()`.
+**Banco** — `MODULES/06-DATABASE.md`
+- **Regex no Postgres é POSIX, não PCRE.** `~` e `regexp_match()` tratam `\d` como `d` literal — use `[0-9]`. Uma junção com `\d` casa zero linhas em silêncio.
 
 ---
 
@@ -243,27 +123,10 @@ Before shipping:
 - PostgreSQL migrations completed
 - PM2/systemd auto-restart configured
 
-**Novo na v4.2** — nada manual, mas saiba o que esperar: o índice `idx_azure_costs_cat_date` é
-criado em background no startup e leva ~10 min numa base de 9M linhas (telas de observabilidade
-ficam lentas até terminar); a tabela `log_analytics_commitment_snapshot` nasce vazia e acumula uma
-linha por workspace/dia; o agendador agora dispara **todas** as SPs due no mesmo tick (antes
-`LIMIT 1`), então reveja o `max` do pool PostgreSQL se houver muitas SPs ativas.
-
-**Depois da v4.2** — as tabelas do Mailing (`mailing_*`) e de economia (`azure_desperdicio_saving`)
-nascem no startup, vazias, sem passo manual. Duas coisas a saber:
-
-- **Onde ficam os segredos da aplicação**: no BANCO, cifrados com a `MASTER_KEY` — Service
-  Principals em `azure_coleta_config`, senha do SMTP em `integracoes`. O `.env` guarda só o que o
-  processo precisa antes de existir banco (conexão, `JWT_SECRET`, `MASTER_KEY`). Consequência: a
-  `MASTER_KEY` faz parte do backup junto com o dump; perdê-la ou trocá-la torna todas as
-  credenciais salvas ilegíveis, e elas precisam ser recadastradas uma a uma pelas telas. Quando
-  isso acontece o sintoma é `[Cripto] FALHA ao decifrar um segredo` no log, e o envio falha com
-  `535 Incorrect authentication data`.
-- **O Mailing usa relay SMTP anônimo próprio** (`integracoes` tipo `mailing_relay`, sem senha,
-  autorizado por IP), separado do SMTP de Alertas. O "Testar Conexão" pode falhar na estação e
-  funcionar em produção — é liberação por IP de origem, não configuração errada.
-
-See `MODULES/10-DEPLOYMENT`, `DEPLOYMENT_CHECKLIST.md` for full checklist.
+O que muda de comportamento no primeiro startup de cada versão (índice criado em
+background, tabelas que nascem vazias, agendador disparando todas as SPs), onde ficam os
+segredos e por que o relay do Mailing é separado: **`MODULES/10-DEPLOYMENT.md`**,
+`DEPLOYMENT_CHECKLIST.md`.
 
 ---
 
@@ -280,25 +143,5 @@ Ao escrever teste de tela: envolver o render em `TenantFilterProvider` e mockar 
 o componente quebra no contexto. `setupTests.ts` já stuba `Element.prototype.scrollIntoView`.
 Texto duplicado na tela (mesmo número em dois cards) resolve por `role`, não por `getByText`.
 
-A suíte leva ~4 min e às vezes cospe `[vitest-pool]: Timeout waiting for worker to respond` em
-alguns arquivos — é o pool de forks estourando no Windows, não teste quebrado; o exit code segue 0
-e a contagem de arquivos fecha. Só investigue se algum arquivo aparecer como `failed`.
-
-Quando o pool flaka a ponto de a CONTAGEM variar entre execuções (já aconteceu: 54 arquivos numa
-rodada, 39 com 15 erros na seguinte), não adianta reler a saída — peça relatório estruturado, que
-não depende do stdout:
-
-```bash
-cd frontend && npx vitest run --reporter=json --outputFile=<caminho>.json --pool=threads --maxWorkers=2
-```
-
-Confirmar comportamento de função embutida em `server.js` sem subir o servidor: extrair o trecho
-por linha e executá-lo com `new Function(...deps)`, injetando dependências stubadas. Foi assim que
-se provou que 157 anomalias viram 1 e-mail e que o resumo de economia trata os dois portais com
-bases diferentes. **Vale o esforço**: `node --check` passa em código sintaticamente válido e
-semanticamente errado — um bloco de resumo acabou DENTRO do laço que deveria agregar, e só o teste
-pegou.
-
-Servidor de desenvolvimento: se uma mudança não refletir, confira se o processo na porta 3000 não
-é um node órfão (nodemon morre e deixa o filho rodando, servindo código antigo indefinidamente).
-`Get-NetTCPConnection -LocalPort 3000 -State Listen` mostra o PID e a hora de início.
+Quando a suíte do frontend flakar (pool de forks no Windows), e como provar comportamento
+de função embutida em `server.js` sem subir o servidor: **`MODULES/15-TESTING.md`**.

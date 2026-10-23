@@ -209,3 +209,27 @@ server {
 ---
 
 See **02-ARCHITECTURE.md** for system overview; **03-AUTHENTICATION.md** for secrets strategy; **01-STARTUP.md** for boot requirements.
+
+## O que esperar ao subir cada versão
+
+Nada aqui é passo manual — é o que muda de comportamento no primeiro startup depois do deploy.
+
+**Novo na v4.2** — nada manual, mas saiba o que esperar: o índice `idx_azure_costs_cat_date` é
+criado em background no startup e leva ~10 min numa base de 9M linhas (telas de observabilidade
+ficam lentas até terminar); a tabela `log_analytics_commitment_snapshot` nasce vazia e acumula uma
+linha por workspace/dia; o agendador agora dispara **todas** as SPs due no mesmo tick (antes
+`LIMIT 1`), então reveja o `max` do pool PostgreSQL se houver muitas SPs ativas.
+
+**Depois da v4.2** — as tabelas do Mailing (`mailing_*`) e de economia (`azure_desperdicio_saving`)
+nascem no startup, vazias, sem passo manual. Duas coisas a saber:
+
+- **Onde ficam os segredos da aplicação**: no BANCO, cifrados com a `MASTER_KEY` — Service
+  Principals em `azure_coleta_config`, senha do SMTP em `integracoes`. O `.env` guarda só o que o
+  processo precisa antes de existir banco (conexão, `JWT_SECRET`, `MASTER_KEY`). Consequência: a
+  `MASTER_KEY` faz parte do backup junto com o dump; perdê-la ou trocá-la torna todas as
+  credenciais salvas ilegíveis, e elas precisam ser recadastradas uma a uma pelas telas. Quando
+  isso acontece o sintoma é `[Cripto] FALHA ao decifrar um segredo` no log, e o envio falha com
+  `535 Incorrect authentication data`.
+- **O Mailing usa relay SMTP anônimo próprio** (`integracoes` tipo `mailing_relay`, sem senha,
+  autorizado por IP), separado do SMTP de Alertas. O "Testar Conexão" pode falhar na estação e
+  funcionar em produção — é liberação por IP de origem, não configuração errada.
