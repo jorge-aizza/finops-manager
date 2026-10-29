@@ -13,13 +13,33 @@ por destinatário. **Separado dos Alertas**: transporte próprio, layout própri
 | Envelope do corpo + rodapé de descadastro | `_mailingEmailEnvelope()` |
 | Disparo em lote, em background, com progresso consultável | `_executarEnvioCampanha()`, `_mailingEnviosEmExecucao` (Map) |
 | Tamanho/intervalo do lote | `_MAILING_LOTE_TAMANHO` (20), `_MAILING_LOTE_INTERVALO_MS` (2s) |
-| Tabelas | `mailing_contatos`, `mailing_campanhas`, `mailing_envio_destinatario`, `mailing_templates`, `mailing_import_lote` |
+| Públicos | Grupos reutilizáveis + seleção individual no momento do envio; opt-outs sempre excluídos |
+| Tabelas | `mailing_contatos`, `mailing_grupos`, `mailing_grupo_contatos`, `mailing_campanhas`, `mailing_envio_destinatario`, `mailing_templates`, `mailing_import_lote` |
 | Imagens de marca (versionadas — precisam ir no deploy) | `mailing_uploads/`, servidas em `/mailing-uploads` |
 | Template padrão, embutido no frontend | `buildTemplatePadraoFinOps()` (`frontend/src/lib/mailingTemplatePadrao.ts`) |
 
 O relay do Mailing é **separado do SMTP de Alertas** por decisão registrada. Consequência
 prática: o "Testar Conexão" pode falhar na estação e funcionar em produção, porque a liberação
 é por IP de origem — não é configuração errada.
+
+## Grupos e seleção de público
+
+- Um contato pode pertencer a vários grupos (`mailing_grupo_contatos`); excluir um grupo não
+	exclui os contatos. Membros são contatos do Mailing, não contas de login do FinOps Manager.
+- Importar para um grupo aceita CSV e Excel `.xlsx` de até 20 MB, com cabeçalho de e-mail
+	obrigatório e nome opcional. A importação faz upsert dos contatos e acrescenta os vínculos;
+	não remove membros que já estavam no grupo. E-mails repetidos no mesmo arquivo são processados
+	uma vez; status `opt_out` existente é preservado.
+- A seleção fica salva em `mailing_campanhas.destinatarios` junto com o rascunho. No disparo,
+	a interface abre essa seleção para revisão e envia `grupo_ids`, `contato_ids` e, opcionalmente,
+	`todos_ativos`. A expansão é deduplicada no banco. Apenas contatos com `status='ativo'` entram,
+	inclusive quando o grupo ainda contém alguém que pediu descadastro.
+- `mailing_envio_destinatario` é o snapshot imutável do público no momento do disparo; mudanças
+	posteriores nos membros de grupos não alteram a campanha já enviada. O reenvio de falhas usa
+	esse mesmo snapshot.
+- Uma seleção explícita sem contatos ativos é recusada. Requisições antigas sem os campos de
+	seleção mantêm o comportamento anterior de enviar para todos os contatos ativos; na interface,
+	essa opção aparece como escolha explícita "Todos os contatos ativos".
 
 ## Armadilhas
 

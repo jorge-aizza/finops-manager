@@ -9,6 +9,7 @@ Commitment Tier (contabilizados separados) e sugestão de tier.
 | O quê | Onde |
 |---|---|
 | Janela do mês corrente (termina no último dia com custo fechado) | `_janelaLogAnalytics()` — é `async` |
+| Rollup diário usado para fechar a janela e comparar custos | `azure_custo_diario`, sincronizado após importações API, Storage e manuais |
 | Retenção REAL por tabela, usada como clamp | `_laRetencaoTabela()` |
 | Volume de ingestão coletado por nós | tabela `log_analytics_ingestao_diaria` |
 | Snapshot diário de commitment por workspace | tabela `log_analytics_commitment_snapshot` |
@@ -20,6 +21,7 @@ Commitment Tier (contabilizados separados) e sugestão de tier.
 
 **A janela do mês corrente corta no último dia com custo fechado.**
 `_janelaLogAnalytics()` é `async` e termina no `_ultimoDiaCustoFechado()`, não em hoje — o billing da Azure atrasa. Qualquer tela nova que some custo precisa usar a mesma janela, senão os números não fecham entre cards.
+O fechamento lê `azure_custo_diario`, não `azure_costs`: se o rollup ficar para trás, todos os gráficos que compartilham essa janela também cortam cedo, mesmo com a coleta bruta em dia. Cada importação de custo reconstrói apenas os meses afetados; o builder periódico continua como recuperação.
 
 **A coleta própria de GB (`log_analytics_ingestao_diaria`) começou em 30/08/2026.**
 Meses anteriores têm cobertura parcial. Número em GB para mês antigo é parcial, não baixo — a tela

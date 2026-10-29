@@ -163,6 +163,29 @@ export async function uploadImportFile(file: File, idx: number, total: number): 
   return { kind: 'accepted', jobId: data.jobId, arquivo: data.arquivo }
 }
 
+export async function uploadImportBatch(files: File[]): Promise<UploadOutcome> {
+  const fd = new FormData()
+  files.forEach((file) => fd.append('arquivos', file))
+  const token = getToken()
+  const headers: Record<string, string> = {}
+  if (token) headers.Authorization = 'Bearer ' + token
+  const res = await fetch(API_BASE + '/azure-costs/import/batch', { method: 'POST', headers, body: fd })
+  if (res.status === 401) {
+    window.logout?.(false)
+    throw new ApiError('Sessão expirada')
+  }
+  if (res.status === 409) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    return { kind: 'conflict', message: data.error || 'Uma importação já está em andamento. Aguarde a conclusão.' }
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    throw new ApiError(data.error || `Erro HTTP ${res.status}`)
+  }
+  const data = await res.json() as { jobId: string; arquivo: string }
+  return { kind: 'accepted', jobId: data.jobId, arquivo: data.arquivo }
+}
+
 // ── Storage Accounts ────────────────────────────────────────────
 const STORAGE_NUM_FIELDS: (keyof StorageConfig)[] = ['sp_id']
 const normalizeStorage = (s: StorageConfig) => numFields(s, STORAGE_NUM_FIELDS)

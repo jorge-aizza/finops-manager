@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { importarContatos } from '../api/mailing'
+import { baixarModeloImportacaoMailing, importarContatos } from '../api/mailing'
 import type { MailingImportLote } from '../types/mailing'
 
 interface MailingImportModalProps {
@@ -13,6 +13,7 @@ export default function MailingImportModal({ onClose }: MailingImportModalProps)
   const queryClient = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)
   const [enviando, setEnviando] = useState(false)
+  const [baixandoModelo, setBaixandoModelo] = useState(false)
   const [resultado, setResultado] = useState<MailingImportLote | null>(null)
   const [verInvalidos, setVerInvalidos] = useState(false)
 
@@ -40,6 +41,17 @@ export default function MailingImportModal({ onClose }: MailingImportModalProps)
     }
   }
 
+  async function handleBaixarModelo() {
+    setBaixandoModelo(true)
+    try {
+      await baixarModeloImportacaoMailing()
+    } catch (e) {
+      window.showToast?.('Erro ao baixar modelo: ' + (e as Error).message, 'error')
+    } finally {
+      setBaixandoModelo(false)
+    }
+  }
+
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" style={{ maxWidth: 520 }}>
@@ -58,9 +70,14 @@ export default function MailingImportModal({ onClose }: MailingImportModalProps)
               </div>
               <input ref={inputRef} type="file" accept=".csv,.xlsx" style={{ display: 'none' }}
                 onChange={(e) => { handleFile(e.target.files); e.target.value = '' }} />
-              <button className="btn-primary" style={{ fontSize: 14, padding: '12px 34px' }} onClick={() => inputRef.current?.click()}>
-                Selecionar arquivo
-              </button>
+              <div style={{ display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: 8 }}>
+                <button className="btn-primary" style={{ fontSize: 14, padding: '12px 24px' }} onClick={() => inputRef.current?.click()}>
+                  Selecionar arquivo
+                </button>
+                <button className="btn-ghost" style={{ fontSize: 12, padding: '10px 14px' }} disabled={baixandoModelo} onClick={handleBaixarModelo}>
+                  {baixandoModelo ? 'Baixando modelo...' : 'Baixar modelo Excel'}
+                </button>
+              </div>
             </>
           )}
 

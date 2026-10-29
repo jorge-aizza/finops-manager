@@ -48,7 +48,7 @@ Uma linha por subsistema; os detalhes (funções, tabelas, decisões) ficam no m
 | **Deployment** | Docker, PM2, systemd | `10-DEPLOYMENT` |
 | **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, auditoria KQL, Sentinel e Commitment Tier separados, sugestão de tier, progresso e backfill | `11-LOG-ANALYTICS` |
 | **Desperdício & Economia** | Órfão identificado + excluído + custo faturado = saving auditável | `12-DESPERDICIO-ECONOMIA` |
-| **Mailing de Comunicados** | Broadcast via relay SMTP próprio, cadastro único de contatos, editor visual (TipTap), acompanhamento por destinatário | `13-MAILING` |
+| **Mailing de Comunicados** | Broadcast via relay SMTP próprio, contatos em grupos, editor visual (TipTap) com hyperlinks e tabelas editáveis, acompanhamento por destinatário | `13-MAILING` |
 | **Reservas** | Reservas e Savings Plans; cadastro manual, sync por SP, export via Storage e upload de CSV pela tela convergindo na mesma linha | `14-RESERVAS` |
 
 ---
@@ -85,6 +85,8 @@ cada uma ficam no módulo indicado, não aqui.
 
 **Mailing de Comunicados** — `MODULES/13-MAILING.md`
 - **Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).** `_mailingEmbutirImagens()` dentro de `_sendMailingEmail()`. Marcar o remetente como confiável NÃO resolve: confiar autoriza o download, não cria rota. Como o arquivo vai em CADA mensagem, imagem de template é dimensionada para o e-mail.
+- **Tabela de dados é HTML estruturado, nunca texto alinhado por espaços.** O editor oferece modelos e ajuste de linhas/colunas; hyperlinks devem ser anchors com `href`. O envelope preserva espaços repetidos e aplica grade às tabelas de dados, mas não à tabela com imagem da assinatura.
+- **Contato pode estar em vários grupos.** A lista do Mailing exibe todos os grupos por contato; a API agrega os nomes em uma consulta.
 
 **Reservas** — `MODULES/14-RESERVAS.md`
 - **Reserva vinda de relatório precisa colidir com a mesma reserva vinda via SP, não duplicar.** Vale para o export lido do Storage e para o CSV subido pela tela — os dois usam o mesmo mapeador, que reconstrói o `azure_id` no formato da API ARM para cair no mesmo `uq_reservas_azure_id`. Via nova de importação só evita duplicar se reconstruir o MESMO formato de id.

@@ -73,13 +73,15 @@ export function buildTemplatePadraoFinOps(): string {
 <h3>Dúvidas e suporte</h3>
 <p>Em caso de dúvidas ou necessidade de suporte, entre em contato com as equipes responsáveis:</p>
 <p><strong>📧 finops.br@telefonica.com</strong></p>
-<table>
+<table width="100%" style="width:100%;max-width:100%">
 <tbody>
 <tr>
-<td><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" width="120"></td>
-<td><p><strong>Diretoria de Infraestrutura e Cloud</strong><br>
-<strong>Telefônica Brasil | Vivo</strong><br>
-<a href="mailto:finops.br@telefonica.com">finops.br@telefonica.com</a></p></td>
+<td width="120" style="width:120px;padding:0 16px 0 0;border-right:1px solid #cccccc"><img src="${base}/mailing-uploads/finops-logo-assinatura.png" alt="FinOps" width="120" style="display:block;max-width:100%;height:auto"></td>
+<td style="padding:0 0 0 30px;color:#666666;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px"><p style="margin:0"><strong style="color:#111111">Jorge Aizza Marcelino</strong><br>
+Ger. Sr. de Eng. de Infra e Cloud<br>
+Diretoria de Infra e Operação<br>
+Avenida Engenheiro Luis Carlos Berrini, 1376 nº, 11º andar Lado B<br>
+CEP 04571-936 | São Paulo - SP</p></td>
 </tr>
 </tbody>
 </table>

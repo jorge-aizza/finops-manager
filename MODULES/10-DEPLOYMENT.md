@@ -121,29 +121,22 @@ pm2 startup
 **Commands**: `pm2 status`, `pm2 logs finops-manager`, `pm2 restart finops-manager`
 
 ### systemd (Linux)
-Create `/etc/systemd/system/finops-manager.service`:
-```ini
-[Unit]
-Description=FinOps Manager
-After=network.target postgresql.service
-
-[Service]
-User=finops
-WorkingDirectory=/opt/finops-manager
-ExecStart=/usr/bin/node server.js
-Restart=on-failure
-RestartSec=10
-EnvironmentFile=/opt/finops-manager/.env
-
-[Install]
-WantedBy=multi-user.target
-```
+Install the versioned unit file from `deploy/finops.service` at
+`/etc/systemd/system/finops.service`. It defines the production working directory
+and starts `server.js`; configure secrets through the deployment environment.
 
 ```bash
-systemctl daemon-reload
-systemctl enable finops-manager
-systemctl start finops-manager
+sudo install -o root -g root -m 644 deploy/finops.service /etc/systemd/system/finops.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now finops
+sudo systemctl status finops --no-pager
 ```
+
+Use `sudo systemctl stop finops` to stop without disabling startup at boot,
+`sudo systemctl disable finops` to disable startup, and
+`sudo journalctl -u finops -f` to follow logs. The unit file's paths must match
+the deployed checkout; review them when installing outside the repository's
+current production path.
 
 ### Windows Service (NSSM)
 ```powershell

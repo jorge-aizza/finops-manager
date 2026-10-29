@@ -4,12 +4,18 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import MailingCampanhaModal from './MailingCampanhaModal'
 import * as mailingApi from '../api/mailing'
-import type { MailingCampanha } from '../types/mailing'
+import type { MailingCampanha, MailingContato, MailingGrupo } from '../types/mailing'
 
 vi.mock('../api/mailing')
 vi.mock('../components/MailingComposer', () => ({
-  default: ({ value, onChange }: { value: string; onChange: (html: string) => void }) => (
-    <textarea aria-label="corpo-html-mock" value={value} onChange={(e) => onChange(e.target.value)} />
+  default: ({ value, onChange, editable }: { value: string; onChange: (html: string) => void; editable?: boolean }) => (
+    <>
+      {editable && <>
+        <select aria-label="Tipo de fonte" />
+        <select aria-label="Tamanho da fonte" />
+      </>}
+      <textarea aria-label="corpo-html-mock" value={value} onChange={(e) => onChange(e.target.value)} />
+    </>
   ),
 }))
 
@@ -18,14 +24,22 @@ const mockCampanha: MailingCampanha = {
   status: 'rascunho', criado_por: 'admin', criado_em: '2026-10-10T00:00:00Z', atualizado_em: '2026-10-10T00:00:00Z',
   iniciado_em: null, concluido_em: null,
 }
+const mockGrupo: MailingGrupo = {
+  id: 8, nome: 'Diretoria', descricao: null, total_contatos: 1, contato_ids: [1],
+  criado_em: '2026-10-01T00:00:00Z', atualizado_em: '2026-10-01T00:00:00Z',
+}
+const mockContato: MailingContato = {
+  id: 1, email: 'diretora@exemplo.com', nome: 'Diretora', status: 'ativo', origem: 'manual',
+  criado_em: '2026-10-01T00:00:00Z', atualizado_em: '2026-10-01T00:00:00Z',
+}
 
-function renderModal(campanha: MailingCampanha | null, onClose = vi.fn()) {
+function renderModal(campanha: MailingCampanha | null, onClose = vi.fn(), onSolicitarEnvio = vi.fn()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return {
     onClose,
     ...render(
       <QueryClientProvider client={queryClient}>
-        <MailingCampanhaModal campanha={campanha} onClose={onClose} />
+        <MailingCampanhaModal campanha={campanha} onClose={onClose} onSolicitarEnvio={onSolicitarEnvio} />
       </QueryClientProvider>,
     ),
   }
@@ -35,9 +49,29 @@ beforeEach(() => {
   vi.clearAllMocks()
   window.showToast = vi.fn()
   vi.mocked(mailingApi.listTemplates).mockResolvedValue([])
+  vi.mocked(mailingApi.listGrupos).mockResolvedValue([])
+  vi.mocked(mailingApi.listContatos).mockResolvedValue([])
 })
 
 describe('MailingCampanhaModal', () => {
+  it('exibe controles de fonte e tamanho ao abrir a edição de um rascunho', () => {
+    renderModal(mockCampanha)
+    expect(screen.getByLabelText('Tipo de fonte')).toBeInTheDocument()
+    expect(screen.getByLabelText('Tamanho da fonte')).toBeInTheDocument()
+  });
+
+  it('prévia usa largura, fonte e rodapé do e-mail enviado', async () => {
+    const user = userEvent.setup()
+    renderModal(mockCampanha)
+    await user.click(screen.getByRole('button', { name: /Prévia/ }))
+
+    expect(await screen.findByText('Descadastrar-se')).toBeInTheDocument()
+    expect(document.querySelector('table[role="presentation"]')).toBeInTheDocument()
+    expect(document.querySelector('[style*="max-width: 640px"]')).toBeInTheDocument()
+    expect(document.querySelector('[style*="font-family: Arial, Helvetica, sans-serif"]')).toBeInTheDocument()
+    expect(document.querySelector('td[style*="font-size: 14px"][style*="line-height: 21px"]')).toBeInTheDocument()
+  });
+
   it('bloqueia salvar sem assunto', async () => {
     const user = userEvent.setup()
     renderModal(null)
@@ -54,6 +88,68 @@ describe('MailingCampanhaModal', () => {
     await user.click(screen.getByRole('button', { name: 'Salvar rascunho' }))
     await waitFor(() => expect(mailingApi.criarCampanha).toHaveBeenCalled())
     await waitFor(() => expect(onClose).toHaveBeenCalled())
+  });
+
+  it('salva e abre a confirmação ao solicitar envio com destinatários', async () => {
+    const user = userEvent.setup()
+    const onSolicitarEnvio = vi.fn()
+    vi.mocked(mailingApi.listContatos).mockResolvedValue([mockContato])
+    vi.mocked(mailingApi.criarCampanha).mockResolvedValue({ ...mockCampanha, id: 99 })
+    const { onClose } = renderModal(null, vi.fn(), onSolicitarEnvio)
+    await user.type(screen.getByLabelText('Assunto *'), 'Comunicado pronto')
+    await user.click(screen.getByRole('checkbox', { name: /Todos os contatos ativos \(1\)/ }))
+    await user.click(screen.getByRole('button', { name: 'Enviar comunicado' }))
+
+    await waitFor(() => expect(onSolicitarEnvio).toHaveBeenCalledWith(expect.objectContaining({
+      id: 99,
+      assunto: 'Comunicado pronto',
+      destinatarios: { grupo_ids: [], contato_ids: [], emails: [], todos_ativos: true },
+    })))
+    expect(onClose).toHaveBeenCalled()
+  });
+
+  it('bloqueia solicitar envio sem destinatários', async () => {
+    const user = userEvent.setup()
+    renderModal(null)
+    await user.type(screen.getByLabelText('Assunto *'), 'Comunicado sem audiência')
+    await user.click(screen.getByRole('button', { name: 'Enviar comunicado' }))
+
+    expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('destinatário'), 'error')
+    expect(mailingApi.criarCampanha).not.toHaveBeenCalled()
+  });
+
+  it('salva no rascunho o grupo escolhido no editor', async () => {
+    const user = userEvent.setup()
+    vi.mocked(mailingApi.listGrupos).mockResolvedValue([mockGrupo])
+    vi.mocked(mailingApi.listContatos).mockResolvedValue([mockContato])
+    vi.mocked(mailingApi.criarCampanha).mockResolvedValue({ ...mockCampanha, id: 99 })
+    renderModal(null)
+    await user.type(screen.getByLabelText('Assunto *'), 'Comunicado para Diretoria')
+    await user.click(await screen.findByText(/Selecionar grupo/))
+    await user.click(await screen.findByRole('checkbox', { name: /Diretoria/ }))
+    await user.click(screen.getByRole('button', { name: 'OK ✓' }))
+    await user.click(screen.getByRole('button', { name: 'Salvar rascunho' }))
+
+    await waitFor(() => expect(mailingApi.criarCampanha).toHaveBeenCalledWith(expect.objectContaining({
+      assunto: 'Comunicado para Diretoria',
+      destinatarios: { grupo_ids: [8], contato_ids: [], emails: [], todos_ativos: false },
+    })))
+  });
+
+  it('inclui e salva um e-mail digitado como destinatário individual', async () => {
+    const user = userEvent.setup()
+    vi.mocked(mailingApi.criarCampanha).mockResolvedValue({ ...mockCampanha, id: 99 })
+    renderModal(null)
+    await user.type(screen.getByLabelText('Assunto *'), 'Comunicado individual')
+    await user.selectOptions(screen.getByLabelText('Tipo de destinatário'), 'contato')
+    await user.type(screen.getByLabelText('Incluir e-mail individual'), 'pessoa@exemplo.com')
+    await user.click(screen.getByRole('button', { name: '+ Incluir e-mail' }))
+    expect(screen.getByText('pessoa@exemplo.com')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Salvar rascunho' }))
+
+    await waitFor(() => expect(mailingApi.criarCampanha).toHaveBeenCalledWith(expect.objectContaining({
+      destinatarios: { grupo_ids: [], contato_ids: [], emails: ['pessoa@exemplo.com'], todos_ativos: false },
+    })))
   });
 
   it('atualiza uma campanha existente, não cria outra', async () => {
@@ -196,6 +292,26 @@ describe('MailingCampanhaModal', () => {
   });
 
   describe('salvar como modelo', () => {
+    it('salva alterações no modelo carregado após confirmar a sobrescrita', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(window, 'confirm').mockReturnValue(true)
+      vi.mocked(mailingApi.listTemplates).mockResolvedValue([
+        { id: 4, nome: 'Aviso de Manutenção', corpo_html: '<p>Versão antiga</p>', remetente_nome: null, remetente_email: null, criado_por: 'admin', criado_em: '', atualizado_em: '' },
+      ])
+      vi.mocked(mailingApi.atualizarTemplate).mockResolvedValue({ ok: true })
+      renderModal(null)
+      await user.click(screen.getByRole('button', { name: /Usar modelo/ }))
+      await user.click(await screen.findByText('Aviso de Manutenção'))
+      await user.clear(screen.getByLabelText('corpo-html-mock'))
+      await user.type(screen.getByLabelText('corpo-html-mock'), '<p>Versão atualizada</p>')
+      await user.click(screen.getByRole('button', { name: 'Salvar alterações no modelo' }))
+
+      await waitFor(() => expect(mailingApi.atualizarTemplate).toHaveBeenCalledWith(4, expect.objectContaining({
+        nome: 'Aviso de Manutenção', corpo_html: '<p>Versão atualizada</p>',
+      })))
+      expect(window.showToast).toHaveBeenCalledWith('Alterações do modelo salvas.', 'success')
+    });
+
     it('salva o conteúdo atual como um novo modelo nomeado', async () => {
       const user = userEvent.setup()
       vi.spyOn(window, 'prompt').mockReturnValue('Meu Novo Modelo')

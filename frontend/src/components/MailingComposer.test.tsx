@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -11,6 +11,111 @@ describe('MailingComposer', () => {
     render(<MailingComposer value="<p>Olá, pessoal!</p>" onChange={() => {}} />)
     expect(await screen.findByText('Olá, pessoal!')).toBeInTheDocument()
   });
+
+  it('oferece controles de fonte e preserva os estilos de fonte em HTML', async () => {
+    let htmlAtualizado = ''
+    const user = userEvent.setup()
+    render(<MailingComposer value="<p>Texto</p>" onChange={(html) => { htmlAtualizado = html }} />)
+
+    const area = document.querySelector('[contenteditable="true"]') as HTMLElement
+    await user.click(area)
+    await user.keyboard('{Control>}a{/Control}')
+    await user.selectOptions(screen.getByLabelText('Tipo de fonte'), 'Georgia, serif')
+    await user.selectOptions(screen.getByLabelText('Tamanho da fonte'), '18px')
+
+    expect(htmlAtualizado).toContain('font-family: Georgia, serif')
+    expect(htmlAtualizado).toContain('font-size: 18px')
+  });
+
+  it('mantém hyperlink real com estilo ao serializar o conteúdo do e-mail', async () => {
+    let htmlAtualizado = ''
+    const user = userEvent.setup()
+    render(<MailingComposer value={'<p><span style="font-size:18px"><a href="https://example.com/info">Acesse as informações</a></span></p>'} onChange={(html) => { htmlAtualizado = html }} />)
+
+    const link = await screen.findByRole('link', { name: 'Acesse as informações' })
+    expect(link).toHaveAttribute('href', 'https://example.com/info')
+
+    const area = document.querySelector('[contenteditable="true"]') as HTMLElement
+    area.focus()
+    await user.type(area, '!')
+    expect(htmlAtualizado).toContain('href="https://example.com/info"')
+    expect(htmlAtualizado).toContain('font-size: 18px')
+  });
+
+  it('insere hyperlink com texto e URL mesmo sem seleção prévia', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'prompt')
+      .mockReturnValueOnce('Acesse o portal')
+      .mockReturnValueOnce('https://example.com/portal')
+    render(<MailingComposer value="<p></p>" onChange={() => {}} />)
+
+    await user.click(screen.getByRole('button', { name: 'Inserir ou editar hyperlink' }))
+
+    expect(await screen.findByRole('link', { name: 'Acesse o portal' })).toHaveAttribute('href', 'https://example.com/portal')
+  });
+
+  it('preserva espaços repetidos visualmente no editor', async () => {
+    let htmlAtualizado = ''
+    const user = userEvent.setup()
+    render(<MailingComposer value="<p>Um  dois</p>" onChange={(html) => { htmlAtualizado = html }} />)
+    const area = document.querySelector('[contenteditable="true"]') as HTMLElement
+
+    expect(area.textContent).toBe('Um  dois')
+    expect(document.querySelector('[style*="white-space: pre-wrap"]')).toBeInTheDocument()
+
+    area.focus()
+    await user.type(area, '!')
+    expect(htmlAtualizado).toContain('Um  dois')
+  });
+
+  it('serializa tabelas com largura fluida e alinhamento de células compatível com Outlook', async () => {
+    let htmlAtualizado = ''
+    const user = userEvent.setup()
+    render(<MailingComposer value={'<table><tbody><tr><td><img src="cid:logo" width="120"></td><td><p>Texto da assinatura</p></td></tr></tbody></table>'} onChange={(html) => { htmlAtualizado = html }} />)
+
+    const area = document.querySelector('[contenteditable="true"]') as HTMLElement
+    expect(area.querySelector('td')?.getAttribute('valign')).toBe('top')
+
+    area.focus()
+    await user.type(area, '!')
+    expect(htmlAtualizado).toContain('width="100%"')
+    expect(htmlAtualizado).toContain('valign="top"')
+    expect(htmlAtualizado).toContain('width="120"')
+    expect(htmlAtualizado).toContain('border="0"')
+    expect(htmlAtualizado).toMatch(/max-width:\s*100%/)
+    expect(htmlAtualizado).toMatch(/vertical-align:\s*middle/)
+  });
+
+  it('insere modelos de tabela editáveis pelo seletor da toolbar', async () => {
+    let htmlAtualizado = ''
+    const user = userEvent.setup()
+    render(<MailingComposer value="<p></p>" onChange={(html) => { htmlAtualizado = html }} />)
+
+    await user.selectOptions(screen.getByLabelText('Inserir modelo de tabela'), 'monitoramento')
+
+    expect(await screen.findByText('Faixa de Consumo')).toBeInTheDocument()
+    expect(document.querySelectorAll('[contenteditable="true"] table tr')).toHaveLength(4)
+    expect(htmlAtualizado).toContain('Bloqueio automático de novas utilizações')
+  });
+
+  it('normaliza tabelas antigas ao carregar, mesmo sem edição manual', async () => {
+    const onChange = vi.fn()
+    render(<MailingComposer value='<table><tbody><tr><td>Texto legado</td></tr></tbody></table>' onChange={onChange} />)
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenCalledWith(expect.stringContaining('width="100%"'))
+    })
+  });
+
+  it('mantém o texto da assinatura próximo ao logo nas tabelas já salvas', async () => {
+    const onChange = vi.fn()
+    render(<MailingComposer value='<table><tbody><tr><td><img src="/mailing-uploads/finops-logo-assinatura.png" width="120"></td><td>Assinatura</td></tr></tbody></table>' onChange={onChange} />)
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenCalledWith(expect.stringContaining('table-layout: fixed'))
+      expect(onChange).toHaveBeenCalledWith(expect.stringContaining('padding-left: 8px'))
+    })
+  })
 
   // Bug real corrigido (2026-10-16, achado pelo usuário: "Não aparece o modelo que do
   // MSG que te mandei" — clicar em "Usar modelo" no composer não atualizava a tela).

@@ -19,6 +19,7 @@
 | Table | Purpose |
 |-------|---------|
 | `azure_costs` | Billing detail (1M+ rows typical) |
+| `azure_custo_diario` | Daily cost rollup by subscription and cost category; rebuilt for affected months after imports and used by Log Analytics cost windows |
 | `azure_subs_cache` | Cached subscriptions (populated by `_refreshAzureCache`) |
 | `azure_rg_cache` | Cached resource groups |
 | `azure_price_list` | Retail Prices API sync (optional, v4.0 not used in UI) |

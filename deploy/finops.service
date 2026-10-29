@@ -1,0 +1,14 @@
+[Unit]
+Description=FinOps Manager
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=finops
+WorkingDirectory=/finopsmanager/finops-manager
+ExecStart=/usr/bin/node /finopsmanager/finops-manager/server.js
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

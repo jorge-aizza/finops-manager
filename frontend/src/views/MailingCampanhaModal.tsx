@@ -1,13 +1,16 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { atualizarCampanha, criarCampanha, enviarTesteCampanha, excluirTemplate, listTemplates, salvarTemplate } from '../api/mailing'
-import type { MailingCampanha, MailingTemplate } from '../types/mailing'
+import CmsMultiSelect from '../components/CmsMultiSelect'
+import { atualizarCampanha, atualizarTemplate, criarCampanha, enviarTesteCampanha, excluirTemplate, listContatos, listGrupos, listTemplates, salvarTemplate } from '../api/mailing'
+import type { MailingCampanha, MailingSelecaoDestinatarios, MailingTemplate } from '../types/mailing'
 import MailingComposer from '../components/MailingComposer'
 import { buildTemplatePadraoFinOps } from '../lib/mailingTemplatePadrao'
 
 interface MailingCampanhaModalProps {
   campanha: MailingCampanha | null // null = nova
+  duplicar?: boolean
   onClose: () => void
+  onSolicitarEnvio: (campanha: MailingCampanha) => void
 }
 
 // O modelo FinOps que veio do .msg do usuário (2026-10-16) é um template EMBUTIDO, não
@@ -19,9 +22,9 @@ const TEMPLATE_EMBUTIDO_ID = -1
 // Só edita campanhas em rascunho — depois de "Enviar" a campanha vira histórico
 // (ver painel de acompanhamento em MailingView), não dá pra voltar e mudar o texto
 // de um comunicado que já saiu pra parte dos destinatários.
-export default function MailingCampanhaModal({ campanha, onClose }: MailingCampanhaModalProps) {
+export default function MailingCampanhaModal({ campanha, duplicar = false, onClose, onSolicitarEnvio }: MailingCampanhaModalProps) {
   const queryClient = useQueryClient()
-  const [assunto, setAssunto] = useState(campanha?.assunto || '')
+  const [assunto, setAssunto] = useState(campanha ? `${campanha.assunto}${duplicar ? ' (reenvio)' : ''}` : '')
   // Campanha nova começa em branco — o usuário escolhe explicitamente "Usar modelo" se
   // quiser partir de um pronto (pedido do usuário, 2026-10-16: em vez de pré-preencher
   // escondido, dar as três opções visíveis: usar modelo / salvar como modelo / criar novo).
@@ -31,8 +34,94 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
   const [emailTeste, setEmailTeste] = useState('')
   const [mostrarPreview, setMostrarPreview] = useState(false)
   const [seletorModeloAberto, setSeletorModeloAberto] = useState(false)
+  const [modeloEmEdicao, setModeloEmEdicao] = useState<MailingTemplate | null>(null)
+  const [tipoDestinatario, setTipoDestinatario] = useState<'grupo' | 'contato'>('grupo')
+  const [buscaDestinatario, setBuscaDestinatario] = useState('')
+  const [buscaAplicada, setBuscaAplicada] = useState('')
+  const [emailParaIncluir, setEmailParaIncluir] = useState('')
+  const [destinatarios, setDestinatarios] = useState<MailingSelecaoDestinatarios>(() => campanha?.destinatarios || {
+    grupo_ids: [], contato_ids: [], emails: [], todos_ativos: false,
+  })
 
   const templatesQuery = useQuery({ queryKey: ['mailing-templates'], queryFn: listTemplates, enabled: seletorModeloAberto })
+  const gruposQuery = useQuery({ queryKey: ['mailing-grupos'], queryFn: listGrupos })
+  const contatosQuery = useQuery({ queryKey: ['mailing-contatos-edicao'], queryFn: () => listContatos() })
+  const grupos = gruposQuery.data || []
+  const contatos = contatosQuery.data || []
+  const contatosAtivos = contatos.filter((contato) => contato.status === 'ativo')
+  const contatosPorId = new Map(contatosAtivos.map((contato) => [contato.id, contato]))
+  const contatosPorEmail = new Map(contatos.map((contato) => [contato.email.trim().toLowerCase(), contato]))
+  const emailsSelecionados = new Set<string>()
+  if (!destinatarios.todos_ativos) {
+    destinatarios.contato_ids.forEach((id) => {
+      const contato = contatosPorId.get(id)
+      if (contato) emailsSelecionados.add(contato.email.trim().toLowerCase())
+    })
+    grupos.filter((grupo) => destinatarios.grupo_ids.includes(grupo.id)).forEach((grupo) => {
+      grupo.contato_ids.forEach((id) => {
+        const contato = contatosPorId.get(id)
+        if (contato) emailsSelecionados.add(contato.email.trim().toLowerCase())
+      })
+    })
+    ;(destinatarios.emails || []).forEach((email) => {
+      const normalizado = email.trim().toLowerCase()
+      const cadastrado = contatosPorEmail.get(normalizado)
+      if (!cadastrado || cadastrado.status === 'ativo') emailsSelecionados.add(normalizado)
+    })
+  }
+  const totalDestinatarios = destinatarios.todos_ativos
+    ? contatosAtivos.length
+    : emailsSelecionados.size
+  const termoAplicado = buscaAplicada.trim().toLowerCase()
+  const contatosVisiveis = contatosAtivos.filter((contato) =>
+    `${contato.nome || ''} ${contato.email}`.toLowerCase().includes(termoAplicado),
+  ).slice(0, 200)
+
+  function alternarContato(id: number) {
+    setDestinatarios((atual) => ({
+      ...atual,
+      todos_ativos: false,
+      contato_ids: atual.contato_ids.includes(id) ? atual.contato_ids.filter((contatoId) => contatoId !== id) : [...atual.contato_ids, id],
+    }))
+  }
+
+  function incluirEmail() {
+    const email = emailParaIncluir.trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      window.showToast?.('Informe um endereço de e-mail válido.', 'error')
+      return
+    }
+    const cadastrado = contatosPorEmail.get(email)
+    if (cadastrado?.status === 'opt_out') {
+      window.showToast?.('Este endereço está descadastrado e não pode receber comunicados.', 'warn')
+      return
+    }
+    if (emailsSelecionados.has(email)) {
+      window.showToast?.('Este e-mail já está selecionado.', 'warn')
+      return
+    }
+    if (cadastrado) {
+      setDestinatarios((atual) => ({
+        ...atual,
+        todos_ativos: false,
+        contato_ids: [...new Set([...atual.contato_ids, cadastrado.id])],
+      }))
+    } else {
+      setDestinatarios((atual) => ({
+        ...atual,
+        todos_ativos: false,
+        emails: [...new Set([...(atual.emails || []), email])],
+      }))
+    }
+    setEmailParaIncluir('')
+  }
+
+  function removerEmail(email: string) {
+    setDestinatarios((atual) => ({
+      ...atual,
+      emails: (atual.emails || []).filter((item) => item !== email),
+    }))
+  }
   const templateEmbutido: MailingTemplate = {
     id: TEMPLATE_EMBUTIDO_ID, nome: 'Modelo FinOps — Governança de Recursos Órfãos',
     corpo_html: buildTemplatePadraoFinOps(), remetente_nome: 'FinOps Vivo', remetente_email: 'finops.vivo.br@telefonica.com',
@@ -40,14 +129,23 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
   }
 
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      const input = { assunto, corpo_html: corpoHtml, remetente_email: remetenteEmail || null, remetente_nome: remetenteNome || null }
-      if (campanha) await atualizarCampanha(campanha.id, input)
-      else await criarCampanha(input)
+    mutationFn: async (abrirEnvio: boolean) => {
+      const input = { assunto, corpo_html: corpoHtml, remetente_email: remetenteEmail || null, remetente_nome: remetenteNome || null, destinatarios }
+      if (campanha && !duplicar) {
+        await atualizarCampanha(campanha.id, input)
+        return { campanha: { ...campanha, ...input }, abrirEnvio }
+      }
+      const criada = await criarCampanha(input)
+      return { campanha: { ...criada, ...input }, abrirEnvio }
     },
-    onSuccess: () => {
-      window.showToast?.('Rascunho salvo.', 'success')
+    onSuccess: ({ campanha: salva, abrirEnvio }) => {
       queryClient.invalidateQueries({ queryKey: ['mailing-campanhas'] })
+      if (abrirEnvio) {
+        onClose()
+        onSolicitarEnvio(salva)
+        return
+      }
+      window.showToast?.('Rascunho salvo.', 'success')
       onClose()
     },
     onError: (e: Error) => window.showToast?.('Erro ao salvar: ' + e.message, 'error'),
@@ -68,6 +166,26 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
     onError: (e: Error) => window.showToast?.('Erro ao salvar modelo: ' + e.message, 'error'),
   })
 
+  const atualizarTemplateMutation = useMutation({
+    mutationFn: (modelo: MailingTemplate) => atualizarTemplate(modelo.id, {
+      nome: modelo.nome,
+      corpo_html: corpoHtml,
+      remetente_nome: remetenteNome || null,
+      remetente_email: remetenteEmail || null,
+    }),
+    onSuccess: (_, modelo) => {
+      setModeloEmEdicao((atual) => atual?.id === modelo.id ? {
+        ...atual,
+        corpo_html: corpoHtml,
+        remetente_nome: remetenteNome || null,
+        remetente_email: remetenteEmail || null,
+      } : atual)
+      window.showToast?.('Alterações do modelo salvas.', 'success')
+      queryClient.invalidateQueries({ queryKey: ['mailing-templates'] })
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao atualizar modelo: ' + e.message, 'error'),
+  })
+
   const excluirTemplateMutation = useMutation({
     mutationFn: (id: number) => excluirTemplate(id),
     onSuccess: () => {
@@ -82,26 +200,33 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
     if (!assunto.trim()) { window.showToast?.('Preencha o assunto antes de testar.', 'error'); return }
     // Precisa existir no banco pra /enviar-teste funcionar — salva (ou atualiza) o
     // rascunho primeiro, silenciosamente, sem fechar o modal.
-    let id = campanha?.id
+    let id = campanha && !duplicar ? campanha.id : undefined
     if (!id) {
-      const criado = await criarCampanha({ assunto, corpo_html: corpoHtml, remetente_email: remetenteEmail || null, remetente_nome: remetenteNome || null })
+      const criado = await criarCampanha({ assunto, corpo_html: corpoHtml, remetente_email: remetenteEmail || null, remetente_nome: remetenteNome || null, destinatarios })
       id = criado.id
       queryClient.invalidateQueries({ queryKey: ['mailing-campanhas'] })
     } else {
-      await atualizarCampanha(id, { assunto, corpo_html: corpoHtml, remetente_email: remetenteEmail || null, remetente_nome: remetenteNome || null })
+      await atualizarCampanha(id, { assunto, corpo_html: corpoHtml, remetente_email: remetenteEmail || null, remetente_nome: remetenteNome || null, destinatarios })
     }
     testeMutation.mutate(id)
   }
 
   function handleSalvar() {
     if (!assunto.trim()) { window.showToast?.('Assunto é obrigatório.', 'error'); return }
-    saveMutation.mutate()
+    saveMutation.mutate(false)
+  }
+
+  function handleSalvarEEnviar() {
+    if (!assunto.trim()) { window.showToast?.('Assunto é obrigatório.', 'error'); return }
+    if (totalDestinatarios === 0) { window.showToast?.('Selecione ao menos um destinatário antes de enviar.', 'error'); return }
+    saveMutation.mutate(true)
   }
 
   function handleUsarTemplate(tpl: MailingTemplate) {
     const temConteudo = corpoHtml.replace(/<[^>]+>/g, '').trim().length > 0
     if (temConteudo && !confirm(`Substituir o conteúdo atual pelo modelo "${tpl.nome}"?`)) return
     setCorpoHtml(tpl.corpo_html)
+    setModeloEmEdicao(tpl.id === TEMPLATE_EMBUTIDO_ID ? null : tpl)
     if (tpl.remetente_nome) setRemetenteNome(tpl.remetente_nome)
     if (tpl.remetente_email) setRemetenteEmail(tpl.remetente_email)
     setSeletorModeloAberto(false)
@@ -113,11 +238,17 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
     salvarTemplateMutation.mutate(nome.trim())
   }
 
+  function handleAtualizarModelo() {
+    if (!modeloEmEdicao) return
+    if (!confirm(`Salvar as alterações no modelo "${modeloEmEdicao.nome}"? Esta ação substituirá o conteúdo atual do modelo.`)) return
+    atualizarTemplateMutation.mutate(modeloEmEdicao)
+  }
+
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" style={{ maxWidth: 1100, width: '96vw' }}>
         <div className="modal-header">
-          <span>{campanha ? 'Editar Comunicado' : 'Novo Comunicado'}</span>
+          <span>{duplicar ? 'Editar e reenviar comunicado' : campanha ? 'Editar Comunicado' : 'Novo Comunicado'}</span>
           <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">
@@ -137,6 +268,103 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
             </div>
           </div>
 
+          <div style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 12, marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'baseline', marginBottom: 8 }}>
+              <strong style={{ fontSize: 12 }}>Destinatários</strong>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{totalDestinatarios} ativo(s) selecionado(s), sem duplicidade</span>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', border: '1px solid var(--border)', borderRadius: 5, marginBottom: 10, cursor: 'pointer' }}>
+              <input type="checkbox" checked={destinatarios.todos_ativos === true} onChange={(event) => setDestinatarios({
+                todos_ativos: event.target.checked, grupo_ids: [], contato_ids: [], emails: [],
+              })} />
+              <span>Todos os contatos ativos ({contatosAtivos.length})</span>
+            </label>
+            <div className="form-group" style={{ display: 'grid', gridTemplateColumns: tipoDestinatario === 'grupo' ? 'minmax(150px, 0.35fr) minmax(0, 1fr)' : 'minmax(150px, 0.35fr) minmax(0, 1fr) auto', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <select aria-label="Tipo de destinatário" value={tipoDestinatario} disabled={destinatarios.todos_ativos} onChange={(event) => setTipoDestinatario(event.target.value as 'grupo' | 'contato')} style={{ height: 36, minWidth: 0, boxSizing: 'border-box' }}>
+                <option value="grupo">Grupo</option>
+                <option value="contato">Usuário</option>
+              </select>
+              {tipoDestinatario === 'grupo' ? (
+                <CmsMultiSelect
+                  values={destinatarios.grupo_ids.map(String)}
+                  options={grupos.map((grupo) => ({
+                    value: String(grupo.id),
+                    label: grupo.nome,
+                    sublabel: `${grupo.contato_ids.filter((id) => contatosPorId.has(id)).length} ativos`,
+                  }))}
+                  searchPlaceholder="Buscar grupo..."
+                  triggerLabel={destinatarios.grupo_ids.length ? `${destinatarios.grupo_ids.length} grupo(s) selecionado(s)` : `Selecionar grupo(s) · ${grupos.length}`}
+                  loading={gruposQuery.isLoading}
+                  emptyState="Nenhum grupo cadastrado."
+                  onChange={(values) => setDestinatarios((atual) => ({
+                    ...atual,
+                    todos_ativos: false,
+                    grupo_ids: values.map(Number),
+                  }))}
+                />
+              ) : (
+                <>
+                  <input
+                    aria-label="Buscar destinatário"
+                    type="search"
+                    placeholder="Nome ou e-mail do usuário"
+                    value={buscaDestinatario}
+                    disabled={destinatarios.todos_ativos}
+                    onChange={(event) => setBuscaDestinatario(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); setBuscaAplicada(buscaDestinatario) } }}
+                    style={{ width: '100%', minWidth: 0, height: 36, boxSizing: 'border-box' }}
+                  />
+                  <button type="button" className="btn-ghost" style={{ height: 36, whiteSpace: 'nowrap' }} disabled={destinatarios.todos_ativos} onClick={() => setBuscaAplicada(buscaDestinatario)}>
+                    Buscar
+                  </button>
+                </>
+              )}
+            </div>
+            {tipoDestinatario === 'contato' && (
+            <div style={{ maxHeight: 240, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-hover)' }}>
+              {tipoDestinatario === 'contato' && contatosQuery.isLoading && <div style={{ padding: 9, fontSize: 11 }}>Carregando usuários...</div>}
+              {tipoDestinatario === 'contato' && !contatosQuery.isLoading && contatosVisiveis.length === 0 && <div style={{ padding: 9, fontSize: 11, color: 'var(--text-muted)' }}>Nenhum usuário ativo encontrado.</div>}
+              {tipoDestinatario === 'contato' && contatosVisiveis.map((contato) => (
+                <label key={contato.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderBottom: '1px solid var(--border)', cursor: destinatarios.todos_ativos ? 'default' : 'pointer' }}>
+                  <input type="checkbox" checked={destinatarios.todos_ativos === true || destinatarios.contato_ids.includes(contato.id)} disabled={destinatarios.todos_ativos} onChange={() => alternarContato(contato.id)} />
+                  <span style={{ flex: 1, minWidth: 0 }}>{contato.nome || contato.email}</span>
+                  {contato.nome && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{contato.email}</span>}
+                </label>
+              ))}
+            </div>)}
+            {tipoDestinatario === 'contato' && (
+              <div className="form-group" style={{ marginTop: 10, marginBottom: 0 }}>
+                <label htmlFor="mc-email-direto">Incluir e-mail individual</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+                  <input
+                    id="mc-email-direto"
+                    type="email"
+                    placeholder="nome@empresa.com.br"
+                    value={emailParaIncluir}
+                    disabled={destinatarios.todos_ativos}
+                    onChange={(event) => setEmailParaIncluir(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); incluirEmail() } }}
+                    style={{ width: '100%', minWidth: 0, height: 36, boxSizing: 'border-box' }}
+                  />
+                  <button type="button" className="btn-ghost" style={{ height: 36, whiteSpace: 'nowrap' }} disabled={destinatarios.todos_ativos || !emailParaIncluir.trim()} onClick={incluirEmail}>
+                    + Incluir e-mail
+                  </button>
+                </div>
+              </div>
+            )}
+            {(destinatarios.emails || []).length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 9 }}>
+                {(destinatarios.emails || []).map((email) => (
+                  <span key={email} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid var(--border)', borderRadius: 5, padding: '4px 7px', fontSize: 11 }}>
+                    {email}
+                    <button type="button" className="btn-icon" title={`Remover ${email}`} onClick={() => removerEmail(email)}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {contatosAtivos.length > 200 && tipoDestinatario === 'contato' && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>Pesquise para localizar os demais usuários.</div>}
+          </div>
+
           <div className="form-group" style={{ position: 'relative' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <label style={{ margin: 0 }}>Conteúdo do comunicado</label>
@@ -149,8 +377,14 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
                   disabled={salvarTemplateMutation.isPending} onClick={handleSalvarComoModelo}>
                   💾 Salvar como modelo
                 </button>
+                {modeloEmEdicao && (
+                  <button type="button" className="btn-ghost" style={{ fontSize: 11, padding: '3px 10px' }}
+                    disabled={atualizarTemplateMutation.isPending} onClick={handleAtualizarModelo}>
+                    {atualizarTemplateMutation.isPending ? 'Salvando modelo...' : 'Salvar alterações no modelo'}
+                  </button>
+                )}
                 <button type="button" className="btn-ghost" style={{ fontSize: 11, padding: '3px 10px' }}
-                  onClick={() => { if (confirm('Limpar o conteúdo e começar do zero?')) setCorpoHtml('<p></p>') }}>
+                  onClick={() => { if (confirm('Limpar o conteúdo e começar do zero?')) { setCorpoHtml('<p></p>'); setModeloEmEdicao(null) } }}>
                   🗋 Criar novo (em branco)
                 </button>
                 <button type="button" className="btn-ghost" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setMostrarPreview((v) => !v)}>
@@ -178,11 +412,23 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
             )}
 
             {mostrarPreview ? (
-              <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '16px 20px', maxHeight: 560, overflowY: 'auto', background: '#fff' }}>
-                <div dangerouslySetInnerHTML={{ __html: corpoHtml }} />
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 16, maxHeight: 560, overflowY: 'auto', background: '#f3f4f6' }}>
+                <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} style={{ width: '100%', maxWidth: 640, margin: '0 auto', borderCollapse: 'collapse', background: '#fff' }}>
+                  <tbody>
+                    <tr>
+                      <td className="mailing-table-surface" valign="top" style={{ padding: '16px 24px', color: '#1f2937', fontFamily: 'Arial,Helvetica,sans-serif', fontSize: 14, lineHeight: '21px', whiteSpace: 'pre-wrap' }} dangerouslySetInnerHTML={{ __html: corpoHtml }} />
+                    </tr>
+                    <tr>
+                      <td align="center" style={{ padding: '16px 24px', background: '#f9fafb', borderTop: '1px solid #e5e7eb', color: '#9ca3af', fontFamily: 'Arial,Helvetica,sans-serif', fontSize: 11, textAlign: 'center' }}>
+                        Você está recebendo este comunicado da Vivo FinOps.{' '}
+                        <span style={{ color: '#9ca3af', textDecoration: 'underline' }}>Descadastrar-se</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             ) : (
-              <MailingComposer value={corpoHtml} onChange={setCorpoHtml} />
+              <MailingComposer value={corpoHtml} onChange={setCorpoHtml} editable />
             )}
           </div>
 
@@ -200,6 +446,9 @@ export default function MailingCampanhaModal({ campanha, onClose }: MailingCampa
         </div>
         <div className="modal-footer">
           <button className="btn-ghost" onClick={onClose}>Cancelar</button>
+          <button className="btn-ghost" disabled={saveMutation.isPending} onClick={handleSalvarEEnviar}>
+            {saveMutation.isPending && saveMutation.variables ? 'Preparando envio...' : 'Enviar comunicado'}
+          </button>
           <button className="btn-primary" disabled={saveMutation.isPending} onClick={handleSalvar}>
             {saveMutation.isPending ? 'Salvando...' : 'Salvar rascunho'}
           </button>

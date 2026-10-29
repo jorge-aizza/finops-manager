@@ -29,6 +29,16 @@ beforeEach(() => {
 })
 
 describe('MailingImportModal', () => {
+  it('disponibiliza o modelo Excel para baixar antes da importação', async () => {
+    const user = userEvent.setup()
+    vi.mocked(mailingApi.baixarModeloImportacaoMailing).mockResolvedValue()
+    renderModal()
+
+    await user.click(screen.getByRole('button', { name: 'Baixar modelo Excel' }))
+
+    expect(mailingApi.baixarModeloImportacaoMailing).toHaveBeenCalledOnce()
+  });
+
   it('rejeita extensão não suportada sem chamar a API', async () => {
     renderModal()
     const input = document.querySelector('input[type="file"]') as HTMLInputElement

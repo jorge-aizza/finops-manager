@@ -32,8 +32,9 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 ### ✉️ Mailing de Comunicados (Novo)
 - **Broadcast corporativo** separado do SMTP de Alertas, de ponta a ponta: configuração própria (`integracoes` tipo `mailing_relay`), transporter próprio e estado de execução próprio. Mexer num não afeta o outro
 - **Relay SMTP anônimo** — sem usuário/senha, autorizado por IP de origem. Não existe campo de senha neste módulo. O "Testar Conexão" pode falhar na estação e funcionar em produção: é liberação de rede, não configuração errada
-- **Cadastro único de contatos** com importação em massa de Excel/CSV, relatório por lote e descadastro público via token HMAC autoverificável
-- **Editor visual** (TipTap) com modelo padrão de Comunicado FinOps e biblioteca de modelos salvos. A assinatura usa tabela de verdade para pôr o logo ao lado do texto — imagem dentro de parágrafo é bloco e nunca fica lado a lado
+- **Cadastro único de contatos** com importação em massa de Excel/CSV, relatório por lote, associação a vários grupos com exibição dos grupos na lista e descadastro público via token HMAC autoverificável
+- **Editor visual** (TipTap) com modelo padrão de Comunicado FinOps e biblioteca de modelos salvos. Permite inserir hyperlinks com texto e URL, usar modelos de tabelas, editar linhas/colunas e redimensionar colunas
+- **HTML compatível com e-mail**: hyperlinks continuam clicáveis, espaços repetidos são preservados e tabelas de dados ganham bordas e espaçamento no envio. A tabela da assinatura mantém o layout próprio, sem grade; imagem dentro de parágrafo é bloco e não fica lado a lado com texto
 - **Um e-mail individual por pessoa**, nunca cópia coletiva: ninguém vê o endereço dos outros e cada um recebe o próprio link de descadastro. Envio em lotes de 20 em paralelo com pausa de 2s, com registro de status por destinatário e reenvio só das falhas
 - **Limitação assumida**: SMTP não dá webhook de entrega nem bounce. O que se registra é "o servidor entregou ao relay", não "a pessoa recebeu"
 
@@ -783,26 +784,24 @@ pm2 save && pm2 startup
 
 **systemd:**
 ```bash
-sudo tee /etc/systemd/system/finops.service > /dev/null <<'EOF'
-[Unit]
-Description=FinOps Manager v2.0
-After=network.target postgresql.service
-
-[Service]
-Type=simple
-User=finops
-WorkingDirectory=/opt/finops
-ExecStart=/usr/bin/node server.js
-Restart=on-failure
-RestartSec=10
-EnvironmentFile=/opt/finops/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+sudo install -o root -g root -m 644 deploy/finops.service /etc/systemd/system/finops.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now finops
+sudo systemctl status finops --no-pager
+```
+
+Para parar o serviço sem desabilitar a inicialização automática:
+```bash
+sudo systemctl stop finops
+```
+
+Para impedir que ele suba no próximo boot:
+```bash
+sudo systemctl disable finops
+```
+
+Para acompanhar os logs:
+```bash
 sudo journalctl -u finops -f
 ```
 
@@ -1534,6 +1533,8 @@ Relay próprio, **separado do SMTP de Alertas** — ver "Onde ficam os segredos"
 |---|---|---|
 | GET/POST | `/api/mailing/contatos` | Listar / criar contato (cadastro único por e-mail) |
 | PATCH/DELETE | `/api/mailing/contatos/:id` | Atualizar / excluir contato |
+| GET | `/api/mailing/grupos` | Listar grupos e membros |
+| POST/PUT/DELETE | `/api/mailing/grupos` e `/api/mailing/grupos/:id` | Criar, atualizar e excluir grupos de destinatários |
 | POST | `/api/mailing/contatos/import` | Importação em massa de Excel/CSV |
 | GET | `/api/mailing/import-lotes` | Relatório dos lotes importados |
 | GET/POST | `/api/mailing/campanhas` | Listar / criar campanha |

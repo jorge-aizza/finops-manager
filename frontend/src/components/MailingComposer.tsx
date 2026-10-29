@@ -5,7 +5,7 @@ import Image from '@tiptap/extension-image'
 import Link from '@tiptap/extension-link'
 import Underline from '@tiptap/extension-underline'
 import TextAlign from '@tiptap/extension-text-align'
-import { TextStyle } from '@tiptap/extension-text-style'
+import { FontFamily, FontSize, TextStyle } from '@tiptap/extension-text-style'
 import { Color } from '@tiptap/extension-color'
 import { Table } from '@tiptap/extension-table'
 import { TableRow } from '@tiptap/extension-table-row'
@@ -50,6 +50,57 @@ interface MailingComposerProps {
 }
 
 const CORES = ['#1b2a4a', '#4a0080', '#7b2fbe', '#ff4d6a', '#ff8c42', '#22c55e', '#4da6ff']
+const MODELOS_TABELA = [
+  {
+    value: 'simples',
+    label: 'Tabela simples (3 colunas)',
+    html: '<table><tbody><tr><th>Coluna 1</th><th>Coluna 2</th><th>Coluna 3</th></tr><tr><td>Item</td><td>Informação</td><td>Detalhe</td></tr><tr><td>Item</td><td>Informação</td><td>Detalhe</td></tr></tbody></table><p></p>',
+  },
+  {
+    value: 'limites',
+    label: 'Limites por ambiente',
+    html: '<table><tbody><tr><th>Ambiente</th><th>Cota do Workspace</th><th>Cota por Usuário</th><th>Vigência</th></tr><tr><td>DEV</td><td>1.000</td><td>A definir</td><td>01/11/2026</td></tr><tr><td>TEST</td><td>2.000</td><td>A definir</td><td>15/11/2026</td></tr><tr><td>PROD</td><td>10.000</td><td>A definir</td><td>01/12/2026</td></tr></tbody></table><p></p>',
+  },
+  {
+    value: 'monitoramento',
+    label: 'Faixas de monitoramento',
+    html: '<table><tbody><tr><th>Status</th><th>Faixa de Consumo</th><th>Ação</th></tr><tr><td>🟡 Atenção</td><td>Acima de 50%</td><td>Avaliação preventiva do consumo</td></tr><tr><td>🟠 Alerta</td><td>Acima de 80%</td><td>Planejamento imediato de mitigação ou expansão</td></tr><tr><td>🔴 Crítico / Excedido</td><td>Acima de 100%</td><td>Bloqueio automático de novas utilizações</td></tr></tbody></table><p></p>',
+  },
+]
+
+function normalizarTabelasEmail(html: string) {
+  const template = document.createElement('template')
+  template.innerHTML = html
+
+  for (const table of template.content.querySelectorAll('table')) {
+    const assinatura = table.querySelector('img[src*="finops-logo-assinatura"]')
+    if (assinatura) {
+      const celulaLogo = table.rows[0]?.cells[0]
+      const celulaTexto = table.rows[0]?.cells[1]
+      const larguraLogo = assinatura.getAttribute('width') || '120'
+      table.style.tableLayout = 'fixed'
+      if (celulaLogo) {
+        celulaLogo.setAttribute('width', larguraLogo)
+        celulaLogo.style.width = `${larguraLogo}px`
+        celulaLogo.style.paddingRight = '8px'
+      }
+      if (celulaTexto) celulaTexto.style.paddingLeft = '8px'
+    }
+    if (!table.hasAttribute('width')) table.setAttribute('width', '100%')
+    if (!table.hasAttribute('border')) table.setAttribute('border', '0')
+    if (!table.hasAttribute('cellpadding')) table.setAttribute('cellpadding', '0')
+    if (!table.hasAttribute('cellspacing')) table.setAttribute('cellspacing', '0')
+    if (!table.style.width) table.style.width = '100%'
+    if (!table.style.borderCollapse) table.style.borderCollapse = 'collapse'
+  }
+
+  for (const cell of template.content.querySelectorAll<HTMLTableCellElement>('td, th')) {
+    if (!cell.hasAttribute('valign')) cell.setAttribute('valign', 'top')
+    if (!cell.style.verticalAlign) cell.style.verticalAlign = 'top'
+  }
+
+  return template.innerHTML
+}
 
 function Toolbar({ editor }: { editor: Editor }) {
   const fileRef = useRef<HTMLInputElement>(null)
@@ -70,6 +121,21 @@ function Toolbar({ editor }: { editor: Editor }) {
   }
 
   function setLink() {
+    const { from, to } = editor.state.selection
+    const textoSelecionado = editor.state.doc.textBetween(from, to, ' ').trim()
+    if (!textoSelecionado) {
+      const texto = window.prompt('Texto que aparecerá no comunicado:')
+      if (texto === null || !texto.trim()) return
+      const url = window.prompt('URL do hyperlink:', 'https://')
+      if (url === null || !url.trim()) return
+      editor.chain().focus().insertContent({
+        type: 'text',
+        text: texto.trim(),
+        marks: [{ type: 'link', attrs: { href: url.trim() } }],
+      }).run()
+      return
+    }
+
     const url = window.prompt('URL do link:', editor.getAttributes('link').href || 'https://')
     if (url === null) return
     if (!url) { editor.chain().focus().unsetLink().run(); return }
@@ -99,6 +165,59 @@ function Toolbar({ editor }: { editor: Editor }) {
         <option value="h2">Título 2</option>
         <option value="h3">Título 3</option>
       </select>
+      <select
+        aria-label="Tipo de fonte"
+        value={editor.getAttributes('textStyle').fontFamily || ''}
+        onChange={(e) => {
+          const family = e.target.value
+          if (family) editor.chain().focus().setFontFamily(family).run()
+          else editor.chain().focus().unsetFontFamily().run()
+        }}
+        style={{ fontSize: 12, padding: '4px 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
+      >
+        <option value="">Fonte padrão</option>
+        <option value="Arial, sans-serif">Arial</option>
+        <option value="Helvetica, sans-serif">Helvetica</option>
+        <option value="Verdana, sans-serif">Verdana</option>
+        <option value="Georgia, serif">Georgia</option>
+        <option value="'Times New Roman', serif">Times New Roman</option>
+        <option value="Tahoma, sans-serif">Tahoma</option>
+      </select>
+      <select
+        aria-label="Tamanho da fonte"
+        value={editor.getAttributes('textStyle').fontSize || ''}
+        onChange={(e) => {
+          const size = e.target.value
+          if (size) editor.chain().focus().setFontSize(size).run()
+          else editor.chain().focus().unsetFontSize().run()
+        }}
+        style={{ fontSize: 12, padding: '4px 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
+      >
+        <option value="">Tamanho</option>
+        {['10px', '12px', '14px', '16px', '18px', '24px', '32px'].map((size) => (
+          <option key={size} value={size}>{size.replace('px', '')}</option>
+        ))}
+      </select>
+      <select
+        aria-label="Inserir modelo de tabela"
+        defaultValue=""
+        onChange={(evento) => {
+          const modelo = MODELOS_TABELA.find((item) => item.value === evento.target.value)
+          if (modelo) editor.chain().focus().insertContent(modelo.html).run()
+          evento.target.value = ''
+        }}
+        style={{ fontSize: 12, padding: '4px 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
+      >
+        <option value="">Inserir tabela...</option>
+        {MODELOS_TABELA.map((modelo) => <option key={modelo.value} value={modelo.value}>{modelo.label}</option>)}
+      </select>
+      {editor.isActive('table') && <>
+        <button type="button" title="Adicionar linha abaixo" style={btn(false)} onClick={() => editor.chain().focus().addRowAfter().run()}>＋ Linha</button>
+        <button type="button" title="Remover linha" style={btn(false)} onClick={() => editor.chain().focus().deleteRow().run()}>− Linha</button>
+        <button type="button" title="Adicionar coluna à direita" style={btn(false)} onClick={() => editor.chain().focus().addColumnAfter().run()}>＋ Coluna</button>
+        <button type="button" title="Remover coluna" style={btn(false)} onClick={() => editor.chain().focus().deleteColumn().run()}>− Coluna</button>
+        <button type="button" title="Excluir tabela" style={btn(false)} onClick={() => editor.chain().focus().deleteTable().run()}>Excluir tabela</button>
+      </>}
       <button type="button" title="Negrito" style={btn(editor.isActive('bold'))} onClick={() => editor.chain().focus().toggleBold().run()}><strong>N</strong></button>
       <button type="button" title="Itálico" style={btn(editor.isActive('italic'))} onClick={() => editor.chain().focus().toggleItalic().run()}><em>I</em></button>
       <button type="button" title="Sublinhado" style={btn(editor.isActive('underline'))} onClick={() => editor.chain().focus().toggleUnderline().run()}><u>S</u></button>
@@ -111,7 +230,7 @@ function Toolbar({ editor }: { editor: Editor }) {
       <button type="button" title="Centralizar" style={btn(editor.isActive({ textAlign: 'center' }))} onClick={() => editor.chain().focus().setTextAlign('center').run()}>⬌</button>
       <button type="button" title="Alinhar à direita" style={btn(editor.isActive({ textAlign: 'right' }))} onClick={() => editor.chain().focus().setTextAlign('right').run()}>➡</button>
       <span style={{ width: 1, background: 'var(--border)', margin: '2px 2px' }} />
-      <button type="button" title="Link" style={btn(editor.isActive('link'))} onClick={setLink}>🔗</button>
+      <button type="button" title="Inserir ou editar hyperlink" aria-label="Inserir ou editar hyperlink" style={btn(editor.isActive('link'))} onClick={setLink}>🔗</button>
       <button type="button" title="Inserir imagem" style={btn(false)} onClick={() => fileRef.current?.click()}>🖼 Imagem</button>
       <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" style={{ display: 'none' }} onChange={handleImagem} />
       <button type="button" title="Linha divisória" style={btn(false)} onClick={() => editor.chain().focus().setHorizontalRule().run()}>— Linha</button>
@@ -141,11 +260,18 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
         link: false,
         underline: false,
       }),
-      ImageComTamanho.configure({ HTMLAttributes: { style: 'max-width:100%;height:auto' } }),
+      ImageComTamanho.configure({
+        HTMLAttributes: {
+          border: '0',
+          style: 'max-width:100%;height:auto;display:inline-block;vertical-align:middle;border:0;outline:none;text-decoration:none',
+        },
+      }),
       Link.configure({ openOnClick: false, HTMLAttributes: { style: 'color:#7b2fbe' } }),
       Underline,
       TextAlign.configure({ types: ['heading', 'paragraph'] }),
       TextStyle,
+      FontFamily,
+      FontSize,
       Color,
       // Tabela — único jeito confiável de texto ao lado de imagem que sobrevive ao editor
       // (2026-10-17, pedido do usuário: "quero o texto na frente da imagem como o MSG
@@ -154,16 +280,20 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
       // BLOCO, não inline — quebra a imagem pro próprio parágrafo dela, sempre.
       // `border:0`/cellpadding/cellspacing como atributo HTML (não só CSS) de propósito:
       // é o jeito mais respeitado entre clientes de e-mail pra garantir tabela sem
-      // bordas visíveis (mesmo raciocínio do `width` na imagem, acima).
+      // bordas visíveis. `width="100%"` também evita que o Outlook Word calcule a
+      // tabela pelo conteúdo da célula e desalinhe imagem e texto.
       Table.configure({
-        resizable: false,
-        HTMLAttributes: { border: '0', cellpadding: '0', cellspacing: '0', style: 'border-collapse:collapse;border:none' },
+        resizable: true,
+        renderWrapper: true,
+        handleWidth: 6,
+        HTMLAttributes: { width: '100%', border: '0', cellpadding: '0', cellspacing: '0', style: 'border-collapse:collapse;border:none' },
       }),
       TableRow,
-      TableHeader,
-      TableCell.configure({ HTMLAttributes: { style: 'border:none;vertical-align:top;padding:0' } }),
+      TableHeader.configure({ HTMLAttributes: { valign: 'top', style: 'border:none;vertical-align:top;padding:0' } }),
+      TableCell.configure({ HTMLAttributes: { valign: 'top', style: 'border:none;vertical-align:top;padding:0' } }),
     ],
     content: value,
+    parseOptions: { preserveWhitespace: 'full' },
     editable,
     onUpdate: ({ editor }) => onChange(editor.getHTML()),
   })
@@ -180,18 +310,22 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
   // digitando) — nesse caso `editor.getHTML()` já é igual a `value`, nada a fazer.
   useEffect(() => {
     if (!editor) return
-    if (editor.getHTML() !== value) {
-      editor.commands.setContent(value, { emitUpdate: false })
+    const htmlNormalizado = normalizarTabelasEmail(value)
+    if (editor.getHTML() !== htmlNormalizado) {
+      editor.commands.setContent(htmlNormalizado, {
+        emitUpdate: false,
+        parseOptions: { preserveWhitespace: 'full' },
+      })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, editor])
+    if (htmlNormalizado !== value) onChange(htmlNormalizado)
+  }, [value, editor, onChange])
 
   if (!editor) return null
 
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)' }}>
       {editable && <Toolbar editor={editor} />}
-      <div style={{ padding: '16px 20px', minHeight: 280, maxHeight: 560, overflowY: 'auto' }}>
+      <div className="mailing-table-surface" style={{ padding: '16px 20px', minHeight: 280, maxHeight: 560, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
         <EditorContent editor={editor} />
       </div>
     </div>

@@ -42,12 +42,12 @@ describe('ImportManualPanel', () => {
     fireEvent.change(input)
 
     await waitFor(() => expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('ignorado'), 'error'))
-    expect(coletaApi.uploadImportFile).not.toHaveBeenCalled()
+    expect(coletaApi.uploadImportBatch).not.toHaveBeenCalled()
   });
 
   it('faz upload de um arquivo válido, aguarda o job concluir e mostra o resumo', async () => {
     const user = userEvent.setup()
-    vi.mocked(coletaApi.uploadImportFile).mockResolvedValue({ kind: 'accepted', jobId: 'job-1', arquivo: 'agosto.csv' })
+    vi.mocked(coletaApi.uploadImportBatch).mockResolvedValue({ kind: 'accepted', jobId: 'job-1', arquivo: 'agosto.csv' })
     const jobDone: ImportJob = {
       id: 'job-1', arquivo: 'agosto.csv', idx: 1, total: 1, status: 'done',
       linhas: 100, inseridos: 90, atualizados: 5, erros: 5, erros_det: [],
@@ -63,7 +63,7 @@ describe('ImportManualPanel', () => {
     const input = document.querySelector('input[type="file"]') as HTMLInputElement
     await user.upload(input, makeFile('agosto.csv'))
 
-    await waitFor(() => expect(coletaApi.uploadImportFile).toHaveBeenCalledWith(expect.any(File), 1, 1))
+    await waitFor(() => expect(coletaApi.uploadImportBatch).toHaveBeenCalledWith([expect.any(File)]))
     expect(await screen.findByText('✅ Importação concluída')).toBeInTheDocument()
     expect(screen.getByText(/90/)).toBeInTheDocument()
     expect(window.showToast).toHaveBeenCalledWith(expect.stringContaining('90'), 'success')
@@ -71,7 +71,7 @@ describe('ImportManualPanel', () => {
 
   it('job com status "error" no servidor aparece como falha no resumo', async () => {
     const user = userEvent.setup()
-    vi.mocked(coletaApi.uploadImportFile).mockResolvedValue({ kind: 'accepted', jobId: 'job-2', arquivo: 'ruim.csv' })
+    vi.mocked(coletaApi.uploadImportBatch).mockResolvedValue({ kind: 'accepted', jobId: 'job-2', arquivo: 'ruim.csv' })
     const jobErro: ImportJob = {
       id: 'job-2', arquivo: 'ruim.csv', idx: 1, total: 1, status: 'error',
       linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
@@ -90,7 +90,7 @@ describe('ImportManualPanel', () => {
 
   it('"Importar mais arquivos" reseta o resultado pro estado inicial', async () => {
     const user = userEvent.setup()
-    vi.mocked(coletaApi.uploadImportFile).mockResolvedValue({ kind: 'accepted', jobId: 'job-3', arquivo: 'a.csv' })
+    vi.mocked(coletaApi.uploadImportBatch).mockResolvedValue({ kind: 'accepted', jobId: 'job-3', arquivo: 'a.csv' })
     vi.mocked(coletaApi.getImportStatus).mockResolvedValueOnce({ job: null }).mockResolvedValue({
       job: { id: 'job-3', arquivo: 'a.csv', idx: 1, total: 1, status: 'done', linhas: 10, inseridos: 10, atualizados: 0, erros: 0, erros_det: [], subArquivo: null, erro: null, iniciado: Date.now(), concluido: Date.now() },
     })
@@ -103,6 +103,30 @@ describe('ImportManualPanel', () => {
 
     await user.click(screen.getByRole('button', { name: 'Importar mais arquivos' }))
     expect(screen.getByRole('button', { name: 'Selecionar Arquivos' })).toBeInTheDocument()
+  });
+
+  it('envia todos os arquivos selecionados em um único job do servidor', async () => {
+    const user = userEvent.setup()
+    const files = [makeFile('parte-1.csv'), makeFile('parte-2.csv')]
+    vi.mocked(coletaApi.uploadImportBatch).mockResolvedValue({ kind: 'accepted', jobId: 'lote-1', arquivo: 'parte-1.csv' })
+    const jobDone: ImportJob = {
+      id: 'lote-1', arquivo: 'parte-2.csv', idx: 2, total: 2, status: 'done',
+      linhas: 200, inseridos: 180, atualizados: 15, erros: 5, erros_det: [],
+      subArquivo: null, erro: null, iniciado: Date.now(), concluido: Date.now(),
+      concluidos: 2, falhas: 0,
+      arquivos: files.map((file) => ({ arquivo: file.name, status: 'done', erro: null, linhas: 100, inseridos: 90, atualizados: 7, erros: 3 })),
+    }
+    vi.mocked(coletaApi.getImportStatus).mockResolvedValueOnce({ job: null }).mockResolvedValue({ job: jobDone })
+
+    renderWithClient()
+    await waitFor(() => expect(coletaApi.getImportStatus).toHaveBeenCalledTimes(1))
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await user.upload(input, files)
+
+    expect(await screen.findByText('✅ Importação concluída')).toBeInTheDocument()
+    expect(coletaApi.uploadImportBatch).toHaveBeenCalledWith(files)
+    expect(screen.getByText(/2\s*arquivos/)).toBeInTheDocument()
+    expect(screen.getByText(/180/)).toBeInTheDocument()
   });
 
   // Bug real corrigido (2026-10-16): trocar de tela e voltar perdia o acompanhamento de
@@ -130,7 +154,7 @@ describe('ImportManualPanel', () => {
       expect(screen.queryByRole('button', { name: 'Selecionar Arquivos' })).not.toBeInTheDocument()
 
       expect(await screen.findByText('✅ Importação concluída')).toBeInTheDocument()
-      expect(coletaApi.uploadImportFile).not.toHaveBeenCalled() // nunca foi um upload desta sessão
+      expect(coletaApi.uploadImportBatch).not.toHaveBeenCalled() // nunca foi um upload desta sessão
     });
 
     it('mostra o resultado de um import que terminou enquanto o usuário estava em outra tela', async () => {

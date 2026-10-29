@@ -2,6 +2,7 @@ import { API_BASE, ApiError, apiFetch, getToken } from './client'
 import type {
   MailingCampanha, MailingCampanhaInput, MailingCampanhaProgresso, MailingContato,
   MailingContatoStatus, MailingEnvio, MailingImportLote, MailingTemplate, MailingTemplateInput,
+  MailingGrupo, MailingGrupoInput, MailingGrupoImportResultado, MailingSelecaoDestinatarios,
 } from '../types/mailing'
 
 // ── Contatos (cadastro único) ──────────────────────────────────────
@@ -25,6 +26,32 @@ export const excluirContato = (id: number) =>
 export const listImportLotes = () =>
   apiFetch<MailingImportLote[]>('GET', '/mailing/import-lotes')
 
+// ── Grupos de destinatários ───────────────────────────────────────
+export const listGrupos = () =>
+  apiFetch<MailingGrupo[]>('GET', '/mailing/grupos')
+
+export const criarGrupo = (input: MailingGrupoInput) =>
+  apiFetch<{ ok: boolean; id: number }>('POST', '/mailing/grupos', input)
+
+export const atualizarGrupo = (id: number, input: MailingGrupoInput) =>
+  apiFetch<{ ok: boolean; id: number }>('PUT', '/mailing/grupos/' + id, input)
+
+export const excluirGrupo = (id: number) =>
+  apiFetch<{ ok: boolean }>('DELETE', '/mailing/grupos/' + id)
+
+export async function importarContatosGrupo(id: number, file: File): Promise<MailingGrupoImportResultado> {
+  const fd = new FormData()
+  fd.append('arquivo', file)
+  const token = getToken()
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = 'Bearer ' + token
+  const res = await fetch(API_BASE + '/mailing/grupos/' + id + '/importar', { method: 'POST', headers, body: fd })
+  if (res.status === 401) { window.logout?.(false); throw new ApiError('Sessão expirada') }
+  const data = await res.json().catch(() => ({}) as { error?: string })
+  if (!res.ok) throw new ApiError((data as { error?: string }).error || `Erro HTTP ${res.status}`)
+  return data as MailingGrupoImportResultado
+}
+
 // Upload multipart — mesmo motivo de uploadImportFile (api/coleta.ts): apiFetch fixa
 // Content-Type application/json, incompatível com FormData.
 export async function importarContatos(file: File): Promise<MailingImportLote> {
@@ -38,6 +65,24 @@ export async function importarContatos(file: File): Promise<MailingImportLote> {
   const data = await res.json().catch(() => ({}) as { error?: string })
   if (!res.ok) throw new ApiError((data as { error?: string }).error || `Erro HTTP ${res.status}`)
   return data as MailingImportLote
+}
+
+export async function baixarModeloImportacaoMailing(): Promise<void> {
+  const token = getToken()
+  const res = await fetch(API_BASE + '/mailing/contatos/import/modelo', {
+    headers: token ? { Authorization: 'Bearer ' + token } : {},
+  })
+  if (res.status === 401) { window.logout?.(false); throw new ApiError('Sessão expirada') }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    throw new ApiError((data as { error?: string }).error || `Erro HTTP ${res.status}`)
+  }
+  const url = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'modelo-importacao-mailing.xlsx'
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
 // Upload de imagem do composer — mesma mecânica de FormData, devolve a URL pública
@@ -74,8 +119,8 @@ export const excluirCampanha = (id: number) =>
 export const enviarTesteCampanha = (id: number, email: string) =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/mailing/campanhas/' + id + '/enviar-teste', { email }, 20000)
 
-export const enviarCampanha = (id: number) =>
-  apiFetch<{ ok: boolean; message: string }>('POST', '/mailing/campanhas/' + id + '/enviar', {}, 20000)
+export const enviarCampanha = (id: number, selecao: MailingSelecaoDestinatarios) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/mailing/campanhas/' + id + '/enviar', selecao, 20000)
 
 export const reenviarFalhasCampanha = (id: number) =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/mailing/campanhas/' + id + '/reenviar-falhas', {}, 20000)
@@ -95,6 +140,9 @@ export const listTemplates = () =>
 
 export const salvarTemplate = (input: MailingTemplateInput) =>
   apiFetch<MailingTemplate>('POST', '/mailing/templates', input)
+
+export const atualizarTemplate = (id: number, input: MailingTemplateInput) =>
+  apiFetch<{ ok: boolean }>('PUT', '/mailing/templates/' + id, input)
 
 export const excluirTemplate = (id: number) =>
   apiFetch<{ ok: boolean }>('DELETE', '/mailing/templates/' + id)

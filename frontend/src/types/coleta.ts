@@ -380,6 +380,9 @@ export interface ImportJob {
   erro: string | null
   iniciado: number
   concluido: number | null
+  arquivos?: { arquivo: string; status: 'done' | 'error'; erro: string | null; linhas: number; inseridos: number; atualizados: number; erros: number }[]
+  concluidos?: number
+  falhas?: number
 }
 
 export interface DiagAgendador {

@@ -61,6 +61,11 @@ const fs       = require('fs');
 const jwksRsa  = require('jwks-rsa');
 const nodemailer = require('nodemailer');
 const { diasOrfaoNaExclusao } = require('./savingOrfaos');
+const {
+  registrarMesCustoImportado,
+  reconstruirMesCustoDiario,
+  reconstruirMesesCustoDiario,
+} = require('./azureCustoDiario');
 
 const JWT_SECRET  = process.env.JWT_SECRET  || 'finops-secret-2024';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '8h';
@@ -3717,6 +3722,7 @@ async function _processarImport(tmpPath, originalname, jobId) {
   let csvGerado    = null;
   const tmpZipFiles = [];
   let totalLinhas = 0, totalIns = 0, totalUpd = 0, totalErr = 0;
+  const mesesImportados = new Set();
   const errosDet = []; // amostras de erro (máx 50)
 
   function upd(fields) {
@@ -3735,6 +3741,7 @@ async function _processarImport(tmpPath, originalname, jobId) {
           try {
             await client.query(`SAVEPOINT ${sp}`);
             const m      = mapFn(rawRow, nomeArq);
+            registrarMesCustoImportado(mesesImportados, m.cost_date);
             const values = COLS.map(col => m[col] ?? null);
             const r      = await client.query(sql, values);
             await client.query(`RELEASE SAVEPOINT ${sp}`);
@@ -3924,6 +3931,8 @@ async function _processarImport(tmpPath, originalname, jobId) {
       }
     }
 
+    await _sincronizarCustoDiarioMeses('import manual', [...mesesImportados]);
+
     // Log charge_type breakdown para diagnóstico
     try {
       const rCT = await pool.query(`
@@ -3948,10 +3957,56 @@ async function _processarImport(tmpPath, originalname, jobId) {
   }
 }
 
+async function _processarImportLote(files, jobId) {
+  let inseridos = 0, atualizados = 0, erros = 0, linhas = 0;
+  let concluidos = 0, falhas = 0;
+  const arquivos = [];
+  const errosDet = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (!_importJob || _importJob.id !== jobId) return;
+    Object.assign(_importJob, {
+      idx: i + 1, total: files.length, arquivo: file.originalname,
+      status: 'running', linhas: 0, inseridos: 0, atualizados: 0, erros: 0,
+      erros_det: [], subArquivo: null, erro: null, concluido: null,
+    });
+
+    await _processarImport(file.path, file.originalname, jobId);
+    const resultado = _importJob && _importJob.id === jobId ? { ..._importJob } : null;
+    if (!resultado) return;
+    const sucesso = resultado.status === 'done';
+    if (sucesso) concluidos++; else falhas++;
+    inseridos += resultado.inseridos || 0;
+    atualizados += resultado.atualizados || 0;
+    erros += resultado.erros || 0;
+    linhas += resultado.linhas || 0;
+    errosDet.push(...(resultado.erros_det || []).slice(0, Math.max(0, 50 - errosDet.length)));
+    arquivos.push({
+      arquivo: file.originalname,
+      status: sucesso ? 'done' : 'error',
+      erro: resultado.erro,
+      linhas: resultado.linhas || 0,
+      inseridos: resultado.inseridos || 0,
+      atualizados: resultado.atualizados || 0,
+      erros: resultado.erros || 0,
+    });
+  }
+
+  if (!_importJob || _importJob.id !== jobId) return;
+  Object.assign(_importJob, {
+    idx: files.length, total: files.length, status: falhas ? 'error' : 'done',
+    linhas, inseridos, atualizados, erros, erros_det: errosDet, arquivos,
+    concluidos, falhas,
+    erro: falhas ? `${falhas} de ${files.length} arquivo(s) falharam.` : null,
+    concluido: Date.now(),
+  });
+}
+
 if (_multer) {
   const _storage = _multer.diskStorage({
     destination: (_, __, cb) => cb(null, _uploadDir),
-    filename: (_, file, cb) => cb(null, Date.now() + '_' + file.originalname),
+    filename: (_, file, cb) => cb(null, crypto.randomBytes(12).toString('hex') + '_' + path.basename(file.originalname)),
   });
 
   // 2 GB — exports Azure multi-part (part_N_0001.csv) podem facilmente superar 500 MB
@@ -3965,6 +4020,10 @@ if (_multer) {
       fieldSize:  FILE_SIZE_LIMIT,
       files:      1,
     },
+  });
+  const _uploadLote = _multer({
+    storage: _storage,
+    limits: { fileSize: FILE_SIZE_LIMIT, fieldSize: FILE_SIZE_LIMIT, files: 50 },
   });
 
   // Status do job de importação em andamento ou último concluído
@@ -3996,7 +4055,7 @@ if (_multer) {
       return res.status(409).json({ error: 'Uma importação já está em andamento. Aguarde a conclusão.' });
     }
 
-    const jobId = Date.now().toString();
+    const jobId = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
     const idx   = parseInt(req.body?.idx   || '1', 10);
     const total = parseInt(req.body?.total || '1', 10);
 
@@ -4014,6 +4073,36 @@ if (_multer) {
     _processarImport(req.file.path, req.file.originalname, jobId).catch(() => {});
 
     res.status(202).json({ jobId, arquivo: req.file.originalname });
+  });
+
+  app.post('/api/azure-costs/import/batch', authMiddleware, dbMiddleware, (req, res, next) => {
+    req.setTimeout(0);
+    res.setTimeout(0);
+    _uploadLote.array('arquivos', 50)(req, res, (err) => {
+      if (err) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: `Erro no upload: ${err.message}` });
+      next();
+    });
+  }, (req, res) => {
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+    if (_importJob && _importJob.status === 'running') {
+      const fs = require('fs');
+      for (const file of files) try { fs.unlinkSync(file.path); } catch (_) {}
+      return res.status(409).json({ error: 'Uma importação já está em andamento. Aguarde a conclusão.' });
+    }
+
+    const jobId = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+    _importJob = {
+      id: jobId, arquivo: files[0].originalname, idx: 1, total: files.length,
+      status: 'running', linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
+      subArquivo: null, erro: null, iniciado: Date.now(), concluido: null,
+      arquivos: [], concluidos: 0, falhas: 0,
+    };
+    res.status(202).json({ jobId, arquivo: files[0].originalname, total: files.length });
+    _processarImportLote(files, jobId).catch((err) => {
+      console.error('[Azure Import] Erro no lote em background:', err);
+      if (_importJob?.id === jobId) Object.assign(_importJob, { status: 'error', erro: err.message, concluido: Date.now() });
+    });
   });
 }
 
@@ -7773,6 +7862,20 @@ function _scanPesadoEmAndamento() {
   return _recursoTagsBuildEmExecucao || _tagRollupEmExecucao;
 }
 
+async function _sincronizarCustoDiarioMeses(origem, meses) {
+  if (!pool || !meses.length) return { ok: true, meses: [] };
+  try {
+    const reconstruidos = await reconstruirMesesCustoDiario(pool, meses);
+    if (reconstruidos.length) {
+      console.log(`[CostDailyRollup] ${origem}: ${reconstruidos.map(r => `${r.mes} (${r.linhas} linhas)`).join(', ')}`);
+    }
+    return { ok: true, meses: reconstruidos };
+  } catch (e) {
+    console.warn(`[CostDailyRollup] ${origem}: falha ao atualizar rollup:`, e.message);
+    return { ok: false, erro: e.message };
+  }
+}
+
 // Reconstrói UM mês, dentro de uma TRANSAÇÃO (2026-09-04).
 // Bug real encontrado testando: sem transação, o `DELETE` + os 4 `INSERT`s não são atômicos —
 // um `pm2 restart` no meio deixava o mês com as linhas de tag mas SEM as linhas sintéticas
@@ -7865,25 +7968,7 @@ async function _rebuildAlocacaoTagsMes(mes, origem = 'agendado') {
     [mes, ini]
   );
 
-  // Custo por dia/assinatura do mesmo mês — a varredura de azure_costs já está paga por este
-  // job, então agregar mais uma saída aqui é de graça perto de somar 9,1 milhões de linhas no
-  // caminho de cada requisição (era o que a aba Comparativo fazia, a 74s por período).
-  await client.query(
-    `DELETE FROM azure_custo_diario WHERE cost_date >= $1::date AND cost_date < ($1::date + INTERVAL '1 month')`,
-    [ini]
-  );
-  await client.query(
-    `INSERT INTO azure_custo_diario (cost_date, subscription_id, custo_microsoft, custo_marketplace, primeiro_import, ultimo_import)
-     SELECT cost_date, subscription_id::text,
-            COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type IS DISTINCT FROM 'Marketplace'),0),
-            COALESCE(SUM(cost_in_billing_currency) FILTER (WHERE publisher_type = 'Marketplace'),0),
-            MIN(importado_em), MAX(importado_em)
-     FROM azure_costs
-     WHERE cost_date >= $1::date AND cost_date < ($1::date + INTERVAL '1 month')
-       AND subscription_id IS NOT NULL
-     GROUP BY 1, 2`,
-    [ini]
-  );
+  await reconstruirMesCustoDiario(client, mes);
 
   const seg = Number(((Date.now() - t0) / 1000).toFixed(1));
   await client.query(
@@ -9367,6 +9452,23 @@ async function ensureMailingTables() {
   `);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_contatos_email ON mailing_contatos(email)`);
   await run(`
+    CREATE TABLE IF NOT EXISTS mailing_grupos (
+      id SERIAL PRIMARY KEY,
+      nome VARCHAR(160) NOT NULL,
+      descricao VARCHAR(500),
+      criado_em TIMESTAMP DEFAULT NOW(),
+      atualizado_em TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_grupos_nome ON mailing_grupos(LOWER(nome))`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS mailing_grupo_contatos (
+      grupo_id INT NOT NULL REFERENCES mailing_grupos(id) ON DELETE CASCADE,
+      contato_id INT NOT NULL REFERENCES mailing_contatos(id) ON DELETE CASCADE,
+      PRIMARY KEY (grupo_id, contato_id)
+    )
+  `);
+  await run(`
     CREATE TABLE IF NOT EXISTS mailing_import_lote (
       id SERIAL PRIMARY KEY,
       arquivo_nome VARCHAR(500),
@@ -9387,6 +9489,7 @@ async function ensureMailingTables() {
       remetente_email VARCHAR(320),
       remetente_nome VARCHAR(200),
       status VARCHAR(20) NOT NULL DEFAULT 'rascunho',
+      destinatarios JSONB NOT NULL DEFAULT '{"todos_ativos":true,"grupo_ids":[],"contato_ids":[]}'::jsonb,
       criado_por VARCHAR(200),
       criado_em TIMESTAMP DEFAULT NOW(),
       atualizado_em TIMESTAMP DEFAULT NOW(),
@@ -9394,6 +9497,7 @@ async function ensureMailingTables() {
       concluido_em TIMESTAMP
     )
   `);
+  await run(`ALTER TABLE mailing_campanhas ADD COLUMN IF NOT EXISTS destinatarios JSONB NOT NULL DEFAULT '{"todos_ativos":true,"grupo_ids":[],"contato_ids":[]}'::jsonb`);
   await run(`
     CREATE TABLE IF NOT EXISTS mailing_envio_destinatario (
       id SERIAL PRIMARY KEY,
@@ -9537,20 +9641,75 @@ app.post('/api/mailing/relay/testar', authMiddleware, adminMiddleware, async (re
   }
 });
 
-// Envelope mínimo em volta do HTML que vem do composer — não é o mesmo wrapper roxo de
-// `_emailTemplate` (esse é da marca dos Alertas); aqui o corpo já vem formatado pelo
-// usuário. Só garante <!DOCTYPE>/viewport (clientes de e-mail são exigentes com isso) e
-// o rodapé de descadastro, que é obrigatório em todo envio, não opcional.
+// Envelope compatível com clientes de e-mail: tabelas e estilos inline para Outlook,
+// com largura fluida nos clientes móveis. O corpo já vem formatado pelo composer.
 function _mailingEmailEnvelope(corpoHtml, unsubscribeUrl) {
+  const corpoComEspacosPreservados = String(corpoHtml || '')
+    .split(/(<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z][^>]*>)/gi)
+    .map((parte, indice) => indice % 2 === 0
+      ? parte.replace(/ {2,}/g, espacos => '&nbsp;'.repeat(espacos.length))
+      : parte)
+    .join('');
+  const corpoCompatibilizado = corpoComEspacosPreservados
+    .replace(/<table\b([^>]*)>/gi, (_tag, atributos) => {
+      let attrs = atributos;
+      const ensureAttr = (name, value) => {
+        if (!new RegExp(`(?:^|\\s)${name}\\s*=`, 'i').test(attrs)) attrs += ` ${name}="${value}"`;
+      };
+      ensureAttr('width', '100%');
+      ensureAttr('border', '0');
+      ensureAttr('cellpadding', '0');
+      ensureAttr('cellspacing', '0');
+      return `<table${attrs}>`;
+    })
+    .replace(/<table\b([^>]*)>([\s\S]*?)<\/table>/gi, (tableHtml, atributos, conteudo) => {
+      if (/<img\b/i.test(conteudo)) return tableHtml;
+      let attrs = atributos.replace(/\sborder\s*=\s*["'][^"']*["']/i, ' border="1"');
+      attrs = attrs.replace(/\scellpadding\s*=\s*["'][^"']*["']/i, ' cellpadding="6"');
+      attrs = attrs.replace(/\sstyle\s*=\s*(["'])(.*?)\1/i, (_match, quote, style) => ` style=${quote}${style};border-collapse:collapse;border:1px solid #cbd5e1${quote}`);
+      if (!/\sstyle\s*=/i.test(attrs)) attrs += ' style="border-collapse:collapse;border:1px solid #cbd5e1"';
+      let rowIndex = 0;
+      const conteudoEstilizado = conteudo.replace(/<tr\b([^>]*)>([\s\S]*?)<\/tr>/gi, (_row, rowAttrs, cells) => {
+        const attrsLinha = rowIndex++ === 0
+          ? rowAttrs.replace(/\sstyle\s*=\s*(["'])(.*?)\1/i, (_match, quote, style) => ` style=${quote}${style};background-color:#f3f4f6${quote}`)
+          : rowAttrs;
+        const linhaEstilizada = rowIndex === 1 && !/\sstyle\s*=/i.test(attrsLinha)
+          ? attrsLinha + ' style="background-color:#f3f4f6"'
+          : attrsLinha;
+        const cellsEstilizadas = cells.replace(/<(td|th)\b([^>]*)>/gi, (_cell, nome, cellAttrs) => {
+          const styledAttrs = cellAttrs.replace(/\sstyle\s*=\s*(["'])(.*?)\1/i, (_match, quote, style) => ` style=${quote}${style};border:1px solid #cbd5e1;padding:7px 9px;vertical-align:top${quote}`);
+          const finalAttrs = /\sstyle\s*=/i.test(styledAttrs)
+            ? styledAttrs
+            : `${styledAttrs} style="border:1px solid #cbd5e1;padding:7px 9px;vertical-align:top"`;
+          return `<${nome}${finalAttrs}>`;
+        });
+        return `<tr${linhaEstilizada}>${cellsEstilizadas}</tr>`;
+      });
+      return `<table${attrs}>${conteudoEstilizado}</table>`;
+    })
+    .replace(/<(td|th)\b([^>]*)>/gi, (_tag, nome, atributos) => {
+      const temValign = /(?:^|\s)valign\s*=/i.test(atributos);
+      return `<${nome}${temValign ? atributos : `${atributos} valign="top"`}>`;
+    });
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif">
-  <div style="max-width:640px;margin:0 auto;background:#ffffff">
-    ${corpoHtml}
-    <div style="padding:16px 24px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:11px;text-align:center">
-      Você está recebendo este comunicado da Vivo FinOps.
-      <a href="${unsubscribeUrl}" style="color:#9ca3af">Descadastrar-se</a>
-    </div>
-  </div>
+<body style="margin:0;padding:0;background-color:#f3f4f6;font-family:Arial,Helvetica,sans-serif">
+  <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#f3f4f6" style="width:100%;border-collapse:collapse;background-color:#f3f4f6">
+    <tr>
+      <td align="center" style="padding:0">
+        <!--[if mso]><table role="presentation" align="center" width="640" border="0" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
+        <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="width:100%;max-width:640px;border-collapse:collapse;background-color:#ffffff">
+          <tr><td valign="top" style="padding:16px 24px;color:#1f2937;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:21px;mso-line-height-rule:exactly;white-space:pre-wrap">${corpoCompatibilizado}</td></tr>
+          <tr>
+            <td align="center" bgcolor="#f9fafb" style="padding:16px 24px;border-top:1px solid #e5e7eb;background-color:#f9fafb;color:#9ca3af;font-family:Arial,Helvetica,sans-serif;font-size:11px;text-align:center">
+              Você está recebendo este comunicado da Vivo FinOps.
+              <a href="${unsubscribeUrl}" style="color:#9ca3af">Descadastrar-se</a>
+            </td>
+          </tr>
+        </table>
+        <!--[if mso]></td></tr></table><![endif]-->
+      </td>
+    </tr>
+  </table>
 </body></html>`;
 }
 
@@ -9629,9 +9788,19 @@ app.get('/api/mailing/contatos', authMiddleware, dbMiddleware, async (req, res) 
     const status = req.query.status;
     const params = [];
     let where = '1=1';
-    if (busca) { params.push(`%${busca}%`); where += ` AND (LOWER(email) LIKE $${params.length} OR LOWER(COALESCE(nome,'')) LIKE $${params.length})`; }
-    if (status) { params.push(status); where += ` AND status = $${params.length}`; }
-    const r = await pool.query(`SELECT * FROM mailing_contatos WHERE ${where} ORDER BY email LIMIT 5000`, params);
+    if (busca) { params.push(`%${busca}%`); where += ` AND (LOWER(mc.email) LIKE $${params.length} OR LOWER(COALESCE(mc.nome,'')) LIKE $${params.length})`; }
+    if (status) { params.push(status); where += ` AND mc.status = $${params.length}`; }
+    const r = await pool.query(`
+      SELECT mc.*,
+        COALESCE(ARRAY_AGG(DISTINCT g.nome) FILTER (WHERE g.id IS NOT NULL), ARRAY[]::text[]) AS grupos
+      FROM mailing_contatos mc
+      LEFT JOIN mailing_grupo_contatos gc ON gc.contato_id=mc.id
+      LEFT JOIN mailing_grupos g ON g.id=gc.grupo_id
+      WHERE ${where}
+      GROUP BY mc.id
+      ORDER BY mc.email
+      LIMIT 5000
+    `, params);
     res.json(r.rows);
   } catch (e) { _dbErr(res, e); }
 });
@@ -9674,6 +9843,126 @@ app.delete('/api/mailing/contatos/:id', authMiddleware, dbMiddleware, async (req
   } catch (e) { _dbErr(res, e); }
 });
 
+// ── Grupos de destinatários ────────────────────────────────────────────────
+app.get('/api/mailing/grupos', authMiddleware, dbMiddleware, async (_req, res) => {
+  try {
+    await ensureMailingTables();
+    const r = await pool.query(`
+      SELECT g.id, g.nome, g.descricao, g.criado_em, g.atualizado_em,
+        COUNT(gc.contato_id)::int AS total_contatos,
+        COALESCE(ARRAY_AGG(gc.contato_id) FILTER (WHERE gc.contato_id IS NOT NULL), ARRAY[]::int[]) AS contato_ids
+      FROM mailing_grupos g
+      LEFT JOIN mailing_grupo_contatos gc ON gc.grupo_id=g.id
+      GROUP BY g.id ORDER BY LOWER(g.nome)
+    `);
+    res.json(r.rows);
+  } catch (e) { _dbErr(res, e); }
+});
+
+async function _salvarGrupoMailing(req, res, grupoId = null) {
+  const nome = String(req.body.nome || '').trim();
+  const descricao = String(req.body.descricao || '').trim() || null;
+  const ids = req.body.contato_ids ?? [];
+  if (!nome) return res.status(400).json({ error: 'Nome do grupo é obrigatório.' });
+  if (nome.length > 160 || (descricao && descricao.length > 500)) {
+    return res.status(400).json({ error: 'Nome ou descrição do grupo excede o limite permitido.' });
+  }
+  if (!Array.isArray(ids) || ids.some((id) => !Number.isSafeInteger(Number(id)) || Number(id) < 1)) {
+    return res.status(400).json({ error: 'Lista de contatos inválida.' });
+  }
+  const contatoIds = [...new Set(ids.map(Number))];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (contatoIds.length) {
+      const existentes = await client.query(`SELECT COUNT(*)::int AS n FROM mailing_contatos WHERE id=ANY($1::int[])`, [contatoIds]);
+      if (existentes.rows[0].n !== contatoIds.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Um ou mais contatos não existem.' });
+      }
+    }
+    let id = grupoId;
+    if (grupoId === null) {
+      const criado = await client.query(`INSERT INTO mailing_grupos (nome, descricao) VALUES ($1,$2) RETURNING id`, [nome, descricao]);
+      id = criado.rows[0].id;
+    } else {
+      const atualizado = await client.query(
+        `UPDATE mailing_grupos SET nome=$1, descricao=$2, atualizado_em=NOW() WHERE id=$3 RETURNING id`,
+        [nome, descricao, grupoId]
+      );
+      if (!atualizado.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Grupo não encontrado.' });
+      }
+      await client.query(`DELETE FROM mailing_grupo_contatos WHERE grupo_id=$1`, [grupoId]);
+    }
+    if (contatoIds.length) {
+      await client.query(
+        `INSERT INTO mailing_grupo_contatos (grupo_id, contato_id) SELECT $1, unnest($2::int[])`,
+        [id, contatoIds]
+      );
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true, id });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (e.code === '23505') return res.status(409).json({ error: 'Já existe um grupo com esse nome.' });
+    _dbErr(res, e);
+  } finally {
+    client.release();
+  }
+}
+
+app.post('/api/mailing/grupos', authMiddleware, dbMiddleware, async (req, res) => {
+  try { await ensureMailingTables(); await _salvarGrupoMailing(req, res); }
+  catch (e) { _dbErr(res, e); }
+});
+
+app.put('/api/mailing/grupos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const grupoId = Number(req.params.id);
+    if (!Number.isSafeInteger(grupoId) || grupoId < 1) return res.status(400).json({ error: 'ID do grupo inválido.' });
+    await _salvarGrupoMailing(req, res, grupoId);
+  } catch (e) { _dbErr(res, e); }
+});
+
+app.delete('/api/mailing/grupos/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    await pool.query(`DELETE FROM mailing_grupos WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
+function _delimitadorCsvMailing(filePath) {
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(65536);
+  let bytes;
+  try { bytes = fs.readSync(fd, buffer, 0, buffer.length, 0); }
+  finally { fs.closeSync(fd); }
+  const primeiraLinha = buffer.toString('utf8', 0, bytes).split(/\r?\n/, 1)[0];
+  let virgulas = 0, pontosEVirgulas = 0, entreAspas = false;
+  for (let i = 0; i < primeiraLinha.length; i++) {
+    const caractere = primeiraLinha[i];
+    if (caractere === '"') {
+      if (entreAspas && primeiraLinha[i + 1] === '"') i++;
+      else entreAspas = !entreAspas;
+    } else if (!entreAspas && caractere === ',') virgulas++;
+    else if (!entreAspas && caractere === ';') pontosEVirgulas++;
+  }
+  return pontosEVirgulas > virgulas ? ';' : ',';
+}
+
+function _textoCelulaMailing(valor) {
+  if (valor && typeof valor === 'object') {
+    if (typeof valor.text === 'string') return valor.text;
+    if (Object.prototype.hasOwnProperty.call(valor, 'result')) return _textoCelulaMailing(valor.result);
+    if (Array.isArray(valor.richText)) return valor.richText.map((parte) => parte.text || '').join('');
+  }
+  return valor == null ? '' : String(valor);
+}
+
 // Detecta a coluna de e-mail (e opcionalmente nome) pelo cabeçalho da primeira linha —
 // planilha corporativa nunca vem com cabeçalho padronizado. Mesma lib (ExcelJS) lê
 // .xlsx e .csv, sem precisar de uma segunda dependência só pra CSV.
@@ -9683,23 +9972,21 @@ async function _parsePlanilhaContatos(filePath, originalName) {
   const ext = (originalName.split('.').pop() || '').toLowerCase();
   let ws;
   if (ext === 'csv') {
-    ws = await wb.csv.readFile(filePath);
+    ws = await wb.csv.readFile(filePath, { parserOptions: { delimiter: _delimitadorCsvMailing(filePath) } });
   } else {
     await wb.xlsx.readFile(filePath);
     ws = wb.worksheets[0];
   }
   if (!ws || ws.rowCount < 1) return { colEmailEncontrada: false, linhas: [] };
-  const headerVals = ws.getRow(1).values || [];
-  const headers = [];
-  for (let i = 1; i < headerVals.length; i++) headers.push(String(headerVals[i] ?? '').trim());
+  const headerRow = ws.getRow(1);
+  const headers = Array.from({ length: headerRow.cellCount }, (_, i) => _textoCelulaMailing(headerRow.getCell(i + 1).value).trim());
   const colEmail = headers.findIndex((h) => /e.?mail/i.test(h));
   const colNome  = headers.findIndex((h) => /nome|name/i.test(h));
   const linhas = [];
   ws.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
-    const vals = row.values || [];
-    const email = colEmail >= 0 ? String(vals[colEmail + 1] ?? '').trim() : '';
-    const nome  = colNome  >= 0 ? String(vals[colNome + 1]  ?? '').trim() : '';
+    const email = colEmail >= 0 ? _textoCelulaMailing(row.getCell(colEmail + 1).value).trim() : '';
+    const nome  = colNome  >= 0 ? _textoCelulaMailing(row.getCell(colNome + 1).value).trim() : '';
     if (email || nome) linhas.push({ email, nome });
   });
   return { colEmailEncontrada: colEmail >= 0, linhas };
@@ -9709,6 +9996,26 @@ if (_multer) {
   const _mailingUploadDir = path.join(__dirname, 'uploads_tmp', 'mailing');
   try { fs.mkdirSync(_mailingUploadDir, { recursive: true }); } catch (_) {}
   const _mailingUpload = _multer({ dest: _mailingUploadDir, limits: { fileSize: 20 * 1024 * 1024 } });
+
+  app.get('/api/mailing/contatos/import/modelo', authMiddleware, dbMiddleware, async (_req, res) => {
+    try {
+      const ExcelJS = require('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Contatos');
+      worksheet.columns = [
+        { header: 'Email', key: 'email', width: 36 },
+        { header: 'Nome', key: 'nome', width: 32 },
+      ];
+      worksheet.views = [{ state: 'frozen', ySplit: 1 }];
+      worksheet.autoFilter = 'A1:B1';
+      worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4A0080' } };
+      const buffer = await workbook.xlsx.writeBuffer();
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="modelo-importacao-mailing.xlsx"');
+      res.send(Buffer.from(buffer));
+    } catch (e) { _dbErr(res, e); }
+  });
 
   app.post('/api/mailing/contatos/import', authMiddleware, dbMiddleware, (req, res, next) => {
     _mailingUpload.single('arquivo')(req, res, (err) => {
@@ -9750,6 +10057,69 @@ if (_multer) {
     } catch (e) {
       _dbErr(res, e);
     } finally {
+      fs.unlink(req.file.path, () => {});
+    }
+  });
+
+  app.post('/api/mailing/grupos/:id/importar', authMiddleware, dbMiddleware, (req, res, next) => {
+    _mailingUpload.single('arquivo')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      next();
+    });
+  }, async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+    let client;
+    try {
+      const grupoId = Number(req.params.id);
+      const extensao = path.extname(req.file.originalname).toLowerCase();
+      if (!Number.isSafeInteger(grupoId) || grupoId < 1) return res.status(400).json({ error: 'ID do grupo inválido.' });
+      if (!['.csv', '.xlsx'].includes(extensao)) return res.status(400).json({ error: 'Formato inválido. Envie um arquivo CSV ou Excel (.xlsx).' });
+      await ensureMailingTables();
+      const { colEmailEncontrada, linhas } = await _parsePlanilhaContatos(req.file.path, req.file.originalname);
+      if (!colEmailEncontrada) {
+        return res.status(400).json({ error: 'Não encontrei uma coluna de e-mail na planilha. A primeira linha precisa ter um cabeçalho com "email" (ou similar).' });
+      }
+
+      client = await pool.connect();
+      await client.query('BEGIN');
+      const grupo = await client.query(`SELECT id FROM mailing_grupos WHERE id=$1`, [grupoId]);
+      if (!grupo.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Grupo não encontrado.' });
+      }
+      let novos = 0, atualizados = 0, invalidos = 0, associados = 0;
+      const amostraInvalidos = [];
+      const emailsProcessados = new Set();
+      for (const linha of linhas) {
+        const email = _normalizarEmailMailing(linha.email);
+        if (!_emailValidoMailing(email)) {
+          invalidos++;
+          if (amostraInvalidos.length < 20) amostraInvalidos.push(linha.email || '(vazio)');
+          continue;
+        }
+        if (emailsProcessados.has(email)) continue;
+        emailsProcessados.add(email);
+        const contato = await client.query(
+          `INSERT INTO mailing_contatos (email, nome, origem) VALUES ($1,$2,'import')
+           ON CONFLICT (email) DO UPDATE SET
+             nome = COALESCE(EXCLUDED.nome, mailing_contatos.nome), atualizado_em = NOW()
+           RETURNING id, (xmax = 0) AS inserido`,
+          [email, String(linha.nome || '').trim() || null]
+        );
+        if (contato.rows[0].inserido) novos++; else atualizados++;
+        await client.query(
+          `INSERT INTO mailing_grupo_contatos (grupo_id, contato_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+          [grupoId, contato.rows[0].id]
+        );
+        associados++;
+      }
+      await client.query('COMMIT');
+      res.json({ ok: true, grupo_id: grupoId, arquivo_nome: req.file.originalname, total_linhas: linhas.length, novos, atualizados, associados, invalidos, invalidos_detalhe: amostraInvalidos });
+    } catch (e) {
+      if (client) await client.query('ROLLBACK').catch(() => {});
+      _dbErr(res, e);
+    } finally {
+      if (client) client.release();
       fs.unlink(req.file.path, () => {});
     }
   });
@@ -9813,6 +10183,23 @@ app.post('/api/mailing/templates', authMiddleware, dbMiddleware, async (req, res
   } catch (e) { _dbErr(res, e); }
 });
 
+app.put('/api/mailing/templates/:id', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    await ensureMailingTables();
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'ID do modelo inválido' });
+    const { nome, corpo_html, remetente_nome, remetente_email } = req.body;
+    if (!nome?.trim()) return res.status(400).json({ error: 'Nome do modelo é obrigatório' });
+    const r = await pool.query(
+      `UPDATE mailing_templates SET nome=$1, corpo_html=$2, remetente_nome=$3, remetente_email=$4, atualizado_em=NOW()
+       WHERE id=$5 RETURNING id`,
+      [nome.trim(), corpo_html || '', remetente_nome || null, remetente_email || null, id]
+    );
+    if (!r.rowCount) return res.status(404).json({ error: 'Modelo não encontrado' });
+    res.json({ ok: true });
+  } catch (e) { _dbErr(res, e); }
+});
+
 app.delete('/api/mailing/templates/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await pool.query(`DELETE FROM mailing_templates WHERE id=$1`, [req.params.id]);
@@ -9824,11 +10211,20 @@ app.delete('/api/mailing/templates/:id', authMiddleware, dbMiddleware, async (re
 app.get('/api/mailing/campanhas', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureMailingTables();
+    const execucoesAtivas = [..._mailingEnviosEmExecucao.keys()];
+    await pool.query(`
+      UPDATE mailing_campanhas c
+      SET status='concluida', concluido_em=COALESCE(c.concluido_em, NOW()), atualizado_em=NOW()
+      WHERE c.status='enviando'
+        AND NOT (c.id = ANY($1::int[]))
+        AND EXISTS (SELECT 1 FROM mailing_envio_destinatario WHERE campanha_id=c.id)
+        AND NOT EXISTS (SELECT 1 FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='pendente')
+    `, [execucoesAtivas]);
     const r = await pool.query(`
       SELECT c.*,
-        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id)                     AS total_destinatarios,
-        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='enviado') AS total_enviados,
-        (SELECT COUNT(*) FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='falha')   AS total_falhas
+        (SELECT COUNT(*)::int FROM mailing_envio_destinatario WHERE campanha_id=c.id)                     AS total_destinatarios,
+        (SELECT COUNT(*)::int FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='enviado') AS total_enviados,
+        (SELECT COUNT(*)::int FROM mailing_envio_destinatario WHERE campanha_id=c.id AND status='falha')   AS total_falhas
       FROM mailing_campanhas c ORDER BY c.criado_em DESC LIMIT 200
     `);
     res.json(r.rows);
@@ -9846,12 +10242,12 @@ app.get('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, 
 app.post('/api/mailing/campanhas', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     await ensureMailingTables();
-    const { assunto, corpo_html, remetente_email, remetente_nome } = req.body;
+    const { assunto, corpo_html, remetente_email, remetente_nome, destinatarios } = req.body;
     if (!assunto) return res.status(400).json({ error: 'Assunto é obrigatório' });
     const r = await pool.query(
-      `INSERT INTO mailing_campanhas (assunto, corpo_html, remetente_email, remetente_nome, criado_por)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [assunto, corpo_html || '', remetente_email || null, remetente_nome || null, req.user?.email || req.user?.nome || null]
+      `INSERT INTO mailing_campanhas (assunto, corpo_html, remetente_email, remetente_nome, destinatarios, criado_por)
+       VALUES ($1,$2,$3,$4,COALESCE($5::jsonb, '{"todos_ativos":true,"grupo_ids":[],"contato_ids":[]}'::jsonb),$6) RETURNING *`,
+      [assunto, corpo_html || '', remetente_email || null, remetente_nome || null, destinatarios ? JSON.stringify(destinatarios) : null, req.user?.email || req.user?.nome || null]
     );
     res.json(r.rows[0]);
   } catch (e) { _dbErr(res, e); }
@@ -9862,10 +10258,11 @@ app.put('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, 
     const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
     if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
     if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Só é possível editar campanhas em rascunho' });
-    const { assunto, corpo_html, remetente_email, remetente_nome } = req.body;
+    const { assunto, corpo_html, remetente_email, remetente_nome, destinatarios } = req.body;
     await pool.query(
-      `UPDATE mailing_campanhas SET assunto=$1, corpo_html=$2, remetente_email=$3, remetente_nome=$4, atualizado_em=NOW() WHERE id=$5`,
-      [assunto, corpo_html, remetente_email || null, remetente_nome || null, req.params.id]
+      `UPDATE mailing_campanhas SET assunto=$1, corpo_html=$2, remetente_email=$3, remetente_nome=$4,
+       destinatarios=COALESCE($5::jsonb, destinatarios), atualizado_em=NOW() WHERE id=$6`,
+      [assunto, corpo_html, remetente_email || null, remetente_nome || null, destinatarios ? JSON.stringify(destinatarios) : null, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
@@ -9873,10 +10270,16 @@ app.put('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, 
 
 app.delete('/api/mailing/campanhas/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [req.params.id])).rows[0];
+    const campanhaId = parseInt(req.params.id);
+    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [campanhaId])).rows[0];
     if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
-    if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Só é possível excluir campanhas em rascunho' });
-    await pool.query(`DELETE FROM mailing_campanhas WHERE id=$1`, [req.params.id]);
+    if (_mailingEnvioAtivo(campanhaId) || camp.status === 'enviando') {
+      return res.status(409).json({ error: 'Não é possível excluir um comunicado enquanto o envio estiver ativo.' });
+    }
+    if (!['rascunho', 'concluida'].includes(camp.status)) {
+      return res.status(409).json({ error: 'Só é possível excluir rascunhos ou comunicados concluídos.' });
+    }
+    await pool.query(`DELETE FROM mailing_campanhas WHERE id=$1`, [campanhaId]);
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
 });
@@ -9900,25 +10303,62 @@ app.post('/api/mailing/campanhas/:id/enviar-teste', authMiddleware, dbMiddleware
 app.post('/api/mailing/campanhas/:id/enviar', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const campId = parseInt(req.params.id);
-    const camp = (await pool.query(`SELECT status FROM mailing_campanhas WHERE id=$1`, [campId])).rows[0];
+    const camp = (await pool.query(`SELECT status, destinatarios FROM mailing_campanhas WHERE id=$1`, [campId])).rows[0];
     if (!camp) return res.status(404).json({ error: 'Campanha não encontrada' });
     if (camp.status !== 'rascunho') return res.status(409).json({ error: 'Esta campanha já foi enviada ou está em andamento' });
     if (_mailingEnvioAtivo(campId)) return res.status(409).json({ error: 'Campanha já está sendo enviada' });
     const cfg = await _getMailingRelayConfig();
     if (!cfg) return res.status(400).json({ error: 'Relay de Mailing não configurado. Configure em Integrações antes de enviar.' });
 
-    const ativosR = await pool.query(`SELECT COUNT(*)::int AS n FROM mailing_contatos WHERE status='ativo'`);
-    if (!ativosR.rows[0].n) return res.status(409).json({ error: 'Nenhum contato ativo para enviar.' });
-    // Snapshot no momento do disparo — quem entrar na lista depois não recebe retroativo.
-    await pool.query(
-      `INSERT INTO mailing_envio_destinatario (campanha_id, contato_id)
-       SELECT $1, id FROM mailing_contatos WHERE status='ativo'
-       ON CONFLICT (campanha_id, contato_id) DO NOTHING`,
-      [campId]
+    const body = req.body || {};
+    const selecaoInformada = ['grupo_ids', 'contato_ids', 'emails', 'todos_ativos'].some((chave) => Object.prototype.hasOwnProperty.call(body, chave));
+    const selecao = selecaoInformada ? body : (camp.destinatarios || { todos_ativos: true, grupo_ids: [], contato_ids: [] });
+    const grupoIds = selecao.grupo_ids ?? [];
+    const contatoIdsSelecionados = selecao.contato_ids ?? [];
+    const emailsSelecionados = selecao.emails ?? [];
+    const idsValidos = (ids) => Array.isArray(ids) && ids.every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0);
+    if (!idsValidos(grupoIds) || !idsValidos(contatoIdsSelecionados)) return res.status(400).json({ error: 'Seleção de destinatários inválida.' });
+    if (!Array.isArray(emailsSelecionados) || emailsSelecionados.length > 5000
+      || emailsSelecionados.some((email) => typeof email !== 'string' || !_emailValidoMailing(_normalizarEmailMailing(email)))) {
+      return res.status(400).json({ error: 'Um ou mais e-mails informados são inválidos.' });
+    }
+    const todosAtivos = selecao.todos_ativos === true;
+    if (!todosAtivos && !grupoIds.length && !contatoIdsSelecionados.length && !emailsSelecionados.length) {
+      return res.status(400).json({ error: 'Selecione ao menos um grupo, contato ou todos os ativos.' });
+    }
+    const contatoIdsEmail = [];
+    for (const email of [...new Set(emailsSelecionados.map(_normalizarEmailMailing))]) {
+      const contato = await pool.query(
+        `INSERT INTO mailing_contatos (email, origem) VALUES ($1,'manual')
+         ON CONFLICT (email) DO UPDATE SET atualizado_em=NOW()
+         RETURNING id, status`,
+        [email]
+      );
+      if (contato.rows[0].status === 'ativo') contatoIdsEmail.push(contato.rows[0].id);
+    }
+    const contatoIds = [...new Set([...contatoIdsSelecionados.map(Number), ...contatoIdsEmail])];
+    // Snapshot no disparo: expande grupos, combina contatos diretos e remove duplicados.
+    // Opt-outs nunca entram, mesmo que ainda pertençam a algum grupo.
+    const destinatarios = await pool.query(
+      `WITH alvos AS (
+         SELECT id AS contato_id FROM mailing_contatos WHERE status='ativo' AND $2::boolean
+         UNION
+         SELECT gc.contato_id FROM mailing_grupo_contatos gc
+           JOIN mailing_contatos mc ON mc.id=gc.contato_id
+           WHERE mc.status='ativo' AND gc.grupo_id=ANY($3::int[])
+         UNION
+         SELECT id AS contato_id FROM mailing_contatos WHERE status='ativo' AND id=ANY($4::int[])
+       )
+       INSERT INTO mailing_envio_destinatario (campanha_id, contato_id)
+       SELECT $1, contato_id FROM alvos
+       ON CONFLICT (campanha_id, contato_id) DO NOTHING
+       RETURNING contato_id`,
+      [campId, todosAtivos, grupoIds.map(Number), contatoIds.map(Number)]
     );
+    if (!destinatarios.rows.length) return res.status(409).json({ error: 'A seleção não possui contatos ativos para enviar.' });
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    res.json({ ok: true, message: `Envio iniciado para ${ativosR.rows[0].n} destinatário(s)` });
+    res.json({ ok: true, message: `Envio iniciado para ${destinatarios.rows.length} destinatário(s)` });
     _executarEnvioCampanha(campId, baseUrl).catch((e) => console.error('[Mailing] Erro no envio:', e.message));
   } catch (e) { _dbErr(res, e); }
 });
@@ -9947,8 +10387,18 @@ app.post('/api/mailing/campanhas/:id/cancelar', authMiddleware, dbMiddleware, as
 });
 
 app.get('/api/mailing/campanhas/:id/progresso', authMiddleware, dbMiddleware, async (req, res) => {
-  const entry = _mailingEnviosEmExecucao.get(parseInt(req.params.id));
-  res.json({ em_execucao: !!entry, progresso: entry ? entry.progresso : null });
+  try {
+    const campanhaId = parseInt(req.params.id);
+    const entry = _mailingEnviosEmExecucao.get(campanhaId);
+    const r = await pool.query(`
+      SELECT COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status='enviado')::int AS enviados,
+        COUNT(*) FILTER (WHERE status='falha')::int AS falhas,
+        COUNT(*) FILTER (WHERE status='pendente')::int AS pendentes
+      FROM mailing_envio_destinatario WHERE campanha_id=$1
+    `, [campanhaId]);
+    res.json({ em_execucao: !!entry, progresso: r.rows[0] });
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.get('/api/mailing/campanhas/:id/envios', authMiddleware, dbMiddleware, async (req, res) => {
@@ -16543,6 +16993,7 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
 async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progresso) {
   const fs = require('fs');
   let ins = 0, upd = 0, err = 0, linhas = 0;
+  const meses = new Set();
   for (const dest of tmpFiles) {
     try {
       // _lerCSVBatched processa 500 linhas por vez — nunca carrega o CSV inteiro na RAM
@@ -16555,6 +17006,7 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progre
           for (const raw of batch) {
             const m = _mapRowCSV(raw, `api-${label}`);
             if (rgFilter && !rgFilter.has((m.resource_group_name || '').toUpperCase())) continue;
+            registrarMesCustoImportado(meses, m.cost_date);
             const sp = `sp_${spCount++}`;
             try {
               await client.query(`SAVEPOINT ${sp}`);
@@ -16581,7 +17033,7 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progre
       try { fs.unlinkSync(dest); } catch (_) {}
     }
   }
-  return { ins, upd, err, linhas };
+  return { ins, upd, err, linhas, meses: [...meses] };
 }
 
 // ── Coleta via Azure Cost Management API ─────────────────────────────────────
@@ -16653,6 +17105,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
   const rgFilter = resourceGroups.length ? new Set(resourceGroups.map(r => r.toUpperCase())) : null;
   _logColeta(`Coleta API [${modo}] — ${startDate} → ${endDate}${rgFilter ? ` | ${rgFilter.size} RG(s) filtrado(s)` : ''}`, _coletaProgresso);
   let totalIns = 0, totalUpd = 0, totalErr = 0, totalLinhas = 0;
+  const mesesCustosAlterados = new Set();
   let subCount = 0;
 
   try {
@@ -16695,6 +17148,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
           const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
           const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter, _coletaProgresso);
+          res.meses.forEach(mes => mesesCustosAlterados.add(mes));
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
       };
@@ -16776,6 +17230,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
             const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
             const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
             const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter, _coletaProgresso);
+            res.meses.forEach(mes => mesesCustosAlterados.add(mes));
             totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
           }
         };
@@ -16836,6 +17291,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
                 const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
                 const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
                 const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso);
+                res.meses.forEach(mes => mesesCustosAlterados.add(mes));
                 totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
               }
             }, 'Billing Profile (Tax)', 3, _coletaProgresso, isCancelada);
@@ -16858,6 +17314,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
           const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
           const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso);
+          res.meses.forEach(mes => mesesCustosAlterados.add(mes));
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
       }
@@ -16870,6 +17327,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     } catch (_) {}
 
     _logColeta(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err / ${totalLinhas} linhas`, _coletaProgresso);
+    await _sincronizarCustoDiarioMeses('coleta API', [...mesesCustosAlterados]);
     // Marca registros desta coleta como fonte='api' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='api' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade
@@ -16985,6 +17443,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
   _logColeta(`Coleta Storage iniciada (${modo}${storageId ? ' STG#'+storageId : ''})`, _coletaProgresso);
 
   let totalIns = 0, totalUpd = 0, totalErr = 0;
+  const mesesCustosAlterados = new Set();
 
   try {
 
@@ -17076,6 +17535,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
               try {
                 await client.query(`SAVEPOINT ${spn}`);
                 const m = _mapRowCSV(raw, blob.name);
+                registrarMesCustoImportado(mesesCustosAlterados, m.cost_date);
                 const r2 = await client.query(sql, COLS.map(col => m[col] ?? null));
                 await client.query(`RELEASE SAVEPOINT ${spn}`);
                 if (r2.rowCount > 0) ins++; else upd++;
@@ -17104,6 +17564,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       }
     }
 
+    await _sincronizarCustoDiarioMeses('coleta Storage', [...mesesCustosAlterados]);
     // Marca registros desta coleta como fonte='storage' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='storage' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
     // Invalida caches imediatamente — dados já estão em azure_costs; _refreshAzureCache leva ~87s e não deve bloquear a visibilidade

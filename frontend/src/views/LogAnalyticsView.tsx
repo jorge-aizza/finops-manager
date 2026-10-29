@@ -134,6 +134,8 @@ export default function LogAnalyticsView() {
   const [workspaceFiltro, setWorkspaceFiltro] = useState<string[]>([])
   const [baldeAberto, setBaldeAberto] = useState<string | null>(null)
   const detalheRef = useRef<HTMLDivElement>(null)
+  const coletaIniciadaEmRef = useRef<string | null>(null)
+  const aguardandoColetaRef = useRef(false)
 
   const workspacesQuery = useQuery({ queryKey: ['log-analytics-workspaces', mes], queryFn: () => getLogAnalyticsWorkspaces(mes) })
   // Trocar de SP pode tirar da lista um workspace escolhido; os que sumiram caem fora do
@@ -191,16 +193,17 @@ export default function LogAnalyticsView() {
   })
 
   const coletaMutation = useMutation({
-    mutationFn: forcarColetaLogAnalytics,
+    mutationFn: async () => {
+      const progresso = await queryClient.ensureQueryData({
+        queryKey: ['log-analytics-progresso'],
+        queryFn: getProgressoLogAnalytics,
+      })
+      coletaIniciadaEmRef.current = progresso.execucoes.find((execucao) => execucao.tipo === 'coleta')?.iniciado_em ?? null
+      return forcarColetaLogAnalytics()
+    },
     onSuccess: (r) => {
       window.showToast?.(r.message, 'success')
-      setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ['log-analytics-workspaces'] })
-        queryClient.invalidateQueries({ queryKey: ['log-analytics-recomendacoes'] })
-        queryClient.invalidateQueries({ queryKey: ['log-analytics-fontes'] })
-        queryClient.invalidateQueries({ queryKey: ['log-analytics-resumo'] })
-        queryClient.invalidateQueries({ queryKey: ['log-analytics-app-insights'] })
-      }, 5000)
+      aguardandoColetaRef.current = true
     },
     onError: (e: Error) => window.showToast?.(e.message, 'error'),
   })
@@ -243,6 +246,21 @@ export default function LogAnalyticsView() {
   const backfillAtribuicaoConcluidoEmRef = useRef<string | null>(null)
   useEffect(() => {
     const execucoes = progressoLogAnalyticsQuery.data?.execucoes ?? []
+
+    const coleta = execucoes.find((e) => e.tipo === 'coleta')
+    if (aguardandoColetaRef.current && coleta && !coleta.em_execucao && coleta.concluido_em
+      && coleta.iniciado_em !== coletaIniciadaEmRef.current) {
+      aguardandoColetaRef.current = false
+      if (!coleta.erro) {
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-workspaces'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-recomendacoes'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-fontes'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-resumo'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-consumo-diario'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-tabelas'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-app-insights'] })
+      }
+    }
 
     const volume = execucoes.find((e) => e.tipo === 'backfill_volume')
     if (volume && !volume.em_execucao && volume.concluido_em && volume.concluido_em !== backfillConcluidoEmRef.current) {

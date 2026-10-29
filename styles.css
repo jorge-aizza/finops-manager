@@ -993,7 +993,7 @@ body {
 .cms-trigger.cms-disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
 .cms-trigger.cms-active { border-color: var(--accent); }
 .cms-dropdown {
-  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 500;
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1100;
   background: var(--bg-card); border: 1px solid var(--border-light);
   border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,.5);
   min-width: 260px; max-width: 420px;

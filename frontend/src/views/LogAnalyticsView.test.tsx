@@ -17,13 +17,14 @@ vi.mock('../api/coleta')
 
 function renderWithClient() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <TenantFilterProvider>
         <LogAnalyticsView />
       </TenantFilterProvider>
     </QueryClientProvider>,
   )
+  return { ...rendered, queryClient }
 }
 
 // "LA-SharedServices-PROD" aparece em até 4 lugares ao mesmo tempo (ranking, dropdown de
@@ -290,15 +291,25 @@ describe('LogAnalyticsView', () => {
     await waitFor(() => expect(logAnalyticsApi.getLogAnalyticsRecomendacoes).toHaveBeenCalledWith('critico', null))
   })
 
-  it('"Atualizar agora" dispara a coleta e mostra o toast de sucesso', async () => {
+  it('"Atualizar agora" atualiza os gráficos após a coleta terminar', async () => {
     vi.mocked(logAnalyticsApi.forcarColetaLogAnalytics).mockResolvedValue({ ok: true, message: 'Coleta iniciada' })
     const user = userEvent.setup()
-    renderWithClient()
+    const { queryClient } = renderWithClient()
     await screen.findByText('rg-shared')
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
 
     await user.click(screen.getByRole('button', { name: '↻ Atualizar agora' }))
 
     await waitFor(() => expect(window.showToast).toHaveBeenCalledWith('Coleta iniciada', 'success'))
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['log-analytics-consumo-diario'] })
+
+    queryClient.setQueryData(['log-analytics-progresso'], { execucoes: [{
+      tipo: 'coleta', fase: 'concluído', atual: 1, total: 1, detalhe: null,
+      iniciado_em: '2026-10-26T10:00:00.000Z', concluido_em: '2026-10-26T10:05:00.000Z',
+      erro: null, em_execucao: false, segundos: 300,
+    }] })
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['log-analytics-consumo-diario'] }))
   })
 
   // Backfill de volume (2026-10-21, pedido do usuário: "gostaria de poder coletar dados antigo

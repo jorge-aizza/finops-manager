@@ -51,24 +51,54 @@ export default function ColetaMonitor() {
   const status = statusQuery.data
   const emExecucao = !!status?.em_execucao
   const execucoes = status?.execucoes || []
+  const ultimoApi = status?.ultimo_api
+  const ultimoStorage = status?.ultimo_storage
+  const historicosAnteriores = useRef({ api: null as { id: number; status: string } | null, storage: null as { id: number; status: string } | null })
+  const historicosInicializados = useRef(false)
+  const custoConcluido = useRef(false)
 
   useEffect(() => {
+    const atuais = {
+      api: ultimoApi ? { id: ultimoApi.id, status: ultimoApi.status } : null,
+      storage: ultimoStorage ? { id: ultimoStorage.id, status: ultimoStorage.status } : null,
+    }
+    const concluiuComSucesso = historicosInicializados.current
+      && (['api', 'storage'] as const).some((tipo) => {
+        const anterior = historicosAnteriores.current[tipo]
+        const atual = atuais[tipo]
+        return atual?.status === 'concluido'
+          && (anterior?.id !== atual.id || anterior.status !== 'concluido')
+      })
+    historicosAnteriores.current = atuais
+    historicosInicializados.current = true
+    if (concluiuComSucesso) custoConcluido.current = true
+
     if (emExecucao && !wasRunning.current) {
       setDismissedKeys(new Set())
       for (const [k] of Object.entries(localStorage)) {
         if (k.startsWith(DISMISS_PREFIX)) localStorage.removeItem(k)
       }
     }
-    wasRunning.current = emExecucao
-  }, [emExecucao])
 
-  useEffect(() => {
     if (wasRunning.current && !emExecucao) {
       queryClient.invalidateQueries({ queryKey: ['coleta-cobertura'] })
       queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
+      if (custoConcluido.current) {
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-workspaces'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-resumo'] })
+        queryClient.invalidateQueries({ queryKey: ['log-analytics-consumo-diario'] })
+        queryClient.invalidateQueries({ queryKey: ['azure-inv-comparativo'] })
+        custoConcluido.current = false
+      }
+    } else if (!emExecucao && custoConcluido.current) {
+      queryClient.invalidateQueries({ queryKey: ['log-analytics-workspaces'] })
+      queryClient.invalidateQueries({ queryKey: ['log-analytics-resumo'] })
+      queryClient.invalidateQueries({ queryKey: ['log-analytics-consumo-diario'] })
+      queryClient.invalidateQueries({ queryKey: ['azure-inv-comparativo'] })
+      custoConcluido.current = false
     }
     wasRunning.current = emExecucao
-  }, [emExecucao, queryClient])
+  }, [emExecucao, ultimoApi?.id, ultimoApi?.status, ultimoStorage?.id, ultimoStorage?.status, queryClient])
 
   // Filtrar por tenant selecionado e por dismissal
   const filteredExecucoes = execucoes.filter((exec) => {

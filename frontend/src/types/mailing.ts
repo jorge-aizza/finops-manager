@@ -11,8 +11,44 @@ export interface MailingContato {
   nome: string | null
   status: MailingContatoStatus
   origem: 'manual' | 'import'
+  grupos?: string[]
   criado_em: string
   atualizado_em: string
+}
+
+export interface MailingGrupo {
+  id: number
+  nome: string
+  descricao: string | null
+  total_contatos: number
+  contato_ids: number[]
+  criado_em: string
+  atualizado_em: string
+}
+
+export interface MailingGrupoInput {
+  nome: string
+  descricao?: string | null
+  contato_ids: number[]
+}
+
+export interface MailingGrupoImportResultado {
+  ok: boolean
+  grupo_id: number
+  arquivo_nome: string
+  total_linhas: number
+  novos: number
+  atualizados: number
+  associados: number
+  invalidos: number
+  invalidos_detalhe: string[]
+}
+
+export interface MailingSelecaoDestinatarios {
+  grupo_ids: number[]
+  contato_ids: number[]
+  emails?: string[]
+  todos_ativos?: boolean
 }
 
 export interface MailingImportLote {
@@ -41,6 +77,7 @@ export interface MailingCampanha {
   atualizado_em: string
   iniciado_em: string | null
   concluido_em: string | null
+  destinatarios?: MailingSelecaoDestinatarios | null
   // Só presentes na listagem (GET /campanhas), não no detalhe de uma campanha
   total_destinatarios?: number
   total_enviados?: number
@@ -52,6 +89,7 @@ export interface MailingCampanhaInput {
   corpo_html: string
   remetente_email?: string | null
   remetente_nome?: string | null
+  destinatarios?: MailingSelecaoDestinatarios
 }
 
 export type MailingEnvioStatus = 'pendente' | 'enviado' | 'falha'
@@ -69,7 +107,7 @@ export interface MailingEnvio {
 
 export interface MailingCampanhaProgresso {
   em_execucao: boolean
-  progresso: { total: number; enviados: number; falhas: number } | null
+  progresso: { total: number; enviados: number; falhas: number; pendentes?: number } | null
 }
 
 // Biblioteca de modelos — "Salvar como modelo" / "Usar modelo" no composer.

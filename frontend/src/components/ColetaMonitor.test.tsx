@@ -20,13 +20,14 @@ function statusBase(overrides: Partial<ColetaStatus> = {}): ColetaStatus {
 
 function renderWithClient() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, refetchInterval: false } } })
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <TenantFilterProvider>
         <ColetaMonitor />
       </TenantFilterProvider>
     </QueryClientProvider>,
   )
+  return { ...rendered, queryClient }
 }
 
 beforeEach(() => {
@@ -96,6 +97,54 @@ describe('ColetaMonitor', () => {
     await user.click(screen.getByRole('button', { name: 'Fechar' }))
     await waitFor(() => expect(screen.queryByText(/Finalizado com sucesso/)).not.toBeInTheDocument())
   });
+
+  it('atualiza gráficos de custos quando uma coleta API termina com sucesso', async () => {
+    const ultimoEmExecucao = { ...ultimoApi, status: 'executando' }
+    vi.mocked(coletaApi.getColetaStatus).mockResolvedValue(statusBase({
+      em_execucao: true,
+      ultimo_api: ultimoEmExecucao,
+      execucoes: [{
+        tipo: 'api', id: ultimoApi.id, iniciado_em: ultimoApi.iniciado_em, cancelando: false,
+        progresso: { tipo: 'api', fase: 'Importando', ins: 10, upd: 0, err: 0, log: [] }, status: null,
+      }],
+    }))
+    const { queryClient } = renderWithClient()
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+    expect(await screen.findByText(/Coleta em andamento/)).toBeInTheDocument()
+
+    queryClient.setQueryData(['coleta-status'], statusBase({
+      em_execucao: false,
+      ultimo_api: { ...ultimoApi, status: 'concluido' },
+    }))
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['log-analytics-workspaces'] }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['log-analytics-resumo'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['log-analytics-consumo-diario'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['azure-inv-comparativo'] })
+  })
+
+  it('não atualiza gráficos de custos quando a coleta falha', async () => {
+    vi.mocked(coletaApi.getColetaStatus).mockResolvedValue(statusBase({
+      em_execucao: true,
+      ultimo_api: { ...ultimoApi, status: 'executando' },
+      execucoes: [{
+        tipo: 'api', id: ultimoApi.id, iniciado_em: ultimoApi.iniciado_em, cancelando: false,
+        progresso: { tipo: 'api', fase: 'Importando', ins: 10, upd: 0, err: 0, log: [] }, status: null,
+      }],
+    }))
+    const { queryClient } = renderWithClient()
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+    expect(await screen.findByText(/Coleta em andamento/)).toBeInTheDocument()
+
+    queryClient.setQueryData(['coleta-status'], statusBase({
+      em_execucao: false,
+      ultimo_api: { ...ultimoApi, status: 'erro' },
+    }))
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['coleta-historico'] }))
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['log-analytics-workspaces'] })
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['log-analytics-consumo-diario'] })
+  })
 });
 
 const ultimoApi: HistoricoItem = {
