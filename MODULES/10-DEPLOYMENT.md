@@ -132,6 +132,11 @@ sudo systemctl enable --now finops
 sudo systemctl status finops --no-pager
 ```
 
+O unit usa `Restart=always` com intervalo de 10 segundos para recuperar o processo
+se ele encerrar inesperadamente, inclusive com saída limpa ou `SIGTERM` externo.
+Uma parada explícita com `systemctl stop` continua intencional e não inicia o serviço
+novamente.
+
 Use `sudo systemctl stop finops` to stop without disabling startup at boot,
 `sudo systemctl disable finops` to disable startup, and
 `sudo journalctl -u finops -f` to follow logs. The unit file's paths must match
