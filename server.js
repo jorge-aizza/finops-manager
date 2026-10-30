@@ -9691,14 +9691,30 @@ function _mailingEmailEnvelope(corpoHtml, unsubscribeUrl) {
       const temValign = /(?:^|\s)valign\s*=/i.test(atributos);
       return `<${nome}${temValign ? atributos : `${atributos} valign="top"`}>`;
     });
+  const fragmento = require('parse5').parseFragment(corpoCompatibilizado, { sourceCodeLocationInfo: true });
+  const posicoesLinhasVazias = [];
+  const visitar = (no) => {
+    if (['p', 'h1', 'h2', 'h3'].includes(no.tagName) && no.sourceCodeLocation?.endTag) {
+      const filhos = (no.childNodes || []).filter(filho => filho.nodeName !== '#comment');
+      if (filhos.length === 0 || filhos[filhos.length - 1].tagName === 'br') {
+        posicoesLinhasVazias.push(no.sourceCodeLocation.endTag.startOffset);
+      }
+    }
+    for (const filho of no.childNodes || []) visitar(filho);
+  };
+  visitar(fragmento);
+  let corpoParaEnvio = corpoCompatibilizado;
+  for (const posicao of posicoesLinhasVazias.sort((primeira, segunda) => segunda - primeira)) {
+    corpoParaEnvio = corpoParaEnvio.slice(0, posicao) + '&nbsp;' + corpoParaEnvio.slice(posicao);
+  }
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="margin:0;padding:0;background-color:#f3f4f6;font-family:Arial,Helvetica,sans-serif">
   <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#f3f4f6" style="width:100%;border-collapse:collapse;background-color:#f3f4f6">
     <tr>
       <td align="center" style="padding:0">
         <!--[if mso]><table role="presentation" align="center" width="640" border="0" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
-        <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="width:100%;max-width:640px;border-collapse:collapse;background-color:#ffffff">
-          <tr><td valign="top" style="padding:16px 24px;color:#1f2937;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:21px;mso-line-height-rule:exactly;white-space:pre-wrap">${corpoCompatibilizado}</td></tr>
+        <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="width:100%;max-width:640px;table-layout:fixed;border-collapse:collapse;background-color:#ffffff">
+          <tr><td valign="top" style="padding:16px 24px;color:#1f2937;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:21px;mso-line-height-rule:exactly;white-space:pre-wrap;white-space:break-spaces">${corpoParaEnvio}</td></tr>
           <tr>
             <td align="center" bgcolor="#f9fafb" style="padding:16px 24px;border-top:1px solid #e5e7eb;background-color:#f9fafb;color:#9ca3af;font-family:Arial,Helvetica,sans-serif;font-size:11px;text-align:center">
               Você está recebendo este comunicado da Vivo FinOps.
@@ -21507,7 +21523,7 @@ app.get('/health', (_req, res) => {
   } catch {}
 
   // Start HTTP server first — wizard needs it before DB is ready
-  app.listen(PORT, () => {
+  app.listen(PORT, process.env.FINOPS_BIND_HOST || undefined, () => {
     console.log('');
     console.log('  FinOps Manager rodando em http://localhost:' + PORT);
     console.log('');

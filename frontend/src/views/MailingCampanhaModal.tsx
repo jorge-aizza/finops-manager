@@ -413,10 +413,10 @@ export default function MailingCampanhaModal({ campanha, duplicar = false, onClo
 
             {mostrarPreview ? (
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 16, maxHeight: 560, overflowY: 'auto', background: '#f3f4f6' }}>
-                <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} style={{ width: '100%', maxWidth: 640, margin: '0 auto', borderCollapse: 'collapse', background: '#fff' }}>
+                <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} style={{ width: '100%', maxWidth: 640, margin: '0 auto', tableLayout: 'fixed', borderCollapse: 'collapse', background: '#fff' }}>
                   <tbody>
                     <tr>
-                      <td className="mailing-table-surface" valign="top" style={{ padding: '16px 24px', color: '#1f2937', fontFamily: 'Arial,Helvetica,sans-serif', fontSize: 14, lineHeight: '21px', whiteSpace: 'pre-wrap' }} dangerouslySetInnerHTML={{ __html: corpoHtml }} />
+                      <td className="mailing-table-surface mailing-email-preview" valign="top" style={{ padding: '16px 24px', color: '#1f2937', fontFamily: 'Arial,Helvetica,sans-serif', fontSize: 14, lineHeight: '21px', whiteSpace: 'break-spaces' }} dangerouslySetInnerHTML={{ __html: corpoHtml }} />
                     </tr>
                     <tr>
                       <td align="center" style={{ padding: '16px 24px', background: '#f9fafb', borderTop: '1px solid #e5e7eb', color: '#9ca3af', fontFamily: 'Arial,Helvetica,sans-serif', fontSize: 11, textAlign: 'center' }}>

@@ -70,6 +70,22 @@ describe('MailingCampanhaModal', () => {
     expect(document.querySelector('[style*="max-width: 640px"]')).toBeInTheDocument()
     expect(document.querySelector('[style*="font-family: Arial, Helvetica, sans-serif"]')).toBeInTheDocument()
     expect(document.querySelector('td[style*="font-size: 14px"][style*="line-height: 21px"]')).toBeInTheDocument()
+    expect(document.querySelector('table[role="presentation"]')).toHaveStyle({ tableLayout: 'fixed' })
+    expect(document.querySelector('.mailing-email-preview')).toHaveStyle({ whiteSpace: 'break-spaces' })
+  });
+
+  it('mantém as quebras do comunicado ao alternar entre edição e prévia', async () => {
+    const user = userEvent.setup()
+    const corpoHtml = '<p>Antes</p><p><br></p><p>Depois</p><ul><li><p><br></p></li></ul>'
+    renderModal({ ...mockCampanha, corpo_html: corpoHtml })
+
+    await user.click(screen.getByRole('button', { name: /Prévia/ }))
+    const corpoPrevia = screen.getByText('Antes').parentElement!
+    expect(corpoPrevia.innerHTML).toBe(corpoHtml)
+    expect(corpoPrevia.querySelectorAll('p > br')).toHaveLength(2)
+
+    await user.click(screen.getByRole('button', { name: /Voltar a editar/ }))
+    expect(screen.getByLabelText('corpo-html-mock')).toHaveValue(corpoHtml)
   });
 
   it('bloqueia salvar sem assunto', async () => {

@@ -7,7 +7,7 @@ const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'u
 const envelopeStart = serverSource.indexOf('function _mailingEmailEnvelope')
 const envelopeEnd = serverSource.indexOf('\nfunction _mailingPaginaDescadastro', envelopeStart)
 if (envelopeStart < 0 || envelopeEnd < 0) throw new Error('Não foi possível localizar o envelope do Mailing em server.js')
-const mailingEmailEnvelope = new Function(`${serverSource.slice(envelopeStart, envelopeEnd)}; return _mailingEmailEnvelope`)()
+const mailingEmailEnvelope = new Function('require', `${serverSource.slice(envelopeStart, envelopeEnd)}; return _mailingEmailEnvelope`)(require)
 
 test('envelope do Mailing centraliza o conteúdo e normaliza tabelas antigas para Outlook', () => {
   const html = mailingEmailEnvelope('<table><tr><td><img src="cid:logo" width="120"></td><td><p><span style="font-size:18px;color:#ff0000"><a href="https://example.com/info" style="color:#7b2fbe">Comunicado de teste</a></span></p></td></tr></table>', 'https://example.com/unsubscribe')
@@ -32,6 +32,17 @@ test('envelope do Mailing preserva a quantidade de espaços repetidos no texto',
 
   assert.match(html, /Antes&nbsp;&nbsp;&nbsp;depois/)
   assert.match(html, /<strong>Texto&nbsp;&nbsp;&nbsp;em destaque<\/strong>/)
+})
+
+test('envelope preserva parágrafos vazios e quebras finais exibidos no editor', () => {
+  const html = mailingEmailEnvelope('<p></p><p><br></p><p>Texto<br></p><h2 style="text-align:center">Título<br></h2><p><strong>Texto<br>continua</strong></p><p>Antes<br>depois</p>', 'https://example.com/unsubscribe')
+
+  assert.match(html, /<p>&nbsp;<\/p><p><br>&nbsp;<\/p><p>Texto<br>&nbsp;<\/p>/)
+  assert.match(html, /<h2 style="text-align:center">Título<br>&nbsp;<\/h2>/)
+  assert.match(html, /<p><strong>Texto<br>continua<\/strong><\/p>/)
+  assert.match(html, /<p>Antes<br>depois<\/p>/)
+  assert.match(html, /max-width:640px;table-layout:fixed/)
+  assert.match(html, /white-space:pre-wrap;white-space:break-spaces/)
 })
 
 test('envelope aplica grade e espaçamento às tabelas de dados, mas não à assinatura', () => {

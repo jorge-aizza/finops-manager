@@ -12,6 +12,17 @@ describe('MailingComposer', () => {
     expect(await screen.findByText('Olá, pessoal!')).toBeInTheDocument()
   });
 
+  it('usa a mesma largura e tipografia da prévia do comunicado', () => {
+    render(<MailingComposer value="<p>Conteúdo</p>" onChange={() => {}} />)
+    const area = document.querySelector('[contenteditable="true"]') as HTMLElement
+
+    expect(area.parentElement).toHaveStyle({
+      boxSizing: 'border-box', maxWidth: '640px', padding: '16px 24px', background: '#fff',
+      fontFamily: 'Arial,Helvetica,sans-serif', fontSize: '14px', lineHeight: '21px',
+      whiteSpace: 'pre-wrap',
+    })
+  });
+
   it('oferece controles de fonte e preserva os estilos de fonte em HTML', async () => {
     let htmlAtualizado = ''
     const user = userEvent.setup()
@@ -25,6 +36,33 @@ describe('MailingComposer', () => {
 
     expect(htmlAtualizado).toContain('font-family: Georgia, serif')
     expect(htmlAtualizado).toContain('font-size: 18px')
+  });
+
+  it('mantém a seleção ao aplicar fonte, tamanho e negrito pela toolbar', async () => {
+    const user = userEvent.setup()
+    function Wrapper() {
+      const [value, setValue] = useState('<p>Texto selecionado</p>')
+      return <MailingComposer value={value} onChange={setValue} />
+    }
+    render(<Wrapper />)
+
+    const area = document.querySelector('[contenteditable="true"]') as HTMLElement
+    await user.click(area)
+    await user.keyboard('{Control>}a{/Control}')
+    await waitFor(() => expect(window.getSelection()?.toString()).toBe('Texto selecionado'))
+
+    await user.selectOptions(screen.getByLabelText('Tipo de fonte'), 'Georgia, serif')
+    await user.selectOptions(screen.getByLabelText('Tamanho da fonte'), '18px')
+    await user.click(screen.getByTitle('Negrito'))
+
+    const textoFormatado = area.querySelector('[style*="font-family"]')
+    expect(textoFormatado).toHaveTextContent('Texto selecionado')
+    expect(textoFormatado).toHaveStyle({ fontFamily: 'Georgia, serif', fontSize: '18px' })
+    expect(area.textContent).toBe('Texto selecionado')
+    expect(area.querySelector('strong')).toHaveTextContent('Texto selecionado')
+
+    await user.keyboard('X')
+    expect(area.textContent).toBe('X')
   });
 
   it('mantém hyperlink real com estilo ao serializar o conteúdo do e-mail', async () => {
@@ -57,15 +95,18 @@ describe('MailingComposer', () => {
   it('preserva espaços repetidos visualmente no editor', async () => {
     let htmlAtualizado = ''
     const user = userEvent.setup()
-    render(<MailingComposer value="<p>Um  dois</p>" onChange={(html) => { htmlAtualizado = html }} />)
+    render(<MailingComposer value="<p>Um  dois</p><p>Nova linha</p>" onChange={(html) => { htmlAtualizado = html }} />)
     const area = document.querySelector('[contenteditable="true"]') as HTMLElement
 
-    expect(area.textContent).toBe('Um  dois')
+    expect(area.querySelectorAll('p')).toHaveLength(2)
+    expect(area.querySelector('p')?.textContent).toBe('Um  dois')
+    expect(area.querySelectorAll('p')[1].textContent).toBe('Nova linha')
     expect(document.querySelector('[style*="white-space: pre-wrap"]')).toBeInTheDocument()
 
     area.focus()
     await user.type(area, '!')
     expect(htmlAtualizado).toContain('Um  dois')
+    expect(htmlAtualizado).toMatch(/<p>Nova linha!?<\/p>/)
   });
 
   it('serializa tabelas com largura fluida e alinhamento de células compatível com Outlook', async () => {
@@ -107,13 +148,47 @@ describe('MailingComposer', () => {
     })
   });
 
+  it('preserva parágrafos vazios sem convertê-los em quebras explícitas', async () => {
+    const onChange = vi.fn()
+    render(<MailingComposer value={'<p>Antes</p>\n<p></p><p><br></p><p>Depois</p>'} onChange={onChange} />)
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenCalledWith('<p>Antes</p><p></p><p><br></p><p>Depois</p>')
+    })
+  });
+
+  it('sincroniza com a prévia o HTML interpretado pelo editor ao carregar um comunicado', async () => {
+    const onChange = vi.fn()
+    render(<MailingComposer value={'<p>Antes</p>\n<p>Depois</p>\n<ul>\n<li>Item</li>\n</ul>'} onChange={onChange} />)
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenCalledWith('<p>Antes</p><p>Depois</p><ul><li><p>Item</p></li></ul><p></p>')
+    })
+  });
+
+  it('estabiliza a sincronização de uma assinatura com tabela em editor controlado', async () => {
+    const onChange = vi.fn()
+    function Wrapper() {
+      const [value, setValue] = useState('<p>Comunicado</p><table><tbody><tr><td><img src="/mailing-uploads/finops-logo-assinatura.png" width="120"></td><td>Assinatura</td></tr></tbody></table>')
+      return <MailingComposer value={value} onChange={(html) => { onChange(html); setValue(html) }} />
+    }
+    render(<Wrapper />)
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    const chamadas = onChange.mock.calls.length
+    expect(chamadas).toBeLessThan(5)
+    expect(onChange.mock.lastCall?.[0]).toContain('Assinatura')
+  });
+
   it('mantém o texto da assinatura próximo ao logo nas tabelas já salvas', async () => {
     const onChange = vi.fn()
     render(<MailingComposer value='<table><tbody><tr><td><img src="/mailing-uploads/finops-logo-assinatura.png" width="120"></td><td>Assinatura</td></tr></tbody></table>' onChange={onChange} />)
 
     await waitFor(() => {
       expect(onChange).toHaveBeenCalledWith(expect.stringContaining('table-layout: fixed'))
-      expect(onChange).toHaveBeenCalledWith(expect.stringContaining('padding-left: 8px'))
+      const template = document.createElement('template')
+      template.innerHTML = onChange.mock.lastCall?.[0] || ''
+      expect(template.content.querySelectorAll('td')[1].style.paddingLeft).toBe('8px')
     })
   })
 
@@ -162,4 +237,5 @@ describe('MailingComposer', () => {
     await user.type(area, 'Testando digitação')
     expect(ultimoValue.replace(/<[^>]+>/g, '').trim().length).toBeGreaterThan(0)
   });
+
 })

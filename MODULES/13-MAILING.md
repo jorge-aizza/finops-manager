@@ -43,6 +43,11 @@ prática: o "Testar Conexão" pode falhar na estação e funcionar em produção
 
 ## Armadilhas
 
+**Linhas vazias e quebras finais precisam existir no HTML enviado.** O editor TipTap usa
+elementos auxiliares que não fazem parte do conteúdo salvo, e a prévia os reproduz com CSS.
+`_mailingEmailEnvelope()` acrescenta espaços não separáveis a blocos vazios e a blocos
+terminados em `<br>`, sem modificar o rascunho. Isso vale para envios de teste e campanhas.
+
 **Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).**
 O corpo do comunicado sai do editor com `src="http://<host-do-finops>/mailing-uploads/x.png"`,
 montado no navegador a partir de `window.location.origin`. Isso obriga o cliente de e-mail a

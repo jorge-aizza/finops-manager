@@ -26,6 +26,7 @@
     "ldapjs": "^3.0.7",
     "multer": "^2.2.0",
     "nodemailer": "^10.1.1",
+    "parse5": "^7.3.0",
     "pg": "^8.11.3"
   },
   "devDependencies": {

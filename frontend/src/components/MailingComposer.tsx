@@ -311,13 +311,15 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
   useEffect(() => {
     if (!editor) return
     const htmlNormalizado = normalizarTabelasEmail(value)
-    if (editor.getHTML() !== htmlNormalizado) {
+    const htmlEditorNormalizado = normalizarTabelasEmail(editor.getHTML())
+    if (htmlEditorNormalizado !== htmlNormalizado) {
       editor.commands.setContent(htmlNormalizado, {
         emitUpdate: false,
         parseOptions: { preserveWhitespace: 'full' },
       })
     }
-    if (htmlNormalizado !== value) onChange(htmlNormalizado)
+    const htmlExibido = normalizarTabelasEmail(editor.getHTML())
+    if (htmlExibido !== value) onChange(htmlExibido)
   }, [value, editor, onChange])
 
   if (!editor) return null
@@ -325,8 +327,8 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)' }}>
       {editable && <Toolbar editor={editor} />}
-      <div className="mailing-table-surface" style={{ padding: '16px 20px', minHeight: 280, maxHeight: 560, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
-        <EditorContent editor={editor} />
+      <div className="mailing-table-surface" style={{ minHeight: 280, maxHeight: 560, overflowY: 'auto' }}>
+        <EditorContent editor={editor} style={{ boxSizing: 'border-box', width: '100%', maxWidth: 640, margin: '0 auto', padding: '16px 24px', background: '#fff', color: '#1f2937', fontFamily: 'Arial,Helvetica,sans-serif', fontSize: 14, lineHeight: '21px', whiteSpace: 'pre-wrap' }} />
       </div>
     </div>
   )

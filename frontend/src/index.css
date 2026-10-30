@@ -40,3 +40,8 @@
    position: absolute;
    z-index: 2;
 }
+
+.mailing-email-preview :is(p, h1, h2, h3):empty::before,
+.mailing-email-preview :is(p, h1, h2, h3):has(> br:last-child)::after {
+   content: '\00a0';
+}
