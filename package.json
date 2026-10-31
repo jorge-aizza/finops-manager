@@ -24,9 +24,11 @@
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^4.1.0",
     "ldapjs": "^3.0.7",
+    "mammoth": "^1.13.0",
     "multer": "^2.2.0",
     "nodemailer": "^10.1.1",
     "parse5": "^7.3.0",
+    "pdfjs-dist": "^4.10.38",
     "pg": "^8.11.3"
   },
   "devDependencies": {

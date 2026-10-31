@@ -1,15 +1,13 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { EditorContent, useEditor } from '@tiptap/react'
-import StarterKit from '@tiptap/starter-kit'
-import Link from '@tiptap/extension-link'
-import Underline from '@tiptap/extension-underline'
 import {
-  archiveWikiPage, createWikiPage, getWikiPage, listWikiCategories, listWikiPages,
+  archiveWikiPage, createWikiPage, deleteWikiPage, getWikiPage, listWikiCategories, listWikiPages,
   listWikiRevisions, publishWikiPage, restoreWikiRevision, updateWikiPage,
 } from '../api/wiki'
 import type { WikiPage, WikiPageInput, WikiPageSummary } from '../types/wiki'
 import WikiEditor from './WikiEditor'
+import { createWikiExtensions } from './WikiExtensions'
 import './WikiView.css'
 
 function formatDate(value: string) {
@@ -18,7 +16,7 @@ function formatDate(value: string) {
 
 function WikiArticle({ page }: { page: WikiPage }) {
   const editor = useEditor({
-    extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3] } }), Link.configure({ openOnClick: false }), Underline],
+    extensions: createWikiExtensions(),
     content: page.conteudo,
     editable: false,
     editorProps: { attributes: { class: 'wiki-content-body' } },
@@ -26,11 +24,12 @@ function WikiArticle({ page }: { page: WikiPage }) {
   return <EditorContent editor={editor} className="wiki-content" />
 }
 
-function WriterActions({ page, onEdit, onPublish, onArchive, onHistory }: {
+function WriterActions({ page, onEdit, onPublish, onArchive, onDelete, onHistory }: {
   page: WikiPageSummary
   onEdit: () => void
   onPublish: () => void
   onArchive: () => void
+  onDelete: () => void
   onHistory: () => void
 }) {
   return (
@@ -39,6 +38,7 @@ function WriterActions({ page, onEdit, onPublish, onArchive, onHistory }: {
       <button className="btn-ghost" onClick={onEdit} title="Editar artigo">Editar</button>
       {page.status !== 'publicado' && <button className="btn-primary" onClick={onPublish}>Publicar</button>}
       <button className="btn-ghost wiki-archive-action" onClick={onArchive} title="Arquivar artigo">Arquivar</button>
+      <button className="btn-ghost wiki-delete-action" onClick={onDelete} title="Excluir artigo">Excluir</button>
     </div>
   )
 }
@@ -96,6 +96,11 @@ export default function WikiView() {
     onSuccess: () => { refreshPages(); setSlug(null); setMostrarHistorico(false) },
     onError: (error: Error) => window.showToast?.(error.message, 'error'),
   })
+  const deleteMutation = useMutation({
+    mutationFn: deleteWikiPage,
+    onSuccess: () => { refreshPages(); setSlug(null); setMostrarHistorico(false) },
+    onError: (error: Error) => window.showToast?.(error.message, 'error'),
+  })
   const restoreMutation = useMutation({
     mutationFn: ({ pageId, revisionId }: { pageId: number; revisionId: number }) => restoreWikiRevision(pageId, revisionId),
     onSuccess: (page) => {
@@ -115,6 +120,12 @@ export default function WikiView() {
   function archivePage(page: WikiPage) {
     if (window.confirm(`Arquivar “${page.titulo}”? O artigo poderá ser recuperado pelo histórico.`)) {
       archiveMutation.mutate(page.id)
+    }
+  }
+
+  function deletePage(page: WikiPage) {
+    if (window.confirm(`Excluir “${page.titulo}” e todo o seu histórico? Esta ação é definitiva.`)) {
+      deleteMutation.mutate(page.id)
     }
   }
 
@@ -185,6 +196,7 @@ export default function WikiView() {
                     onEdit={() => { setMostrarHistorico(false); setEditando(true) }}
                     onPublish={() => publishMutation.mutate(selectedPage.id)}
                     onArchive={() => archivePage(selectedPage)}
+                    onDelete={() => deletePage(selectedPage)}
                     onHistory={() => setMostrarHistorico((value) => !value)}
                   />
                 )}

@@ -47,4 +47,26 @@ describe('WikiView', () => {
 
     expect(screen.getByRole('button', { name: 'Novo artigo' })).toBeInTheDocument()
   })
+
+  it('mostra edição, arquivamento e exclusão ao abrir um artigo como editor', async () => {
+    const user = userEvent.setup()
+    window.currentUser = { perfil: 'finops' }
+    const summary = {
+      id: 8, slug: 'custos-azure', titulo: 'Custos Azure', categoria: 'Operação', resumo: null,
+      status: 'publicado' as const, atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z',
+    }
+    vi.mocked(wikiApi.listWikiPages).mockResolvedValue([summary])
+    vi.mocked(wikiApi.getWikiPage).mockResolvedValue({
+      ...summary, criado_por: 'FinOps', criado_em: summary.atualizado_em,
+      conteudo: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Conteúdo' }] }] },
+    })
+    renderWikiView()
+
+    await user.click(await screen.findByRole('button', { name: /Custos Azure/ }))
+
+    expect(await screen.findByRole('button', { name: 'Editar' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Arquivar' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Excluir' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Histórico' })).toBeInTheDocument()
+  })
 })

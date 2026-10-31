@@ -25,6 +25,22 @@ test('documento aceita blocos e marcas suportados e extrai texto para busca', ()
   assert.match(extractWikiText(documento), /guia/);
 });
 
+test('documento normaliza atributos nulos padrão serializados pelo TipTap', () => {
+  const documento = sanitizeWikiDocument({
+    type: 'doc',
+    content: [{
+      type: 'paragraph',
+      attrs: { textAlign: null },
+      content: [{ type: 'text', text: 'Texto', marks: [{ type: 'textStyle', attrs: { color: null, fontSize: null, fontFamily: null } }] }],
+    }],
+  });
+
+  assert.deepEqual(documento.content[0], {
+    type: 'paragraph',
+    content: [{ type: 'text', text: 'Texto', marks: [{ type: 'textStyle', attrs: {} }] }],
+  });
+});
+
 test('documento rejeita HTML, protocolos inseguros e headings fora do schema', () => {
   assert.throws(() => sanitizeWikiDocument({ type: 'doc', content: [{ type: 'script', text: 'alert(1)' }] }), /Tipo de bloco não permitido/);
   assert.throws(() => sanitizeWikiDocument({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'x', marks: [{ type: 'link', attrs: { href: 'javascript:alert(1)' } }] }] }] }), /Protocolo de link não permitido/);
@@ -67,12 +83,20 @@ test('router exige autenticacao e filtra rascunhos para leitores', async (t) => 
       if (sql.includes('FROM wiki_paginas WHERE slug=$1')) {
         return { rows: page?.slug === values[0] && (values[1] || page.status === 'publicado') ? [page] : [] };
       }
+      if (sql.startsWith('DELETE FROM wiki_paginas')) return { rows: [{ id: values[0] }] };
       return { rows: [] };
     },
     async connect() {
       return {
         async query(sql, values = []) {
           queries.push(sql);
+          if (sql.startsWith('INSERT INTO wiki_paginas')) {
+            page = {
+              id: 7, slug: values[0], titulo: values[1], categoria: values[2], resumo: values[3], conteudo: values[4],
+              status: 'rascunho', criado_por: values[6], atualizado_por: values[6], criado_em: '2026-10-30T00:00:00Z', atualizado_em: '2026-10-30T00:00:00Z',
+            };
+            return { rows: [page] };
+          }
           if (sql.startsWith('SELECT * FROM wiki_paginas')) return { rows: page ? [{ ...page }] : [] };
           if (sql.startsWith('SELECT COALESCE(MAX(versao)')) return { rows: [{ versao: revisionCount + 1 }] };
           if (sql.startsWith('INSERT INTO wiki_revisoes')) { revisionCount += 1; return { rows: [] }; }
@@ -140,6 +164,12 @@ test('router exige autenticacao e filtra rascunhos para leitores', async (t) => 
   assert.equal(visiblePage.status, 200);
   assert.equal((await visiblePage.json()).slug, 'guia-de-finops');
 
+  const forbiddenDelete = await fetch(`${url}/7`, { method: 'DELETE', headers: { Authorization: 'Bearer reader' } });
+  assert.equal(forbiddenDelete.status, 403);
+  const deleted = await fetch(`${url}/7`, { method: 'DELETE', headers: { Authorization: 'Bearer writer' } });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), { ok: true, id: 7 });
+
   const replacementQueries = [];
   activePool = {
     async query(sql) {
@@ -159,4 +189,50 @@ test('router exige autenticacao e filtra rascunhos para leitores', async (t) => 
     body: JSON.stringify({ titulo: 'Sem permissão' }),
   });
   assert.equal(forbidden.status, 403);
+});
+
+test('upload de imagem exige escritor e a mídia fica isolada pela identidade do usuário', async (t) => {
+  const savedMedia = { mime_type: 'image/png', dados: Buffer.from('89504e470d0a1a0a', 'hex') };
+  const pool = {
+    async query(sql, values = []) {
+      if (sql.includes('INSERT INTO wiki_midias')) return { rows: [{ id: 21 }] };
+      if (sql.includes('FROM wiki_midias m')) {
+        return values[1] === 'writer-id' ? { rows: [savedMedia] } : { rows: [] };
+      }
+      return { rows: [] };
+    },
+  };
+  const app = express();
+  app.use('/api/wiki', createWikiRouter({
+    pool,
+    authMiddleware(req, res, next) {
+      const token = req.headers.authorization;
+      if (!token) return res.status(401).end();
+      req.user = token === 'Bearer writer'
+        ? { id: 'writer-id', nome: 'Nome compartilhado', perfil: 'finops' }
+        : { id: 'reader-id', nome: 'Nome compartilhado', perfil: 'reader' };
+      next();
+    },
+    dbMiddleware(_req, _res, next) { next(); },
+  }));
+  const server = app.listen(0);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  await once(server, 'listening');
+  const url = `http://127.0.0.1:${server.address().port}/api/wiki/midias`;
+  const image = new Blob([savedMedia.dados], { type: 'image/png' });
+  const body = new FormData();
+  body.append('imagem', image, 'grafico.png');
+
+  const forbiddenUpload = await fetch(`${url}/imagens`, { method: 'POST', headers: { Authorization: 'Bearer reader' }, body });
+  assert.equal(forbiddenUpload.status, 403);
+
+  const uploaded = await fetch(`${url}/imagens`, { method: 'POST', headers: { Authorization: 'Bearer writer' }, body });
+  assert.equal(uploaded.status, 201);
+  assert.deepEqual(await uploaded.json(), { mediaId: 21, mimeType: 'image/png' });
+
+  const ownerRead = await fetch(`${url}/21`, { headers: { Authorization: 'Bearer writer' } });
+  assert.equal(ownerRead.status, 200);
+  assert.equal(ownerRead.headers.get('x-content-type-options'), 'nosniff');
+  const otherUserRead = await fetch(`${url}/21`, { headers: { Authorization: 'Bearer reader' } });
+  assert.equal(otherUserRead.status, 404);
 });

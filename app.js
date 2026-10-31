@@ -6,6 +6,10 @@
 // Detects server URL automatically — works from any device on the network
 const API = window.location.origin + '/api';
 let currentUser = null;
+Object.defineProperty(window, 'currentUser', {
+  configurable: true,
+  get: () => currentUser,
+});
 
 // ── SETUP WIZARD ──────────────────────────────
 async function checkFirstRun() {

@@ -53,3 +53,11 @@ export interface WikiPageInput {
   resumo?: string | null
   conteudo: WikiDocument
 }
+
+export interface WikiImportedDocument {
+  titulo: string
+  categoria: string
+  resumo: string
+  conteudo: WikiDocument
+  avisos: string[]
+}

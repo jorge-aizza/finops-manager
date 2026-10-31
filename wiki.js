@@ -1,17 +1,61 @@
 'use strict';
 
 const express = require('express');
+const multer = require('multer');
 const WIKI_INITIAL_PAGES = require('./wikiConteudoInicial');
+const { convertDocxToWikiDocument, convertPdfToWikiDocument } = require('./wikiImport');
 
 const MAX_DOCUMENT_NODES = 10000;
 const MAX_DOCUMENT_TEXT = 200000;
 const BLOCK_NODES = new Set([
-  'blockquote', 'bulletList', 'codeBlock', 'heading', 'horizontalRule',
-  'listItem', 'orderedList', 'paragraph',
+  'blockquote', 'bulletList', 'codeBlock', 'heading', 'horizontalRule', 'listItem',
+  'orderedList', 'paragraph', 'table', 'tableCell', 'tableHeader', 'tableRow', 'wikiImage',
 ]);
 const INLINE_NODES = new Set(['hardBreak', 'text']);
-const MARKS = new Set(['bold', 'code', 'italic', 'strike', 'underline', 'link']);
+const MARKS = new Set(['bold', 'code', 'italic', 'strike', 'textStyle', 'underline', 'link']);
+const TEXT_FONTS = new Set(['Arial', 'Calibri', 'Georgia', 'Tahoma', 'Times New Roman', 'Verdana']);
+const TEXT_ALIGNMENTS = new Set(['left', 'center', 'right', 'justify']);
 const SEARCH_VECTOR = `to_tsvector('portuguese', coalesce(titulo, '') || ' ' || coalesce(resumo, '') || ' ' || coalesce(texto_busca, ''))`;
+const MAX_WIKI_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_WIKI_IMPORT_BYTES = 12 * 1024 * 1024;
+const wikiMemoryUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_WIKI_IMPORT_BYTES, files: 1 },
+});
+const wikiImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_WIKI_IMAGE_BYTES, files: 1 },
+});
+
+function uploadFile(upload, fieldName) {
+  const middleware = upload.single(fieldName);
+  return (req, res, next) => middleware(req, res, (error) => {
+    if (error) {
+      const status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(status).json({ error: status === 413 ? 'O arquivo excede o limite permitido.' : 'Não foi possível receber o arquivo.' });
+    }
+    next();
+  });
+}
+
+function imageMimeFromBuffer(buffer) {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString('ascii'))) return 'image/gif';
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+function collectWikiMediaIds(document) {
+  const ids = new Set();
+  function visit(node) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'wikiImage' && Number.isSafeInteger(Number(node.attrs?.mediaId))) ids.add(Number(node.attrs.mediaId));
+    for (const child of node.content || []) visit(child);
+  }
+  visit(document);
+  return [...ids];
+}
 
 class WikiError extends Error {
   constructor(status, message) {
@@ -64,10 +108,59 @@ function sanitizeWikiDocument(document) {
       clean.attrs = { level };
     }
 
+    if (type === 'heading' || type === 'paragraph') {
+      const textAlign = node.attrs?.textAlign;
+      if (textAlign != null && !TEXT_ALIGNMENTS.has(textAlign)) throw new WikiError(400, 'Alinhamento inválido.');
+      if (textAlign) clean.attrs = { ...(clean.attrs || {}), textAlign };
+    }
+
+    if (type === 'tableCell' || type === 'tableHeader') {
+      const colspan = Number(node.attrs?.colspan ?? 1);
+      const rowspan = Number(node.attrs?.rowspan ?? 1);
+      const colwidth = node.attrs?.colwidth;
+      if (!Number.isInteger(colspan) || colspan < 1 || colspan > 10 || !Number.isInteger(rowspan) || rowspan < 1 || rowspan > 10) {
+        throw new WikiError(400, 'Dimensões de célula inválidas.');
+      }
+      if (colwidth !== null && colwidth !== undefined && (!Array.isArray(colwidth) || colwidth.length > 10 || colwidth.some((width) => !Number.isInteger(width) || width < 40 || width > 1600))) {
+        throw new WikiError(400, 'Largura de coluna inválida.');
+      }
+      clean.attrs = { colspan, rowspan, colwidth: colwidth || null };
+    }
+
+    if (type === 'wikiImage') {
+      const mediaId = Number(node.attrs?.mediaId);
+      const alt = String(node.attrs?.alt || '').trim();
+      const width = node.attrs?.width === null || node.attrs?.width === undefined ? null : Number(node.attrs.width);
+      if (!Number.isSafeInteger(mediaId) || mediaId < 1 || alt.length > 300 || (width !== null && (!Number.isInteger(width) || width < 80 || width > 1600))) {
+        throw new WikiError(400, 'Imagem inválida.');
+      }
+      clean.attrs = { mediaId, alt, width };
+    }
+
     if (Array.isArray(node.marks)) {
       clean.marks = node.marks.map((mark) => {
         if (!mark || typeof mark !== 'object' || !MARKS.has(mark.type)) {
           throw new WikiError(400, 'Formatação não permitida.');
+        }
+        if (mark.type === 'textStyle') {
+          const attrs = {};
+          const color = mark.attrs?.color;
+          const fontSize = mark.attrs?.fontSize;
+          const fontFamily = mark.attrs?.fontFamily;
+          if (color != null) {
+            if (!/^#[0-9a-f]{6}$/i.test(color)) throw new WikiError(400, 'Cor inválida.');
+            attrs.color = color;
+          }
+          if (fontSize != null) {
+            const size = Number.parseInt(fontSize, 10);
+            if (!/^\d{1,2}px$/.test(fontSize) || size < 8 || size > 48) throw new WikiError(400, 'Tamanho de fonte inválido.');
+            attrs.fontSize = `${size}px`;
+          }
+          if (fontFamily != null) {
+            if (!TEXT_FONTS.has(fontFamily)) throw new WikiError(400, 'Fonte não permitida.');
+            attrs.fontFamily = fontFamily;
+          }
+          return { type: 'textStyle', attrs };
         }
         if (mark.type !== 'link') return { type: mark.type };
         const href = String(mark.attrs?.href || '').trim();
@@ -97,7 +190,7 @@ function extractWikiText(document) {
   function visit(node) {
     if (!node || typeof node !== 'object') return;
     if (node.type === 'text' && typeof node.text === 'string') parts.push(node.text);
-    else if (node.type === 'hardBreak' || node.type === 'paragraph' || node.type === 'heading' || node.type === 'listItem') parts.push('\n');
+    else if (node.type === 'hardBreak' || node.type === 'paragraph' || node.type === 'heading' || node.type === 'listItem' || node.type === 'tableCell' || node.type === 'tableHeader') parts.push('\n');
     for (const child of node.content || []) visit(child);
   }
   visit(document);
@@ -128,6 +221,10 @@ function parseId(value) {
 
 function editorName(user) {
   return String(user?.nome || user?.email || user?.id || 'Usuário').slice(0, 200);
+}
+
+function editorIdentity(user) {
+  return String(user?.id || user?.sub || user?.email || user?.nome || 'Usuário').slice(0, 200);
 }
 
 function respondError(res, error) {
@@ -171,6 +268,24 @@ async function ensureWikiSchema(pool) {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wiki_revisoes_pagina ON wiki_revisoes (pagina_id, versao DESC)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wiki_midias (
+      id SERIAL PRIMARY KEY,
+      mime_type VARCHAR(32) NOT NULL CHECK (mime_type IN ('image/png','image/jpeg','image/gif','image/webp')),
+      dados BYTEA NOT NULL,
+      tamanho INT NOT NULL CHECK (tamanho > 0 AND tamanho <= ${MAX_WIKI_IMAGE_BYTES}),
+      criado_por VARCHAR(200) NOT NULL,
+      criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wiki_pagina_midias (
+      pagina_id INT NOT NULL REFERENCES wiki_paginas(id) ON DELETE CASCADE,
+      midia_id INT NOT NULL REFERENCES wiki_midias(id) ON DELETE RESTRICT,
+      PRIMARY KEY (pagina_id, midia_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_wiki_pagina_midias_midia ON wiki_pagina_midias (midia_id, pagina_id)`);
   for (const page of WIKI_INITIAL_PAGES) {
     await pool.query(
       `INSERT INTO wiki_paginas (slug,titulo,categoria,resumo,conteudo,texto_busca,status,criado_por,atualizado_por)
@@ -206,6 +321,24 @@ async function saveRevision(client, page, user) {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
     [page.id, rows[0].versao, page.titulo, page.categoria, page.resumo, page.conteudo, page.status, editorName(user)],
   );
+}
+
+async function syncWikiMedia(client, pageId, document, user, restoredMediaIds = []) {
+  const mediaIds = collectWikiMediaIds(document);
+  if (mediaIds.length > 50) throw new WikiError(400, 'Um artigo pode conter no máximo 50 imagens.');
+  const { rows: available } = await client.query(
+    `SELECT id FROM wiki_midias
+     WHERE id = ANY($1::int[])
+       AND (criado_por=$2 OR id = ANY($4::int[]) OR EXISTS (
+         SELECT 1 FROM wiki_pagina_midias pm WHERE pm.pagina_id=$3 AND pm.midia_id=wiki_midias.id
+       ))`,
+    [mediaIds, editorIdentity(user), pageId, restoredMediaIds],
+  );
+  if (available.length !== mediaIds.length) throw new WikiError(400, 'Uma ou mais imagens não pertencem a este artigo ou não existem.');
+  await client.query('DELETE FROM wiki_pagina_midias WHERE pagina_id=$1', [pageId]);
+  for (const mediaId of mediaIds) {
+    await client.query('INSERT INTO wiki_pagina_midias (pagina_id,midia_id) VALUES ($1,$2)', [pageId, mediaId]);
+  }
 }
 
 function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
@@ -277,6 +410,93 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
     } catch (error) { respondError(res, error); }
   });
 
+  router.post('/midias/imagens', uploadFile(wikiImageUpload, 'imagem'), async (req, res) => {
+    try {
+      if (!isWikiWriter(req.user)) throw new WikiError(403, 'Seu perfil não pode enviar imagens.');
+      const buffer = req.file?.buffer;
+      if (!buffer?.length) throw new WikiError(400, 'Selecione uma imagem PNG, JPG, GIF ou WEBP.');
+      const mimeType = imageMimeFromBuffer(buffer);
+      if (!mimeType) throw new WikiError(400, 'O arquivo não é uma imagem PNG, JPG, GIF ou WEBP válida.');
+      const { rows } = await resolvePool().query(
+        'INSERT INTO wiki_midias (mime_type,dados,tamanho,criado_por) VALUES ($1,$2,$3,$4) RETURNING id',
+        [mimeType, buffer, buffer.length, editorIdentity(req.user)],
+      );
+      res.status(201).json({ mediaId: rows[0].id, mimeType });
+    } catch (error) { respondError(res, error); }
+  });
+
+  router.get('/midias/:id', async (req, res) => {
+    try {
+      const id = parseId(req.params.id);
+      const { rows } = await resolvePool().query(
+        `SELECT m.mime_type,m.dados
+         FROM wiki_midias m
+         WHERE m.id=$1 AND (
+           m.criado_por=$2 OR EXISTS (
+             SELECT 1 FROM wiki_pagina_midias pm JOIN wiki_paginas p ON p.id=pm.pagina_id
+             WHERE pm.midia_id=m.id AND ($3::boolean OR p.status='publicado')
+           )
+         )`,
+        [id, editorIdentity(req.user), isWikiWriter(req.user)],
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Imagem não encontrada.' });
+      res.set('Content-Type', rows[0].mime_type)
+        .set('X-Content-Type-Options', 'nosniff')
+        .set('Cache-Control', 'private, max-age=60')
+        .send(rows[0].dados);
+    } catch (error) { respondError(res, error); }
+  });
+
+  router.post('/importar', uploadFile(wikiMemoryUpload, 'documento'), async (req, res) => {
+    const mediaIds = [];
+    try {
+      if (!isWikiWriter(req.user)) throw new WikiError(403, 'Seu perfil não pode importar documentos.');
+      if (!req.file?.buffer?.length) throw new WikiError(400, 'Selecione um arquivo PDF ou DOCX.');
+      const filename = String(req.file.originalname || '').slice(0, 255);
+      const extension = filename.split('.').pop()?.toLowerCase();
+      let document;
+      let avisos = [];
+
+      if (extension === 'pdf' && req.file.buffer.subarray(0, 5).toString('ascii') === '%PDF-') {
+        document = await convertPdfToWikiDocument(req.file.buffer);
+      } else if (extension === 'docx' && req.file.buffer.subarray(0, 4).equals(Buffer.from('504b0304', 'hex'))) {
+        const result = await convertDocxToWikiDocument(req.file.buffer, async (buffer, declaredMime) => {
+          if (mediaIds.length >= 50) throw new WikiError(400, 'O documento contém mais de 50 imagens.');
+          if (buffer.length > MAX_WIKI_IMAGE_BYTES) throw new WikiError(413, 'Uma imagem do documento excede 5 MB.');
+          const mimeType = imageMimeFromBuffer(buffer);
+          if (!mimeType || mimeType !== declaredMime) throw new WikiError(400, 'Uma imagem incorporada ao DOCX não é válida.');
+          const { rows } = await resolvePool().query(
+            'INSERT INTO wiki_midias (mime_type,dados,tamanho,criado_por) VALUES ($1,$2,$3,$4) RETURNING id',
+            [mimeType, buffer, buffer.length, editorIdentity(req.user)],
+          );
+          mediaIds.push(rows[0].id);
+          return rows[0].id;
+        });
+        document = result.document;
+        avisos = result.avisos;
+      } else {
+        throw new WikiError(415, 'Formato não suportado. Envie PDF ou Word moderno (.docx).');
+      }
+
+      document = sanitizeWikiDocument(document);
+      const basename = filename.replace(/\.(pdf|docx)$/i, '').replace(/[\u0000-\u001f]/g, '').trim();
+      res.json({
+        titulo: basename.slice(0, 180) || 'Documento importado',
+        categoria: 'Importado',
+        resumo: '',
+        conteudo: document,
+        avisos,
+      });
+    } catch (error) {
+      if (mediaIds.length) {
+        await resolvePool().query('DELETE FROM wiki_midias WHERE id = ANY($1::int[])', [mediaIds]).catch(() => {});
+      }
+      if (error instanceof WikiError) return respondError(res, error);
+      console.error('[Wiki] erro ao importar documento:', error?.message || error);
+      return res.status(422).json({ error: 'Não foi possível converter o documento. Verifique se o PDF/DOCX está íntegro.' });
+    }
+  });
+
   router.get('/pages/:slug', async (req, res) => {
     try {
       const { rows } = await resolvePool().query(
@@ -299,15 +519,19 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
       const resumo = optionalText(req.body?.resumo, 500);
       const conteudo = sanitizeWikiDocument(req.body?.conteudo);
       const autor = editorName(req.user);
-      const { rows } = await resolvePool().query(
-        `INSERT INTO wiki_paginas (slug,titulo,categoria,resumo,conteudo,texto_busca,criado_por,atualizado_por)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$7)
-         ON CONFLICT (slug) DO NOTHING
-         RETURNING id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em`,
-        [slug, titulo, categoria, resumo, conteudo, extractWikiText(conteudo), autor],
-      );
-      if (!rows.length) throw new WikiError(409, 'Já existe um artigo com esse título.');
-      res.status(201).json(rows[0]);
+      const page = await inTransaction(resolvePool(), async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO wiki_paginas (slug,titulo,categoria,resumo,conteudo,texto_busca,criado_por,atualizado_por)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$7)
+           ON CONFLICT (slug) DO NOTHING
+           RETURNING id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em`,
+          [slug, titulo, categoria, resumo, conteudo, extractWikiText(conteudo), autor],
+        );
+        if (!rows.length) throw new WikiError(409, 'Já existe um artigo com esse título.');
+        await syncWikiMedia(client, rows[0].id, conteudo, req.user);
+        return rows[0];
+      });
+      res.status(201).json(page);
     } catch (error) { respondError(res, error); }
   });
 
@@ -330,6 +554,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
            RETURNING id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em`,
           [id, titulo, categoria, resumo, conteudo, extractWikiText(conteudo), autor],
         );
+        await syncWikiMedia(client, id, conteudo, req.user);
         return updated[0];
       });
       res.json(page);
@@ -374,6 +599,16 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
     } catch (error) { respondError(res, error); }
   });
 
+  router.delete('/pages/:id', async (req, res) => {
+    try {
+      if (!isWikiWriter(req.user)) throw new WikiError(403, 'Seu perfil não pode excluir artigos.');
+      const id = parseId(req.params.id);
+      const { rows } = await resolvePool().query('DELETE FROM wiki_paginas WHERE id=$1 RETURNING id', [id]);
+      if (!rows.length) throw new WikiError(404, 'Artigo não encontrado.');
+      res.json({ ok: true, id: rows[0].id });
+    } catch (error) { respondError(res, error); }
+  });
+
   router.get('/pages/:id/revisoes', async (req, res) => {
     try {
       if (!isWikiWriter(req.user)) throw new WikiError(403, 'Seu perfil não pode consultar o histórico.');
@@ -405,6 +640,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
            WHERE id=$1 RETURNING id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em`,
           [id, revision.titulo, revision.categoria, revision.resumo, revision.conteudo, extractWikiText(revision.conteudo), editorName(req.user)],
         );
+        await syncWikiMedia(client, id, revision.conteudo, req.user, collectWikiMediaIds(revision.conteudo));
         return rows[0];
       });
       res.json(page);
