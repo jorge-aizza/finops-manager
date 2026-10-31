@@ -22,6 +22,10 @@ vi.mock('./views/PublicGenieCotasView', () => ({
   default: () => <div data-testid="public-genie-cotas">cota genie</div>,
 }))
 
+vi.mock('./views/PublicWikiView', () => ({
+  default: () => <div data-testid="public-wiki">wiki pública</div>,
+}))
+
 function makeConfig(overrides: Partial<PortalConfig> = {}): PortalConfig {
   return {
     titulo: 'Portal FinOps Vivo', descricao: 'Estime seus custos Azure.',
@@ -56,6 +60,18 @@ describe('PortalApp', () => {
     renderWithClient()
     expect(screen.getByText('Carregando portal...')).toBeInTheDocument()
   });
+
+    it('inclui a Wiki pública como serviço configurável e abre sua rota', async () => {
+      const user = userEvent.setup()
+      vi.mocked(portalApi.getPortalConfig).mockResolvedValue(makeConfig({ wiki_ativa: true }))
+      renderWithClient()
+
+      expect(await screen.findByTestId('portal-home')).toBeInTheDocument()
+      expect(screen.getByTestId('portal-card-wiki')).toHaveAttribute('href', '#/wiki')
+      await user.click(screen.getByRole('link', { name: 'Wiki' }))
+      expect(await screen.findByTestId('public-wiki')).toBeInTheDocument()
+    });
+
 
   it('mostra "portal indisponível" quando a config falha (portal desativado)', async () => {
     vi.mocked(portalApi.getPortalConfig).mockRejectedValue(new Error('Portal desativado'))

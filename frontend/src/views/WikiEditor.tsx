@@ -23,6 +23,8 @@ export default function WikiEditor({ initial, saving, onCancel, onSave }: WikiEd
   const [categoria, setCategoria] = useState(initial?.categoria || 'Geral')
   const [resumo, setResumo] = useState(initial?.resumo || '')
   const [conteudo, setConteudo] = useState<WikiDocument>(initial?.conteudo || EMPTY_DOCUMENT)
+  const [portalPublico, setPortalPublico] = useState(initial?.portal_publico || false)
+  const [liberarNovasImagens, setLiberarNovasImagens] = useState(false)
   const [corTexto, setCorTexto] = useState('#1f2937')
   const [importando, setImportando] = useState(false)
   const [uploadingImage, setUploadingImage] = useState(false)
@@ -60,7 +62,7 @@ export default function WikiEditor({ initial, saving, onCancel, onSave }: WikiEd
     for (const file of filesToUpload) {
       try {
         const { mediaId } = await uploadWikiImage(file)
-        imageNodes.push({ type: 'wikiImage', attrs: { mediaId, alt: file.name.replace(/\.[^.]+$/, '').slice(0, 300) } })
+        imageNodes.push({ type: 'wikiImage', attrs: { mediaId, alt: file.name.replace(/\.[^.]+$/, '').slice(0, 300), portalPublico: liberarNovasImagens } })
       } catch {
         failedFiles.push(file.name)
       }
@@ -101,7 +103,7 @@ export default function WikiEditor({ initial, saving, onCancel, onSave }: WikiEd
 
   function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    onSave({ titulo, categoria, resumo, conteudo })
+    onSave({ titulo, categoria, resumo, conteudo, portal_publico: portalPublico })
   }
 
   return (
@@ -133,6 +135,10 @@ export default function WikiEditor({ initial, saving, onCancel, onSave }: WikiEd
           <input maxLength={500} value={resumo} onChange={(event) => setResumo(event.target.value)} placeholder="Opcional" />
         </label>
       </div>
+      <label className="wiki-public-toggle">
+        <input type="checkbox" checked={portalPublico} onChange={(event) => setPortalPublico(event.target.checked)} />
+        <span><strong>Disponibilizar artigo no Portal Público</strong><small>O artigo precisa estar publicado; imagens só aparecem se forem liberadas individualmente.</small></span>
+      </label>
 
       <div className="wiki-editor-frame">
         <div className="wiki-editor-toolbar" role="toolbar" aria-label="Formatação do artigo">
@@ -186,6 +192,10 @@ export default function WikiEditor({ initial, saving, onCancel, onSave }: WikiEd
             <button type="button" title="Inserir link" aria-label="Inserir link" onClick={applyLink}>↗</button>
           </div>
           <div className="wiki-toolbar-group">
+            <label className="wiki-new-image-public-toggle">
+              <input type="checkbox" checked={liberarNovasImagens} onChange={(event) => setLiberarNovasImagens(event.target.checked)} />
+              Liberar novas imagens no portal
+            </label>
             <button type="button" title="Inserir capturas ou imagens" aria-label="Inserir imagens" disabled={uploadingImage} onClick={() => document.getElementById('wiki-image-input')?.click()}>{uploadingImage ? 'Enviando…' : 'Inserir imagens'}</button>
             <button type="button" title="Importar PDF ou Word" aria-label="Importar PDF ou Word" disabled={importando} onClick={() => document.getElementById('wiki-import-input')?.click()}>{importando ? 'Importando…' : 'Importar PDF/Word'}</button>
           </div>

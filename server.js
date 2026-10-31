@@ -61,7 +61,7 @@ const fs       = require('fs');
 const jwksRsa  = require('jwks-rsa');
 const nodemailer = require('nodemailer');
 const { diasOrfaoNaExclusao } = require('./savingOrfaos');
-const { createWikiRouter } = require('./wiki');
+const { createPublicWikiRouter, createWikiRouter } = require('./wiki');
 const {
   registrarMesCustoImportado,
   reconstruirMesCustoDiario,
@@ -4400,6 +4400,8 @@ async function _getPortalConfig() {
     // Azure Retail Prices API, já sincronizado em Configurações → Price List) — não é billing
     // nem dado do tenant, então não precisa de allowlist nem identificação, só liga/desliga.
     price_simulator_ativo: false,
+    // Wiki pública exige liberação própria do artigo e está desligada por padrão.
+    wiki_ativa: false,
     // Imposto sobre custo coletado (2026-09-28): DOIS impostos independentes — Serviço Microsoft
     // e Marketplace (`publisher_type` em azure_costs distingue os dois; medido no dado real que
     // Marketplace é ~36% do custo total, não é um caso de borda). Cada um só se aplica se
@@ -4415,6 +4417,8 @@ async function _getPortalConfig() {
     return { ..._defaults, ...JSON.parse(r.rows[0].value) };
   } catch (_) { return _defaults; }
 }
+
+app.use('/api/public/wiki', createPublicWikiRouter({ getPool: () => pool, getPortalConfig: _getPortalConfig }));
 
 // Imposto adicional sobre custo coletado (2026-09-28): dois impostos independentes — Serviço
 // Microsoft e Marketplace (`publisher_type` em azure_costs) — cada um só aplicado se `ativo`,
@@ -4487,7 +4491,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
             taxa_imposto, taxa_cond, taxa_gordura, horario_livre, solicitar_identificacao,
             permitir_selecao_periodo, permitir_selecao_recursos,
             orfaos_ativo, orfaos_subscription_ids, orfaos_resource_groups, orfaos_categorias, calculadora_ativa,
-            genie_cotas_ativo, price_simulator_ativo, imposto_microsoft, imposto_marketplace } = req.body;
+            genie_cotas_ativo, price_simulator_ativo, wiki_ativa, imposto_microsoft, imposto_marketplace } = req.body;
     // Recursos órfãos no portal: allowlist explícita. Listas sempre normalizadas (strings não vazias);
     // categorias filtradas contra as 8 válidas — nada vindo do cliente entra sem validação.
     const _strList = (v) => (Array.isArray(v) ? v : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 2000);
@@ -4501,6 +4505,7 @@ app.post('/api/admin/portal-config', authMiddleware, dbMiddleware, async (req, r
       orfaos_categorias: _strList(orfaos_categorias).filter((c) => Object.prototype.hasOwnProperty.call(_DESP_LABEL_XLSX, c)),
       genie_cotas_ativo: !!genie_cotas_ativo,
       price_simulator_ativo: !!price_simulator_ativo,
+      wiki_ativa: !!wiki_ativa,
       taxa_imposto:           taxa_imposto  != null ? parseFloat(taxa_imposto)  : 18.65,
       taxa_cond:              taxa_cond     != null ? parseFloat(taxa_cond)     : 13.00,
       taxa_gordura:           taxa_gordura  != null ? parseFloat(taxa_gordura)  : 0,
@@ -4600,7 +4605,8 @@ app.get('/api/public/calculadora/config', _portalMiddleware, (req, res) => {
              calculadora_ativa: req.portalCfg.calculadora_ativa !== false,
              orfaos_ativo: !!req.portalCfg.orfaos_ativo,
              genie_cotas_ativo: !!req.portalCfg.genie_cotas_ativo,
-             price_simulator_ativo: !!req.portalCfg.price_simulator_ativo });
+             price_simulator_ativo: !!req.portalCfg.price_simulator_ativo,
+             wiki_ativa: !!req.portalCfg.wiki_ativa });
 });
 
 // ── GET /api/public/orfaos ────────────────────────────────────────────────────

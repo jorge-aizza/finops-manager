@@ -5,10 +5,11 @@ import PublicCalculadoraView from './views/PublicCalculadoraView'
 import PublicOrfaosView from './views/PublicOrfaosView'
 import PublicGenieCotasView from './views/PublicGenieCotasView'
 import PublicPriceSimulatorView from './views/PublicPriceSimulatorView'
+import PublicWikiView from './views/PublicWikiView'
 import PortalHome from './components/PortalHome'
 import PortalHero from './components/PortalHero'
 import FinopsLogo from './components/FinopsLogo'
-import { IconCalculadora, IconInicio, IconOrfaos, IconCotaGenie, IconSimulador } from './components/portalIcons'
+import { IconCalculadora, IconInicio, IconOrfaos, IconCotaGenie, IconSimulador, IconWiki } from './components/portalIcons'
 import { hrefDe, usePortalRoute, type ServicoId } from './lib/portalRoute'
 import { consumePortalEntraHandoff, setPortalEntraToken } from './api/portalEntra'
 import type { PortalConfig, PortalIdentSessao } from './types/portal'
@@ -48,6 +49,12 @@ const SERVICOS: ServicoDef[] = [
     descricao: 'Simule o custo de um recurso Azure antes de provisioná-lo, usando o catálogo público de preços.',
     ativo: (cfg) => !!cfg.price_simulator_ativo,
     icone: (size) => <IconSimulador size={size} />,
+  },
+  {
+    id: 'wiki', titulo: 'Wiki', subtitulo: 'Base de conhecimento', etiqueta: 'Documentação',
+    descricao: 'Consulte os artigos de conhecimento liberados pelo time FinOps.',
+    ativo: (cfg) => !!cfg.wiki_ativa,
+    icone: (size) => <IconWiki size={size} />,
   },
 ]
 
@@ -278,6 +285,7 @@ export default function PortalApp() {
       {viewAtual === 'orfaos' && <PublicOrfaosView />}
       {viewAtual === 'genie-cotas' && <PublicGenieCotasView />}
       {viewAtual === 'price-simulator' && <PublicPriceSimulatorView />}
+      {viewAtual === 'wiki' && <PublicWikiView />}
       {viewAtual === 'nenhum' && (
         <div id="portal-inactive" style={{ display: 'block' }}>
           <div className="pi-icon">🔒</div>

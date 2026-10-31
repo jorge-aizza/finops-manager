@@ -36,6 +36,7 @@ export interface PortalConfig {
   // Simulador de Preços — busca sobre o catálogo público da Azure (azure_price_list), sem
   // allowlist (dado público, não é billing do tenant).
   price_simulator_ativo?: boolean
+  wiki_ativa?: boolean
 }
 
 export interface PortalIdentSessao {

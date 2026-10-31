@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import WikiEditor from './WikiEditor'
 import * as wikiApi from '../api/wiki'
+import type { WikiPage } from '../types/wiki'
 
 vi.mock('../api/wiki')
 
@@ -104,6 +105,26 @@ describe('WikiEditor', () => {
     const saved = onSave.mock.calls[0][0]
     const serialized = JSON.stringify(saved.conteudo)
     expect(serialized).toContain('"mediaId":42')
+  })
+
+  it('salva a liberação do artigo e de cada imagem para o Portal Público', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn()
+    const initial: WikiPage = {
+      id: 8, slug: 'publicacao', titulo: 'Artigo liberado', categoria: 'Geral', resumo: null,
+      status: 'publicado', portal_publico: false, atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z',
+      criado_por: 'FinOps', criado_em: '2026-10-30T00:00:00Z',
+      conteudo: { type: 'doc', content: [{ type: 'wikiImage', attrs: { mediaId: 42, alt: 'Diagrama', portalPublico: false } }] },
+    }
+    render(<WikiEditor initial={initial} saving={false} onCancel={() => {}} onSave={onSave} />)
+
+    await user.click(screen.getByRole('checkbox', { name: /Disponibilizar artigo no Portal Público/ }))
+    await user.click(await screen.findByLabelText('Liberar no portal público'))
+    await user.click(screen.getByRole('button', { name: 'Salvar alterações' }))
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+    expect(onSave.mock.calls[0][0]).toMatchObject({ portal_publico: true })
+    expect(JSON.stringify(onSave.mock.calls[0][0].conteudo)).toContain('"portalPublico":true')
   })
 
   it('insere várias capturas selecionadas na ordem dos arquivos', async () => {

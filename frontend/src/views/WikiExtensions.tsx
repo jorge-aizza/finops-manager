@@ -13,7 +13,7 @@ import { TableHeader } from '@tiptap/extension-table-header'
 import Link from '@tiptap/extension-link'
 import { fetchWikiImage } from '../api/wiki'
 
-function WikiImageNodeView({ node }: NodeViewProps) {
+function WikiImageNodeView({ node, updateAttributes, editor, fetchImage }: NodeViewProps & { fetchImage: typeof fetchWikiImage }) {
   const [src, setSrc] = useState('')
   const mediaId = Number(node.attrs?.mediaId)
   const alt = String(node.attrs?.alt || '')
@@ -23,7 +23,7 @@ function WikiImageNodeView({ node }: NodeViewProps) {
     let active = true
     let objectUrl = ''
     setSrc('')
-    void fetchWikiImage(mediaId).then((blob) => {
+    void fetchImage(mediaId).then((blob) => {
       objectUrl = URL.createObjectURL(blob)
       if (active) setSrc(objectUrl)
       else URL.revokeObjectURL(objectUrl)
@@ -32,38 +32,47 @@ function WikiImageNodeView({ node }: NodeViewProps) {
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [mediaId])
+  }, [fetchImage, mediaId])
 
   return (
     <NodeViewWrapper className="wiki-image-node">
       {src ? <img src={src} alt={alt} width={width} draggable={false} contentEditable={false} /> : <span className="wiki-image-loading">Carregando imagem...</span>}
+      {editor.isEditable && (
+        <label className="wiki-image-public-toggle" onMouseDown={(event) => event.stopPropagation()}>
+          <input type="checkbox" checked={node.attrs.portalPublico === true} onChange={(event) => updateAttributes({ portalPublico: event.target.checked })} />
+          Liberar no portal público
+        </label>
+      )}
     </NodeViewWrapper>
   )
 }
 
-const WikiImage = Node.create({
-  name: 'wikiImage',
-  group: 'block',
-  atom: true,
-  addAttributes() {
-    return {
-      mediaId: { default: null },
-      alt: { default: '' },
-      width: { default: null },
-    }
-  },
-  parseHTML() {
-    return [{ tag: 'img[data-wiki-media-id]' }]
-  },
-  renderHTML({ HTMLAttributes }) {
-    return ['img', mergeAttributes(HTMLAttributes, { 'data-wiki-media-id': HTMLAttributes.mediaId })]
-  },
-  addNodeView() {
-    return ReactNodeViewRenderer(WikiImageNodeView)
-  },
-})
+function createWikiImageExtension(fetchImage: typeof fetchWikiImage) {
+  return Node.create({
+    name: 'wikiImage',
+    group: 'block',
+    atom: true,
+    addAttributes() {
+      return {
+        mediaId: { default: null },
+        alt: { default: '' },
+        width: { default: null },
+        portalPublico: { default: false },
+      }
+    },
+    parseHTML() {
+      return [{ tag: 'img[data-wiki-media-id]' }]
+    },
+    renderHTML({ HTMLAttributes }) {
+      return ['img', mergeAttributes(HTMLAttributes, { 'data-wiki-media-id': HTMLAttributes.mediaId })]
+    },
+    addNodeView() {
+      return ReactNodeViewRenderer((props) => <WikiImageNodeView {...props} fetchImage={fetchImage} />)
+    },
+  })
+}
 
-export function createWikiExtensions() {
+export function createWikiExtensions(fetchImage: typeof fetchWikiImage = fetchWikiImage) {
   return [
     StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: false, underline: false }),
     Underline,
@@ -77,6 +86,6 @@ export function createWikiExtensions() {
     TableRow,
     TableHeader,
     TableCell,
-    WikiImage,
+    createWikiImageExtension(fetchImage),
   ]
 }

@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const express = require('express');
-const { createWikiRouter, extractWikiText, isWikiWriter, sanitizeWikiDocument, slugifyWikiTitle, WIKI_INITIAL_PAGES } = require('../wiki');
+const { createPublicWikiRouter, createWikiRouter, extractWikiText, isWikiWriter, sanitizeWikiDocument, slugifyWikiTitle, WIKI_INITIAL_PAGES } = require('../wiki');
 
 test('slug da Wiki normaliza acentos e remove caracteres fora do caminho', () => {
   assert.equal(slugifyWikiTitle('  Guia de FinOps: Ação & Custo  '), 'guia-de-finops-acao-custo');
@@ -235,4 +235,58 @@ test('upload de imagem exige escritor e a mídia fica isolada pela identidade do
   assert.equal(ownerRead.headers.get('x-content-type-options'), 'nosniff');
   const otherUserRead = await fetch(`${url}/21`, { headers: { Authorization: 'Bearer reader' } });
   assert.equal(otherUserRead.status, 404);
+});
+
+test('Wiki pública exige configuração ativa e só serve artigo e imagens liberados', async (t) => {
+  const image = { mime_type: 'image/png', dados: Buffer.from('89504e470d0a1a0a', 'hex') };
+  const document = {
+    type: 'doc',
+    content: [
+      { type: 'wikiImage', attrs: { mediaId: 21, alt: 'Liberada', portalPublico: true } },
+      { type: 'wikiImage', attrs: { mediaId: 22, alt: 'Privada', portalPublico: false } },
+    ],
+  };
+  let config = { ativo: true, wiki_ativa: false };
+  const queries = [];
+  const pool = {
+    async query(sql, values = []) {
+      queries.push(sql);
+      if (sql.includes('SELECT p.slug')) {
+        return { rows: [{ slug: 'guia', titulo: 'Guia', categoria: 'Geral', resumo: null, atualizado_em: '2026-10-30T00:00:00Z' }] };
+      }
+      if (sql.includes('SELECT categoria,COUNT(*)::int')) return { rows: [{ categoria: 'Geral', total: 1 }] };
+      if (sql.includes('SELECT slug,titulo,categoria,resumo,conteudo,atualizado_em FROM wiki_paginas')) {
+        return { rows: [{ slug: 'guia', titulo: 'Guia', categoria: 'Geral', resumo: null, conteudo: document, atualizado_em: '2026-10-30T00:00:00Z' }] };
+      }
+      if (sql.includes('SELECT m.mime_type,m.dados FROM wiki_midias')) return values[0] === 21 ? { rows: [image] } : { rows: [] };
+      return { rows: [] };
+    },
+  };
+  const app = express();
+  app.use('/api/public/wiki', createPublicWikiRouter({ pool, getPortalConfig: async () => config }));
+  const server = app.listen(0);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}/api/public/wiki`;
+
+  const disabled = await fetch(`${base}/pages`);
+  assert.equal(disabled.status, 404);
+  assert.equal(queries.length, 0);
+
+  config = { ...config, wiki_ativa: true };
+  const pages = await fetch(`${base}/pages`);
+  assert.equal(pages.status, 200);
+  assert.equal((await pages.json())[0].slug, 'guia');
+  assert.match(queries.at(-1), /p\.status='publicado'.*p\.portal_publico=true/);
+
+  const page = await fetch(`${base}/pages/guia`);
+  const publicPage = await page.json();
+  assert.equal(publicPage.conteudo.content[0].attrs.portalPublico, true);
+  assert.equal(publicPage.conteudo.content[1].content[0].text, 'Imagem não disponibilizada no portal público.');
+
+  const allowedImage = await fetch(`${base}/midias/21`);
+  assert.equal(allowedImage.status, 200);
+  assert.equal(allowedImage.headers.get('cache-control'), 'no-store');
+  const privateImage = await fetch(`${base}/midias/22`);
+  assert.equal(privateImage.status, 404);
 });

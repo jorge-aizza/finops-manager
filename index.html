@@ -3921,6 +3921,13 @@
                     <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Busca sobre o catálogo público de preços da Azure (já sincronizado em Configurações → Price List) — simula o custo de um recurso antes de provisioná-lo. Dado público, sem allowlist.</div>
                   </div>
                 </label>
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px;color:var(--text);">
+                  <input type="checkbox" id="portal-cfg-wiki-ativo" onchange="atualizarAvisoServicosPortal()" style="width:14px;height:14px;accent-color:var(--accent);">
+                  <div>
+                    <span style="font-weight:600;">Wiki pública</span>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Exibe somente artigos publicados e liberados individualmente na Wiki privada. Imagens também precisam ser liberadas no editor.</div>
+                  </div>
+                </label>
                 <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
                   Recursos Órfãos é ligado mais abaixo, no card “Recursos Órfãos no Portal”. Com <strong style="color:var(--text-dim);">dois ou mais serviços ativos</strong> o portal abre numa página inicial com um card por serviço; com um só, abre direto nele.
                 </div>

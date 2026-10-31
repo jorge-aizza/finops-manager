@@ -2,6 +2,7 @@
 
 const express = require('express');
 const multer = require('multer');
+const rateLimit = require('express-rate-limit');
 const WIKI_INITIAL_PAGES = require('./wikiConteudoInicial');
 const { convertDocxToWikiDocument, convertPdfToWikiDocument } = require('./wikiImport');
 
@@ -47,14 +48,23 @@ function imageMimeFromBuffer(buffer) {
 }
 
 function collectWikiMediaIds(document) {
+  return collectWikiMedia(document).map((image) => image.mediaId);
+}
+
+function collectWikiMedia(document) {
   const ids = new Set();
+  const images = new Map();
   function visit(node) {
     if (!node || typeof node !== 'object') return;
-    if (node.type === 'wikiImage' && Number.isSafeInteger(Number(node.attrs?.mediaId))) ids.add(Number(node.attrs.mediaId));
+    if (node.type === 'wikiImage' && Number.isSafeInteger(Number(node.attrs?.mediaId))) {
+      const mediaId = Number(node.attrs.mediaId);
+      ids.add(mediaId);
+      images.set(mediaId, images.get(mediaId) || node.attrs?.portalPublico === true);
+    }
     for (const child of node.content || []) visit(child);
   }
   visit(document);
-  return [...ids];
+  return [...ids].map((mediaId) => ({ mediaId, portalPublico: images.get(mediaId) === true }));
 }
 
 class WikiError extends Error {
@@ -134,7 +144,7 @@ function sanitizeWikiDocument(document) {
       if (!Number.isSafeInteger(mediaId) || mediaId < 1 || alt.length > 300 || (width !== null && (!Number.isInteger(width) || width < 80 || width > 1600))) {
         throw new WikiError(400, 'Imagem inválida.');
       }
-      clean.attrs = { mediaId, alt, width };
+      clean.attrs = { mediaId, alt, width, portalPublico: node.attrs?.portalPublico === true };
     }
 
     if (Array.isArray(node.marks)) {
@@ -243,6 +253,7 @@ async function ensureWikiSchema(pool) {
       resumo VARCHAR(500),
       conteudo JSONB NOT NULL,
       texto_busca TEXT NOT NULL DEFAULT '',
+      portal_publico BOOLEAN NOT NULL DEFAULT false,
       status VARCHAR(16) NOT NULL DEFAULT 'rascunho' CHECK (status IN ('rascunho', 'publicado', 'arquivado')),
       criado_por VARCHAR(200) NOT NULL,
       atualizado_por VARCHAR(200) NOT NULL,
@@ -250,7 +261,9 @@ async function ensureWikiSchema(pool) {
       atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await pool.query(`ALTER TABLE wiki_paginas ADD COLUMN IF NOT EXISTS portal_publico BOOLEAN NOT NULL DEFAULT false`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wiki_paginas_categoria ON wiki_paginas (categoria, atualizado_em DESC) WHERE status <> 'arquivado'`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_wiki_paginas_publicas ON wiki_paginas (atualizado_em DESC) WHERE status='publicado' AND portal_publico=true`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wiki_paginas_busca ON wiki_paginas USING GIN (${SEARCH_VECTOR}) WHERE status <> 'arquivado'`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS wiki_revisoes (
@@ -262,11 +275,13 @@ async function ensureWikiSchema(pool) {
       resumo VARCHAR(500),
       conteudo JSONB NOT NULL,
       status VARCHAR(16) NOT NULL,
+      portal_publico BOOLEAN NOT NULL DEFAULT false,
       alterado_por VARCHAR(200) NOT NULL,
       alterado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (pagina_id, versao)
     )
   `);
+  await pool.query(`ALTER TABLE wiki_revisoes ADD COLUMN IF NOT EXISTS portal_publico BOOLEAN NOT NULL DEFAULT false`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wiki_revisoes_pagina ON wiki_revisoes (pagina_id, versao DESC)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS wiki_midias (
@@ -282,9 +297,11 @@ async function ensureWikiSchema(pool) {
     CREATE TABLE IF NOT EXISTS wiki_pagina_midias (
       pagina_id INT NOT NULL REFERENCES wiki_paginas(id) ON DELETE CASCADE,
       midia_id INT NOT NULL REFERENCES wiki_midias(id) ON DELETE RESTRICT,
+      portal_publico BOOLEAN NOT NULL DEFAULT false,
       PRIMARY KEY (pagina_id, midia_id)
     )
   `);
+  await pool.query(`ALTER TABLE wiki_pagina_midias ADD COLUMN IF NOT EXISTS portal_publico BOOLEAN NOT NULL DEFAULT false`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wiki_pagina_midias_midia ON wiki_pagina_midias (midia_id, pagina_id)`);
   for (const page of WIKI_INITIAL_PAGES) {
     await pool.query(
@@ -317,15 +334,16 @@ async function saveRevision(client, page, user) {
     [page.id],
   );
   await client.query(
-    `INSERT INTO wiki_revisoes (pagina_id, versao, titulo, categoria, resumo, conteudo, status, alterado_por)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [page.id, rows[0].versao, page.titulo, page.categoria, page.resumo, page.conteudo, page.status, editorName(user)],
+    `INSERT INTO wiki_revisoes (pagina_id, versao, titulo, categoria, resumo, conteudo, status, portal_publico, alterado_por)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [page.id, rows[0].versao, page.titulo, page.categoria, page.resumo, page.conteudo, page.status, !!page.portal_publico, editorName(user)],
   );
 }
 
 async function syncWikiMedia(client, pageId, document, user, restoredMediaIds = []) {
-  const mediaIds = collectWikiMediaIds(document);
-  if (mediaIds.length > 50) throw new WikiError(400, 'Um artigo pode conter no máximo 50 imagens.');
+  const media = collectWikiMedia(document);
+  const mediaIds = media.map((image) => image.mediaId);
+  if (media.length > 50) throw new WikiError(400, 'Um artigo pode conter no máximo 50 imagens.');
   const { rows: available } = await client.query(
     `SELECT id FROM wiki_midias
      WHERE id = ANY($1::int[])
@@ -336,8 +354,8 @@ async function syncWikiMedia(client, pageId, document, user, restoredMediaIds = 
   );
   if (available.length !== mediaIds.length) throw new WikiError(400, 'Uma ou mais imagens não pertencem a este artigo ou não existem.');
   await client.query('DELETE FROM wiki_pagina_midias WHERE pagina_id=$1', [pageId]);
-  for (const mediaId of mediaIds) {
-    await client.query('INSERT INTO wiki_pagina_midias (pagina_id,midia_id) VALUES ($1,$2)', [pageId, mediaId]);
+  for (const image of media) {
+    await client.query('INSERT INTO wiki_pagina_midias (pagina_id,midia_id,portal_publico) VALUES ($1,$2,$3)', [pageId, image.mediaId, image.portalPublico]);
   }
 }
 
@@ -347,7 +365,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
   let schemaPromise;
   let schemaPool;
   router.use(authMiddleware, dbMiddleware);
-  router.use(async (_req, res, next) => {
+  router.use(async (req, res, next) => {
     try {
       const activePool = resolvePool();
       if (!activePool) throw new WikiError(503, 'Banco não configurado.');
@@ -387,7 +405,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
         ? `ts_rank(${SEARCH_VECTOR}, websearch_to_tsquery('portuguese', $1)) DESC, p.atualizado_em DESC`
         : 'p.atualizado_em DESC';
       const { rows } = await resolvePool().query(
-        `SELECT p.id,p.slug,p.titulo,p.categoria,p.resumo,p.status,p.atualizado_por,p.atualizado_em,
+        `SELECT p.id,p.slug,p.titulo,p.categoria,p.resumo,p.status,p.portal_publico,p.atualizado_por,p.atualizado_em,
                 ${relevancia} AS relevancia
          FROM wiki_paginas p WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 200`,
         params,
@@ -500,7 +518,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
   router.get('/pages/:slug', async (req, res) => {
     try {
       const { rows } = await resolvePool().query(
-        `SELECT id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em
+        `SELECT id,slug,titulo,categoria,resumo,conteudo,status,portal_publico,criado_por,atualizado_por,criado_em,atualizado_em
          FROM wiki_paginas WHERE slug=$1 AND status <> 'arquivado' AND ($2 = true OR status = 'publicado')`,
         [String(req.params.slug).slice(0, 160), isWikiWriter(req.user)],
       );
@@ -521,11 +539,11 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
       const autor = editorName(req.user);
       const page = await inTransaction(resolvePool(), async (client) => {
         const { rows } = await client.query(
-          `INSERT INTO wiki_paginas (slug,titulo,categoria,resumo,conteudo,texto_busca,criado_por,atualizado_por)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$7)
+          `INSERT INTO wiki_paginas (slug,titulo,categoria,resumo,conteudo,texto_busca,portal_publico,criado_por,atualizado_por)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
            ON CONFLICT (slug) DO NOTHING
-           RETURNING id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em`,
-          [slug, titulo, categoria, resumo, conteudo, extractWikiText(conteudo), autor],
+           RETURNING id,slug,titulo,categoria,resumo,conteudo,status,portal_publico,criado_por,atualizado_por,criado_em,atualizado_em`,
+          [slug, titulo, categoria, resumo, conteudo, extractWikiText(conteudo), req.body?.portal_publico === true, autor],
         );
         if (!rows.length) throw new WikiError(409, 'Já existe um artigo com esse título.');
         await syncWikiMedia(client, rows[0].id, conteudo, req.user);
@@ -539,6 +557,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
     try {
       if (!isWikiWriter(req.user)) throw new WikiError(403, 'Seu perfil não pode editar artigos.');
       const id = parseId(req.params.id);
+      const portalPublico = req.body?.portal_publico === true;
       const titulo = requiredText(req.body?.titulo, 'Título', 180);
       const categoria = requiredText(req.body?.categoria || 'Geral', 'Categoria', 100);
       const resumo = optionalText(req.body?.resumo, 500);
@@ -549,10 +568,10 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
         if (!rows.length || rows[0].status === 'arquivado') throw new WikiError(404, 'Artigo não encontrado.');
         await saveRevision(client, rows[0], req.user);
         const { rows: updated } = await client.query(
-          `UPDATE wiki_paginas SET titulo=$2,categoria=$3,resumo=$4,conteudo=$5,texto_busca=$6,atualizado_por=$7,atualizado_em=NOW()
+          `UPDATE wiki_paginas SET titulo=$2,categoria=$3,resumo=$4,conteudo=$5,texto_busca=$6,portal_publico=$7,atualizado_por=$8,atualizado_em=NOW()
            WHERE id=$1
-           RETURNING id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em`,
-          [id, titulo, categoria, resumo, conteudo, extractWikiText(conteudo), autor],
+           RETURNING id,slug,titulo,categoria,resumo,conteudo,status,portal_publico,criado_por,atualizado_por,criado_em,atualizado_em`,
+          [id, titulo, categoria, resumo, conteudo, extractWikiText(conteudo), portalPublico, autor],
         );
         await syncWikiMedia(client, id, conteudo, req.user);
         return updated[0];
@@ -614,7 +633,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
       if (!isWikiWriter(req.user)) throw new WikiError(403, 'Seu perfil não pode consultar o histórico.');
       const id = parseId(req.params.id);
       const { rows } = await resolvePool().query(
-        'SELECT id,versao,titulo,categoria,resumo,status,alterado_por,alterado_em FROM wiki_revisoes WHERE pagina_id=$1 ORDER BY versao DESC LIMIT 100',
+        'SELECT id,versao,titulo,categoria,resumo,status,portal_publico,alterado_por,alterado_em FROM wiki_revisoes WHERE pagina_id=$1 ORDER BY versao DESC LIMIT 100',
         [id],
       );
       res.json(rows);
@@ -636,9 +655,9 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
         await saveRevision(client, pages[0], req.user);
         const revision = revisions[0];
         const { rows } = await client.query(
-          `UPDATE wiki_paginas SET titulo=$2,categoria=$3,resumo=$4,conteudo=$5,texto_busca=$6,atualizado_por=$7,atualizado_em=NOW()
-           WHERE id=$1 RETURNING id,slug,titulo,categoria,resumo,conteudo,status,criado_por,atualizado_por,criado_em,atualizado_em`,
-          [id, revision.titulo, revision.categoria, revision.resumo, revision.conteudo, extractWikiText(revision.conteudo), editorName(req.user)],
+          `UPDATE wiki_paginas SET titulo=$2,categoria=$3,resumo=$4,conteudo=$5,texto_busca=$6,portal_publico=$7,atualizado_por=$8,atualizado_em=NOW()
+           WHERE id=$1 RETURNING id,slug,titulo,categoria,resumo,conteudo,status,portal_publico,criado_por,atualizado_por,criado_em,atualizado_em`,
+          [id, revision.titulo, revision.categoria, revision.resumo, revision.conteudo, extractWikiText(revision.conteudo), !!revision.portal_publico, editorName(req.user)],
         );
         await syncWikiMedia(client, id, revision.conteudo, req.user, collectWikiMediaIds(revision.conteudo));
         return rows[0];
@@ -650,7 +669,111 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
   return router;
 }
 
+function createPublicWikiRouter({ pool, getPool, getPortalConfig }) {
+  const router = express.Router();
+  const resolvePool = getPool || (() => pool);
+  const limiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
+  let schemaPool;
+  let schemaPromise;
+
+  router.use(limiter);
+  router.use(async (req, res, next) => {
+    try {
+      const config = await getPortalConfig();
+      if (!config?.ativo || config.wiki_ativa !== true) throw new WikiError(404, 'Wiki pública não encontrada.');
+      const activePool = resolvePool();
+      if (!activePool) throw new WikiError(503, 'Banco não configurado.');
+      if (schemaPool !== activePool) {
+        schemaPool = activePool;
+        schemaPromise = ensureWikiSchema(activePool).catch((error) => {
+          if (schemaPool === activePool) { schemaPool = null; schemaPromise = null; }
+          throw error;
+        });
+      }
+      req.wikiPool = activePool;
+      await schemaPromise;
+      next();
+    } catch (error) { respondError(res, error); }
+  });
+
+  router.get('/pages', async (req, res) => {
+    try {
+      const params = [];
+      const where = ["p.status='publicado'", 'p.portal_publico=true'];
+      const busca = String(req.query.busca || '').trim().slice(0, 120);
+      if (busca) {
+        params.push(busca);
+        where.push(`${SEARCH_VECTOR} @@ websearch_to_tsquery('portuguese', $${params.length})`);
+      }
+      const categoria = String(req.query.categoria || '').trim().slice(0, 100);
+      if (categoria) {
+        params.push(categoria);
+        where.push(`p.categoria=$${params.length}`);
+      }
+      const order = busca
+        ? `ts_rank(${SEARCH_VECTOR}, websearch_to_tsquery('portuguese', $1)) DESC, p.atualizado_em DESC`
+        : 'p.atualizado_em DESC';
+      const { rows } = await req.wikiPool.query(
+        `SELECT p.slug,p.titulo,p.categoria,p.resumo,p.atualizado_em
+         FROM wiki_paginas p WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 200`,
+        params,
+      );
+      res.json(rows);
+    } catch (error) { respondError(res, error); }
+  });
+
+  router.get('/categorias', async (req, res) => {
+    try {
+      const { rows } = await req.wikiPool.query(
+        `SELECT categoria,COUNT(*)::int AS total FROM wiki_paginas
+         WHERE status='publicado' AND portal_publico=true GROUP BY categoria ORDER BY LOWER(categoria)`,
+      );
+      res.json(rows);
+    } catch (error) { respondError(res, error); }
+  });
+
+  router.get('/pages/:slug', async (req, res) => {
+    try {
+      const { rows } = await req.wikiPool.query(
+        `SELECT slug,titulo,categoria,resumo,conteudo,atualizado_em FROM wiki_paginas
+         WHERE slug=$1 AND status='publicado' AND portal_publico=true`,
+        [String(req.params.slug).slice(0, 160)],
+      );
+      if (!rows.length) throw new WikiError(404, 'Artigo não encontrado.');
+      const page = rows[0];
+      function publicDocument(node) {
+        if (node?.type === 'wikiImage' && node.attrs?.portalPublico !== true) {
+          return { type: 'paragraph', content: [{ type: 'text', text: 'Imagem não disponibilizada no portal público.' }] };
+        }
+        return { ...node, ...(Array.isArray(node?.content) ? { content: node.content.map(publicDocument) } : {}) };
+      }
+      res.json({ ...page, conteudo: publicDocument(page.conteudo) });
+    } catch (error) { respondError(res, error); }
+  });
+
+  router.get('/midias/:id', async (req, res) => {
+    try {
+      const id = parseId(req.params.id);
+      const { rows } = await req.wikiPool.query(
+        `SELECT m.mime_type,m.dados FROM wiki_midias m
+         JOIN wiki_pagina_midias pm ON pm.midia_id=m.id
+         JOIN wiki_paginas p ON p.id=pm.pagina_id
+         WHERE m.id=$1 AND pm.portal_publico=true AND p.portal_publico=true AND p.status='publicado'`,
+        [id],
+      );
+      if (!rows.length) throw new WikiError(404, 'Imagem não encontrada.');
+      res.set('Content-Type', rows[0].mime_type)
+        .set('X-Content-Type-Options', 'nosniff')
+        .set('Cache-Control', 'no-store')
+        .send(rows[0].dados);
+    } catch (error) { respondError(res, error); }
+  });
+
+  return router;
+}
+
 module.exports = {
+  createPublicWikiRouter,
   createWikiRouter,
   ensureWikiSchema,
   extractWikiText,

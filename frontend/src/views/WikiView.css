@@ -89,6 +89,13 @@
 .wiki-field { display: grid; gap: 6px; min-width: 0; color: var(--text-muted); font-size: 11px; }
 .wiki-field input { width: 100%; min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
 .wiki-field-row { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(180px, 1.3fr); gap: 12px; }
+.wiki-public-toggle, .wiki-new-image-public-toggle, .wiki-image-public-toggle { display: flex; align-items: flex-start; gap: 8px; color: var(--text-muted); font-size: 11px; line-height: 1.4; }
+.wiki-public-toggle input, .wiki-new-image-public-toggle input, .wiki-image-public-toggle input { margin: 2px 0 0; accent-color: var(--accent); }
+.wiki-public-toggle strong { display: block; color: var(--text); font-size: 12px; }
+.wiki-public-toggle small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
+.wiki-new-image-public-toggle { align-items: center; white-space: nowrap; }
+.wiki-image-node { display: grid; justify-items: start; gap: 5px; }
+.wiki-image-public-toggle { align-items: center; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-card); cursor: pointer; }
 .wiki-editor-frame { overflow: hidden; border: 1px solid var(--border); border-radius: 6px; }
 .wiki-editor-toolbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 7px; border-bottom: 1px solid var(--border); background: var(--bg-subtle, rgba(127,127,127,.05)); }
 .wiki-toolbar-group { display: flex; align-items: center; gap: 3px; padding-right: 7px; border-right: 1px solid var(--border); }

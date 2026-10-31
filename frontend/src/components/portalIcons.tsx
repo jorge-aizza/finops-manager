@@ -46,3 +46,12 @@ export function IconInicio({ size = 16 }: IconProps) {
     </svg>
   )
 }
+
+export function IconWiki({ size = 16 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" width={size} height={size} aria-hidden="true">
+      <path d="M4 3.5h8.5A2.5 2.5 0 0115 6v10.5H6.5A2.5 2.5 0 014 14V3.5z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" />
+      <path d="M4 14a2.5 2.5 0 012.5-2.5H15M7 7h5M7 9.5h5" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" />
+    </svg>
+  )
+}

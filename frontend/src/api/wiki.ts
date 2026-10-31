@@ -1,5 +1,5 @@
 import { API_BASE, ApiError, apiFetch, getToken } from './client'
-import type { WikiCategory, WikiImportedDocument, WikiPage, WikiPageInput, WikiPageSummary, WikiRevision } from '../types/wiki'
+import type { PublicWikiPage, PublicWikiPageSummary, WikiCategory, WikiImportedDocument, WikiPage, WikiPageInput, WikiPageSummary, WikiRevision } from '../types/wiki'
 
 export function listWikiPages(busca?: string, categoria?: string): Promise<WikiPageSummary[]> {
   const params = new URLSearchParams()
@@ -54,5 +54,29 @@ export async function fetchWikiImage(mediaId: number): Promise<Blob> {
     throw new ApiError('Sessão expirada')
   }
   if (!response.ok) throw new ApiError('Imagem indisponível')
+  return response.blob()
+}
+
+async function publicWikiFetch<T>(path: string): Promise<T> {
+  const response = await fetch(`${window.location.origin}/api/public/wiki${path}`)
+  const data = await response.json().catch(() => ({}) as { error?: string })
+  if (!response.ok) throw new Error((data as { error?: string }).error || `Erro HTTP ${response.status}`)
+  return data as T
+}
+
+export function listPublicWikiPages(busca?: string, categoria?: string): Promise<PublicWikiPageSummary[]> {
+  const params = new URLSearchParams()
+  if (busca) params.set('busca', busca)
+  if (categoria) params.set('categoria', categoria)
+  const query = params.toString()
+  return publicWikiFetch('/pages' + (query ? `?${query}` : ''))
+}
+
+export const listPublicWikiCategories = () => publicWikiFetch<WikiCategory[]>('/categorias')
+export const getPublicWikiPage = (slug: string) => publicWikiFetch<PublicWikiPage>(`/pages/${encodeURIComponent(slug)}`)
+
+export async function fetchPublicWikiImage(mediaId: number): Promise<Blob> {
+  const response = await fetch(`${window.location.origin}/api/public/wiki/midias/${mediaId}`)
+  if (!response.ok) throw new Error('Imagem indisponível')
   return response.blob()
 }

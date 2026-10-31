@@ -32,7 +32,7 @@ describe('WikiView', () => {
     const user = userEvent.setup()
     vi.mocked(wikiApi.listWikiPages).mockResolvedValue([{
       id: 1, slug: 'custos-azure', titulo: 'Custos Azure', categoria: 'Operação', resumo: 'Conferência mensal',
-      status: 'publicado', atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z',
+      status: 'publicado', portal_publico: false, atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z',
     }])
     renderWikiView()
 
@@ -53,7 +53,7 @@ describe('WikiView', () => {
     window.currentUser = { perfil: 'finops' }
     const summary = {
       id: 8, slug: 'custos-azure', titulo: 'Custos Azure', categoria: 'Operação', resumo: null,
-      status: 'publicado' as const, atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z',
+      status: 'publicado' as const, portal_publico: false, atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z',
     }
     vi.mocked(wikiApi.listWikiPages).mockResolvedValue([summary])
     vi.mocked(wikiApi.getWikiPage).mockResolvedValue({

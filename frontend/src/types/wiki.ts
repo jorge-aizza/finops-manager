@@ -23,6 +23,7 @@ export interface WikiPageSummary {
   atualizado_por: string
   atualizado_em: string
   relevancia?: number
+  portal_publico: boolean
 }
 
 export interface WikiPage extends WikiPageSummary {
@@ -43,8 +44,21 @@ export interface WikiRevision {
   categoria: string
   resumo: string | null
   status: WikiStatus
+  portal_publico: boolean
   alterado_por: string
   alterado_em: string
+}
+
+export interface PublicWikiPageSummary {
+  slug: string
+  titulo: string
+  categoria: string
+  resumo: string | null
+  atualizado_em: string
+}
+
+export interface PublicWikiPage extends PublicWikiPageSummary {
+  conteudo: WikiDocument
 }
 
 export interface WikiPageInput {
@@ -52,6 +66,7 @@ export interface WikiPageInput {
   categoria: string
   resumo?: string | null
   conteudo: WikiDocument
+  portal_publico?: boolean
 }
 
 export interface WikiImportedDocument {

@@ -2913,6 +2913,8 @@ async function loadPortalConfig() {
     if (genieAtivo) genieAtivo.checked = !!d.genie_cotas_ativo;
     const priceSimAtivo = document.getElementById('portal-cfg-price-sim-ativo');
     if (priceSimAtivo) priceSimAtivo.checked = !!d.price_simulator_ativo;
+    const wikiAtivo = document.getElementById('portal-cfg-wiki-ativo');
+    if (wikiAtivo) wikiAtivo.checked = !!d.wiki_ativa;
     atualizarAvisoServicosPortal();
     _checarEntraAtivoPortal();
     _mostrarCorpoOrfaosPortal(!!d.orfaos_ativo);
@@ -3018,7 +3020,8 @@ function atualizarAvisoServicosPortal() {
   const orf   = !!document.getElementById('portal-cfg-orfaos-ativo')?.checked;
   const genie = !!document.getElementById('portal-cfg-genie-ativo')?.checked;
   const priceSim = !!document.getElementById('portal-cfg-price-sim-ativo')?.checked;
-  aviso.style.display = (!calc && !orf && !genie && !priceSim) ? 'block' : 'none';
+  const wiki = !!document.getElementById('portal-cfg-wiki-ativo')?.checked;
+  aviso.style.display = (!calc && !orf && !genie && !priceSim && !wiki) ? 'block' : 'none';
 }
 
 // "Minha Cota Genie" exige a integração Entra ID ativa (é o login que a tela usa) — sem
@@ -3189,6 +3192,7 @@ async function savePortalConfig() {
         calculadora_ativa:         document.getElementById('portal-cfg-calc-ativo')?.checked !== false,
         genie_cotas_ativo:         document.getElementById('portal-cfg-genie-ativo')?.checked || false,
         price_simulator_ativo:     document.getElementById('portal-cfg-price-sim-ativo')?.checked || false,
+        wiki_ativa:                document.getElementById('portal-cfg-wiki-ativo')?.checked || false,
         orfaos_ativo:              document.getElementById('portal-cfg-orfaos-ativo')?.checked || false,
         orfaos_subscription_ids:   Array.from(_portalOrfaos.subs),
         orfaos_categorias:         Array.from(_portalOrfaos.cats),
