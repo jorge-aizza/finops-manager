@@ -61,6 +61,7 @@ const fs       = require('fs');
 const jwksRsa  = require('jwks-rsa');
 const nodemailer = require('nodemailer');
 const { diasOrfaoNaExclusao } = require('./savingOrfaos');
+const { createWikiRouter } = require('./wiki');
 const {
   registrarMesCustoImportado,
   reconstruirMesCustoDiario,
@@ -530,6 +531,8 @@ function dbMiddleware(req, res, next) {
   if (!pool) return res.status(503).json({ error: 'Banco nao configurado. Complete o Setup Wizard.' });
   next();
 }
+
+app.use('/api/wiki', createWikiRouter({ getPool: () => pool, authMiddleware, dbMiddleware }));
 
 // Substitui `res.status(500).json({ error: err.message })` nos ~90 catches genéricos do
 // arquivo — err.message costuma ser um erro cru do Postgres (nome de tabela/coluna/

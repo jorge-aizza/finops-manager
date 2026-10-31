@@ -29,6 +29,13 @@ Sistema web corporativo para gestão FinOps com inventário de recursos Azure, a
 
 ## O que há de novo na v4.3.0
 
+### 📚 Base de Conhecimento (Novo)
+- Wiki interna integrada à sessão atual do FinOps Manager, sem login ou serviço externo separado
+- Busca textual em português e filtro por categoria; leitores veem somente conteúdo publicado
+- Editor TipTap, rascunhos, publicação, arquivamento e histórico com restauração de revisões
+- Perfis `admin` e `finops` editam; `reader` consulta. API valida o documento e bloqueia HTML arbitrário
+- Backend isolado em `wiki.js`; arquitetura e operação em `MODULES/16-WIKI.md`
+
 ### ✉️ Mailing de Comunicados (Novo)
 - **Broadcast corporativo** separado do SMTP de Alertas, de ponta a ponta: configuração própria (`integracoes` tipo `mailing_relay`), transporter próprio e estado de execução próprio. Mexer num não afeta o outro
 - **Relay SMTP anônimo** — sem usuário/senha, autorizado por IP de origem. Não existe campo de senha neste módulo. O "Testar Conexão" pode falhar na estação e funcionar em produção: é liberação de rede, não configuração errada

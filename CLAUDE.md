@@ -25,7 +25,7 @@ npm start                # Prod: node server.js
 | `calculadora.js` | Cost calculator logic & formulas |
 | `encrypt-env.js` | Environment variable encryption utility |
 | `frontend/` | React app (Vite) — main UI, replaces legacy |
-| `MODULES/` | Documentação detalhada por subsistema (01–15) |
+| `MODULES/` | Documentação detalhada por subsistema (01–16) |
 | `tests/` | Jest/Playwright test suite |
 | `fonts/`, `libs/` | Static assets & libraries |
 
@@ -50,6 +50,7 @@ Uma linha por subsistema; os detalhes (funções, tabelas, decisões) ficam no m
 | **Desperdício & Economia** | Órfão identificado + excluído + custo faturado = saving auditável | `12-DESPERDICIO-ECONOMIA` |
 | **Mailing de Comunicados** | Broadcast via relay SMTP próprio, contatos em grupos, editor visual (TipTap) com hyperlinks e tabelas editáveis, acompanhamento por destinatário | `13-MAILING` |
 | **Reservas** | Reservas e Savings Plans; cadastro manual, sync por SP, export via Storage e upload de CSV pela tela convergindo na mesma linha | `14-RESERVAS` |
+| **Wiki** | Base de conhecimento interna, busca PostgreSQL, editor TipTap e histórico de revisões | `16-WIKI` |
 
 ---
 
@@ -87,6 +88,11 @@ cada uma ficam no módulo indicado, não aqui.
 - **Imagem em e-mail NUNCA vai por URL — vai embutida (`cid:`).** `_mailingEmbutirImagens()` dentro de `_sendMailingEmail()`. Marcar o remetente como confiável NÃO resolve: confiar autoriza o download, não cria rota. Como o arquivo vai em CADA mensagem, imagem de template é dimensionada para o e-mail.
 - **Tabela de dados é HTML estruturado, nunca texto alinhado por espaços.** O editor oferece modelos e ajuste de linhas/colunas; hyperlinks devem ser anchors com `href`. O envelope preserva espaços repetidos e aplica grade às tabelas de dados, mas não à tabela com imagem da assinatura.
 - **Contato pode estar em vários grupos.** A lista do Mailing exibe todos os grupos por contato; a API agrega os nomes em uma consulta.
+
+**Wiki** — `MODULES/16-WIKI.md`
+- **A Wiki é privada e o controle de perfil vive no backend.** `admin` e `finops` escrevem; `reader` recebe somente páginas publicadas. Não confie no botão oculto da interface como autorização.
+- **Conteúdo é JSON TipTap validado, nunca HTML arbitrário.** Preserve a allowlist de blocos/marcas e os protocolos seguros de link em `wiki.js`; não use `dangerouslySetInnerHTML` para artigos.
+- **O pool é lazy no Setup Wizard.** O router recebe `getPool`, não uma referência inicial ao `pool`, que começa `null`.
 
 **Reservas** — `MODULES/14-RESERVAS.md`
 - **Reserva vinda de relatório precisa colidir com a mesma reserva vinda via SP, não duplicar.** Vale para o export lido do Storage e para o CSV subido pela tela — os dois usam o mesmo mapeador, que reconstrói o `azure_id` no formato da API ARM para cair no mesmo `uq_reservas_azure_id`. Via nova de importação só evita duplicar se reconstruir o MESMO formato de id.

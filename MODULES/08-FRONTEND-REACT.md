@@ -14,6 +14,7 @@
 | Calculadora | ✅ Live | `CalculadoraView.tsx` | Cost motor, pico, overlay |
 | Portal Público | ✅ Live | `PublicCalculadoraView.tsx` | Unauthenticated calculator |
 | Databricks Dashboard | ✅ Live | `DatabricksDashboardView.tsx` | Budgets, anomalies, job runs |
+| Base de Conhecimento | ✅ Live | `WikiView.tsx` | Busca, artigos, edição e histórico via API autenticada |
 | Reservas | ⏳ Legacy | `index.html #view-reservas` | Functional, not ported yet |
 | Admin Settings | ⏳ Legacy | `index.html #view-settings` | Functional, not ported yet |
 
