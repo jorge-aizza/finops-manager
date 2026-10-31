@@ -99,17 +99,17 @@
 }
 
 :root {
-  --bg: #04000c;
-  --bg-card: rgba(10, 1, 20, 0.92);
-  --bg-hover: rgba(18, 3, 32, 0.75);
-  --border: #150028;
-  --border-light: #1e0038;
+  --bg: #111014;
+  --bg-card: rgba(27, 24, 31, 0.96);
+  --bg-hover: rgba(220, 205, 235, 0.07);
+  --border: #342f39;
+  --border-light: #48414f;
   --text: #e8eaf0;
-  --text-muted: #7b6a9e;
-  --text-dim: #a990cc;
+  --text-muted: #aaa3b2;
+  --text-dim: #c3a9e6;
   --accent: #9333ea;
-  --accent-dim: rgba(147, 51, 234, 0.12);
-  --accent-glow: rgba(147, 51, 234, 0.28);
+  --accent-dim: rgba(147, 51, 234, 0.16);
+  --accent-glow: rgba(147, 51, 234, 0.22);
   --danger: #ff4d6a;
   --red: #ff4d6a;
   /* Cor do "maior dia" nos gráficos (CkBarChart). Vive no :root porque o gráfico é usado
@@ -120,9 +120,9 @@
   --blue: #4da6ff;
   --sidebar-w: 220px;
   /* compatibility aliases — fallback for inline styles that reference old variable names */
-  --surface:      rgba(10, 1, 20, 0.92);
-  --base:         #04000c;
-  --surface-alt:  rgba(6, 0, 14, 0.96);
+  --surface:      rgba(27, 24, 31, 0.96);
+  --base:         #111014;
+  --surface-alt:  rgba(22, 20, 26, 0.98);
   --text-primary: #e8eaf0;
 }
 
@@ -131,9 +131,9 @@
 body {
   font-family: 'IBM Plex Sans', sans-serif;
   background:
-    radial-gradient(ellipse at 25% 45%, rgba(60, 0, 110, 0.18) 0%, transparent 55%),
-    radial-gradient(ellipse at 75% 80%, rgba(38, 0, 70, 0.10) 0%, transparent 50%),
-    linear-gradient(160deg, #08000e 0%, #04000c 50%, #02000a 100%);
+    radial-gradient(ellipse at 25% 45%, rgba(111, 53, 153, 0.12) 0%, transparent 55%),
+    radial-gradient(ellipse at 75% 80%, rgba(72, 49, 91, 0.08) 0%, transparent 50%),
+    linear-gradient(160deg, #19161d 0%, #111014 55%, #151319 100%);
   background-attachment: fixed;
   color: var(--text);
   font-size: 14px;
@@ -152,7 +152,7 @@ body {
 /* ── SIDEBAR — icon rail: 56px collapsed → 240px open ── */
 .sidebar {
   width: 56px;
-  background: rgba(4, 0, 10, 0.88);
+  background: var(--bg-card);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   border-right: 1px solid var(--border);
@@ -166,7 +166,7 @@ body {
 }
 .sidebar.open {
   width: 240px;
-  box-shadow: 4px 0 32px rgba(80, 0, 140, 0.35);
+  box-shadow: 4px 0 32px rgba(0, 0, 0, 0.24);
 }
 
 /* ── Overlay cobre apenas o main-content quando sidebar está aberta ── */
@@ -485,7 +485,7 @@ body {
   padding: 0 24px;
   height: 58px;
   border-bottom: 1px solid var(--border);
-  background: rgba(4, 0, 10, 0.82);
+  background: var(--bg-card);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   flex-shrink: 0;
@@ -542,7 +542,7 @@ body {
 }
 
 .stat-card {
-  background: rgba(8, 1, 18, 0.88);
+  background: var(--bg-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border);
