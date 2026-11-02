@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import MonthGrid, { type MonthValues } from '../components/MonthGrid'
+import { useAccessibleModal } from '../hooks/useAccessibleModal'
 import { createAcao, deleteAcao, updateAcao } from '../api/acoes'
 import { listProjetos } from '../api/projetos'
 import { listUsuarios } from '../api/usuarios'
@@ -68,6 +69,7 @@ interface AcaoModalProps {
 export default function AcaoModal({ acao, onClose }: AcaoModalProps) {
   const queryClient = useQueryClient()
   const [form, setForm] = useState<FormState>(() => (acao ? fromAcao(acao) : emptyForm()))
+  const modalRef = useAccessibleModal(onClose)
 
   const projetosQuery = useQuery({ queryKey: ['projetos'], queryFn: listProjetos })
   const usuariosQuery = useQuery({ queryKey: ['usuarios'], queryFn: listUsuarios })
@@ -140,9 +142,9 @@ export default function AcaoModal({ acao, onClose }: AcaoModalProps) {
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal modal-wide">
+      <div ref={modalRef} className="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="acao-modal-title" tabIndex={-1}>
         <div className="modal-header">
-          <span>{acao ? 'Editar Ação FinOps' : 'Nova Ação FinOps'}</span>
+          <span id="acao-modal-title">{acao ? 'Editar Ação FinOps' : 'Nova Ação FinOps'}</span>
           <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">

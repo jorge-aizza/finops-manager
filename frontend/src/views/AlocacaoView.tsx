@@ -93,7 +93,7 @@ function ShowbackTab() {
         </div>
 
         <div style={{ display: 'flex', gap: 8, padding: '0 20px 12px', flexWrap: 'wrap', alignItems: 'center' }}>
-          <select value={chave} onChange={(e) => setChave(e.target.value)} style={{ minWidth: 220 }}>
+          <select className="filter-select" aria-label="Chave de tag" value={chave} onChange={(e) => setChave(e.target.value)}>
             <option value="">Escolha uma chave de tag…</option>
             {chaves.map((c) => (
               <option key={c.chave} value={c.chave}>
@@ -101,7 +101,7 @@ function ShowbackTab() {
               </option>
             ))}
           </select>
-          <select value={sub} onChange={(e) => setSub(e.target.value)}>
+          <select className="filter-select" aria-label="Assinatura" value={sub} onChange={(e) => setSub(e.target.value)}>
             <option value="">Todas as assinaturas</option>
             {subsQuery.data?.map((s) => (
               <option key={s.subscription_id} value={s.subscription_id}>{s.subscription_name || s.subscription_id}</option>
@@ -824,13 +824,13 @@ export default function AlocacaoView() {
   const [tab, setTab] = useState<TabId>('showback')
   return (
     <div className="view active">
-      <div className="view-hero">
-        <div className="page-title">Alocação &amp; Otimização</div>
-        <div className="view-hero-sub">Rateio de custo por tag, conformidade, previsão e cobertura de compromisso</div>
-      </div>
-      <div style={{ display: 'flex', gap: 8, margin: '16px 20px 0' }}>
+      <header className="section-heading">
+        <h1>Alocação &amp; Otimização</h1>
+        <p>Rateio de custo por tag, conformidade, previsão e cobertura de compromisso</p>
+      </header>
+      <div className="view-tabs" style={{ marginTop: 16, marginBottom: 0 }}>
         {TABS.map((t) => (
-          <button key={t.id} className={tab === t.id ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab(t.id)}>{t.label}</button>
+          <button key={t.id} aria-current={tab === t.id ? 'page' : undefined} onClick={() => setTab(t.id)}>{t.label}</button>
         ))}
       </div>
       {tab === 'showback' && <ShowbackTab />}

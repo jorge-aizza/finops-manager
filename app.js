@@ -645,7 +645,7 @@ function showView(view) {
   }
   currentView = view;
 
-  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure', databricks: 'Dashboard Databricks', mailing: 'Mailing de Comunicados', wiki: 'Base de conhecimento' };
+  const titles = { dashboard: 'Dashboard', projetos: 'Projetos', acoes: 'Ações FinOps', calculadora: 'Calculadora Azure', estimativas: 'Estimativas', reservas: 'Reservas Cloud', coleta: 'Coleta Azure', databricks: 'Dashboard Databricks', inventario: 'Inventário', alocacao: 'Alocação e Otimização', 'log-analytics': 'Log Analytics FinOps', mailing: 'Mailing de Comunicados', wiki: 'Base de conhecimento' };
   document.getElementById('page-title').textContent = titles[view] || view;
 
   const btn = document.getElementById('top-action-btn');

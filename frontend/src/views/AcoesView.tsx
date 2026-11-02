@@ -60,8 +60,8 @@ export default function AcoesView() {
   return (
     <div>
       <div className="view-hero" style={{ marginBottom: 16 }}>
-        <div className="page-title">Ações FinOps</div>
-        <div className="view-hero-sub">Iniciativas de otimização, responsáveis e retorno mensal esperado</div>
+        <h1 className="page-title">Ações FinOps</h1>
+        <p className="view-hero-sub">Iniciativas de otimização, responsáveis e retorno mensal esperado</p>
       </div>
 
       <div className="filters-bar" style={{ alignItems: 'center' }}>
@@ -72,14 +72,19 @@ export default function AcoesView() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select className="filter-select" value={filterCloud} onChange={(e) => setFilterCloud(e.target.value)}>
-          <option value="">Todas as Clouds</option>
-          {CLOUDS.map((c) => <option key={c}>{c}</option>)}
-        </select>
-        <select className="filter-select" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-          <option value="">Todos os Status</option>
-          {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
-        </select>
+        <details className="filter-disclosure">
+          <summary>Filtros</summary>
+          <div className="filter-disclosure-panel">
+            <select className="filter-select" aria-label="Cloud" value={filterCloud} onChange={(e) => setFilterCloud(e.target.value)}>
+              <option value="">Todas as Clouds</option>
+              {CLOUDS.map((c) => <option key={c}>{c}</option>)}
+            </select>
+            <select className="filter-select" aria-label="Status" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+              <option value="">Todos os Status</option>
+              {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
+            </select>
+          </div>
+        </details>
         <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={openNew}>
           Nova Ação
         </button>

@@ -7,6 +7,18 @@ import MailingComposer from './MailingComposer'
 vi.mock('../api/mailing', () => ({ uploadImagemMailing: vi.fn() }))
 
 describe('MailingComposer', () => {
+  it('oferece uma toolbar Office-like alinhada à Wiki, sem remover recursos do Mailing', () => {
+    render(<MailingComposer value="<p>Conteúdo</p>" onChange={() => {}} />)
+
+    expect(screen.getByRole('toolbar', { name: 'Formatação da mensagem' })).toBeInTheDocument()
+    for (const name of ['Desfazer', 'Refazer', 'Negrito', 'Tachado', 'Centralizar', 'Justificar', 'Inserir ou editar hyperlink', 'Inserir imagem']) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument()
+    }
+    expect(screen.getByLabelText('Cor do texto')).toBeInTheDocument()
+    expect(screen.getByLabelText('Inserir modelo de tabela')).toBeInTheDocument()
+    expect(document.querySelectorAll('.mailing-toolbar-group').length).toBeGreaterThan(4)
+  })
+
   it('mostra o conteúdo inicial', async () => {
     render(<MailingComposer value="<p>Olá, pessoal!</p>" onChange={() => {}} />)
     expect(await screen.findByText('Olá, pessoal!')).toBeInTheDocument()

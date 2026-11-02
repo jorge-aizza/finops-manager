@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType } from 'react'
+import { lazy, Suspense, useEffect, useState, type ComponentType, type LazyExoticComponent } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { setRefreshHandler, setViewListener } from './bridge'
 import { TenantFilterProvider } from './contexts/TenantFilterContext'
@@ -14,7 +14,6 @@ import InventarioView from './views/InventarioView'
 import AlocacaoView from './views/AlocacaoView'
 import LogAnalyticsView from './views/LogAnalyticsView'
 import MailingView from './views/MailingView'
-import WikiView from './views/WikiView'
 import DatabricksBudgetAlertModal from './components/DatabricksBudgetAlertModal'
 import ErrorBoundary from './components/ErrorBoundary'
 
@@ -23,7 +22,9 @@ const queryClient = new QueryClient({
 })
 
 // Cresce a cada tela migrada — ver "Ordem de migração" no plano.
-const VIEWS: Record<string, ComponentType> = {
+const WikiView = lazy(() => import('./views/WikiView'))
+
+const VIEWS: Record<string, ComponentType | LazyExoticComponent<ComponentType>> = {
   projetos: ProjetosView,
   reservas: ReservasView,
   acoes: AcoesView,
@@ -71,7 +72,9 @@ export default function App() {
           // `key={view}` reseta o ErrorBoundary ao trocar de tela — sem isso,
           // um erro numa view ficaria "preso" mesmo navegando pra outra.
           <ErrorBoundary key={view}>
-            <ViewComponent />
+            <Suspense fallback={<div role="status" style={{ padding: 24, color: 'var(--text-muted)' }}>Carregando tela...</div>}>
+              <ViewComponent />
+            </Suspense>
           </ErrorBoundary>
         ) : null}
         {autenticado && (

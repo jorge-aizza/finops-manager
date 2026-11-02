@@ -81,17 +81,17 @@ export default function CalculadoraView() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+    <div className="calculadora-layout" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* flexShrink:0 e obrigatorio aqui: a raiz e uma coluna flex de altura
           fixa com rolagem interna -- sem isso o hero seria espremido conforme
           o corpo cresce, em vez de manter a propria altura. */}
       <div className="view-hero" style={{ flexShrink: 0, marginBottom: 16 }}>
-        <div className="page-title">Calculadora</div>
-        <div className="view-hero-sub">Estimativa de custo Azure a partir do billing real — por assinatura, resource group e período</div>
+        <h1 className="page-title">Calculadora</h1>
+        <p className="view-hero-sub">Estimativa de custo Azure a partir do billing real — por assinatura, resource group e período</p>
       </div>
 
       {/* Filtros */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 10, alignItems: 'end', padding: '13px 24px', background: 'var(--bg-card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+      <div className="calculadora-filtros" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 10, alignItems: 'end', padding: '13px 24px', background: 'var(--bg-card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
         <div className="cfg">
           <label className="cl">Assinatura</label>
           <CmsMultiSelect
@@ -117,7 +117,7 @@ export default function CalculadoraView() {
         </div>
         <div className="cfg">
           <label className="cl">Período</label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <div className="calculadora-periodo" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <input type="date" value={calc.dataInicio} onChange={(e) => calc.setDataInicio(e.target.value)}
               style={{ height: 34, padding: '0 8px', borderRadius: 6, border: '1px solid var(--border-light)', background: 'var(--bg)', color: 'var(--text)', fontSize: 12, minWidth: 128 }} />
             <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>→</span>
@@ -137,7 +137,7 @@ export default function CalculadoraView() {
       </div>
 
       {/* Corpo */}
-      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', minHeight: 0 }}>
+      <div className="calculadora-corpo" style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', minHeight: 0 }}>
         <div style={{ padding: '9px 13px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
           <input
             type="text" className="ci" placeholder="Filtrar recursos..." value={calc.filtroTexto}
@@ -212,7 +212,7 @@ export default function CalculadoraView() {
 
         {!calc.erro && !calc.subsSel.length && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>
-            Selecione uma <strong style={{ color: 'var(--text)' }}>Assinatura</strong>, confirme com <strong style={{ color: 'var(--accent)' }}>OK ✓</strong> e clique em <strong style={{ color: 'var(--accent)' }}>Buscar</strong>.
+            <span>Selecione uma <strong style={{ color: 'var(--text)' }}>Assinatura</strong>, confirme com <strong style={{ color: 'var(--accent)' }}>OK ✓</strong> e clique em <strong style={{ color: 'var(--accent)' }}>Buscar</strong>.</span>
           </div>
         )}
 

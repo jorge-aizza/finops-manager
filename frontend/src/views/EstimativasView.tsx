@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteEstimativa, getEstimativa, listEstimativas, setEstimativaStatus } from '../api/estimativas'
 import { buildPdfHtml } from '../lib/buildPdfHtml'
 import InvoicePreviewModal from '../components/InvoicePreviewModal'
+import { useAccessibleModal } from '../hooks/useAccessibleModal'
 import type { Estimativa, EstimativaResumo, EstimativaStatus } from '../types/estimativa'
 
 function formatBRL(v: number | null | undefined): string {
@@ -104,8 +105,8 @@ export default function EstimativasView() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div className="view-hero">
-        <div className="page-title">Estimativas</div>
-        <div className="view-hero-sub">Estimativas de custo geradas na Calculadora — aprovação e histórico</div>
+        <h1 className="page-title">Estimativas</h1>
+        <p className="view-hero-sub">Estimativas de custo geradas na Calculadora — aprovação e histórico</p>
       </div>
 
       <div className="filters-bar">
@@ -113,10 +114,15 @@ export default function EstimativasView() {
           type="text" className="filter-input" placeholder="Buscar por número, projeto, título..."
           value={search} onChange={(e) => setSearch(e.target.value)}
         />
-        <select className="filter-select" value={filterProjeto} onChange={(e) => setFilterProjeto(e.target.value)}>
-          <option value="">Todos os Projetos</option>
-          {projetos.map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
+        <details className="filter-disclosure">
+          <summary>Filtros</summary>
+          <div className="filter-disclosure-panel">
+            <select className="filter-select" aria-label="Projeto" value={filterProjeto} onChange={(e) => setFilterProjeto(e.target.value)}>
+              <option value="">Todos os Projetos</option>
+              {projetos.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+        </details>
       </div>
 
       {stats.length > 0 && (
@@ -214,6 +220,7 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
   onClose: () => void
   onStatusChange: (status: EstimativaStatus) => void
 }) {
+  const modalRef = useAccessibleModal(onClose)
   const detalheQuery = useQuery({ queryKey: ['estimativa', id], queryFn: () => getEstimativa(id) })
   const e = detalheQuery.data
   // `recursos` é JSONB no banco — estimativas antigas/malformadas podem ter
@@ -255,9 +262,9 @@ function EstimativaDetalheModal({ id, onClose, onStatusChange }: {
 
   return (
     <div className="modal-overlay open" onClick={(ev) => ev.target === ev.currentTarget && onClose()}>
-      <div className="modal modal-wide">
+      <div ref={modalRef} className="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="estimativa-modal-title" tabIndex={-1}>
         <div className="modal-header">
-          <span>{e?.numero || 'Detalhes da Estimativa'}</span>
+          <span id="estimativa-modal-title">{e?.numero || 'Detalhes da Estimativa'}</span>
           <button className="modal-close" aria-label="Fechar modal" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">

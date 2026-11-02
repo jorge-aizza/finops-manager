@@ -27,6 +27,11 @@ function renderWithClient() {
   return { ...rendered, queryClient }
 }
 
+function mesAtualLocal(): string {
+  const hoje = new Date()
+  return `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`
+}
+
 // "LA-SharedServices-PROD" aparece em até 4 lugares ao mesmo tempo (ranking, dropdown de
 // workspace, legenda do gráfico, linha da tabela) — qualquer findByText/getByText por esse
 // nome quebra com "multiple elements". `resource_group` só existe na tabela, então serve de
@@ -264,7 +269,7 @@ describe('LogAnalyticsView', () => {
     await user.click(linhaWorkspace('LA-SharedServices-PROD'))
 
     expect(await screen.findByText('Tabelas — LA-SharedServices-PROD')).toBeInTheDocument()
-    await waitFor(() => expect(logAnalyticsApi.getLogAnalyticsTabelas).toHaveBeenCalledWith('guid-shared', '2026-10'))
+    await waitFor(() => expect(logAnalyticsApi.getLogAnalyticsTabelas).toHaveBeenCalledWith('guid-shared', mesAtualLocal()))
     expect(logAnalyticsApi.getLogAnalyticsFontes).toHaveBeenCalledWith('guid-shared')
     expect(scrollSpy).toHaveBeenCalled()
   })
@@ -365,14 +370,14 @@ describe('LogAnalyticsView', () => {
     await user.click(linhaWorkspace('LA-SharedServices-PROD'))
     await screen.findByText('Tabelas — LA-SharedServices-PROD')
     await user.click(screen.getByRole('button', { name: /Exportar Excel/ }))
-    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith('2026-10', null, []))
+    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith(mesAtualLocal(), null, []))
 
     // Escolher no multi-select "Filtrar por Workspace" é o que de fato recorta o export.
     await user.click(screen.getByText('Todos os workspaces (2)'))
     await user.click(await screen.findByText('LA-SharedServices-PROD', { selector: '.cms-option *, .cms-option' }))
     await user.click(screen.getByRole('button', { name: /OK/ }))
     await user.click(screen.getByRole('button', { name: /Exportar Excel/ }))
-    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith('2026-10', null, ['guid-shared']))
+    await waitFor(() => expect(logAnalyticsApi.baixarLogAnalyticsExcel).toHaveBeenCalledWith(mesAtualLocal(), null, ['guid-shared']))
   })
 
   it('o filtro de workspace aceita mais de um — a tela soma o conjunto e o detalhe espera um clique', async () => {
@@ -389,7 +394,7 @@ describe('LogAnalyticsView', () => {
     expect(await screen.findByText(/comparando 2/)).toBeInTheDocument()
     expect(screen.queryByText(/^Tabelas — /)).not.toBeInTheDocument()
     await waitFor(() => expect(logAnalyticsApi.getLogAnalyticsResumo)
-      .toHaveBeenCalledWith('2026-10', null, ['guid-shared', 'guid-basic']))
+      .toHaveBeenCalledWith(mesAtualLocal(), null, ['guid-shared', 'guid-basic']))
   })
 
   it('mostra a sugestão de Commitment Tier avaliada dia a dia, não pela média', async () => {

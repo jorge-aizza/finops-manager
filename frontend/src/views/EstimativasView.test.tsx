@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import axe from 'axe-core'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import EstimativasView from './EstimativasView'
@@ -54,6 +55,18 @@ describe('EstimativasView', () => {
     expect(row).toHaveTextContent('R$ 15.757,66')
   });
 
+  it('não tem violações WCAG A/AA detectáveis pelo axe-core', async () => {
+    renderWithClient()
+    await screen.findByText('EST-100001')
+
+    const results = await axe.run(document.body, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+      rules: { 'color-contrast': { enabled: false } },
+    })
+
+    expect(results.violations).toEqual([])
+  })
+
   it('mostra estado vazio quando não há estimativas', async () => {
     vi.mocked(estimativasApi.listEstimativas).mockResolvedValue([])
     renderWithClient()
@@ -79,6 +92,23 @@ describe('EstimativasView', () => {
     expect(await screen.findByText('VM produção')).toBeInTheDocument()
     expect(screen.getByText('Standard_D4s_v3')).toBeInTheDocument()
   });
+
+  it('fecha o detalhe com Escape e devolve o foco ao acionador', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('EST-100001')
+
+    const trigger = screen.getByTitle('Ver detalhes')
+    trigger.focus()
+    await user.keyboard('{Enter}')
+
+    expect(await screen.findByRole('dialog', { name: 'EST-100001' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Fechar modal' })).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  })
 
   it('aprova uma estimativa a partir da tabela', async () => {
     const user = userEvent.setup()

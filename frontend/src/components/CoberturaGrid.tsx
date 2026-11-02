@@ -100,9 +100,9 @@ export default function CoberturaGrid({ data, onColetarAgora, onAgendarPendente,
   return (
     <div>
       {porAno.map(([ano, meses]) => (
-        <div key={ano} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <div key={ano} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, overflowX: 'auto' }}>
           <div style={{ width: 40, fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', flexShrink: 0 }}>{ano}</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 4, flex: 1 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 4, flex: 1, minWidth: 500 }}>
             {meses.map((cell, i) => {
               const key = `${ano}-${String(i + 1).padStart(2, '0')}`
               const isCurrentMonth = key === mesAtualKey

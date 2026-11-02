@@ -1,27 +1,17 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { EditorContent, useEditor } from '@tiptap/react'
 import {
   archiveWikiPage, createWikiPage, deleteWikiPage, getWikiPage, listWikiCategories, listWikiPages,
   listWikiRevisions, publishWikiPage, restoreWikiRevision, updateWikiPage,
 } from '../api/wiki'
 import type { WikiPage, WikiPageInput, WikiPageSummary } from '../types/wiki'
-import WikiEditor from './WikiEditor'
-import { createWikiExtensions } from './WikiExtensions'
 import './WikiView.css'
+
+const WikiArticle = lazy(() => import('./WikiArticle'))
+const WikiEditor = lazy(() => import('./WikiEditor'))
 
 function formatDate(value: string) {
   return new Date(value).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' })
-}
-
-function WikiArticle({ page }: { page: WikiPage }) {
-  const editor = useEditor({
-    extensions: createWikiExtensions(),
-    content: page.conteudo,
-    editable: false,
-    editorProps: { attributes: { class: 'wiki-content-body' } },
-  }, [page.id, page.atualizado_em])
-  return <EditorContent editor={editor} className="wiki-content" />
 }
 
 function WriterActions({ page, onEdit, onPublish, onArchive, onDelete, onHistory }: {
@@ -136,8 +126,8 @@ export default function WikiView() {
   return (
     <div className="wiki-view">
       <div className="view-hero">
-        <div className="page-title">Base de conhecimento</div>
-        <div className="view-hero-sub">FinOps Manager</div>
+        <h1 className="page-title">Base de conhecimento</h1>
+        <p className="view-hero-sub">FinOps Manager</p>
       </div>
 
       <div className="wiki-toolbar-row">
@@ -173,6 +163,7 @@ export default function WikiView() {
         </aside>
 
         <main className="wiki-main">
+          <Suspense fallback={<div className="wiki-state" role="status">Carregando conteúdo...</div>}>
           {criando && editando && (
             <WikiEditor key="novo-artigo" saving={isSaving} onCancel={() => { setCriando(false); setEditando(false) }} onSave={savePage} />
           )}
@@ -229,6 +220,7 @@ export default function WikiView() {
               <p>Selecione um artigo para abrir.</p>
             </div>
           )}
+          </Suspense>
         </main>
       </div>
     </div>

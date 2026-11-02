@@ -380,8 +380,8 @@ export default function DatabricksDashboardView() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div className="view-hero">
-        <div className="page-title">{DBX_TAB_INFO[dbxTab].titulo}</div>
-        <div className="view-hero-sub">{DBX_TAB_INFO[dbxTab].sub}</div>
+        <h1 className="page-title">{DBX_TAB_INFO[dbxTab].titulo}</h1>
+        <p className="view-hero-sub">{DBX_TAB_INFO[dbxTab].sub}</p>
       </div>
 
       {/* Barra de abas na pagina, no idioma da .nav do cockpit. Antes as abas

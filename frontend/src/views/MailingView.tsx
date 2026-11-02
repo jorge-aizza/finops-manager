@@ -40,8 +40,8 @@ export default function MailingView() {
   return (
     <div>
       <div className="view-hero">
-        <div className="page-title">📣 Mailing de Comunicados</div>
-        <div className="view-hero-sub">Cadastro único de destinatários, composer visual e acompanhamento de envio</div>
+        <h1 className="page-title">📣 Mailing de Comunicados</h1>
+        <p className="view-hero-sub">Cadastro único de destinatários, composer visual e acompanhamento de envio</p>
       </div>
 
       {/* Barra de abas no padrao do sistema (.view-tabs, igual a Inventario e Databricks).

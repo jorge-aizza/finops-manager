@@ -431,10 +431,10 @@ export default function LogAnalyticsView() {
 
   return (
     <div>
-      <div className="view-hero">
-        <div className="page-title">Log Analytics FinOps</div>
-        <div className="view-hero-sub">Ingestão, retenção e oportunidades de economia nos workspaces de Log Analytics.</div>
-      </div>
+      <header className="section-heading">
+        <h1>Log Analytics FinOps</h1>
+        <p>Ingestão, retenção e oportunidades de economia nos workspaces de Log Analytics.</p>
+      </header>
 
       {/* Filtro de Tenant (Service Principal) */}
       <div style={{ padding: '0 20px' }}>

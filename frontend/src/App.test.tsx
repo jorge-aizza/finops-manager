@@ -1,7 +1,13 @@
-import { render } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { QueryClient } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import App from './App'
+
+const wikiModuleLoaded = vi.hoisted(() => vi.fn())
+vi.mock('./views/WikiView', () => {
+  wikiModuleLoaded()
+  return { default: () => <div>Wiki carregada</div> }
+})
 
 // manualRefresh() (app.js) chama window.__reactBridge.refresh() pro botão
 // "Atualizar"/countdown de auto-refresh — verifica que App.tsx registra um
@@ -20,4 +26,14 @@ describe('App — bridge de refresh (window.__reactBridge.refresh)', () => {
 
     expect(spy).toHaveBeenCalled()
   });
+
+  it('carrega a Wiki sob demanda ao navegar para a tela', async () => {
+    render(<App />)
+
+    expect(wikiModuleLoaded).not.toHaveBeenCalled()
+    await act(async () => window.__reactBridge.mount('wiki'))
+
+    expect(await screen.findByText('Wiki carregada')).toBeInTheDocument()
+    expect(wikiModuleLoaded).toHaveBeenCalledOnce()
+  })
 });

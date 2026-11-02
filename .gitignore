@@ -39,3 +39,6 @@ skills-lock.json
 # O .png fica versionado tambem: campanhas ja salvas no banco apontam para ele.
 !mailing_uploads/finops-banner-comunicado.png
 !mailing_uploads/finops-logo-assinatura.png
+
+# Imagem de fundo da tela de autenticacao.
+!frontend/public/images/Vivo_home.png

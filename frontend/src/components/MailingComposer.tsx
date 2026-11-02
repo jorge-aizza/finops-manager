@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useEditor, EditorContent, type Editor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
@@ -12,6 +12,7 @@ import { TableRow } from '@tiptap/extension-table-row'
 import { TableCell } from '@tiptap/extension-table-cell'
 import { TableHeader } from '@tiptap/extension-table-header'
 import { uploadImagemMailing } from '../api/mailing'
+import './MailingComposer.css'
 
 // TipTap só preserva, ao CARREGAR um HTML pronto (ex: um modelo), os atributos que a
 // extensão declara entender — `style` arbitrário em cima de <img>/<hr>/cor de texto é
@@ -49,7 +50,6 @@ interface MailingComposerProps {
   editable?: boolean
 }
 
-const CORES = ['#1b2a4a', '#4a0080', '#7b2fbe', '#ff4d6a', '#ff8c42', '#22c55e', '#4da6ff']
 const MODELOS_TABELA = [
   {
     value: 'simples',
@@ -104,6 +104,7 @@ function normalizarTabelasEmail(html: string) {
 
 function Toolbar({ editor }: { editor: Editor }) {
   const fileRef = useRef<HTMLInputElement>(null)
+  const [corTexto, setCorTexto] = useState('#1f2937')
 
   async function handleImagem(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -142,106 +143,93 @@ function Toolbar({ editor }: { editor: Editor }) {
     editor.chain().focus().extendMarkRange('link').setLink({ href: url }).run()
   }
 
-  const btn = (ativo: boolean): React.CSSProperties => ({
-    padding: '5px 9px', fontSize: 12, borderRadius: 5, border: '1px solid var(--border)',
-    background: ativo ? 'var(--accent-dim)' : 'var(--bg)', color: ativo ? 'var(--accent)' : 'var(--text)',
-    cursor: 'pointer', lineHeight: 1,
-  })
-
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '8px', borderBottom: '1px solid var(--border)', background: 'var(--bg-hover)', borderRadius: '8px 8px 0 0' }}>
-      <select
-        aria-label="Estilo de texto"
-        value={editor.isActive('heading', { level: 1 }) ? 'h1' : editor.isActive('heading', { level: 2 }) ? 'h2' : editor.isActive('heading', { level: 3 }) ? 'h3' : 'p'}
-        onChange={(e) => {
-          const v = e.target.value
-          if (v === 'p') editor.chain().focus().setParagraph().run()
-          else editor.chain().focus().toggleHeading({ level: Number(v.slice(1)) as 1 | 2 | 3 }).run()
-        }}
-        style={{ fontSize: 12, padding: '4px 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-      >
-        <option value="p">Parágrafo</option>
-        <option value="h1">Título 1</option>
-        <option value="h2">Título 2</option>
-        <option value="h3">Título 3</option>
-      </select>
-      <select
-        aria-label="Tipo de fonte"
-        value={editor.getAttributes('textStyle').fontFamily || ''}
-        onChange={(e) => {
-          const family = e.target.value
+    <div className="mailing-editor-toolbar" role="toolbar" aria-label="Formatação da mensagem">
+      <div className="mailing-toolbar-group">
+        <button type="button" title="Desfazer" aria-label="Desfazer" disabled={!editor.can().undo()} onClick={() => editor.chain().focus().undo().run()}>↶</button>
+        <button type="button" title="Refazer" aria-label="Refazer" disabled={!editor.can().redo()} onClick={() => editor.chain().focus().redo().run()}>↷</button>
+      </div>
+      <div className="mailing-toolbar-group">
+        <select
+          aria-label="Estilo de texto"
+          value={editor.isActive('heading', { level: 1 }) ? 'h1' : editor.isActive('heading', { level: 2 }) ? 'h2' : editor.isActive('heading', { level: 3 }) ? 'h3' : 'p'}
+          onChange={(event) => {
+            const value = event.target.value
+            if (value === 'p') editor.chain().focus().setParagraph().run()
+            else editor.chain().focus().toggleHeading({ level: Number(value.slice(1)) as 1 | 2 | 3 }).run()
+          }}
+        >
+          <option value="p">Parágrafo</option><option value="h1">Título 1</option><option value="h2">Título 2</option><option value="h3">Título 3</option>
+        </select>
+        <select aria-label="Tipo de fonte" value={editor.getAttributes('textStyle').fontFamily || ''} onChange={(event) => {
+          const family = event.target.value
           if (family) editor.chain().focus().setFontFamily(family).run()
           else editor.chain().focus().unsetFontFamily().run()
-        }}
-        style={{ fontSize: 12, padding: '4px 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-      >
-        <option value="">Fonte padrão</option>
-        <option value="Arial, sans-serif">Arial</option>
-        <option value="Helvetica, sans-serif">Helvetica</option>
-        <option value="Verdana, sans-serif">Verdana</option>
-        <option value="Georgia, serif">Georgia</option>
-        <option value="'Times New Roman', serif">Times New Roman</option>
-        <option value="Tahoma, sans-serif">Tahoma</option>
-      </select>
-      <select
-        aria-label="Tamanho da fonte"
-        value={editor.getAttributes('textStyle').fontSize || ''}
-        onChange={(e) => {
-          const size = e.target.value
+        }}>
+          <option value="">Fonte padrão</option>
+          <option value="Arial, sans-serif">Arial</option><option value="Calibri, sans-serif">Calibri</option>
+          <option value="Helvetica, sans-serif">Helvetica</option><option value="Verdana, sans-serif">Verdana</option>
+          <option value="Georgia, serif">Georgia</option><option value="'Times New Roman', serif">Times New Roman</option>
+          <option value="Tahoma, sans-serif">Tahoma</option>
+        </select>
+        <select aria-label="Tamanho da fonte" value={editor.getAttributes('textStyle').fontSize || ''} onChange={(event) => {
+          const size = event.target.value
           if (size) editor.chain().focus().setFontSize(size).run()
           else editor.chain().focus().unsetFontSize().run()
-        }}
-        style={{ fontSize: 12, padding: '4px 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-      >
-        <option value="">Tamanho</option>
-        {['10px', '12px', '14px', '16px', '18px', '24px', '32px'].map((size) => (
-          <option key={size} value={size}>{size.replace('px', '')}</option>
-        ))}
-      </select>
-      <select
-        aria-label="Inserir modelo de tabela"
-        defaultValue=""
-        onChange={(evento) => {
-          const modelo = MODELOS_TABELA.find((item) => item.value === evento.target.value)
+        }}>
+          <option value="">Tamanho</option>
+          {['10px', '12px', '14px', '16px', '18px', '24px', '32px', '48px'].map((size) => <option key={size} value={size}>{Number.parseInt(size, 10)}</option>)}
+        </select>
+        <label className="mailing-color-control" title="Cor do texto">
+          <span aria-hidden="true">A</span>
+          <span className="mailing-color-swatch" style={{ backgroundColor: corTexto }} aria-hidden="true" />
+          <span aria-hidden="true">Cor</span>
+          <input aria-label="Cor do texto" type="color" value={corTexto} onChange={(event) => {
+            setCorTexto(event.target.value)
+            editor.chain().focus().setColor(event.target.value).run()
+          }} />
+        </label>
+      </div>
+      <div className="mailing-toolbar-group">
+        <button type="button" title="Negrito" aria-label="Negrito" aria-pressed={editor.isActive('bold')} onClick={() => editor.chain().focus().toggleBold().run()}><strong>B</strong></button>
+        <button type="button" title="Itálico" aria-label="Itálico" aria-pressed={editor.isActive('italic')} onClick={() => editor.chain().focus().toggleItalic().run()}><em>I</em></button>
+        <button type="button" title="Sublinhado" aria-label="Sublinhado" aria-pressed={editor.isActive('underline')} onClick={() => editor.chain().focus().toggleUnderline().run()}><u>U</u></button>
+        <button type="button" title="Tachado" aria-label="Tachado" aria-pressed={editor.isActive('strike')} onClick={() => editor.chain().focus().toggleStrike().run()}><s>S</s></button>
+      </div>
+      <div className="mailing-toolbar-group">
+        <button type="button" title="Alinhar à esquerda" aria-label="Alinhar à esquerda" aria-pressed={editor.isActive({ textAlign: 'left' })} onClick={() => editor.chain().focus().setTextAlign('left').run()}>≡</button>
+        <button type="button" title="Centralizar" aria-label="Centralizar" aria-pressed={editor.isActive({ textAlign: 'center' })} onClick={() => editor.chain().focus().setTextAlign('center').run()}>≣</button>
+        <button type="button" title="Alinhar à direita" aria-label="Alinhar à direita" aria-pressed={editor.isActive({ textAlign: 'right' })} onClick={() => editor.chain().focus().setTextAlign('right').run()}>≡</button>
+        <button type="button" title="Justificar" aria-label="Justificar" aria-pressed={editor.isActive({ textAlign: 'justify' })} onClick={() => editor.chain().focus().setTextAlign('justify').run()}>☷</button>
+      </div>
+      <div className="mailing-toolbar-group">
+        <button type="button" title="Lista com marcadores" aria-label="Lista com marcadores" aria-pressed={editor.isActive('bulletList')} onClick={() => editor.chain().focus().toggleBulletList().run()}>•</button>
+        <button type="button" title="Lista numerada" aria-label="Lista numerada" aria-pressed={editor.isActive('orderedList')} onClick={() => editor.chain().focus().toggleOrderedList().run()}>1.</button>
+        <button type="button" title="Citação" aria-label="Citação" aria-pressed={editor.isActive('blockquote')} onClick={() => editor.chain().focus().toggleBlockquote().run()}>❞</button>
+        <button type="button" title="Linha horizontal" aria-label="Linha horizontal" onClick={() => editor.chain().focus().setHorizontalRule().run()}>―</button>
+      </div>
+      <div className="mailing-toolbar-group mailing-table-tools">
+        <select aria-label="Inserir modelo de tabela" defaultValue="" onChange={(event) => {
+          const modelo = MODELOS_TABELA.find((item) => item.value === event.target.value)
           if (modelo) editor.chain().focus().insertContent(modelo.html).run()
-          evento.target.value = ''
-        }}
-        style={{ fontSize: 12, padding: '4px 6px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-      >
-        <option value="">Inserir tabela...</option>
-        {MODELOS_TABELA.map((modelo) => <option key={modelo.value} value={modelo.value}>{modelo.label}</option>)}
-      </select>
-      {editor.isActive('table') && <>
-        <button type="button" title="Adicionar linha abaixo" style={btn(false)} onClick={() => editor.chain().focus().addRowAfter().run()}>＋ Linha</button>
-        <button type="button" title="Remover linha" style={btn(false)} onClick={() => editor.chain().focus().deleteRow().run()}>− Linha</button>
-        <button type="button" title="Adicionar coluna à direita" style={btn(false)} onClick={() => editor.chain().focus().addColumnAfter().run()}>＋ Coluna</button>
-        <button type="button" title="Remover coluna" style={btn(false)} onClick={() => editor.chain().focus().deleteColumn().run()}>− Coluna</button>
-        <button type="button" title="Excluir tabela" style={btn(false)} onClick={() => editor.chain().focus().deleteTable().run()}>Excluir tabela</button>
-      </>}
-      <button type="button" title="Negrito" style={btn(editor.isActive('bold'))} onClick={() => editor.chain().focus().toggleBold().run()}><strong>N</strong></button>
-      <button type="button" title="Itálico" style={btn(editor.isActive('italic'))} onClick={() => editor.chain().focus().toggleItalic().run()}><em>I</em></button>
-      <button type="button" title="Sublinhado" style={btn(editor.isActive('underline'))} onClick={() => editor.chain().focus().toggleUnderline().run()}><u>S</u></button>
-      <span style={{ width: 1, background: 'var(--border)', margin: '2px 2px' }} />
-      <button type="button" title="Lista com marcadores" style={btn(editor.isActive('bulletList'))} onClick={() => editor.chain().focus().toggleBulletList().run()}>• Lista</button>
-      <button type="button" title="Lista numerada" style={btn(editor.isActive('orderedList'))} onClick={() => editor.chain().focus().toggleOrderedList().run()}>1. Lista</button>
-      <button type="button" title="Citação / destaque" style={btn(editor.isActive('blockquote'))} onClick={() => editor.chain().focus().toggleBlockquote().run()}>" Destaque</button>
-      <span style={{ width: 1, background: 'var(--border)', margin: '2px 2px' }} />
-      <button type="button" title="Alinhar à esquerda" style={btn(editor.isActive({ textAlign: 'left' }))} onClick={() => editor.chain().focus().setTextAlign('left').run()}>⬅</button>
-      <button type="button" title="Centralizar" style={btn(editor.isActive({ textAlign: 'center' }))} onClick={() => editor.chain().focus().setTextAlign('center').run()}>⬌</button>
-      <button type="button" title="Alinhar à direita" style={btn(editor.isActive({ textAlign: 'right' }))} onClick={() => editor.chain().focus().setTextAlign('right').run()}>➡</button>
-      <span style={{ width: 1, background: 'var(--border)', margin: '2px 2px' }} />
-      <button type="button" title="Inserir ou editar hyperlink" aria-label="Inserir ou editar hyperlink" style={btn(editor.isActive('link'))} onClick={setLink}>🔗</button>
-      <button type="button" title="Inserir imagem" style={btn(false)} onClick={() => fileRef.current?.click()}>🖼 Imagem</button>
-      <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" style={{ display: 'none' }} onChange={handleImagem} />
-      <button type="button" title="Linha divisória" style={btn(false)} onClick={() => editor.chain().focus().setHorizontalRule().run()}>— Linha</button>
-      <span style={{ width: 1, background: 'var(--border)', margin: '2px 2px' }} />
-      {CORES.map((c) => (
-        <button
-          key={c} type="button" title={`Cor do texto`} aria-label={`Cor do texto ${c}`}
-          onClick={() => editor.chain().focus().setColor(c).run()}
-          style={{ width: 20, height: 20, borderRadius: 4, background: c, border: '1px solid var(--border)', cursor: 'pointer', padding: 0 }}
-        />
-      ))}
+          event.target.value = ''
+        }}>
+          <option value="">Inserir tabela...</option>
+          {MODELOS_TABELA.map((modelo) => <option key={modelo.value} value={modelo.value}>{modelo.label}</option>)}
+        </select>
+        {editor.isActive('table') && <>
+          <button type="button" title="Adicionar linha" aria-label="Adicionar linha" onClick={() => editor.chain().focus().addRowAfter().run()}>+↵</button>
+          <button type="button" title="Remover linha" aria-label="Remover linha" onClick={() => editor.chain().focus().deleteRow().run()}>−↵</button>
+          <button type="button" title="Adicionar coluna" aria-label="Adicionar coluna" onClick={() => editor.chain().focus().addColumnAfter().run()}>+↦</button>
+          <button type="button" title="Remover coluna" aria-label="Remover coluna" onClick={() => editor.chain().focus().deleteColumn().run()}>−↦</button>
+          <button type="button" title="Excluir tabela" aria-label="Excluir tabela" onClick={() => editor.chain().focus().deleteTable().run()}>Excluir</button>
+        </>}
+      </div>
+      <div className="mailing-toolbar-group">
+        <button type="button" title="Inserir ou editar hyperlink" aria-label="Inserir ou editar hyperlink" aria-pressed={editor.isActive('link')} onClick={setLink}>↗</button>
+        <button type="button" title="Inserir imagem" aria-label="Inserir imagem" onClick={() => fileRef.current?.click()}>Inserir imagem</button>
+        <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onChange={handleImagem} />
+      </div>
     </div>
   )
 }
@@ -325,9 +313,9 @@ export default function MailingComposer({ value, onChange, editable = true }: Ma
   if (!editor) return null
 
   return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)' }}>
+    <div className="mailing-editor-frame">
       {editable && <Toolbar editor={editor} />}
-      <div className="mailing-table-surface" style={{ minHeight: 280, maxHeight: 560, overflowY: 'auto' }}>
+      <div className="mailing-table-surface mailing-editor-scroll">
         <EditorContent editor={editor} style={{ boxSizing: 'border-box', width: '100%', maxWidth: 640, margin: '0 auto', padding: '16px 24px', background: '#fff', color: '#1f2937', fontFamily: 'Arial,Helvetica,sans-serif', fontSize: 14, lineHeight: '21px', whiteSpace: 'pre-wrap' }} />
       </div>
     </div>

@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import axe from 'axe-core'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import AcoesView from './AcoesView'
@@ -54,6 +55,18 @@ describe('AcoesView', () => {
     expect(row).toHaveTextContent('R$ 5.000,00')
   });
 
+  it('não tem violações WCAG A/AA detectáveis pelo axe-core', async () => {
+    renderWithClient()
+    await screen.findByText('Rightsizing VMs produção')
+
+    const results = await axe.run(document.body, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+      rules: { 'color-contrast': { enabled: false } },
+    })
+
+    expect(results.violations).toEqual([])
+  })
+
   it('mostra estado vazio quando não há ações', async () => {
     vi.mocked(acoesApi.listAcoes).mockResolvedValue([])
     renderWithClient()
@@ -92,6 +105,28 @@ describe('AcoesView', () => {
       )
     });
   });
+
+  it('mantém o foco no modal, fecha com Escape e devolve o foco ao acionador', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('Rightsizing VMs produção')
+
+    const trigger = screen.getByRole('button', { name: 'Nova Ação' })
+    trigger.focus()
+    await user.keyboard('{Enter}')
+
+    const dialog = await screen.findByRole('dialog', { name: 'Nova Ação FinOps' })
+    expect(screen.getByLabelText('Ação *')).toHaveFocus()
+
+    screen.getByRole('button', { name: 'Salvar' }).focus()
+    await user.tab()
+    expect(screen.getByRole('button', { name: 'Fechar' })).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+    expect(dialog).not.toBeInTheDocument()
+  })
 
   it('só lista responsáveis ativos no formulário', async () => {
     const user = userEvent.setup()

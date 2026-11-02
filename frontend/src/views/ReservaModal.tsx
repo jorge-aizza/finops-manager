@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import CmsSelect from '../components/CmsSelect'
+import { useAccessibleModal } from '../hooks/useAccessibleModal'
 import { createReserva, deleteReserva, updateReserva } from '../api/reservas'
 import { listResourceGroups } from '../api/azure'
 import { CLOUDS, DEFAULT_SCOPE, SCOPE_CONFIG, TIPOS_RECURSO, type Cloud } from '../config/reservaScopes'
@@ -97,6 +98,7 @@ export default function ReservaModal({ reserva, subscriptions, onClose }: Reserv
   const [form, setForm] = useState<FormState>(() =>
     reserva ? fromReserva(reserva, subscriptions) : EMPTY_FORM,
   )
+  const modalRef = useAccessibleModal(onClose)
 
   const cloud = (form.cloud || null) as Cloud | null
   const scopeCfg = cloud ? (SCOPE_CONFIG[cloud]?.[form.tipo_escopo] ?? {}) : {}
@@ -205,9 +207,9 @@ export default function ReservaModal({ reserva, subscriptions, onClose }: Reserv
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal modal-wide">
+      <div ref={modalRef} className="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="reserva-modal-title" tabIndex={-1}>
         <div className="modal-header">
-          <span>{reserva ? 'Editar Reserva' : 'Nova Reserva'}</span>
+          <span id="reserva-modal-title">{reserva ? 'Editar Reserva' : 'Nova Reserva'}</span>
           <button className="modal-close" aria-label="Fechar" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body">

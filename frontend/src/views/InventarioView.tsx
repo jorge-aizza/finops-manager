@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { useTenantFilter } from '../contexts/TenantFilterContext'
 import { TenantSelector } from '../components/TenantSelector'
@@ -56,16 +56,16 @@ const DESPERDICIO_LABEL: Record<AzureDesperdicioCategoria, string> = {
 }
 const MOTIVO_VALIDACAO_LABEL: Record<'aks_pvc' | 'asr', { label: string; color: string; bg: string }> = {
   aks_pvc: { label: 'AKS/PVC', color: 'var(--accent)', bg: 'color-mix(in srgb, var(--accent) 15%, transparent)' },
-  asr: { label: 'ASR', color: 'var(--orange,#ff8c42)', bg: 'color-mix(in srgb, var(--orange,#ff8c42) 15%, transparent)' },
+  asr: { label: 'ASR', color: 'var(--text-orange,var(--orange,#ff8c42))', bg: 'color-mix(in srgb, var(--orange,#ff8c42) 15%, transparent)' },
 }
 function fmtBRLCurto(v: number): string {
   return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 const ACAO_BADGE: Record<AzureAuditoriaAcao, { color: string; bg: string; label: string }> = {
-  CRIACAO: { color: 'var(--green,#22c55e)', bg: 'rgba(34,197,94,.10)', label: '✚ Criação' },
+  CRIACAO: { color: 'var(--text-green,var(--green,#22c55e))', bg: 'rgba(34,197,94,.10)', label: '✚ Criação' },
   ATUALIZACAO: { color: 'var(--blue,#4da6ff)', bg: 'rgba(77,166,255,.10)', label: '✎ Atualização' },
-  EXCLUSAO: { color: 'var(--red,#ff4d6a)', bg: 'rgba(255,77,106,.10)', label: '✕ Exclusão' },
+  EXCLUSAO: { color: 'var(--text-red,var(--red,#ff4d6a))', bg: 'rgba(255,77,106,.10)', label: '✕ Exclusão' },
 }
 
 // Caixas "por Tipo de Recurso" na aba Auditoria (2026-08-31, pedido do usuário) — `resource_type`
@@ -174,7 +174,7 @@ function GrowthChart({ dias }: { dias: { dia: string; ativos: number }[] }) {
   const primeiro = dias[0].ativos
   const ultimo = dias[dias.length - 1].ativos
   const delta = ultimo - primeiro
-  const corDelta = delta > 0 ? 'var(--green,#22c55e)' : delta < 0 ? 'var(--red,#ff4d6a)' : 'var(--text-muted)'
+  const corDelta = delta > 0 ? 'var(--text-green,var(--green,#22c55e))' : delta < 0 ? 'var(--text-red,var(--red,#ff4d6a))' : 'var(--text-muted)'
 
   return (
     <div style={{ padding: '0 20px 16px' }}>
@@ -198,7 +198,7 @@ function GrowthChart({ dias }: { dias: { dia: string; ativos: number }[] }) {
 }
 
 function DeltaTag({ delta }: { delta: number }) {
-  const cor = delta > 0 ? 'var(--green,#22c55e)' : delta < 0 ? 'var(--red,#ff4d6a)' : 'var(--text-muted)'
+  const cor = delta > 0 ? 'var(--text-green,var(--green,#22c55e))' : delta < 0 ? 'var(--text-red,var(--red,#ff4d6a))' : 'var(--text-muted)'
   const seta = delta > 0 ? '▲' : delta < 0 ? '▼' : '—'
   return <span style={{ color: cor, fontWeight: 700, fontSize: 12, flexShrink: 0 }}>{seta} {Math.abs(delta).toLocaleString('pt-BR')}</span>
 }
@@ -312,7 +312,7 @@ function CrescimentoPersistenteCard({ data, loading }: { data: any[] | undefined
             <thead><tr><th>Subscription</th><th>Dia</th><th style={{ textAlign: 'right' }}>Recursos</th><th style={{ textAlign: 'right' }}>Novos (7-14d)</th><th style={{ textAlign: 'right' }}>Z-Score</th><th>Severidade</th></tr></thead>
             <tbody>
               {data.map((a, i) => {
-                const cor = a.severidade === 'critico' ? 'var(--red,#ff4d6a)' : a.severidade === 'atencao' ? 'var(--orange,#ff8c42)' : 'var(--green,#22c55e)'
+                const cor = a.severidade === 'critico' ? 'var(--text-red,var(--red,#ff4d6a))' : a.severidade === 'atencao' ? 'var(--text-orange,var(--orange,#ff8c42))' : 'var(--text-green,var(--green,#22c55e))'
                 return (
                   <tr key={i}>
                     <td style={{ fontSize: 12 }} title={a.subscription_id}>{a.subscription_id.slice(0, 8)}</td>
@@ -344,7 +344,7 @@ const ADVISOR_CATEGORIA_INFO: Record<AzureAdvisorCategoria, { label: string; ico
   OperationalExcellence: { label: 'Excelência Operacional', icon: '⚙️' },
 }
 const ADVISOR_IMPACTO_COR: Record<string, string> = {
-  High: 'var(--red,#ff4d6a)', Medium: 'var(--orange,#ff8c42)', Low: 'var(--text-muted)',
+  High: 'var(--text-red,var(--red,#ff4d6a))', Medium: 'var(--text-orange,var(--orange,#ff8c42))', Low: 'var(--text-muted)',
 }
 
 // Diagrama de topologia de rede (2026-09-02, inspirado no ARI, que gera diagrama draw.io de
@@ -438,7 +438,7 @@ function LinhaComparativo({ label, a, b, formato }: { label: string; a: number; 
   const fmt = (v: number) => (formato === 'brl' ? fmtBRL(v) : v.toLocaleString('pt-BR'))
   const delta = b - a
   const deltaPct = a !== 0 ? (delta / a) * 100 : (b !== 0 ? 100 : 0)
-  const cor = delta > 0 ? 'var(--green,#22c55e)' : delta < 0 ? 'var(--red,#ff4d6a)' : 'var(--text-muted)'
+  const cor = delta > 0 ? 'var(--text-green,var(--green,#22c55e))' : delta < 0 ? 'var(--text-red,var(--red,#ff4d6a))' : 'var(--text-muted)'
   const seta = delta > 0 ? '▲' : delta < 0 ? '▼' : '—'
   return (
     <tr>
@@ -469,6 +469,8 @@ export default function InventarioView() {
   // acontece no backend, por `subscription_id` (ver _getInventarioEscopos em server.js).
   const { selectedTenantId } = useTenantFilter()
   const [tab, setTab] = useState<InventarioTab>('recursos')
+  const tabListRef = useRef<HTMLDivElement>(null)
+  const pendingTabFocus = useRef<InventarioTab | null>(null)
   // Escopo vindo de uma notificação do sino (anomalia de crescimento): filtra Recursos por assinatura,
   // RG e (se houver) dia de criação — a lista do que gerou o alerta.
   const [escopoRecursos, setEscopoRecursos] = useState<EscopoRecursos | null>(null)
@@ -489,6 +491,12 @@ export default function InventarioView() {
       setEscopoRecursos(null)
     }
   }), [])
+  useEffect(() => {
+    const id = pendingTabFocus.current
+    if (!id) return
+    tabListRef.current?.querySelector<HTMLButtonElement>(`#inv-tab-${id}`)?.focus()
+    pendingTabFocus.current = null
+  }, [tab])
   const [periodo, setPeriodo] = useState(defaultPeriodo(30))
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroDesperdicioDias, setFiltroDesperdicioDias] = useState(0)
@@ -796,25 +804,49 @@ export default function InventarioView() {
     onError: (e: Error) => window.showToast?.('Erro ao exportar: ' + e.message, 'error'),
   })
 
+  function activateTab(id: InventarioTab) {
+    if (window.showInvTab) window.showInvTab(id)
+    else setTab(id)
+  }
+
+  function handleTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % INV_TABS.length
+    else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + INV_TABS.length) % INV_TABS.length
+    else if (event.key === 'Home') nextIndex = 0
+    else if (event.key === 'End') nextIndex = INV_TABS.length - 1
+    if (nextIndex === null) return
+
+    event.preventDefault()
+    const nextId = INV_TABS[nextIndex][0]
+    if (nextId === tab) return
+    pendingTabFocus.current = nextId
+    activateTab(nextId)
+  }
+
   return (
     // Sem a classe `view active`: showView() (app.js) remove `active` de todo `.view` a cada troca
     // de aba pelo menu e o React não a recoloca — a tela ficava em branco. #react-root já controla a exibição.
     <div>
-      <div className="view-hero">
-        <div className="page-title">Inventário</div>
-        <div className="view-hero-sub">Inventário e auditoria de recursos Azure — quem criou, quando, e quanto custa</div>
-      </div>
+      <header className="section-heading">
+        <h1>Inventário</h1>
+        <p>Inventário e auditoria de recursos Azure — quem criou, quando, e quanto custa</p>
+      </header>
 
       {/* Barra de abas no padrão do sistema (.view-tabs, igual ao Databricks). Chama
           window.showInvTab para o realce do submenu lateral acompanhar; sem o app.js
           (testes) cai direto no estado local. */}
-      <div className="view-tabs" role="tablist" aria-label="Seções do Inventário" style={{ marginTop: 16 }}>
-        {INV_TABS.map(([id, label]) => (
+      <div ref={tabListRef} className="view-tabs" role="tablist" aria-label="Seções do Inventário" style={{ marginTop: 16 }}>
+        {INV_TABS.map(([id, label], index) => (
           <button
             key={id}
+            id={`inv-tab-${id}`}
             role="tab"
+            aria-selected={tab === id}
             aria-current={tab === id ? 'page' : undefined}
-            onClick={() => (window.showInvTab ? window.showInvTab(id) : setTab(id))}
+            tabIndex={tab === id ? 0 : -1}
+            onClick={() => activateTab(id)}
+            onKeyDown={(event) => handleTabKeyDown(event, index)}
           >
             {label}
           </button>
@@ -895,7 +927,7 @@ export default function InventarioView() {
                       <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>
                         RG: {r.resource_group} · Tipo: {r.resource_type}
                       </div>
-                      <div style={{ fontSize: 10, color: 'var(--orange,#ff8c42)' }}>
+                      <div style={{ fontSize: 10, color: 'var(--text-orange,var(--orange,#ff8c42))' }}>
                         Faltam: <strong>{r.tags_faltando.join(', ')}</strong>
                       </div>
                     </div>
@@ -923,15 +955,20 @@ export default function InventarioView() {
             </button>
           </div>
           <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-            Permanente — nunca é apagado pela retenção configurável (só o log de Auditoria é). Custo correlacionado com a Coleta Azure por resource_id — quando o recurso individual nunca teve billing próprio (comum pra VMs/discos/NICs efêmeros de cluster Databricks), mostra o custo <span style={{ color: 'var(--orange,#ff8c42)' }}>~aproximado do Resource Group inteiro</span> em vez de zero.
+            Permanente — nunca é apagado pela retenção configurável (só o log de Auditoria é). Custo correlacionado com a Coleta Azure por resource_id — quando o recurso individual nunca teve billing próprio (comum pra VMs/discos/NICs efêmeros de cluster Databricks), mostra o custo <span style={{ color: 'var(--text-orange,var(--orange,#ff8c42))' }}>~aproximado do Resource Group inteiro</span> em vez de zero.
           </div>
           <div style={{ display: 'flex', gap: 8, padding: '0 20px 12px', flexWrap: 'wrap' }}>
-            <select value={filtroAtivo} onChange={(e) => setFiltroAtivo(e.target.value as typeof filtroAtivo)}>
+            <select className="filter-select" aria-label="Status dos recursos" value={filtroAtivo} onChange={(e) => setFiltroAtivo(e.target.value as typeof filtroAtivo)}>
               <option value="ativos">Ativos</option>
               <option value="excluidos">Excluídos</option>
               <option value="todos">Todos</option>
             </select>
-            <input placeholder="Filtrar por quem criou" value={filtroCriadoPor} onChange={(e) => setFiltroCriadoPor(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
+            <details className="filter-disclosure">
+              <summary>Filtros</summary>
+              <div className="filter-disclosure-panel">
+                <input className="filter-input" aria-label="Filtrar por quem criou" placeholder="Filtrar por quem criou" value={filtroCriadoPor} onChange={(e) => setFiltroCriadoPor(e.target.value)} />
+              </div>
+            </details>
           </div>
           {escopoRecursos && (
             <div style={{ padding: '0 20px 12px' }}>
@@ -971,11 +1008,11 @@ export default function InventarioView() {
                       <td style={{ fontSize: 12 }}>{fmtData(r.criado_em)}</td>
                       <td>
                         {r.ativo
-                          ? <span style={{ color: 'var(--green,#22c55e)', fontSize: 11 }}>● Ativo</span>
+                          ? <span style={{ color: 'var(--text-green,var(--green,#22c55e))', fontSize: 11 }}>● Ativo</span>
                           : <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={r.excluido_por ? `Excluído por ${r.excluido_por_nome || r.excluido_por} em ${fmtData(r.excluido_em)}` : ''}>○ Excluído</span>}
                       </td>
                       <td
-                        style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--orange,#ff8c42)' : undefined }}
+                        style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--text-orange,var(--orange,#ff8c42))' : undefined }}
                         title={usaFallbackRg ? `Custo direto deste recurso é zero (comum pra recursos efêmeros de cluster) — mostrando o custo total do Resource Group "${r.resource_group}" no lugar` : ''}
                       >
                         {usaFallbackRg ? '~' : ''}{fmtBRL(usaFallbackRg ? r.custo_resource_group : r.custo_acumulado)}
@@ -1104,7 +1141,7 @@ export default function InventarioView() {
                             <td style={{ fontSize: 12 }} title={r.criado_por || ''}>{r.criado_por_nome || r.criado_por || 'desconhecido'}</td>
                             <td style={{ fontSize: 12 }}>{fmtData(r.criado_em)}</td>
                             <td
-                              style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--orange,#ff8c42)' : undefined }}
+                              style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--text-orange,var(--orange,#ff8c42))' : undefined }}
                               title={usaFallbackRg ? `Custo direto deste recurso é zero — mostrando o custo total do Resource Group no lugar` : ''}
                             >
                               {usaFallbackRg ? '~' : ''}{fmtBRL(usaFallbackRg ? r.custo_resource_group : r.custo_acumulado)}
@@ -1135,7 +1172,7 @@ export default function InventarioView() {
               <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
                 <div className="stat-card">
                   <div className="stat-label">Novos ontem ({new Date(relatorioDiarioQuery.data.dia + 'T00:00:00Z').toLocaleDateString('pt-BR', { timeZone: 'UTC' })})</div>
-                  <div className="stat-value" style={{ color: 'var(--green,#22c55e)' }}>{relatorioDiarioQuery.data.criados}</div>
+                  <div className="stat-value" style={{ color: 'var(--text-green,var(--green,#22c55e))' }}>{relatorioDiarioQuery.data.criados}</div>
                 </div>
                 <div className="stat-card">
                   <div className="stat-label">Atualizados</div>
@@ -1151,7 +1188,7 @@ export default function InventarioView() {
                 {relatorioDiarioQuery.data.delta === 0 ? (
                   <strong>igual</strong>
                 ) : relatorioDiarioQuery.data.delta > 0 ? (
-                  <strong style={{ color: 'var(--green,#22c55e)' }}>▲ {relatorioDiarioQuery.data.delta} a mais</strong>
+                  <strong style={{ color: 'var(--text-green,var(--green,#22c55e))' }}>▲ {relatorioDiarioQuery.data.delta} a mais</strong>
                 ) : (
                   <strong style={{ color: 'var(--red,#ff4d6a)' }}>▼ {Math.abs(relatorioDiarioQuery.data.delta)} a menos</strong>
                 )}
@@ -1284,7 +1321,7 @@ export default function InventarioView() {
                       <td style={{ fontSize: 12, fontWeight: 600 }}>{m.propriedade_label}</td>
                       <td style={{ fontSize: 12, color: 'var(--red,#ff4d6a)' }}>{m.valor_anterior || '—'}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>→</td>
-                      <td style={{ fontSize: 12, color: 'var(--green,#22c55e)', fontWeight: 600 }}>{m.valor_novo || '—'}</td>
+                      <td style={{ fontSize: 12, color: 'var(--text-green,var(--green,#22c55e))', fontWeight: 600 }}>{m.valor_novo || '—'}</td>
                       <td style={{ fontSize: 12 }} title={m.evento_autor || ''}>{m.evento_autor_nome || m.evento_autor || 'desconhecido'}</td>
                     </tr>
                   ))}
@@ -1542,7 +1579,7 @@ export default function InventarioView() {
                 <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', marginBottom: 12 }}>
                   <div className="stat-card yellow-card">
                     <div className="stat-label">Desperdício estimado por mês</div>
-                    <div className="stat-value" style={{ color: 'var(--orange,#ff8c42)' }}>{fmtBRLCurto(despCustoMensal)}</div>
+                    <div className="stat-value" style={{ color: 'var(--text-orange,var(--orange,#ff8c42))' }}>{fmtBRLCurto(despCustoMensal)}</div>
                   </div>
                   <div className="stat-card danger">
                     <div className="stat-label">Projeção anual</div>
@@ -1572,7 +1609,7 @@ export default function InventarioView() {
                     <>
                       <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
                         <div className="stat-label">💰 Economia realizada por mês</div>
-                        <div className="stat-value" style={{ color: 'var(--green,#22c55e)' }}>
+                        <div className="stat-value" style={{ color: 'var(--text-green,var(--green,#22c55e))' }}>
                           {fmtBRLCurto(desperdicioQuery.data.saving.economia_mensal)}
                         </div>
                         {desperdicioQuery.data.saving.desconto_mensal_snapshots > 0 && (
@@ -1593,7 +1630,7 @@ export default function InventarioView() {
                             que foi excluído — inclusive o que merece ressalva. Quem olha aqui
                             tem contexto pra julgar, mas precisa ver a ressalva junto do número. */}
                         {desperdicioQuery.data.saving.para_validacao > 0 && (
-                          <div style={{ fontSize: 11, color: 'var(--orange,#ff8c42)' }}
+                          <div style={{ fontSize: 11, color: 'var(--text-orange,var(--orange,#ff8c42))' }}
                             title="Disco de PVC/AKS ou ASR: o estado do recurso não prova abandono, então a exclusão pode ter sido o ciclo de vida do cluster e não o processo de FinOps">
                             ⚠ {desperdicioQuery.data.saving.para_validacao} em validação (AKS/ASR) dentro do total, {fmtBRLCurto(desperdicioQuery.data.saving.para_validacao_custo_mensal)}/mês
                           </div>
@@ -1667,7 +1704,7 @@ export default function InventarioView() {
                               <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{i.excluido_por || '—'}</td>
                               {/* 0 dias é informação, não ausência dela: foi detectado e excluído
                                   no mesmo dia. Já null é "não sabemos" e vira travessão. */}
-                              <td style={{ textAlign: 'right', color: i.dias_orfao !== null && i.dias_orfao < 7 ? 'var(--orange,#ff8c42)' : undefined }}>
+                              <td style={{ textAlign: 'right', color: i.dias_orfao !== null && i.dias_orfao < 7 ? 'var(--text-orange,var(--orange,#ff8c42))' : undefined }}>
                                 {i.dias_orfao === null ? '—' : i.dias_orfao}
                               </td>
                               <td style={{ textAlign: 'right' }}>{i.custo_mensal === null ? '—' : fmtBRLCurto(i.custo_mensal)}</td>
@@ -1710,7 +1747,7 @@ export default function InventarioView() {
                       >
                         <span style={{ fontSize: 18, fontWeight: 700, color: ativo ? 'var(--accent)' : 'var(--text)' }}>{c.itens}</span>
                         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{DESPERDICIO_LABEL[c.categoria] || c.categoria}</span>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--orange,#ff8c42)' }}>{fmtBRLCurto(c.custo)}/mês</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-orange,var(--orange,#ff8c42))' }}>{fmtBRLCurto(c.custo)}/mês</span>
                       </button>
                     )
                   })}
@@ -1775,7 +1812,7 @@ export default function InventarioView() {
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.sku || '—'}</td>
                         <td style={{ textAlign: 'right', fontSize: 12 }}>{it.tamanho_gb ? it.tamanho_gb + ' GB' : '—'}</td>
                         <td
-                          style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}
+                          style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--text-orange,var(--orange,#ff8c42))' : 'var(--text-muted)' }}
                           title={it.custo_mensal_estimado === null ? 'Sem billing conhecido para este recurso — não dá pra afirmar o custo' : ''}
                         >
                           {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
@@ -1833,7 +1870,7 @@ export default function InventarioView() {
                           <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.resource_group || '—'}</td>
                           <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.sku || '—'}</td>
                           <td style={{ textAlign: 'right', fontSize: 12 }}>{it.tamanho_gb ? it.tamanho_gb + ' GB' : '—'}</td>
-                          <td style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}>
+                          <td style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--text-orange,var(--orange,#ff8c42))' : 'var(--text-muted)' }}>
                             {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
                           </td>
                         </tr>
@@ -1879,7 +1916,7 @@ export default function InventarioView() {
                     const n = (sp.subscription_ids || '').split(/[\n,]+/).filter((x) => x.trim()).length
                     return (
                       <div key={sp.id} style={{ fontSize: 12 }}>
-                        <span style={{ color: 'var(--green,#22c55e)' }}>●</span> {sp.nome}
+                        <span style={{ color: 'var(--text-green,var(--green,#22c55e))' }}>●</span> {sp.nome}
                         <span style={{ color: 'var(--text-muted)' }}> — {n} assinatura{n === 1 ? '' : 's'}</span>
                       </div>
                     )
@@ -1952,7 +1989,7 @@ export default function InventarioView() {
                         {h.origem?.startsWith('reconciliacao') ? '🔎 Reconciliação' : h.origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'}
                       </td>
                       <td>
-                        <span style={{ color: h.status === 'concluido' ? 'var(--green,#22c55e)' : h.status === 'erro' ? 'var(--red,#ff4d6a)' : 'var(--orange,#ff8c42)', fontSize: 11, fontWeight: 600 }}>
+                        <span style={{ color: h.status === 'concluido' ? 'var(--text-green,var(--green,#22c55e))' : h.status === 'erro' ? 'var(--text-red,var(--red,#ff4d6a))' : 'var(--text-orange,var(--orange,#ff8c42))', fontSize: 11, fontWeight: 600 }}>
                           {h.status}
                         </span>
                       </td>

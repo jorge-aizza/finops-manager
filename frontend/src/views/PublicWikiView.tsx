@@ -34,8 +34,8 @@ export default function PublicWikiView() {
   return (
     <div className="wiki-view public-wiki-view">
       <div className="view-hero">
-        <div className="page-title">Base de conhecimento</div>
-        <div className="view-hero-sub">Artigos públicos</div>
+        <h1 className="page-title">Base de conhecimento</h1>
+        <p className="view-hero-sub">Artigos públicos</p>
       </div>
 
       <div className="wiki-toolbar-row">

@@ -70,8 +70,8 @@ export default function ProjetosView() {
   return (
     <div>
       <div className="view-hero" style={{ marginBottom: 16 }}>
-        <div className="page-title">Projetos</div>
-        <div className="view-hero-sub">Cadastro de projetos usados em ações, estimativas e rateio de custo</div>
+        <h1 className="page-title">Projetos</h1>
+        <p className="view-hero-sub">Cadastro de projetos usados em ações, estimativas e rateio de custo</p>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>

@@ -99,41 +99,46 @@
 }
 
 :root {
-  --bg: #111014;
-  --bg-card: rgba(27, 24, 31, 0.96);
-  --bg-hover: rgba(220, 205, 235, 0.07);
-  --border: #342f39;
-  --border-light: #48414f;
-  --text: #e8eaf0;
-  --text-muted: #aaa3b2;
-  --text-dim: #c3a9e6;
-  --accent: #9333ea;
-  --accent-dim: rgba(147, 51, 234, 0.16);
-  --accent-glow: rgba(147, 51, 234, 0.22);
+  --bg: #18171b;
+  --bg-card: #222126;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --border: #39373e;
+  --border-light: #4a474f;
+  --text: #f4f2f5;
+  --text-muted: #b4afb9;
+  --text-dim: #e2c8ef;
+  --accent: #d49be1;
+  --accent-brand: #660099;
+  --accent-secondary: #e6007e;
+  --accent-strong: #a82bd0;
+  --accent-strong-hover: #bd45df;
+  --accent-dim: rgba(212, 155, 225, 0.14);
+  --accent-glow: rgba(212, 155, 225, 0.18);
   --danger: #ff4d6a;
   --red: #ff4d6a;
   /* Cor do "maior dia" nos gráficos (CkBarChart). Vive no :root porque o gráfico é usado
      fora de .ck-cotas, único escopo onde --ck-magenta existia — lá a barra saía preta. */
   --ck-destaque: var(--red);
   --orange: #ff8c42;
+  --text-orange: #ff8c42;
+  --text-red: #ff7185;
+  --text-green: #22c55e;
+  --text-blue: #4da6ff;
   --green: #22c55e;
   --blue: #4da6ff;
   --sidebar-w: 220px;
   /* compatibility aliases — fallback for inline styles that reference old variable names */
-  --surface:      rgba(27, 24, 31, 0.96);
-  --base:         #111014;
-  --surface-alt:  rgba(22, 20, 26, 0.98);
-  --text-primary: #e8eaf0;
+  --surface:      #222126;
+  --base:         #18171b;
+  --surface-alt:  #29272d;
+  --text-primary: #f4f2f5;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
   font-family: 'IBM Plex Sans', sans-serif;
-  background:
-    radial-gradient(ellipse at 25% 45%, rgba(111, 53, 153, 0.12) 0%, transparent 55%),
-    radial-gradient(ellipse at 75% 80%, rgba(72, 49, 91, 0.08) 0%, transparent 50%),
-    linear-gradient(160deg, #19161d 0%, #111014 55%, #151319 100%);
+  background-color: var(--bg);
   background-attachment: fixed;
   color: var(--text);
   font-size: 14px;
@@ -153,8 +158,6 @@ body {
 .sidebar {
   width: 56px;
   background: var(--bg-card);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -166,7 +169,7 @@ body {
 }
 .sidebar.open {
   width: 240px;
-  box-shadow: 4px 0 32px rgba(0, 0, 0, 0.24);
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.12);
 }
 
 /* ── Overlay cobre apenas o main-content quando sidebar está aberta ── */
@@ -202,7 +205,7 @@ body {
   position: absolute;
   top: 0; left: 0; right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--accent) 0%, transparent 100%);
+  background: linear-gradient(90deg, var(--accent-brand) 0%, var(--accent-secondary) 55%, transparent 100%);
   z-index: 1;
 }
 
@@ -486,8 +489,6 @@ body {
   height: 58px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-card);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
   flex-shrink: 0;
   position: relative;
   z-index: 20;
@@ -501,10 +502,10 @@ body {
 
 .page-title {
   font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #ffffff;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
   text-shadow: none;
 }
 
@@ -522,6 +523,22 @@ body {
 .view.active { display: block; }
 
 /* ── DASHBOARD ── */
+.section-heading {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.section-heading h1 {
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.section-heading p {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -543,10 +560,8 @@ body {
 
 .stat-card {
   background: var(--bg-card);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 20px;
   position: relative;
   overflow: hidden;
@@ -567,9 +582,9 @@ body {
 .stat-card.blue-card::before   { background: linear-gradient(90deg, #3b82f6, transparent); }
 
 .stat-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
   color: var(--text-muted);
   font-weight: 500;
   margin-bottom: 10px;
@@ -585,6 +600,7 @@ body {
 }
 
 .stat-value.green { color: var(--accent); }
+.stat-card.green-card .stat-value { color: var(--green); }
 
 .stat-sub {
   font-size: 11px;
@@ -682,7 +698,7 @@ body {
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 8px;
   overflow: hidden;
 }
 
@@ -697,11 +713,11 @@ body {
 }
 
 .card-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .badge {
@@ -742,6 +758,23 @@ body {
 
 .filter-input::placeholder { color: var(--text-muted); }
 
+.filter-disclosure { position: relative; flex: 0 0 auto; }
+.filter-disclosure summary {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 36px; padding: 0 12px; border: 1px solid var(--border-light);
+  border-radius: 6px; color: var(--text-dim); background: var(--bg-card);
+  font-size: 12px; font-weight: 600; cursor: pointer; list-style: none;
+}
+.filter-disclosure summary::-webkit-details-marker { display: none; }
+.filter-disclosure summary::after { content: '⌄'; color: var(--text-muted); }
+.filter-disclosure[open] summary { border-color: var(--accent); color: var(--accent); }
+.filter-disclosure-panel {
+  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0;
+  display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 8px;
+  width: min(360px, calc(100vw - 32px)); padding: 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-card); box-shadow: var(--ck-shadow, 0 8px 24px rgba(0, 0, 0, .28));
+}
 /* ── TABLE ── */
 .table-wrapper {
   overflow-x: auto;
@@ -756,10 +789,10 @@ body {
 .data-table th {
   text-align: left;
   padding: 11px 16px;
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  text-transform: none;
+  letter-spacing: 0;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -769,7 +802,7 @@ body {
 .data-table td {
   padding: 11px 16px;
   border-bottom: 1px solid var(--border);
-  color: var(--text-dim);
+  color: var(--text);
   vertical-align: middle;
 }
 
@@ -828,6 +861,23 @@ body {
 .status-andamento { background: rgba(255,140,66,0.12); color: var(--orange); }
 .status-concluido { background: rgba(34,197,94,0.12); color: var(--green); }
 .status-cancelado { background: rgba(255,77,106,0.12); color: var(--red); }
+:root:not([data-theme="light"]) .status-cancelado { color: #ff7185; }
+[data-theme="light"] .status-planejado { color: #1d4ed8; }
+[data-theme="light"] .status-andamento { color: #92400e; }
+[data-theme="light"] .status-concluido { color: #15803d; }
+[data-theme="light"] .status-cancelado { color: #b91c1c; }
+[data-theme="light"] .reserva-status-badge[data-status="Ativa"] { --reserva-status-text: var(--text-green); }
+[data-theme="light"] .reserva-status-badge[data-status="Expirada"] { --reserva-status-text: var(--text-red); }
+[data-theme="light"] .reserva-status-badge[data-status="Cancelada"] { --reserva-status-text: #5b21b6; }
+[data-theme="light"] .reserva-cloud-tag[data-cloud="Azure"] { --reserva-cloud-text: var(--text-blue); }
+[data-theme="light"] .reserva-cloud-tag[data-cloud="AWS"] { --reserva-cloud-text: var(--text-orange); }
+[data-theme="light"] .reserva-cloud-tag[data-cloud="GCP"] { --reserva-cloud-text: var(--text-green); }
+[data-theme="light"] .reserva-cloud-tag[data-cloud="Oracle"] { --reserva-cloud-text: var(--text-red); }
+[data-theme="light"] .reserva-cloud-tag[data-cloud="Multicloud"] { --reserva-cloud-text: var(--accent); }
+:root:not([data-theme="light"]) .reserva-status-badge[data-status="Ativa"] { --reserva-status-text: var(--text-green); }
+:root:not([data-theme="light"]) .reserva-status-badge[data-status="Expirada"] { --reserva-status-text: var(--text-red); }
+:root:not([data-theme="light"]) .reserva-status-badge[data-status="Cancelada"] { --reserva-status-text: #c4b5fd; }
+:root:not([data-theme="light"]) .reserva-cloud-tag[data-cloud="Multicloud"] { --reserva-cloud-text: #c4b5fd; }
 
 .cloud-tag {
   font-family: 'IBM Plex Mono', monospace;
@@ -882,7 +932,7 @@ body {
   display: flex; align-items: center; gap: 6px;
   padding: 0 16px;
   height: 34px;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: #ffffff;
   border: none;
   border-radius: 8px;
@@ -892,7 +942,7 @@ body {
   cursor: pointer;
   transition: all 0.15s;
 }
-.btn-primary:hover { background: #7c3aed; }
+.btn-primary:hover { background: var(--accent-strong-hover); }
 .btn-primary svg { width: 14px; height: 14px; }
 
 .btn-ghost {
@@ -990,7 +1040,7 @@ body {
   transition: border-color .15s; user-select: none;
 }
 .cms-trigger:not(.cms-disabled):hover { border-color: var(--accent); }
-.cms-trigger.cms-disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
+.cms-trigger.cms-disabled { color: var(--text-muted); background: var(--bg-hover); cursor: not-allowed; pointer-events: none; }
 .cms-trigger.cms-active { border-color: var(--accent); }
 .cms-dropdown {
   position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1100;
@@ -1046,7 +1096,7 @@ body {
   transition: border-color .15s; box-sizing: border-box;
 }
 .ci:focus, .cs:focus { border-color: var(--accent); }
-.cs:disabled { opacity: .4; cursor: not-allowed; }
+.cs:disabled { color: var(--text-muted); background: var(--bg-hover); cursor: not-allowed; }
 .cl {
   font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
   color: var(--text-muted); margin-bottom: 5px; display: block;
@@ -1059,7 +1109,7 @@ body {
   white-space: nowrap; font-family: inherit;
 }
 .cbtn-sec:hover { border-color: var(--accent); color: var(--accent); }
-.cbtn-sec:disabled { opacity: .4; cursor: not-allowed; }
+.cbtn-sec:disabled { color: var(--text-muted); background: var(--bg-hover); cursor: not-allowed; }
 .cbtn-sec:disabled:hover { border-color: var(--border-light); color: var(--text-dim); }
 .cbtn-go {
   display: inline-flex; align-items: center; gap: 6px; padding: 0 16px; height: 34px;
@@ -1224,9 +1274,10 @@ select option { background: var(--bg-card); }
   opacity: 1;
   transform: translateY(0);
 }
-.toast.success { background: var(--accent); color: #ffffff; }
-.toast.error   { background: var(--red);    color: #fff; }
-.toast.warn    { background: var(--orange, #ff8c42); color: #fff; }
+.toast.success { background: var(--accent); color: var(--bg); }
+.toast.error   { background: var(--red);    color: var(--bg); }
+.toast.warn    { background: var(--orange, #ff8c42); color: var(--bg); }
+[data-theme="light"] .toast.success { color: #ffffff; }
 
 /* ── SCROLLBAR ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1262,6 +1313,7 @@ select option { background: var(--bg-card); }
 }
 .est-dash-aprov .est-dash-panel-title    { color: var(--green); }
 .est-dash-nao-aprov .est-dash-panel-title { color: var(--red); }
+[data-theme="light"] .est-dash-nao-aprov .est-dash-panel-title { color: #b91c1c; }
 
 .est-dash-valor {
   font-size: 26px;
@@ -1349,6 +1401,9 @@ select option { background: var(--bg-card); }
   .est-dash-panel:first-child { border-right: none; border-bottom: 1px solid var(--border); }
   .est-dash-valor { font-size: 20px; }
   .stats-grid { grid-template-columns: 1fr; gap: 8px; }
+  .stats-grid.reservas-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .reservas-stats .stat-card { min-width: 0; padding: 12px; }
+  .reservas-stats .stat-value { font-size: 20px; }
   .stats-grid-5 { grid-template-columns: 1fr; gap: 8px; }
   .months-grid { grid-template-columns: repeat(2, 1fr); }
   .detalhe-grid { grid-template-columns: 1fr; }
@@ -1370,6 +1425,12 @@ select option { background: var(--bg-card); }
   /* Filtros empilham em coluna */
   .filters-bar { flex-wrap: wrap; gap: 8px; }
   .filter-input, .filter-select { min-width: 0; width: 100%; }
+  .filter-disclosure { flex: 1 1 100%; }
+  .filter-disclosure summary { min-height: 44px; }
+  .filter-disclosure-panel {
+    position: static; grid-template-columns: minmax(0, 1fr); width: 100%;
+    margin-top: 8px; padding: 10px; box-shadow: none;
+  }
 
   /* Tabelas — scroll horizontal com largura suficiente */
   .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -1408,6 +1469,10 @@ select option { background: var(--bg-card); }
   #view-calculadora .filtros-grid {
     grid-template-columns: 1fr !important;
   }
+  .calculadora-layout { height: auto !important; overflow: visible !important; }
+  .calculadora-filtros { grid-template-columns: minmax(0, 1fr) !important; padding: 13px 12px !important; }
+  .calculadora-periodo input { min-width: 0 !important; width: 0; flex: 1; }
+  .calculadora-corpo { overflow: visible !important; }
 
   /* Dropdown multiselect — largura total */
   .cms-dropdown { min-width: 100% !important; left: 0 !important; right: 0 !important; }
@@ -1423,6 +1488,8 @@ select option { background: var(--bg-card); }
 
 /* ── Mobile muito pequeno (< 380px) ── */
 @media (max-width: 380px) {
+  .stats-grid.reservas-stats { grid-template-columns: 1fr; }
+  .reservas-stats .stat-value { font-size: 16px; }
   .stats-grid { grid-template-columns: 1fr; }
   .top-actions .btn-primary span { display: none; }
   .brand-sub { display: none; }
@@ -1435,29 +1502,37 @@ select option { background: var(--bg-card); }
    Toggle: data-theme="light" no <html>
    ══════════════════════════════════════════ */
 [data-theme="light"] {
-  --bg:           #f0f2f5;
+  --bg:           #f4f5f7;
   --bg-card:      #ffffff;
-  --bg-hover:     rgba(147, 51, 234, 0.06);
-  --border:       #e2e8f0;
-  --border-light: #ede9f6;
+  --bg-hover:     rgba(102, 0, 153, 0.06);
+  --border:       #dfe1e6;
+  --border-light: #e9e7ed;
   --text:         #111827;
-  --text-muted:   #6b7280;
-  --text-dim:     #7c3aed;
-  --accent:       #9333ea;
-  --accent-dim:   rgba(147, 51, 234, 0.10);
-  --accent-glow:  rgba(147, 51, 234, 0.25);
-  --danger:       #ef4444;
-  --red:          #ef4444;
+  --text-muted:   #606672;
+  --text-dim:     #660099;
+  --accent:       #660099;
+  --accent-brand: #660099;
+  --accent-secondary: #e6007e;
+  --accent-strong: #660099;
+  --accent-strong-hover: #4f0075;
+  --accent-dim:   rgba(102, 0, 153, 0.09);
+  --accent-glow:  rgba(102, 0, 153, 0.16);
+  --danger:       #b91c1c;
+  --red:          #b91c1c;
   --orange:       #f59e0b;
+  --text-orange:  #92400e;
+  --text-red:     #b91c1c;
+  --text-green:   #166534;
+  --text-blue:    #1d4ed8;
   --green:        #22c55e;
   --blue:         #3b82f6;
   --surface:      #ffffff;
-  --base:         #f0f2f5;
-  --surface-alt:  #f8f7ff;
+  --base:         #f4f5f7;
+  --surface-alt:  #f8f8fa;
   --text-primary: #111827;
 }
 
-[data-theme="light"] body { background: #f0f2f5; }
+[data-theme="light"] body { background: var(--bg); }
 
 /* ── SIDEBAR: branca — Direção A (clean corporate). Roxo só como acento
    (item ativo, brand, hover), não mais como fundo sólido. ── */
@@ -1468,15 +1543,15 @@ select option { background: var(--bg-card); }
 }
 [data-theme="light"] .sidebar .nav-item           { color: #6b7280; }
 [data-theme="light"] .sidebar .nav-item:hover     { color: #111827; background: #f3f4f6; }
-[data-theme="light"] .sidebar .nav-item.active    { color: #7c3aed; background: #f3e8ff; }
+[data-theme="light"] .sidebar .nav-item.active    { color: var(--accent); background: var(--accent-dim); }
 [data-theme="light"] .sidebar .nav-item svg       { color: inherit; }
 [data-theme="light"] .sidebar .nav-group-header   { color: #6b7280; }
 [data-theme="light"] .sidebar .nav-group-header:hover  { color: #111827; background: #f3f4f6; }
-[data-theme="light"] .sidebar .nav-group-header.active { color: #7c3aed; background: #f3e8ff; }
+[data-theme="light"] .sidebar .nav-group-header.active { color: var(--accent); background: var(--accent-dim); }
 [data-theme="light"] .sidebar .nav-section-label  { color: #9ca3af; }
 [data-theme="light"] .sidebar .nav-section-label::after { background: #e5e7eb; }
 [data-theme="light"] .sidebar .sidebar-brand      { color: #111827; border-bottom-color: #e5e7eb; }
-[data-theme="light"] .sidebar .brand-name         { color: #7c3aed; }
+[data-theme="light"] .sidebar .brand-name         { color: var(--accent); }
 [data-theme="light"] .sidebar .brand-sub          { color: #9ca3af; }
 [data-theme="light"] .sidebar .brand-icon svg     { filter: none; }
 [data-theme="light"] .sidebar .db-status,
@@ -1487,7 +1562,7 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .sidebar .btn-gear:hover,
 [data-theme="light"] .sidebar .btn-theme:hover,
 [data-theme="light"] .sidebar .btn-logout:hover   { color: #111827; background: #f3f4f6; }
-[data-theme="light"] .sidebar::before             { background: linear-gradient(90deg, #9333ea 0%, transparent 100%); }
+[data-theme="light"] .sidebar::before             { background: linear-gradient(90deg, var(--accent-brand) 0%, var(--accent-secondary) 55%, transparent 100%); }
 
 /* ── TOP-BAR: branca, alinhada ao sidebar — Direção A ── */
 [data-theme="light"] .top-bar {
@@ -1509,9 +1584,9 @@ select option { background: var(--bg-card); }
   color: #6b7280;
 }
 [data-theme="light"] .btn-menu:hover {
-  border-color: #c4b5fd;
-  background: #f3e8ff;
-  color: #7c3aed;
+  border-color: var(--accent-brand);
+  background: var(--accent-dim);
+  color: var(--accent);
 }
 
 /* ── User info no rodapé da sidebar ── */
@@ -1519,8 +1594,8 @@ select option { background: var(--bg-card); }
   border-top-color: #e5e7eb !important;
 }
 [data-theme="light"] #sidebar-user-avatar {
-  background: #f3e8ff !important;
-  color: #7c3aed !important;
+  background: var(--accent-dim) !important;
+  color: var(--accent) !important;
 }
 [data-theme="light"] #sidebar-user-name {
   color: #111827 !important;
@@ -1531,7 +1606,7 @@ select option { background: var(--bg-card); }
 
 /* ── Logo "vivo" — roxo sólido, sem glow branco (fundo agora é claro) ── */
 [data-theme="light"] #topbar-vivo-text {
-  fill: #7c3aed;
+  fill: var(--accent-brand);
 }
 [data-theme="light"] #topbar-vivo-svg {
   filter: none !important;
@@ -1547,9 +1622,9 @@ select option { background: var(--bg-card); }
 [data-theme="light"] #btn-theme-toggle:hover,
 [data-theme="light"] #notif-btn:hover,
 [data-theme="light"] .top-actions > a:hover {
-  border-color: #c4b5fd !important;
-  background: #f3e8ff !important;
-  color: #7c3aed !important;
+  border-color: var(--accent-brand) !important;
+  background: var(--accent-dim) !important;
+  color: var(--accent) !important;
 }
 
 /* ── STAT-CARDS: branco liso, borda uniforme, sem faixa colorida no topo ── */
@@ -1560,9 +1635,9 @@ select option { background: var(--bg-card); }
   color: #111827;
 }
 [data-theme="light"] .stat-card::before           { display: none; }
-[data-theme="light"] .stat-card .stat-label       { color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+[data-theme="light"] .stat-card .stat-label       { color: #6b7280; font-size: 12px; text-transform: none; letter-spacing: 0; }
 [data-theme="light"] .stat-card .stat-value       { color: #111827; font-weight: 700; }
-[data-theme="light"] .stat-card.accent      .stat-value { color: #7c3aed; }
+[data-theme="light"] .stat-card.accent      .stat-value { color: var(--accent); }
 [data-theme="light"] .stat-card.danger      .stat-value { color: #dc2626; }
 [data-theme="light"] .stat-card.green-card  .stat-value { color: #15803d; }
 [data-theme="light"] .stat-card.yellow-card .stat-value { color: #b45309; }
@@ -1581,6 +1656,10 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .cs:focus {
   border-color: #9333ea !important;
   box-shadow: 0 0 0 2px rgba(147,51,234,0.12);
+}
+[data-theme="light"] .cs:disabled {
+  background: var(--bg-hover) !important;
+  color: var(--text-muted) !important;
 }
 /* color-scheme garante que controles nativos (dd/mm/aaaa, ícone calendário) renderizem em modo claro */
 [data-theme="light"] input[type="date"],
@@ -1631,12 +1710,13 @@ select option { background: var(--bg-card); }
 [data-theme="light"] .cloud-stat-card.active .cloud-label { color: #7c3aed !important; }
 
 /* ── PAGE TITLE ── */
-/* Título de seção dentro do conteúdo (fundo claro) — texto roxo em gradiente */
+/* Títulos em superfície clara usam tinta sólida para leitura e hierarquia consistentes. */
 [data-theme="light"] .page-title {
-  background: linear-gradient(90deg, #5b21b6, #9333ea);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  background: none;
+  -webkit-background-clip: unset;
+  background-clip: unset;
+  -webkit-text-fill-color: var(--text);
+  color: var(--text);
   filter: none;
   text-shadow: none;
 }
@@ -1650,34 +1730,35 @@ select option { background: var(--bg-card); }
   text-shadow: none;
 }
 
-/* ── HERO: título+subtítulo de seção em fundo roxo (ex: tela Coleta) ──
-   Só cor/fundo — sem cantos arredondados nem sombra.
-   Só no tema claro — no escuro o .view-hero fica sem estilo próprio (mantém
-   o texto branco com glow já existente, que já lê bem no fundo quase preto). */
-[data-theme="light"] .view-hero {
-  background: linear-gradient(135deg, #4a0080 0%, #6d28d9 55%, #7c3aed 100%);
-  padding: 20px 24px;
+/* ── Cabeçalho das telas operacionais ── */
+.view-hero {
+  background: transparent;
+  padding: 0 0 16px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
 }
 [data-theme="light"] .view-hero .page-title {
   background: none;
   -webkit-background-clip: unset;
   background-clip: unset;
-  -webkit-text-fill-color: #ffffff;
-  color: #ffffff;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.18);
+  -webkit-text-fill-color: var(--text);
+  color: var(--text);
+  text-shadow: none;
 }
-[data-theme="light"] .view-hero .view-hero-sub {
-  color: #ede9fe !important;
+.view-hero .view-hero-sub {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 /* ── BOTÕES ── */
-[data-theme="light"] .btn-primary       { background: #9333ea; color: #fff; }
-[data-theme="light"] .btn-primary:hover { background: #7c3aed; box-shadow: 0 4px 14px rgba(147,51,234,0.35); }
+[data-theme="light"] .btn-primary       { background: var(--accent-strong); color: #fff; }
+[data-theme="light"] .btn-primary:hover { background: var(--accent-strong-hover); box-shadow: 0 4px 14px rgba(102,0,153,0.22); }
 
 /* ── TOAST ── */
 [data-theme="light"] .toast.success { background: #9333ea; color: #fff; }
-[data-theme="light"] .toast.error   { background: #ef4444; color: #fff; }
-[data-theme="light"] .toast.warn    { background: #f59e0b; color: #fff; }
+[data-theme="light"] .toast.error   { background: #b91c1c; color: #fff; }
+[data-theme="light"] .toast.warn    { background: #f59e0b; color: #111827; }
 
 /* ── INPUTS ── */
 [data-theme="light"] input,
@@ -1859,21 +1940,21 @@ input[type="time"]::-webkit-calendar-picker-indicator {
    =========================================================================== */
 
 [data-theme="light"] {
-  --ck-radius:      18px;
-  --ck-shadow:      0 12px 30px rgba(31, 25, 88, .06);
-  --ck-shadow-soft: 0 8px 18px rgba(31, 25, 88, .08);
+  --ck-radius:      8px;
+  --ck-shadow:      0 1px 3px rgba(17, 24, 39, .06);
+  --ck-shadow-soft: 0 1px 2px rgba(17, 24, 39, .05);
   --ck-grad:        linear-gradient(135deg, #400056, #660099, #8a00c4);
   --ck-grad-hover:  linear-gradient(135deg, #50006f, #7800ad, #9b22d2);
-  --ck-stripe-h:    4px;
+  --ck-stripe-h:    2px;
 }
 
-/* 1. fundo lavanda -- a primeira coisa que se ve do cockpit */
+/* 1. fundo neutro para manter contraste em telas densas */
 [data-theme="light"] body {
-  background: radial-gradient(circle at 40% -10%, #efe9ff 0, #faf8fc 38%, #f5f7fb 100%);
+  background: var(--bg);
   background-attachment: fixed;
 }
 
-/* 2. cartoes mais arredondados e elevados */
+/* 2. cartoes compactos com elevação mínima */
 [data-theme="light"] .card,
 [data-theme="light"] .stat-card {
   border-radius: var(--ck-radius);
@@ -1882,9 +1963,9 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 
 /* 3. titulo de cartao legivel, em caixa mista como no cockpit */
 [data-theme="light"] .card-title {
-  font-size: 17px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   text-transform: none;
 }
 
@@ -1892,27 +1973,24 @@ input[type="time"]::-webkit-calendar-picker-indicator {
    background-image nao participa do box model: o cartao mantem exatamente as
    medidas originais, ao contrario de um border-top. */
 [data-theme="light"] .stats-grid .stat-card {
-  background-image: linear-gradient(to bottom, var(--accent) 0, var(--accent) var(--ck-stripe-h), transparent var(--ck-stripe-h));
+  --stat-stripe: var(--border);
+  background-image: linear-gradient(to bottom, var(--stat-stripe) 0, var(--stat-stripe) var(--ck-stripe-h), transparent var(--ck-stripe-h));
   background-repeat: no-repeat;
 }
-[data-theme="light"] .stats-grid .stat-card:nth-child(4n+2) {
-  background-image: linear-gradient(to bottom, var(--blue) 0, var(--blue) var(--ck-stripe-h), transparent var(--ck-stripe-h));
-}
-[data-theme="light"] .stats-grid .stat-card:nth-child(4n+3) {
-  background-image: linear-gradient(to bottom, var(--green) 0, var(--green) var(--ck-stripe-h), transparent var(--ck-stripe-h));
-}
-[data-theme="light"] .stats-grid .stat-card:nth-child(4n+4) {
-  background-image: linear-gradient(to bottom, var(--orange) 0, var(--orange) var(--ck-stripe-h), transparent var(--ck-stripe-h));
-}
+[data-theme="light"] .stats-grid .stat-card.accent { --stat-stripe: var(--accent); }
+[data-theme="light"] .stats-grid .stat-card.danger { --stat-stripe: var(--danger); }
+[data-theme="light"] .stats-grid .stat-card.green-card { --stat-stripe: var(--green); }
+[data-theme="light"] .stats-grid .stat-card.yellow-card { --stat-stripe: var(--orange); }
+[data-theme="light"] .stats-grid .stat-card.blue-card { --stat-stripe: var(--blue); }
 
-/* 5. botao primario em gradiente (sem mexer na metrica do texto) */
+/* 5. botao primario solido com contraste consistente */
 [data-theme="light"] .btn-primary {
-  border-radius: 10px;
-  background: var(--ck-grad);
-  box-shadow: var(--ck-shadow-soft);
+  border-radius: 8px;
+  background: var(--accent-strong);
+  box-shadow: none;
   color: #fff;
 }
-[data-theme="light"] .btn-primary:hover { background: var(--ck-grad-hover); }
+[data-theme="light"] .btn-primary:hover { background: var(--accent-strong-hover); }
 
 
 
@@ -1927,43 +2005,44 @@ input[type="time"]::-webkit-calendar-picker-indicator {
    Continua valendo so no claro: o escuro do portal fica como na v3.0.
    --------------------------------------------------------------------------- */
 
-/* fundo lavanda -- vence [data-theme="light"] body do inline (0,1,1 -> 0,2,1) */
+/* fundo neutro -- vence [data-theme="light"] body do inline (0,1,1 -> 0,2,1) */
 [data-theme="light"] body.portal-mode {
-  background: radial-gradient(circle at 40% -10%, #efe9ff 0, #faf8fc 38%, #f5f7fb 100%);
+  background: var(--bg);
   background-attachment: fixed;
 }
 
 /* hero com a mesma faixa roxa das telas internas (.view-hero) */
 [data-theme="light"] body.portal-mode .portal-hero {
-  background: linear-gradient(135deg, #4a0080 0%, #6d28d9 55%, #7c3aed 100%);
-  border-bottom: none;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
 }
-/* O h1 do portal pinta o texto com gradiente recortado
-   (-webkit-background-clip:text). Sobre a faixa roxa isso sumiria, entao o
-   preenchimento volta a ser solido. */
 [data-theme="light"] body.portal-mode .portal-hero h1 {
   background: none;
   -webkit-background-clip: border-box;
   background-clip: border-box;
-  -webkit-text-fill-color: #ffffff;
-  color: #ffffff;
+  -webkit-text-fill-color: var(--accent);
+  color: var(--accent);
+  filter: none;
 }
 [data-theme="light"] body.portal-mode .portal-hero p {
-  color: rgba(255, 255, 255, 0.88);
+  color: var(--text-muted);
 }
-/* Folga sob a faixa. .portal-calc-wrap tem 'padding: 0 16px 40px' -- sem topo.
-   Antes nao aparecia porque o hero era um gradiente suave que se dissolvia no
-   fundo; com a faixa solida o painel encostava numa borda dura. So no claro:
-   no escuro o hero continua sendo o gradiente suave original. */
 [data-theme="light"] body.portal-mode .portal-calc-wrap {
-  padding-top: 16px;
+  padding-top: 8px;
 }
-
-/* chips sobre fundo roxo: vidro claro, nao a pilula lilas de fundo claro */
 [data-theme="light"] body.portal-mode .portal-chip {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: rgba(255, 255, 255, 0.28);
-  color: #ffffff;
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+[data-theme="light"] body.portal-mode .portal-rays,
+[data-theme="light"] body.portal-mode .portal-glow {
+  display: none;
+}
+[data-theme="light"] body.portal-mode .portal-eyebrow {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-color: var(--border);
 }
 
 
@@ -2573,4 +2652,21 @@ input[type="time"]::-webkit-calendar-picker-indicator {
   .ck-analise .ck-chart-stack > .card .ck-semaphores { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 6px; margin-right: -6px; }
   .ck-analise .ck-chart-stack > .card .ck-panel-head,
   .ck-analise .ck-chart-stack > .card .ck-legend { flex: none; }
+}
+
+html :is(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--text);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

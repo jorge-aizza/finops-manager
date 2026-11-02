@@ -23,8 +23,10 @@ function StatusBadge({ status }: { status: string }) {
   const c = STATUS_COLORS[status] || '#7b6a9e'
   return (
     <span
+      className="reserva-status-badge"
+      data-status={status}
       style={{
-        background: c + '22', color: c, border: '1px solid ' + c + '55',
+        background: c + '22', color: `var(--reserva-status-text, ${c})`, border: '1px solid ' + c + '55',
         padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600,
       }}
     >
@@ -39,9 +41,9 @@ function VencimentoLabel({ dateStr }: { dateStr: string | null }) {
   const d = new Date(dateStr); d.setHours(0, 0, 0, 0)
   const diff = Math.floor((d.getTime() - hoje.getTime()) / 86400000)
   let badge: ReactNode = null
-  if (diff < 0) badge = <span style={{ color: '#ff4d6a', fontSize: 10, marginLeft: 4 }}>⚠ expirada</span>
-  else if (diff <= 30) badge = <span style={{ color: '#ff8c42', fontSize: 10, marginLeft: 4 }}>⚠ {diff}d</span>
-  else if (diff <= 90) badge = <span style={{ color: '#f9e2af', fontSize: 10, marginLeft: 4 }}>~{Math.round(diff / 30)}m</span>
+  if (diff < 0) badge = <span style={{ color: 'var(--text-red)', fontSize: 10, marginLeft: 4 }}>⚠ expirada</span>
+  else if (diff <= 30) badge = <span style={{ color: 'var(--text-orange)', fontSize: 10, marginLeft: 4 }}>⚠ {diff}d</span>
+  else if (diff <= 90) badge = <span style={{ color: 'var(--text-orange)', fontSize: 10, marginLeft: 4 }}>~{Math.round(diff / 30)}m</span>
   return (
     <>
       {formatDate(dateStr)}
@@ -148,11 +150,11 @@ export default function ReservasView() {
   return (
     <div>
       <div className="view-hero" style={{ marginBottom: 16 }}>
-        <div className="page-title">Reservas Cloud</div>
-        <div className="view-hero-sub">Compromissos de reserva e savings plan — vigência, custo e vencimento</div>
+        <h1 className="page-title">Reservas Cloud</h1>
+        <p className="view-hero-sub">Compromissos de reserva e savings plan — vigência, custo e vencimento</p>
       </div>
 
-      <div className="stats-grid" style={{ marginBottom: 16 }}>
+      <div className="stats-grid reservas-stats" style={{ marginBottom: 16 }}>
         <div className="stat-card accent">
           <div className="stat-label">Total de Reservas</div>
           <div className="stat-value">{stats.total || '—'}</div>
@@ -183,34 +185,38 @@ export default function ReservasView() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select className="filter-select" value={filterCloud} onChange={(e) => setFilterCloud(e.target.value)}>
-          <option value="">Todas as Clouds</option>
-          {CLOUDS.map((c) => (
-            <option key={c}>{c}</option>
-          ))}
-        </select>
-        <select className="filter-select" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-          <option value="">Todos os Status</option>
-          <option>Ativa</option>
-          <option>Expirada</option>
-          <option>Cancelada</option>
-        </select>
-        {spsAtivas.length > 1 && (
-          <select
-            className="filter-select"
-            style={{ marginLeft: 'auto' }}
-            aria-label="Service Principal"
-            value={spId}
-            onChange={(e) => setSpId(e.target.value)}
-          >
-            <option value="">SP padrão</option>
-            {spsAtivas.map((sp) => (
-              <option key={sp.id} value={sp.id}>
-                {sp.nome}
-              </option>
-            ))}
-          </select>
-        )}
+        <details className="filter-disclosure">
+          <summary>Filtros</summary>
+          <div className="filter-disclosure-panel">
+            <select className="filter-select" aria-label="Cloud" value={filterCloud} onChange={(e) => setFilterCloud(e.target.value)}>
+              <option value="">Todas as Clouds</option>
+              {CLOUDS.map((c) => (
+                <option key={c}>{c}</option>
+              ))}
+            </select>
+            <select className="filter-select" aria-label="Status" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+              <option value="">Todos os Status</option>
+              <option>Ativa</option>
+              <option>Expirada</option>
+              <option>Cancelada</option>
+            </select>
+            {spsAtivas.length > 1 && (
+              <select
+                className="filter-select"
+                aria-label="Service Principal"
+                value={spId}
+                onChange={(e) => setSpId(e.target.value)}
+              >
+                <option value="">SP padrão</option>
+                {spsAtivas.map((sp) => (
+                  <option key={sp.id} value={sp.id}>
+                    {sp.nome}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        </details>
         <button
           className="btn-ghost"
           style={spsAtivas.length > 1 ? undefined : { marginLeft: 'auto' }}
@@ -251,7 +257,7 @@ export default function ReservasView() {
                 Custos não informados pela Azure podem ser preenchidos manualmente na edição.
               </div>
               {syncResult.avisos.map((a) => (
-                <div key={a} style={{ fontSize: 12, color: '#ff8c42', marginTop: 4 }}>
+                <div key={a} style={{ fontSize: 12, color: 'var(--text-orange)', marginTop: 4 }}>
                   ⚠ {a}
                 </div>
               ))}
@@ -274,12 +280,12 @@ export default function ReservasView() {
                 Reserva que já existia pela sincronização com Azure foi atualizada, não duplicada.
               </div>
               {importResult.invalidas > 0 && (
-                <div style={{ fontSize: 12, color: '#ff8c42', marginTop: 4 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-orange)', marginTop: 4 }}>
                   ⚠ Linha ignorada é a que não tem "Name" ou "Expiration date" — as duas colunas são obrigatórias.
                 </div>
               )}
               {importResult.avisos?.map((a) => (
-                <div key={a} style={{ fontSize: 12, color: '#ff8c42', marginTop: 4 }}>
+                <div key={a} style={{ fontSize: 12, color: 'var(--text-orange)', marginTop: 4 }}>
                   ⚠ {a}
                 </div>
               ))}
@@ -333,7 +339,7 @@ export default function ReservasView() {
             {filtered.map((r) => (
               <tr key={r.id}>
                 <td>
-                  <span style={{ color: CLOUD_COLORS[r.cloud] || '#9333ea', fontWeight: 600 }}>{r.cloud}</span>
+                  <span className="reserva-cloud-tag" data-cloud={r.cloud} style={{ color: `var(--reserva-cloud-text, ${CLOUD_COLORS[r.cloud] || '#9333ea'})`, fontWeight: 600 }}>{r.cloud}</span>
                 </td>
                 <td style={{ fontWeight: 500 }}>{r.nome_reserva}</td>
                 <td>{r.tipo_recurso}</td>

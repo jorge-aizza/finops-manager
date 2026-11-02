@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import axe from 'axe-core'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import ReservasView from './ReservasView'
@@ -97,6 +98,23 @@ describe('ReservasView', () => {
     });
   });
 
+  it('fecha o formulário com Escape e devolve o foco ao acionador', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+
+    const trigger = screen.getByRole('button', { name: 'Nova Reserva' })
+    trigger.focus()
+    await user.keyboard('{Enter}')
+
+    expect(await screen.findByRole('dialog', { name: 'Nova Reserva' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Cloud *')).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  })
+
   it('sincroniza com a Azure usando a SP configurada e recarrega a lista', async () => {
     const user = userEvent.setup()
     vi.mocked(reservasApi.sincronizarReservasAzure).mockResolvedValue({
@@ -129,6 +147,19 @@ describe('ReservasView', () => {
     await screen.findByText('EC2-Prod-Reserva')
 
     await user.type(screen.getByPlaceholderText('Buscar reserva...'), 'inexistente')
+    expect(await screen.findByText('Nenhuma reserva encontrada')).toBeInTheDocument()
+  });
+
+  it('mantém filtros secundários recolhidos e permite filtrar ao expandir', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+
+    const toggle = screen.getByText('Filtros')
+    expect(toggle.closest('details')).not.toHaveAttribute('open')
+    await user.click(toggle)
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Cloud' }), 'Azure')
+
     expect(await screen.findByText('Nenhuma reserva encontrada')).toBeInTheDocument()
   });
 
@@ -182,4 +213,16 @@ describe('ReservasView', () => {
     expect(screen.getByText('R-CSV').closest('tr')).toHaveTextContent('Azure (arquivo)')
     expect(screen.getByText('R-MAN').closest('tr')).toHaveTextContent('Manual')
   });
+
+  it('não tem violações WCAG A/AA detectáveis pelo axe-core', async () => {
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+
+    const results = await axe.run(document.body, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+      rules: { 'color-contrast': { enabled: false } },
+    })
+
+    expect(results.violations).toEqual([])
+  })
 });

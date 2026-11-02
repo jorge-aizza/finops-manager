@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import axe from 'axe-core'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TenantFilterProvider } from '../contexts/TenantFilterContext'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -67,6 +68,35 @@ beforeEach(() => {
 })
 
 describe('InventarioView', () => {
+  it('não tem violações WCAG A/AA detectáveis pelo axe-core', async () => {
+    renderWithClient()
+    await screen.findByRole('tablist', { name: 'Seções do Inventário' })
+
+    const results = await axe.run(document.body, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+      rules: { 'color-contrast': { enabled: false } },
+    })
+
+    expect(results.violations).toEqual([])
+  })
+
+  it('navega entre abas com setas e mantém apenas a selecionada no Tab', async () => {
+    renderWithClient()
+    const recursos = await screen.findByRole('tab', { name: 'Recursos' })
+    expect(recursos).toHaveAttribute('aria-selected', 'true')
+    expect(recursos).toHaveAttribute('tabindex', '0')
+
+    recursos.focus()
+    await userEvent.keyboard('{ArrowRight}')
+    const assinatura = screen.getByRole('tab', { name: 'Por Assinatura' })
+    expect(assinatura).toHaveFocus()
+    expect(assinatura).toHaveAttribute('aria-selected', 'true')
+    expect(recursos).toHaveAttribute('tabindex', '-1')
+
+    await userEvent.keyboard('{End}')
+    expect(screen.getByRole('tab', { name: 'Configuração' })).toHaveFocus()
+  })
+
   it('aba Desperdício mostra dias órfão e filtra por tempo mínimo', async () => {
     const base = { subscription_id: 's', subscription_name: 'Assinatura Principal', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({

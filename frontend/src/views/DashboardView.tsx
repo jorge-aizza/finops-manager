@@ -177,10 +177,10 @@ export default function DashboardView() {
 
   return (
     <div>
-      <div className="view-hero" style={{ marginBottom: 16 }}>
-        <div className="page-title">{DASH_TAB_INFO[tab].titulo}</div>
-        <div className="view-hero-sub">{DASH_TAB_INFO[tab].sub}</div>
-      </div>
+      <header className="section-heading">
+        <h1>{DASH_TAB_INFO[tab].titulo}</h1>
+        <p>{DASH_TAB_INFO[tab].sub}</p>
+      </header>
 
       {tab === 'acoes' && (
         <>

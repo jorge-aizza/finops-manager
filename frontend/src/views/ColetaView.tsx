@@ -378,8 +378,8 @@ export default function ColetaView() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div className="view-hero">
-        <div className="page-title">Coleta de Custos Azure</div>
-        <div className="view-hero-sub">Service Principals, Storage Accounts, cobertura de dados e histórico de execuções</div>
+        <h1 className="page-title">Coleta de Custos Azure</h1>
+        <p className="view-hero-sub">Service Principals, Storage Accounts, cobertura de dados e histórico de execuções</p>
       </div>
 
       <ColetaMonitor />

@@ -11,6 +11,7 @@ import react from '@vitejs/plugin-react'
 // portal.html legado). Bundles separados de propósito — usuários anônimos do
 // portal não devem baixar o código das 7 telas internas autenticadas.
 export default defineConfig({
+  base: '/react-app/',
   plugins: [react()],
   server: {
     // Dev: fala com o Express já rodando em localhost:3000 (npm run dev na raiz)

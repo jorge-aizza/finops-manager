@@ -108,7 +108,7 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
           cockpit em styles.css). O fallback mantem o escuro exatamente como
           estava -- e por isso sao variaveis e nao valores fixos aqui. */}
       <div style={{ display: 'flex', flexDirection: 'column', border: '1px solid var(--border)', borderRadius: 'var(--ck-radius, 14px)', boxShadow: 'var(--ck-shadow, none)', overflow: 'hidden', background: 'var(--bg-card)' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 10, alignItems: 'end', padding: '13px 20px', borderBottom: '1px solid var(--border)' }}>
+        <div className="calculadora-filtros" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 10, alignItems: 'end', padding: '13px 20px', borderBottom: '1px solid var(--border)' }}>
           <div className="cfg">
             <label className="cl">Assinatura</label>
             <CmsMultiSelect
@@ -133,7 +133,7 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
           </div>
           <div className="cfg">
             <label className="cl">Período{!permitirPeriodo && ' 🔒'}</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <div className="calculadora-periodo" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
               <input type="date" value={calc.dataInicio} disabled={!permitirPeriodo} onChange={(e) => calc.setDataInicio(e.target.value)}
                 style={{ height: 34, padding: '0 8px', borderRadius: 6, border: '1px solid var(--border-light)', background: 'var(--bg)', color: 'var(--text)', fontSize: 12, minWidth: 128, opacity: permitirPeriodo ? 1 : 0.6 }} />
               <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>→</span>
@@ -207,7 +207,7 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
 
           {!calc.erro && !calc.subsSel.length && (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 13, padding: 30, textAlign: 'center' }}>
-              Selecione uma <strong style={{ color: 'var(--text)' }}>Assinatura</strong>, confirme com <strong style={{ color: 'var(--accent)' }}>OK ✓</strong> e clique em <strong style={{ color: 'var(--accent)' }}>Buscar</strong>.
+              <span>Selecione uma <strong style={{ color: 'var(--text)' }}>Assinatura</strong>, confirme com <strong style={{ color: 'var(--accent)' }}>OK ✓</strong> e clique em <strong style={{ color: 'var(--accent)' }}>Buscar</strong>.</span>
             </div>
           )}
 
