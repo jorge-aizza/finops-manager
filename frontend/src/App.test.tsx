@@ -36,4 +36,15 @@ describe('App — bridge de refresh (window.__reactBridge.refresh)', () => {
     expect(await screen.findByText('Wiki carregada')).toBeInTheDocument()
     expect(wikiModuleLoaded).toHaveBeenCalledOnce()
   })
+
+  it('sinaliza quando a primeira tela do app é montada', async () => {
+    const listener = vi.fn()
+    window.addEventListener('finops:app-view-mounted', listener)
+    render(<App />)
+
+    await act(async () => window.__reactBridge.mount('dashboard'))
+
+    expect(listener).toHaveBeenCalled()
+    window.removeEventListener('finops:app-view-mounted', listener)
+  })
 });

@@ -6,10 +6,35 @@
 // Detects server URL automatically — works from any device on the network
 const API = window.location.origin + '/api';
 let currentUser = null;
+let loginPending = false;
+let appStartupLoadingTimer = null;
 Object.defineProperty(window, 'currentUser', {
   configurable: true,
   get: () => currentUser,
 });
+
+function setLoginPending(pending) {
+  const button = document.getElementById('login-submit');
+  const label = document.getElementById('login-submit-label');
+  if (!button || !label) return;
+  button.disabled = pending;
+  button.setAttribute('aria-busy', String(pending));
+  label.textContent = pending ? 'Entrando...' : 'Entrar';
+}
+
+function hideAppStartupLoading() {
+  const loader = document.getElementById('app-startup-loading');
+  if (!loader || loader.style.display === 'none') return;
+  clearTimeout(appStartupLoadingTimer);
+  loader.setAttribute('aria-hidden', 'true');
+  loader.classList.add('is-leaving');
+  setTimeout(() => {
+    loader.style.display = 'none';
+    loader.classList.remove('is-leaving');
+  }, 200);
+}
+
+window.addEventListener('finops:app-view-mounted', hideAppStartupLoading);
 
 // ── SETUP WIZARD ──────────────────────────────
 async function checkFirstRun() {
@@ -207,6 +232,7 @@ function swGoLogin() {
 
 // ── AUTH ──────────────────────────────────────
 async function doLogin() {
+  if (loginPending) return;
   const email = document.getElementById('login-email').value.trim();
   const senha = document.getElementById('login-senha').value;
   const errEl = document.getElementById('login-error');
@@ -215,6 +241,8 @@ async function doLogin() {
   if (!email || !senha) {
     showLoginError('Preencha e-mail e senha.'); return;
   }
+  loginPending = true;
+  setLoginPending(true);
   try {
     const data = await fetch(API + '/auth/login', {
       method: 'POST',
@@ -231,6 +259,9 @@ async function doLogin() {
     enterApp();
   } catch (e) {
     showLoginError('Erro ao conectar com o servidor. Verifique se o servidor está rodando.');
+  } finally {
+    loginPending = false;
+    setLoginPending(false);
   }
 }
 
@@ -281,6 +312,12 @@ function updateSidebarUser() {
 }
 
 function enterApp() {
+  const startupLoader = document.getElementById('app-startup-loading');
+  if (startupLoader) {
+    startupLoader.style.display = 'grid';
+    startupLoader.setAttribute('aria-hidden', 'false');
+    appStartupLoadingTimer = setTimeout(hideAppStartupLoading, 8000);
+  }
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-shell').style.display = '';
   const fab = document.getElementById('refresh-fab');

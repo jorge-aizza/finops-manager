@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="preload" as="image" href="/react-app/images/Vivo_home.webp" fetchpriority="high">
+  <link rel="preload" as="image" href="/finops-logo-dark.png" fetchpriority="high">
   <title>FinOps Manager</title>
   <!-- Favicon FinOps -->
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
@@ -505,6 +506,30 @@
     }
     [data-theme="light"] .login-error { color: #dc2626; border-color: rgba(220,38,38,.3); background: rgba(220,38,38,.08); }
     .login-logo { margin-bottom: 12px; display:flex; justify-content:center; }
+    .login-submit-spinner,
+    .app-startup-spinner {
+      width: 18px; height: 18px; border: 2px solid currentColor;
+      border-right-color: transparent; border-radius: 50%;
+      animation: finops-loading-spin 750ms linear infinite;
+    }
+    .login-submit-spinner { display: none; width: 15px; height: 15px; }
+    #login-submit[aria-busy="true"] { gap: 9px; opacity: .84; cursor: progress; }
+    #login-submit[aria-busy="true"] .login-submit-spinner { display: inline-block; }
+    @keyframes finops-loading-spin { to { transform: rotate(360deg); } }
+    .app-startup-loading {
+      position: fixed; inset: 0; z-index: 9998; display: none;
+      place-items: center; padding: 24px; background: var(--bg); color: var(--text);
+      opacity: 1; transition: opacity 180ms ease;
+    }
+    .app-startup-loading.is-leaving { opacity: 0; pointer-events: none; }
+    .app-startup-content { display: grid; justify-items: center; gap: 18px; text-align: center; }
+    .app-startup-logo { display: flex; min-height: 76px; align-items: center; justify-content: center; }
+    .app-startup-copy { font-size: 13px; color: var(--text-muted); }
+    .app-startup-spinner { color: var(--accent); }
+    @media (prefers-reduced-motion: reduce) {
+      .login-submit-spinner, .app-startup-spinner { animation: none; }
+      .app-startup-loading { transition: none; }
+    }
     .login-brand {
       font-size: 22px; font-weight: 700;
       color: var(--text, #cdd6f4); letter-spacing: -.3px;
@@ -1202,7 +1227,7 @@
           }
         </style>
            <img src="/finops-logo-dark.png" alt="FinOps" class="finops-logo"
-             style="height:56px;width:auto;display:block;">
+             fetchpriority="high" decoding="async" style="height:56px;width:auto;display:block;">
       </div>
       <div class="login-brand">FinOps Manager</div>
       <div class="login-sub">Faça login para continuar</div>
@@ -1217,8 +1242,9 @@
         <label>Senha</label>
         <input type="password" id="login-senha" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()">
       </div>
-      <button class="btn-primary" style="width:100%;margin-top:8px;justify-content:center" onclick="doLogin()">
-        Entrar
+      <button class="btn-primary" id="login-submit" style="width:100%;margin-top:8px;justify-content:center" onclick="doLogin()" aria-busy="false">
+        <span id="login-submit-label">Entrar</span>
+        <span class="login-submit-spinner" aria-hidden="true"></span>
       </button>
 
       <div class="login-divider"><span>ou</span></div>
@@ -1246,6 +1272,16 @@
   </div>
 
   <div class="app-shell" id="app-shell" style="display:none">
+    <div id="app-startup-loading" class="app-startup-loading" role="status" aria-live="polite" aria-hidden="true">
+      <div class="app-startup-content">
+        <div class="app-startup-logo" aria-hidden="true">
+          <img src="/finops-logo.png" alt="" class="finops-logo topbar-logo-light" style="height:72px;width:auto;display:block;">
+          <img src="/finops-logo-dark.png" alt="" class="finops-logo topbar-logo-dark" style="height:72px;width:auto;display:none;">
+        </div>
+        <span class="app-startup-spinner" aria-hidden="true"></span>
+        <span class="app-startup-copy">Carregando sua área de trabalho...</span>
+      </div>
+    </div>
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-brand">

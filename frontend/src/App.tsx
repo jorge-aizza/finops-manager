@@ -63,6 +63,10 @@ export default function App() {
     return () => window.removeEventListener('finops:portal-config-updated', refreshTaxConfig)
   }, [])
 
+  useEffect(() => {
+    if (view) window.dispatchEvent(new Event('finops:app-view-mounted'))
+  }, [view])
+
   const ViewComponent = view ? VIEWS[view] : undefined
 
   return (
