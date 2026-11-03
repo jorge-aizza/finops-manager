@@ -36,6 +36,22 @@ function hideAppStartupLoading() {
 
 window.addEventListener('finops:app-view-mounted', hideAppStartupLoading);
 
+function hideLoginPageLoading() {
+  const status = document.getElementById('login-page-loading');
+  if (status) status.classList.add('is-ready');
+}
+
+function waitForLoginAssets() {
+  const pageReady = document.readyState === 'complete'
+    ? Promise.resolve()
+    : new Promise(resolve => window.addEventListener('load', resolve, { once: true }));
+  const logo = document.querySelector('#login-screen .login-logo img');
+  const logoReady = logo?.decode ? logo.decode().catch(() => {}) : Promise.resolve();
+  Promise.all([pageReady, logoReady]).then(hideLoginPageLoading);
+}
+
+waitForLoginAssets();
+
 // ── SETUP WIZARD ──────────────────────────────
 async function checkFirstRun() {
   try {

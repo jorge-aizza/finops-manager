@@ -515,6 +515,12 @@
     .login-submit-spinner { display: none; width: 15px; height: 15px; }
     #login-submit[aria-busy="true"] { gap: 9px; opacity: .84; cursor: progress; }
     #login-submit[aria-busy="true"] .login-submit-spinner { display: inline-block; }
+    .login-page-loading {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      min-height: 20px; margin-top: 10px; color: var(--text-muted); font-size: 11px;
+    }
+    .login-page-loading .login-submit-spinner { display: inline-block; }
+    .login-page-loading.is-ready { display: none; }
     @keyframes finops-loading-spin { to { transform: rotate(360deg); } }
     .app-startup-loading {
       position: fixed; inset: 0; z-index: 9998; display: none;
@@ -1231,6 +1237,10 @@
       </div>
       <div class="login-brand">FinOps Manager</div>
       <div class="login-sub">Faça login para continuar</div>
+      <div id="login-page-loading" class="login-page-loading" role="status" aria-live="polite">
+        <span class="login-submit-spinner" aria-hidden="true"></span>
+        <span>Carregando ferramenta...</span>
+      </div>
 
       <div id="login-error" class="login-error" style="display:none"></div>
 
