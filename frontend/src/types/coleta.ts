@@ -370,7 +370,7 @@ export interface ImportJob {
   arquivo: string
   idx: number
   total: number
-  status: 'running' | 'done' | 'error'
+  status: 'uploading' | 'running' | 'done' | 'error'
   linhas: number
   inseridos: number
   atualizados: number
@@ -383,6 +383,7 @@ export interface ImportJob {
   arquivos?: { arquivo: string; status: 'done' | 'error'; erro: string | null; linhas: number; inseridos: number; atualizados: number; erros: number }[]
   concluidos?: number
   falhas?: number
+  uploads?: { arquivo: string; tamanho: number; ultimaModificacao: number; chunks: number; recebidos: number[] }[]
 }
 
 export interface DiagAgendador {

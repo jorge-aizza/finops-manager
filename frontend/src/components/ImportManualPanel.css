@@ -1,0 +1,32 @@
+.import-manual-visual {
+  display: flex;
+  min-height: 82px;
+  justify-content: center;
+  margin: 0 auto 16px;
+  animation: import-manual-enter 450ms ease-out both;
+}
+
+.import-manual-visual img {
+  max-width: 100%;
+  height: 72px;
+  width: auto;
+  transform-origin: center;
+  animation: import-manual-breathe 3s ease-in-out 450ms infinite;
+}
+
+@keyframes import-manual-enter {
+  from { opacity: 0; transform: translateY(7px) scale(.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes import-manual-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.025); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .import-manual-visual,
+  .import-manual-visual img {
+    animation: none;
+  }
+}

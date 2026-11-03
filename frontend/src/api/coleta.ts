@@ -186,6 +186,67 @@ export async function uploadImportBatch(files: File[]): Promise<UploadOutcome> {
   return { kind: 'accepted', jobId: data.jobId, arquivo: data.arquivo }
 }
 
+export const IMPORT_CHUNK_SIZE = 8 * 1024 * 1024
+
+export interface BeginImportResult {
+  jobId: string
+  resumed: boolean
+  uploads: { arquivo: string; tamanho: number; ultimaModificacao: number; chunks: number; recebidos: number[] }[]
+}
+
+function importAuthorizationHeaders(contentType?: string): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const token = getToken()
+  if (token) headers.Authorization = 'Bearer ' + token
+  if (contentType) headers['Content-Type'] = contentType
+  return headers
+}
+
+async function validateImportResponse(res: Response): Promise<void> {
+  if (res.status === 401) {
+    window.logout?.(false)
+    throw new ApiError('Sessão expirada')
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    throw new ApiError(data.error || `Erro HTTP ${res.status}`)
+  }
+}
+
+export async function beginResumableImport(files: File[]): Promise<BeginImportResult> {
+  const res = await fetch(API_BASE + '/azure-costs/import/resumable/start', {
+    method: 'POST',
+    headers: importAuthorizationHeaders('application/json'),
+    body: JSON.stringify({ files: files.map((file) => ({ arquivo: file.name, tamanho: file.size, ultimaModificacao: file.lastModified })) }),
+  })
+  await validateImportResponse(res)
+  return await res.json() as BeginImportResult
+}
+
+export async function uploadImportChunk(jobId: string, fileIndex: number, chunkIndex: number, chunk: Blob): Promise<void> {
+  const res = await fetch(`${API_BASE}/azure-costs/import/resumable/${encodeURIComponent(jobId)}/files/${fileIndex}/chunks/${chunkIndex}`, {
+    method: 'PUT',
+    headers: importAuthorizationHeaders('application/octet-stream'),
+    body: chunk,
+  })
+  await validateImportResponse(res)
+}
+
+export async function finishResumableImport(jobId: string): Promise<UploadOutcome> {
+  const res = await fetch(`${API_BASE}/azure-costs/import/resumable/${encodeURIComponent(jobId)}/finalize`, {
+    method: 'POST',
+    headers: importAuthorizationHeaders('application/json'),
+    body: '{}',
+  })
+  if (res.status === 409) {
+    const data = await res.json().catch(() => ({}) as { error?: string })
+    return { kind: 'conflict', message: data.error || 'O lote ainda possui partes pendentes.' }
+  }
+  await validateImportResponse(res)
+  const data = await res.json() as { jobId: string; arquivo: string }
+  return { kind: 'accepted', jobId: data.jobId, arquivo: data.arquivo }
+}
+
 // ── Storage Accounts ────────────────────────────────────────────
 const STORAGE_NUM_FIELDS: (keyof StorageConfig)[] = ['sp_id']
 const normalizeStorage = (s: StorageConfig) => numFields(s, STORAGE_NUM_FIELDS)

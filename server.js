@@ -62,6 +62,7 @@ const jwksRsa  = require('jwks-rsa');
 const nodemailer = require('nodemailer');
 const { diasOrfaoNaExclusao } = require('./savingOrfaos');
 const { createPublicWikiRouter, createWikiRouter } = require('./wiki');
+const { createAzureImportJobStore } = require('./azureImportJobStore');
 const {
   registrarMesCustoImportado,
   reconstruirMesCustoDiario,
@@ -495,6 +496,15 @@ async function initDB() {
         ip          TEXT,
         user_agent  TEXT,
         acessado_em TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS azure_cost_import_state (
+        id             SMALLINT PRIMARY KEY CHECK (id = 1),
+        job            JSONB NOT NULL,
+        source_files   JSONB NOT NULL DEFAULT '[]'::jsonb,
+        atualizado_em  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
 
@@ -3716,10 +3726,133 @@ except Exception as e:
 
 // ── Background import job state ──────────────────────────────────────────────
 let _importJob = null;
+let _importSourceFiles = [];
+const _azureImportJobStore = createAzureImportJobStore(() => pool);
 // { id, arquivo, idx, total, status:'running'|'done'|'error',
 //   linhas, inseridos, atualizados, erros, erros_det, subArquivo, erro, iniciado, concluido }
 
-async function _processarImport(tmpPath, originalname, jobId) {
+function _persistImportJob(jobId) {
+  if (!_importJob || _importJob.id !== jobId) return Promise.resolve();
+  return _azureImportJobStore.save(_importJob, _importSourceFiles);
+}
+
+function _updateImportJob(jobId, fields) {
+  if (!_importJob || _importJob.id !== jobId) return;
+  Object.assign(_importJob, fields);
+  _persistImportJob(jobId).catch((err) => console.error('[Azure Import] Falha ao persistir progresso:', err.message));
+}
+
+function _reconciliarChunksImportacao(job, sourceFiles) {
+  let changed = false;
+  sourceFiles.forEach((source, fileIndex) => {
+    const recorded = Array.isArray(source.receivedChunks) ? source.receivedChunks : [];
+    const received = recorded.filter((chunk) => Number.isInteger(chunk)
+      && chunk >= 0
+      && chunk < source.chunkCount
+      && fs.existsSync(path.join(source.chunkDir, `${chunk}.part`)));
+    if (received.length !== recorded.length) changed = true;
+    source.receivedChunks = received;
+    if (job.uploads?.[fileIndex]) job.uploads[fileIndex].recebidos = received;
+  });
+  return changed;
+}
+
+function _removerArquivosImportacao(files) {
+  for (const file of files) try { fs.unlinkSync(file.path); } catch (_) {}
+  for (const jobDir of new Set(files.map((file) => file.jobDir).filter(Boolean))) {
+    try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
+function _executarImportacaoEmBackground(files, jobId) {
+  _processarImportLote(files, jobId).catch(async (err) => {
+    console.error('[Azure Import] Erro no lote em background:', err);
+    if (_importJob?.id !== jobId) return;
+    Object.assign(_importJob, { status: 'error', erro: err.message, concluido: Date.now() });
+    const sourceFiles = _importSourceFiles;
+    _importSourceFiles = [];
+    _removerArquivosImportacao(sourceFiles);
+    await _persistImportJob(jobId).catch((persistErr) => console.error('[Azure Import] Falha ao persistir erro:', persistErr.message));
+  });
+}
+
+async function _restaurarImportacaoPersistida() {
+  const saved = await _azureImportJobStore.load();
+  if (!saved) return;
+  _importJob = saved.job;
+  _importSourceFiles = Array.isArray(saved.source_files) ? saved.source_files : [];
+  if (_importJob.status === 'uploading') {
+    if (_reconciliarChunksImportacao(_importJob, _importSourceFiles)) await _persistImportJob(_importJob.id);
+    return;
+  }
+  if (_importJob.status !== 'running') {
+    _importSourceFiles = [];
+    await _persistImportJob(_importJob.id);
+    return;
+  }
+
+  const missing = _importSourceFiles.filter((file) => !fs.existsSync(file.path));
+  if (!_importSourceFiles.length || missing.length) {
+    Object.assign(_importJob, {
+      status: 'error', erro: 'Importação interrompida: arquivos de origem indisponíveis após reinício do servidor.',
+      concluido: Date.now(),
+    });
+    _importSourceFiles = [];
+    await _persistImportJob(_importJob.id);
+    return;
+  }
+
+  Object.assign(_importJob, {
+    idx: 1, total: _importSourceFiles.length, arquivo: _importSourceFiles[0].originalname,
+    status: 'running', linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
+    subArquivo: null, erro: null, iniciado: Date.now(), concluido: null,
+    arquivos: [], concluidos: 0, falhas: 0,
+  });
+  await _persistImportJob(_importJob.id);
+  console.log(`[Azure Import] Retomando job ${_importJob.id} após reinício do servidor.`);
+  _executarImportacaoEmBackground(_importSourceFiles.slice(), _importJob.id);
+}
+
+function _limparUploadsTmp(sourceFiles = []) {
+  const tmpDir = path.join(__dirname, 'uploads_tmp');
+  if (!fs.existsSync(tmpDir)) return;
+  const protectedPaths = new Set(sourceFiles.map((file) => path.resolve(file.path)));
+  const protectedJobDirs = new Set(sourceFiles.map((file) => file.jobDir && path.resolve(file.jobDir)).filter(Boolean));
+  let removed = 0, freed = 0;
+  for (const name of fs.readdirSync(tmpDir)) {
+    const filePath = path.resolve(tmpDir, name);
+    if (protectedPaths.has(filePath)) continue;
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) continue;
+      fs.unlinkSync(filePath);
+      removed++;
+      freed += stat.size;
+    } catch (_) {}
+  }
+  const importDir = path.join(tmpDir, 'azure-import');
+  if (fs.existsSync(importDir)) {
+    for (const name of fs.readdirSync(importDir)) {
+      const jobDir = path.resolve(importDir, name);
+      if (protectedJobDirs.has(jobDir)) continue;
+      try { fs.rmSync(jobDir, { recursive: true, force: true }); removed++; } catch (_) {}
+    }
+  }
+  if (removed) console.log(`  [Startup] Limpeza uploads_tmp: ${removed} arquivo(s) removido(s) (${(freed / 1024 / 1024).toFixed(0)} MB)`);
+}
+
+async function _obterImportacaoAtiva() {
+  if (_importJob?.status === 'running' || _importJob?.status === 'uploading') return _importJob;
+  const saved = await _azureImportJobStore.load();
+  if (saved?.job?.status === 'running' || saved?.job?.status === 'uploading') {
+    _importJob = saved.job;
+    _importSourceFiles = saved.source_files || [];
+    return _importJob;
+  }
+  return null;
+}
+
+async function _processarImport(tmpPath, originalname, jobId, preserveSourceFile = false) {
   const fs   = require('fs');
   const path = require('path');
   let csvGerado    = null;
@@ -3729,7 +3862,7 @@ async function _processarImport(tmpPath, originalname, jobId) {
   const errosDet = []; // amostras de erro (máx 50)
 
   function upd(fields) {
-    if (_importJob && _importJob.id === jobId) Object.assign(_importJob, fields);
+    _updateImportJob(jobId, fields);
   }
 
   // Insert a batch of rows and update job progress counters
@@ -3954,7 +4087,7 @@ async function _processarImport(tmpPath, originalname, jobId) {
     console.error('[Azure Import] Erro no processamento em background:', err);
     upd({ status: 'error', erro: err.message, concluido: Date.now() });
   } finally {
-    if (tmpPath)   try { fs.unlinkSync(tmpPath);   } catch (_) {}
+    if (tmpPath && !preserveSourceFile) try { fs.unlinkSync(tmpPath); } catch (_) {}
     if (csvGerado) try { fs.unlinkSync(csvGerado); } catch (_) {}
     for (const f of tmpZipFiles) try { fs.unlinkSync(f); } catch (_) {}
   }
@@ -3974,8 +4107,9 @@ async function _processarImportLote(files, jobId) {
       status: 'running', linhas: 0, inseridos: 0, atualizados: 0, erros: 0,
       erros_det: [], subArquivo: null, erro: null, concluido: null,
     });
+    await _persistImportJob(jobId);
 
-    await _processarImport(file.path, file.originalname, jobId);
+    await _processarImport(file.path, file.originalname, jobId, true);
     const resultado = _importJob && _importJob.id === jobId ? { ..._importJob } : null;
     if (!resultado) return;
     const sucesso = resultado.status === 'done';
@@ -4004,6 +4138,11 @@ async function _processarImportLote(files, jobId) {
     erro: falhas ? `${falhas} de ${files.length} arquivo(s) falharam.` : null,
     concluido: Date.now(),
   });
+  await _persistImportJob(jobId);
+  const arquivosOrigem = _importSourceFiles;
+  _importSourceFiles = [];
+  _removerArquivosImportacao(arquivosOrigem);
+  await _persistImportJob(jobId);
 }
 
 if (_multer) {
@@ -4015,6 +4154,23 @@ if (_multer) {
   // 2 GB — exports Azure multi-part (part_N_0001.csv) podem facilmente superar 500 MB
   // A leitura CSV é em streaming (readline), sem carregar o arquivo inteiro na memória
   const FILE_SIZE_LIMIT = 2 * 1024 * 1024 * 1024; // 2 GB
+  const TOTAL_IMPORT_SIZE_LIMIT = 10 * 1024 * 1024 * 1024; // 10 GB por lote retomável
+  const IMPORT_CHUNK_SIZE = 8 * 1024 * 1024;
+
+  async function _montarArquivoImportacao(source) {
+    const stream = require('stream/promises');
+    fs.mkdirSync(path.dirname(source.path), { recursive: true });
+    try { fs.unlinkSync(source.path); } catch (_) {}
+    for (let chunk = 0; chunk < source.chunkCount; chunk++) {
+      const chunkPath = path.join(source.chunkDir, `${chunk}.part`);
+      await stream.pipeline(
+        fs.createReadStream(chunkPath),
+        fs.createWriteStream(source.path, { flags: chunk === 0 ? 'w' : 'a' }),
+      );
+    }
+    const size = fs.statSync(source.path).size;
+    if (size !== source.size) throw new Error(`Tamanho incorreto no arquivo ${source.originalname}.`);
+  }
 
   const _upload = _multer({
     storage: _storage,
@@ -4030,8 +4186,130 @@ if (_multer) {
   });
 
   // Status do job de importação em andamento ou último concluído
-  app.get('/api/azure-costs/import-status', authMiddleware, (req, res) => {
-    res.json({ job: _importJob });
+  app.get('/api/azure-costs/import-status', authMiddleware, dbMiddleware, async (req, res) => {
+    try {
+      const saved = await _azureImportJobStore.load();
+      if (saved && (!_importJob || _importJob.id !== saved.job.id || _importJob.status !== 'running')) {
+        _importJob = saved.job;
+        _importSourceFiles = saved.source_files || [];
+      }
+      res.json({ job: _importJob });
+    } catch (err) { _dbErr(res, err); }
+  });
+
+  app.post('/api/azure-costs/import/resumable/start', authMiddleware, dbMiddleware, async (req, res) => {
+    const manifest = req.body?.files;
+    if (!Array.isArray(manifest) || manifest.length < 1 || manifest.length > 50) {
+      return res.status(400).json({ error: 'Selecione de 1 a 50 arquivos.' });
+    }
+    const files = manifest.map((file) => ({
+      originalname: path.basename(String(file?.arquivo || '')).slice(0, 255),
+      size: Number(file?.tamanho),
+      lastModified: Number(file?.ultimaModificacao) || 0,
+    }));
+    if (files.some((file) => !file.originalname || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > FILE_SIZE_LIMIT)) {
+      return res.status(400).json({ error: 'Manifesto inválido: nome ou tamanho de arquivo fora do limite.' });
+    }
+    if (files.reduce((sum, file) => sum + file.size, 0) > TOTAL_IMPORT_SIZE_LIMIT) {
+      return res.status(413).json({ error: 'O lote excede o limite total de 10 GB.' });
+    }
+
+    let active;
+    try { active = await _obterImportacaoAtiva(); }
+    catch (err) { return _dbErr(res, err); }
+    if (active) {
+      if (active.status === 'uploading' && _reconciliarChunksImportacao(active, _importSourceFiles)) {
+        try { await _persistImportJob(active.id); }
+        catch (err) { return _dbErr(res, err); }
+      }
+      const current = _importSourceFiles.map((file) => ({ arquivo: file.originalname, tamanho: file.size, ultimaModificacao: file.lastModified || 0 }));
+      const sameManifest = active.status === 'uploading' && current.length === files.length && files.every((file, index) =>
+        current[index]?.arquivo === file.originalname && current[index]?.tamanho === file.size && current[index]?.ultimaModificacao === file.lastModified)
+      if (!sameManifest) return res.status(409).json({ error: 'Há outro import ativo. Para retomar, selecione exatamente os mesmos arquivos.' });
+      return res.json({ jobId: active.id, resumed: true, uploads: active.uploads || [] });
+    }
+
+    const jobId = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+    const jobDir = path.join(_uploadDir, 'azure-import', jobId);
+    try {
+      _importSourceFiles = files.map((file, index) => {
+        const chunkDir = path.join(jobDir, `file-${index}-chunks`);
+        fs.mkdirSync(chunkDir, { recursive: true });
+        return {
+          path: path.join(jobDir, `file-${index}.upload`), originalname: file.originalname,
+          size: file.size, lastModified: file.lastModified, chunkCount: Math.ceil(file.size / IMPORT_CHUNK_SIZE),
+          receivedChunks: [], chunkDir, jobDir,
+        };
+      });
+      _importJob = {
+        id: jobId, arquivo: files[0].originalname, idx: 1, total: files.length,
+        status: 'uploading', linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
+        subArquivo: null, erro: null, iniciado: Date.now(), concluido: null,
+        uploads: _importSourceFiles.map((file) => ({
+          arquivo: file.originalname, tamanho: file.size, ultimaModificacao: file.lastModified,
+          chunks: file.chunkCount, recebidos: [],
+        })),
+      };
+      await _persistImportJob(jobId);
+    } catch (err) {
+      try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch (_) {}
+      _importSourceFiles = [];
+      _importJob = null;
+      return _dbErr(res, err);
+    }
+    res.status(201).json({ jobId, resumed: false, uploads: _importJob.uploads });
+  });
+
+  app.put('/api/azure-costs/import/resumable/:jobId/files/:fileIndex/chunks/:chunkIndex', authMiddleware, dbMiddleware,
+    express.raw({ type: 'application/octet-stream', limit: '10mb' }), async (req, res) => {
+      const job = _importJob;
+      const fileIndex = Number(req.params.fileIndex);
+      const chunkIndex = Number(req.params.chunkIndex);
+      if (!job || job.id !== req.params.jobId || job.status !== 'uploading') return res.status(409).json({ error: 'Este upload não está mais aberto.' });
+      if (!Number.isInteger(fileIndex) || !Number.isInteger(chunkIndex) || fileIndex < 0 || fileIndex >= _importSourceFiles.length) {
+        return res.status(400).json({ error: 'Índice de arquivo ou parte inválido.' });
+      }
+      const source = _importSourceFiles[fileIndex];
+      const expectedChunks = source.chunkCount;
+      const expectedSize = Math.min(IMPORT_CHUNK_SIZE, source.size - chunkIndex * IMPORT_CHUNK_SIZE);
+      if (chunkIndex < 0 || chunkIndex >= expectedChunks || expectedSize <= 0 || !Buffer.isBuffer(req.body) || req.body.length !== expectedSize) {
+        return res.status(400).json({ error: 'Tamanho ou índice do chunk inválido.' });
+      }
+      if (source.receivedChunks.includes(chunkIndex)) return res.status(204).end();
+      const chunkPath = path.join(source.chunkDir, `${chunkIndex}.part`);
+      const tempPath = `${chunkPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+      try {
+        fs.writeFileSync(tempPath, req.body, { flag: 'wx' });
+        fs.renameSync(tempPath, chunkPath);
+        source.receivedChunks.push(chunkIndex);
+        source.receivedChunks.sort((a, b) => a - b);
+        job.uploads[fileIndex].recebidos = source.receivedChunks;
+        await _persistImportJob(job.id);
+        res.status(204).end();
+      } catch (err) {
+        try { fs.unlinkSync(tempPath); } catch (_) {}
+        _dbErr(res, err);
+      }
+    });
+
+  app.post('/api/azure-costs/import/resumable/:jobId/finalize', authMiddleware, dbMiddleware, async (req, res) => {
+    const job = _importJob;
+    if (!job || job.id !== req.params.jobId || job.status !== 'uploading') return res.status(409).json({ error: 'Este upload não está mais aberto.' });
+    const incomplete = _importSourceFiles.find((file) => file.receivedChunks.length !== file.chunkCount);
+    if (incomplete) return res.status(409).json({ error: `Ainda faltam partes do arquivo ${incomplete.originalname}.` });
+    try {
+      for (const file of _importSourceFiles) await _montarArquivoImportacao(file);
+      Object.assign(job, {
+        status: 'running', idx: 1, arquivo: _importSourceFiles[0].originalname,
+        linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
+        subArquivo: null, erro: null, concluido: null, arquivos: [], concluidos: 0, falhas: 0,
+      });
+      await _persistImportJob(job.id);
+    } catch (err) {
+      return _dbErr(res, err);
+    }
+    res.status(202).json({ jobId: job.id, arquivo: job.arquivo, total: job.total });
+    _executarImportacaoEmBackground(_importSourceFiles.slice(), job.id);
   });
 
   app.post('/api/azure-costs/import', authMiddleware, dbMiddleware, (req, res, next) => {
@@ -4048,33 +4326,50 @@ if (_multer) {
       }
       next();
     });
-  }, (req, res) => {
+  }, async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
 
     // Rejeitar se já há uma importação em andamento
-    if (_importJob && _importJob.status === 'running') {
-      const fs = require('fs');
-      try { fs.unlinkSync(req.file.path); } catch (_) {}
-      return res.status(409).json({ error: 'Uma importação já está em andamento. Aguarde a conclusão.' });
+    try {
+      if (await _obterImportacaoAtiva()) {
+        const fs = require('fs');
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
+        return res.status(409).json({ error: 'Uma importação já está em andamento. Aguarde a conclusão.' });
+      }
+    } catch (err) {
+      try { require('fs').unlinkSync(req.file.path); } catch (_) {}
+      return _dbErr(res, err);
     }
 
     const jobId = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
     const idx   = parseInt(req.body?.idx   || '1', 10);
     const total = parseInt(req.body?.total || '1', 10);
-
+    _importSourceFiles = [{ path: req.file.path, originalname: req.file.originalname }];
     _importJob = {
-      id: jobId,
-      arquivo: req.file.originalname,
-      idx, total,
-      status: 'running',
-      linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
-      subArquivo: null, erro: null,
-      iniciado: Date.now(), concluido: null,
+      id: jobId, arquivo: req.file.originalname, idx, total,
+      status: 'running', linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
+      subArquivo: null, erro: null, iniciado: Date.now(), concluido: null,
+      arquivos: [], concluidos: 0, falhas: 0,
     };
+    try {
+      await _persistImportJob(jobId);
+    } catch (err) {
+      try { require('fs').unlinkSync(req.file.path); } catch (_) {}
+      _importSourceFiles = [];
+      _importJob = null;
+      return _dbErr(res, err);
+    }
 
-    // Processar em background — não aguarda a resposta HTTP
-    _processarImport(req.file.path, req.file.originalname, jobId).catch(() => {});
-
+    _processarImportLote(_importSourceFiles.slice(), jobId).catch(async (err) => {
+      console.error('[Azure Import] Erro no lote em background:', err);
+      if (_importJob?.id === jobId) {
+        Object.assign(_importJob, { status: 'error', erro: err.message, concluido: Date.now() });
+        const files = _importSourceFiles;
+        _importSourceFiles = [];
+        for (const file of files) try { require('fs').unlinkSync(file.path); } catch (_) {}
+        await _persistImportJob(jobId).catch((persistErr) => console.error('[Azure Import] Falha ao persistir erro:', persistErr.message));
+      }
+    });
     res.status(202).json({ jobId, arquivo: req.file.originalname });
   });
 
@@ -4085,26 +4380,46 @@ if (_multer) {
       if (err) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: `Erro no upload: ${err.message}` });
       next();
     });
-  }, (req, res) => {
+  }, async (req, res) => {
     const files = req.files || [];
     if (!files.length) return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-    if (_importJob && _importJob.status === 'running') {
-      const fs = require('fs');
-      for (const file of files) try { fs.unlinkSync(file.path); } catch (_) {}
-      return res.status(409).json({ error: 'Uma importação já está em andamento. Aguarde a conclusão.' });
+    try {
+      if (await _obterImportacaoAtiva()) {
+        for (const file of files) try { require('fs').unlinkSync(file.path); } catch (_) {}
+        return res.status(409).json({ error: 'Uma importação já está em andamento. Aguarde a conclusão.' });
+      }
+    } catch (err) {
+      for (const file of files) try { require('fs').unlinkSync(file.path); } catch (_) {}
+      return _dbErr(res, err);
     }
 
     const jobId = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+    _importSourceFiles = files.map((file) => ({ path: file.path, originalname: file.originalname }));
     _importJob = {
       id: jobId, arquivo: files[0].originalname, idx: 1, total: files.length,
       status: 'running', linhas: 0, inseridos: 0, atualizados: 0, erros: 0, erros_det: [],
       subArquivo: null, erro: null, iniciado: Date.now(), concluido: null,
       arquivos: [], concluidos: 0, falhas: 0,
     };
+    try {
+      await _persistImportJob(jobId);
+    } catch (err) {
+      for (const file of files) try { require('fs').unlinkSync(file.path); } catch (_) {}
+      _importSourceFiles = [];
+      _importJob = null;
+      return _dbErr(res, err);
+    }
+
     res.status(202).json({ jobId, arquivo: files[0].originalname, total: files.length });
-    _processarImportLote(files, jobId).catch((err) => {
+    _processarImportLote(_importSourceFiles.slice(), jobId).catch(async (err) => {
       console.error('[Azure Import] Erro no lote em background:', err);
-      if (_importJob?.id === jobId) Object.assign(_importJob, { status: 'error', erro: err.message, concluido: Date.now() });
+      if (_importJob?.id === jobId) {
+        Object.assign(_importJob, { status: 'error', erro: err.message, concluido: Date.now() });
+        const filesAtivos = _importSourceFiles;
+        _importSourceFiles = [];
+        for (const file of filesAtivos) try { require('fs').unlinkSync(file.path); } catch (_) {}
+        await _persistImportJob(jobId).catch((persistErr) => console.error('[Azure Import] Falha ao persistir erro:', persistErr.message));
+      }
     });
   });
 }
@@ -21513,24 +21828,6 @@ app.get('/health', (_req, res) => {
 
 // ─── START ───────────────────────────────────────────────────────────────────
 (async () => {
-  // Limpar uploads_tmp ao iniciar — arquivos temporários deixados por crash ou restart
-  try {
-    const tmpDir = path.join(__dirname, 'uploads_tmp');
-    if (fs.existsSync(tmpDir)) {
-      const tmpFiles = fs.readdirSync(tmpDir);
-      let freed = 0;
-      for (const f of tmpFiles) {
-        try {
-          const fp = path.join(tmpDir, f);
-          const stat = fs.statSync(fp);
-          freed += stat.size;
-          fs.unlinkSync(fp);
-        } catch {}
-      }
-      if (tmpFiles.length > 0) console.log(`  [Startup] Limpeza uploads_tmp: ${tmpFiles.length} arquivo(s) removido(s) (${(freed/1024/1024).toFixed(0)} MB)`);
-    }
-  } catch {}
-
   // Start HTTP server first — wizard needs it before DB is ready
   app.listen(PORT, process.env.FINOPS_BIND_HOST || undefined, () => {
     console.log('');
@@ -21554,6 +21851,12 @@ app.get('/health', (_req, res) => {
       await initDB();
       // Inicializar tabelas na startup — uma vez só, não em cada request
       try { await ensureAzureCostsTable(); } catch (e) { console.warn('[Azure] Tabela será criada na primeira importação:', e.message); }
+      try {
+        await _restaurarImportacaoPersistida();
+        _limparUploadsTmp(_importSourceFiles);
+      } catch (e) {
+        console.warn('[Azure Import] Não foi possível restaurar o job na inicialização:', e.message);
+      }
       try { await ensureAzureColetaTable(); } catch (e) { console.warn('[Coleta] Tabela de histórico não iniciada:', e.message); }
       // Price List: cria azure_price_list_meta (necessária para o agendador) antes de iniciar o timer.
       // MVs podem demorar com dados; executar antes do agendador garante que a tabela exista no primeiro tick.

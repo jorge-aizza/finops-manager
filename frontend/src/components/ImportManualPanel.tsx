@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { ApiError } from '../api/client'
-import { getImportStatus, uploadImportBatch } from '../api/coleta'
+import { beginResumableImport, finishResumableImport, getImportStatus, IMPORT_CHUNK_SIZE, uploadImportChunk } from '../api/coleta'
 import type { ImportJob } from '../types/coleta'
+import FinopsLogo from './FinopsLogo'
+import './ImportManualPanel.css'
 
 interface ArquivoResultado {
   arquivo: string
@@ -27,7 +29,39 @@ interface Resultado {
   ultimoJob: ImportJob | null
 }
 
+interface EstadoImportacao {
+  uploading: boolean
+  awaitingFiles: boolean
+  progresso: Progresso | null
+  resultado: Resultado | null
+}
+
 const EXT_VALIDAS = ['.csv', '.parquet', '.zip']
+const estadoInicial: EstadoImportacao = { uploading: false, awaitingFiles: false, progresso: null, resultado: null }
+let estadoImportacao = estadoInicial
+let operacaoAtiva = false
+let verificandoStatus = false
+const ouvintes = new Set<() => void>()
+
+function assinarImportacao(ouvinte: () => void): () => void {
+  ouvintes.add(ouvinte)
+  return () => ouvintes.delete(ouvinte)
+}
+
+function obterEstadoImportacao(): EstadoImportacao {
+  return estadoImportacao
+}
+
+function atualizarEstadoImportacao(parcial: Partial<EstadoImportacao>) {
+  estadoImportacao = { ...estadoImportacao, ...parcial }
+  ouvintes.forEach((ouvinte) => ouvinte())
+}
+
+export function resetImportManualState() {
+  operacaoAtiva = false
+  verificandoStatus = false
+  atualizarEstadoImportacao(estadoInicial)
+}
 
 function ehValido(nome: string): boolean {
   const n = nome.toLowerCase()
@@ -84,6 +118,151 @@ function resultadoDeJobConcluido(job: ImportJob): Resultado {
   }
 }
 
+function finalizarImportacao(job: ImportJob, queryClient: QueryClient, mostrarToast = false) {
+  const resultado = resultadoDeJobConcluido(job)
+  operacaoAtiva = false
+  window.resumeInactivityTimer?.()
+  atualizarEstadoImportacao({ uploading: false, awaitingFiles: false, progresso: null, resultado })
+  if (mostrarToast) {
+    window.showToast?.(
+      resultado.tudoOk
+        ? `✅ ${resultado.concluidos} arquivo(s) — ${resultado.totalInseridos.toLocaleString('pt-BR')} registros inseridos.`
+        : `⚠️ ${resultado.concluidos} ok · ${resultado.falhas} com erro.`,
+      resultado.tudoOk ? 'success' : 'error',
+    )
+  }
+  if (resultado.concluidos > 0) {
+    queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
+    queryClient.invalidateQueries({ queryKey: ['coleta-cobertura'] })
+    queryClient.invalidateQueries({ queryKey: ['azure-resumo'] })
+  }
+}
+
+async function acompanharImportacao(jobId: string, idx: number, total: number, queryClient: QueryClient, mostrarToast = false) {
+  const jobFinal = await aguardarImport(jobId, idx, total, (progresso) => {
+    atualizarEstadoImportacao({ progresso })
+  })
+  finalizarImportacao(jobFinal, queryClient, mostrarToast)
+}
+
+async function ressincronizarImportacao(queryClient: QueryClient) {
+  if (operacaoAtiva || verificandoStatus) return
+  verificandoStatus = true
+  try {
+    const { job } = await getImportStatus()
+    if (operacaoAtiva || !job) return
+    if (job.status === 'uploading') {
+      const uploads = job.uploads || []
+      const totalBytes = uploads.reduce((sum, file) => sum + file.tamanho, 0)
+      const uploadedBytes = uploads.reduce((sum, file) => sum + file.recebidos.reduce((fileSum, chunk) => {
+        return fileSum + Math.max(0, Math.min(IMPORT_CHUNK_SIZE, file.tamanho - chunk * IMPORT_CHUNK_SIZE))
+      }, 0), 0)
+      atualizarEstadoImportacao({
+        uploading: true,
+        awaitingFiles: true,
+        resultado: null,
+        progresso: {
+          idxAtual: job.idx,
+          total: job.total,
+          arquivoAtual: job.arquivo,
+          subLabel: 'Envio pausado. Selecione novamente os mesmos arquivos para retomar.',
+          pct: totalBytes > 0 ? Math.floor(uploadedBytes / totalBytes * 100) : 0,
+        },
+      })
+    } else if (job.status === 'running') {
+      operacaoAtiva = true
+      window.suspendInactivityTimer?.()
+      atualizarEstadoImportacao({
+        uploading: true,
+        awaitingFiles: false,
+        resultado: null,
+        progresso: {
+          idxAtual: job.idx,
+          total: job.total,
+          arquivoAtual: job.arquivo + (job.subArquivo ? ` · ${job.subArquivo}` : ''),
+          subLabel: 'retomando acompanhamento...',
+          pct: 0,
+        },
+      })
+      await acompanharImportacao(job.id, job.idx, job.total, queryClient)
+    } else if (job.status === 'done' || job.status === 'error') {
+      atualizarEstadoImportacao({ resultado: resultadoDeJobConcluido(job) })
+    }
+  } catch {
+    // A próxima montagem da tela tentará consultar o job novamente.
+  } finally {
+    verificandoStatus = false
+  }
+}
+
+async function iniciarImportacao(files: File[], queryClient: QueryClient) {
+  if (operacaoAtiva) return
+  const retomando = estadoImportacao.awaitingFiles
+  operacaoAtiva = true
+  window.suspendInactivityTimer?.()
+  atualizarEstadoImportacao({
+    uploading: true,
+    awaitingFiles: false,
+    resultado: null,
+    progresso: { idxAtual: 1, total: files.length, arquivoAtual: files[0].name, subLabel: 'Preparando envio retomável...', pct: 0 },
+  })
+
+  let jobId: string | null = null
+  try {
+    const upload = await beginResumableImport(files)
+    jobId = upload.jobId
+    const manifestMatches = upload.uploads.length === files.length && files.every((file, index) =>
+      upload.uploads[index]?.arquivo === file.name && upload.uploads[index]?.tamanho === file.size && upload.uploads[index]?.ultimaModificacao === file.lastModified)
+    if (!manifestMatches) throw new ApiError('Os arquivos selecionados não correspondem ao envio pausado. Selecione o mesmo conjunto de arquivos.')
+
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
+    let uploadedBytes = upload.uploads.reduce((sum, manifest) => sum + manifest.recebidos.reduce((fileSum, chunk) => {
+      return fileSum + Math.max(0, Math.min(IMPORT_CHUNK_SIZE, manifest.tamanho - chunk * IMPORT_CHUNK_SIZE))
+    }, 0), 0)
+    for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+      const file = files[fileIndex]
+      const manifest = upload.uploads[fileIndex]
+      const received = new Set(manifest.recebidos)
+      const chunkCount = Math.ceil(file.size / IMPORT_CHUNK_SIZE)
+      for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        if (received.has(chunkIndex)) continue
+        const start = chunkIndex * IMPORT_CHUNK_SIZE
+        const chunk = file.slice(start, Math.min(start + IMPORT_CHUNK_SIZE, file.size))
+        await uploadImportChunk(jobId, fileIndex, chunkIndex, chunk)
+        uploadedBytes += chunk.size
+        atualizarEstadoImportacao({
+          progresso: {
+            idxAtual: fileIndex + 1,
+            total: files.length,
+            arquivoAtual: file.name,
+            subLabel: `${uploadedBytes.toLocaleString('pt-BR')} / ${totalBytes.toLocaleString('pt-BR')} bytes enviados`,
+            pct: totalBytes > 0 ? Math.floor(uploadedBytes / totalBytes * 100) : 0,
+          },
+        })
+      }
+    }
+
+    const outcome = await finishResumableImport(jobId)
+    if (outcome.kind === 'conflict') throw new ApiError(outcome.message)
+    atualizarEstadoImportacao({
+      progresso: estadoImportacao.progresso && { ...estadoImportacao.progresso, subLabel: 'Lote recebido pelo servidor; processamento em background.' },
+    })
+    await acompanharImportacao(outcome.jobId, 1, files.length, queryClient, true)
+  } catch (e) {
+    const mensagem = e instanceof ApiError ? e.message : String(e)
+    operacaoAtiva = false
+    window.resumeInactivityTimer?.()
+    atualizarEstadoImportacao({
+      uploading: Boolean(jobId) || retomando,
+      awaitingFiles: Boolean(jobId) || retomando,
+      progresso: Boolean(jobId) || retomando
+        ? { idxAtual: 1, total: files.length, arquivoAtual: files[0].name, subLabel: 'Envio pausado. Selecione novamente os mesmos arquivos para retomar.', pct: 0 }
+        : null,
+    })
+    window.showToast?.('Erro ao iniciar importação: ' + mensagem, 'error')
+  }
+}
+
 // Porta de _setupImport()/_aguardarImport() (calculadora.js) — antes só
 // acionável pelo botão "Selecionar Arquivos" dentro de #view-coleta, que
 // virou permanentemente display:none quando 'coleta' entrou em
@@ -94,54 +273,14 @@ function resultadoDeJobConcluido(job: ImportJob): Resultado {
 export default function ImportManualPanel() {
   const queryClient = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)
-  const [uploading, setUploading] = useState(false)
-  const [progresso, setProgresso] = useState<Progresso | null>(null)
-  const [resultado, setResultado] = useState<Resultado | null>(null)
+  const { uploading, awaitingFiles, progresso, resultado } = useSyncExternalStore(assinarImportacao, obterEstadoImportacao, obterEstadoImportacao)
   const [verErros, setVerErros] = useState(false)
 
-  // Bug real corrigido (2026-10-16, achado pelo usuário: "fui fazer um Import Manual ao
-  // mudar de tela e voltar perdi o import e não atualiza"): o progresso/resultado vivia
-  // só em useState — ao navegar pra outra VIEW (não aba, view inteira: ColetaView
-  // desmonta por completo) e voltar, o componente remonta do zero sem checar se o
-  // servidor ainda tem um import rodando (ou um que terminou enquanto o usuário estava
-  // fora). `_importJob` no servidor é um singleton que sobrevive à troca de view — só
-  // faltava consultá-lo no mount, igual o resto do app já faz pra coleta (ColetaMonitor
-  // consulta GET /status ao montar, nunca assume estado zerado).
   useEffect(() => {
-    let cancelado = false
-    async function resync() {
-      let job: ImportJob | null
-      try { const r = await getImportStatus(); job = r.job } catch { return }
-      if (cancelado || !job) return
-      if (job.status === 'running') {
-        window.suspendInactivityTimer?.()
-        setUploading(true)
-        setProgresso({ idxAtual: job.idx, total: job.total, arquivoAtual: job.arquivo + (job.subArquivo ? ` · ${job.subArquivo}` : ''), subLabel: 'retomando acompanhamento...', pct: 0 })
-        const jobFinal = await aguardarImport(job.id, job.idx, job.total, (tick) => {
-          if (!cancelado) setProgresso(tick)
-        })
-        if (cancelado) return
-        window.resumeInactivityTimer?.()
-        setProgresso(null)
-        setUploading(false)
-        setResultado(resultadoDeJobConcluido(jobFinal))
-        if (jobFinal.status === 'done') {
-          queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
-          queryClient.invalidateQueries({ queryKey: ['coleta-cobertura'] })
-          queryClient.invalidateQueries({ queryKey: ['azure-resumo'] })
-        }
-      } else if (job.status === 'done' || job.status === 'error') {
-        // Terminou enquanto o usuário estava em outra tela — mostra o resultado em vez
-        // de deixar o painel parecer que nada aconteceu.
-        setResultado(resultadoDeJobConcluido(job))
-      }
-    }
-    resync()
-    return () => { cancelado = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    void ressincronizarImportacao(queryClient)
+  }, [queryClient])
 
-  async function handleFiles(fileList: FileList | null) {
+  function handleFiles(fileList: FileList | null) {
     if (!fileList || !fileList.length) return
     const arquivos = Array.from(fileList)
     const invalidos = arquivos.filter((f) => !ehValido(f.name))
@@ -151,61 +290,8 @@ export default function ImportManualPanel() {
     const validos = arquivos.filter((f) => ehValido(f.name))
     if (!validos.length) return
 
-    window.suspendInactivityTimer?.()
-    setUploading(true)
-    setResultado(null)
     setVerErros(false)
-    setProgresso({ idxAtual: 1, total: validos.length, arquivoAtual: validos[0].name, subLabel: 'Enviando arquivos ao servidor...', pct: 0 })
-
-    let jobFinal: ImportJob | null = null
-    try {
-      let outcome = await uploadImportBatch(validos)
-      while (outcome.kind === 'conflict') {
-        setProgresso((p) => p && ({ ...p, subLabel: 'Aguardando importação anterior concluir...' }))
-        let jobExistente: ImportJob | null
-        do {
-          await new Promise((r) => setTimeout(r, 4000))
-          try { jobExistente = (await getImportStatus()).job } catch { jobExistente = null }
-        } while (jobExistente?.status === 'running')
-        outcome = await uploadImportBatch(validos)
-      }
-      setProgresso((p) => p && ({ ...p, subLabel: 'Lote recebido pelo servidor; processamento em background.' }))
-      jobFinal = await aguardarImport(outcome.jobId, 1, validos.length, (tick) => setProgresso(tick))
-    } catch (e) {
-      const mensagem = e instanceof ApiError ? e.message : String(e)
-      setProgresso(null)
-      setUploading(false)
-      window.resumeInactivityTimer?.()
-      window.showToast?.('Erro ao iniciar importação: ' + mensagem, 'error')
-      return
-    }
-
-    const concluidos = jobFinal.concluidos ?? (jobFinal.status === 'done' ? 1 : 0)
-    const falhas = jobFinal.falhas ?? (jobFinal.status === 'done' ? 0 : 1)
-    const totalInseridos = jobFinal.inseridos || 0
-    const totalErros = jobFinal.erros || 0
-    const errosArquivos: ArquivoResultado[] = jobFinal.arquivos
-      ? jobFinal.arquivos.filter((arquivo) => arquivo.status === 'error').map((arquivo) => ({ arquivo: arquivo.arquivo, erro: arquivo.erro || 'erro no servidor' }))
-      : jobFinal.status === 'done' ? [] : [{ arquivo: jobFinal.arquivo, erro: jobFinal.erro || 'erro no servidor' }]
-
-    window.resumeInactivityTimer?.()
-    setProgresso(null)
-    const tudoOk = falhas === 0
-    setResultado({ tudoOk, concluidos, falhas, totalInseridos, totalErros, errosArquivos, ultimoJob: jobFinal })
-    setUploading(false)
-
-    window.showToast?.(
-      tudoOk
-        ? `✅ ${concluidos} arquivo(s) — ${totalInseridos.toLocaleString('pt-BR')} registros inseridos.`
-        : `⚠️ ${concluidos} ok · ${falhas} com erro.`,
-      tudoOk ? 'success' : 'error',
-    )
-
-    if (concluidos > 0) {
-      queryClient.invalidateQueries({ queryKey: ['coleta-historico'] })
-      queryClient.invalidateQueries({ queryKey: ['coleta-cobertura'] })
-      queryClient.invalidateQueries({ queryKey: ['azure-resumo'] })
-    }
+    void iniciarImportacao(validos, queryClient)
   }
 
   return (
@@ -214,25 +300,31 @@ export default function ImportManualPanel() {
         <span className="card-title">📥 Importação Manual</span>
       </div>
       <div style={{ padding: '24px 20px', textAlign: 'center' }}>
-        {!uploading && !resultado && (
+        {(!uploading || awaitingFiles) && !resultado && (
           <>
             <div style={{ fontSize: 13, color: 'var(--text-muted)', maxWidth: 480, margin: '0 auto 18px', lineHeight: 1.6 }}>
               Aceita arquivos <strong style={{ color: 'var(--text)' }}>.csv</strong>, <strong style={{ color: 'var(--text)' }}>.parquet</strong> ou <strong style={{ color: 'var(--text)' }}>.zip</strong> exportados do Azure Cost Management. Múltiplos arquivos podem ser selecionados de uma vez.
+              {awaitingFiles && <div style={{ marginTop: 8 }}>Envio pausado. Selecione novamente os mesmos arquivos para retomar.</div>}
             </div>
             <input ref={inputRef} type="file" accept=".csv,.parquet,.zip" multiple style={{ display: 'none' }}
               onChange={(e) => { handleFiles(e.target.files); e.target.value = '' }} />
             <button className="btn-primary" style={{ fontSize: 14, padding: '12px 34px' }} onClick={() => inputRef.current?.click()}>
-              Selecionar Arquivos
+              {awaitingFiles ? 'Selecionar Arquivos para Retomar' : 'Selecionar Arquivos'}
             </button>
           </>
         )}
 
         {uploading && progresso && (
           <div style={{ textAlign: 'left', maxWidth: 520, margin: '0 auto' }}>
+            <div className="import-manual-visual" role="img" aria-label="Ciclo FinOps: Informar, Otimizar e Operar">
+              <FinopsLogo height={72} />
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
               <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: 'var(--accent)' }} />
               <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>
-                {progresso.subLabel === 'Enviando arquivos ao servidor...'
+                {awaitingFiles
+                  ? 'Envio aguardando seleção dos arquivos...'
+                  : progresso.subLabel === 'Preparando envio retomável...' || progresso.subLabel.endsWith('bytes enviados')
                   ? `Enviando ${progresso.total} arquivo(s) ao servidor...`
                   : `Importando ${progresso.total > 1 ? `${progresso.idxAtual} / ${progresso.total}` : ''}...`}
               </span>
@@ -286,7 +378,7 @@ export default function ImportManualPanel() {
               </div>
             )}
             <div style={{ marginTop: 14 }}>
-              <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 16px' }} onClick={() => { setResultado(null); setVerErros(false) }}>
+              <button className="btn-ghost" style={{ fontSize: 12, padding: '6px 16px' }} onClick={() => { resetImportManualState(); setVerErros(false) }}>
                 Importar mais arquivos
               </button>
             </div>
