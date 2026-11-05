@@ -126,4 +126,16 @@ caso de mudança de propriedade (hoje só sino) e de anomalia de crescimento (ho
 eram ~157/dia para um destinatário, e de forma recorrente, porque o dedup libera a chave a cada
 24h e a janela de detecção são 35 dias). Para rotear ao responsável use `_destinatariosPara()`.
 
+**Reservas vencendo e anomalias Databricks são enviadas em resumos.**
+Reservas são agrupadas por conjunto de destinatários (responsável quando identificado; senão,
+lista padrão), sem misturar reservas de responsáveis diferentes. Anomalias Databricks de custo e
+usuário são agrupadas em um e-mail por checagem. A deduplicação continua por ocorrência, com
+cooldown individual de 24h; somente ocorrências que ganham o claim entram no resumo. Os links
+para as telas usam `ALLOWED_ORIGIN` e `/?view=reservas` ou `/?view=databricks`; o parâmetro `view`
+é validado contra as telas React migradas e removido após a entrada no app.
+
+**Logo dos alertas vai embutido, não por URL.**
+O template comum usa `finops-logo.png` como anexo inline `cid:finops-logo@finopsmanager`.
+O fallback mantém o cabeçalho textual se o arquivo não estiver disponível no deploy.
+
 ---

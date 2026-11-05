@@ -1012,7 +1012,7 @@ app.post('/api/integrations/smtp/testar', authMiddleware, adminMiddleware, async
 // Loga no MESMO ring buffer de `_sendEmail` — a tela de Integrações mostra teste e envio real na
 // mesma lista, que é o que serve pra diagnosticar.
 app.post('/api/integrations/alertas-relay/testar', authMiddleware, adminMiddleware, async (req, res) => {
-  const { host, port, secure, remetente_email, remetente_nome, destinatarios_padrao } = req.body;
+  const { host, port, secure, remetente_email, remetente_nome, destinatarios_padrao, testar_reserva } = req.body;
   const destino = _parseDestinatarios(destinatarios_padrao)[0] || remetente_email;
   try {
     if (!host || !remetente_email) {
@@ -1024,6 +1024,38 @@ app.post('/api/integrations/alertas-relay/testar', authMiddleware, adminMiddlewa
       greetingTimeout: 10_000,
       socketTimeout: 10_000,
     });
+    if (testar_reserva) {
+      const resultado = await pool.query(`
+        SELECT nome_reserva, cloud, tipo_recurso, data_vencimento
+        FROM reservas_cloud
+        WHERE status = 'Ativa' AND data_vencimento <= NOW() + INTERVAL '90 days'
+        ORDER BY data_vencimento ASC
+        LIMIT 1
+      `);
+      if (!resultado.rows.length) {
+        return res.status(404).json({ error: 'Nenhuma reserva ativa vence nos próximos 90 dias.' });
+      }
+      const reserva = resultado.rows[0];
+      const dias = Math.floor((new Date(reserva.data_vencimento) - new Date()) / 86400000);
+      const situacao = dias < 0 ? `expirada há ${Math.abs(dias)} dia(s)` : dias === 0 ? 'vence hoje' : `vence em ${dias} dia(s)`;
+      const logoPath = path.join(__dirname, 'finops-logo.png');
+      const assunto = '[TESTE] Reserva Cloud vencendo';
+      await transporter.sendMail({
+        from: `"${remetente_nome || 'FinOps Manager'}" <${remetente_email}>`,
+        to: destino,
+        subject: assunto,
+        html: _emailTemplate('Teste — Reserva Cloud vencendo', `
+          <p>Prévia do alerta de reserva ativa com vencimento nos próximos 90 dias ou já expirada:</p>
+          <ul style="padding-left:18px"><li style="margin-bottom:10px"><strong>${_escHtmlServer(reserva.nome_reserva)}</strong> (${_escHtmlServer(reserva.cloud)} · ${_escHtmlServer(reserva.tipo_recurso)}) ${situacao}. Vencimento: ${new Date(reserva.data_vencimento).toLocaleDateString('pt-BR')}.</li></ul>
+          ${_emailAppLink('reservas', 'Abrir Reservas no FinOps Manager')}`),
+        ...(fs.existsSync(logoPath) ? {
+          attachments: [{ filename: 'finops-logo.png', path: logoPath, cid: 'finops-logo@finopsmanager', contentDisposition: 'inline' }],
+        } : {}),
+      });
+      _logEmailAttempt({ tipo: 'teste', destinatarios: destino, assunto, ok: true });
+      return res.json({ ok: true, message: `Prévia da reserva enviada para ${destino}.` });
+    }
+    const logoPath = path.join(__dirname, 'finops-logo.png');
     await transporter.sendMail({
       from: `"${remetente_nome || 'FinOps Manager'}" <${remetente_email}>`,
       to: destino,
@@ -1031,6 +1063,9 @@ app.post('/api/integrations/alertas-relay/testar', authMiddleware, adminMiddlewa
       html: _emailTemplate('Teste de conexão — Relay de Alertas',
         '<p>Se você está lendo isso, o relay de Alertas está funcionando e esta caixa recebe as notificações do sistema.</p>'
         + '<p style="color:#6b7280;font-size:12px">Relay anônimo, autorizado por IP de origem — sem usuário e senha.</p>'),
+      ...(fs.existsSync(logoPath) ? {
+        attachments: [{ filename: 'finops-logo.png', path: logoPath, cid: 'finops-logo@finopsmanager', contentDisposition: 'inline' }],
+      } : {}),
     });
     _logEmailAttempt({ tipo: 'teste', destinatarios: destino, assunto: 'Teste de conexão — Relay de Alertas', ok: true });
     res.json({ ok: true, message: `E-mail de teste enviado para ${destino}.` });
@@ -8562,11 +8597,15 @@ async function _sendEmail({ to, subject, html }) {
       greetingTimeout: 10_000,
       socketTimeout: 10_000,
     });
+    const logoPath = path.join(__dirname, 'finops-logo.png');
     await transporter.sendMail({
       from: `"${cfg.remetente_nome || 'FinOps Manager'}" <${cfg.remetente_email || cfg.usuario}>`,
       to: destinatarios.join(','),
       subject,
       html,
+      ...(fs.existsSync(logoPath) ? {
+        attachments: [{ filename: 'finops-logo.png', path: logoPath, cid: 'finops-logo@finopsmanager', contentDisposition: 'inline' }],
+      } : {}),
     });
     _logEmailAttempt({ tipo: 'envio', destinatarios, assunto: subject, ok: true });
   } catch (e) {
@@ -8600,11 +8639,28 @@ function _avisarFalhaEmail(msg) {
 // Wrapper HTML com estilos inline (obrigatório em e-mail — a maioria dos clientes
 // remove <style> em bloco), cabeçalho no roxo Vivo já usado no resto do app.
 function _emailTemplate(titulo, corpoHtml) {
+  const logoPath = path.join(__dirname, 'finops-logo.png');
+  const cabecalho = fs.existsSync(logoPath)
+    ? `<table role="presentation" style="width:100%;border-collapse:collapse;background:#ffffff;border-bottom:3px solid #6d28d9"><tr><td style="padding:14px 24px;vertical-align:middle"><img src="cid:finops-logo@finopsmanager" alt="FinOps" width="145" style="display:block;width:145px;max-width:100%;height:auto"></td><td style="padding:14px 24px 14px 0;text-align:right;vertical-align:middle;color:#4c1d95;font-size:17px;font-weight:700;white-space:nowrap">FinOps Manager</td></tr></table>`
+    : '<div style="background:#6d28d9;padding:20px 24px"><span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:.5px">FinOps Manager</span></div>';
   return `<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
-    <div style="background:#6d28d9;padding:20px 24px"><span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:.5px">FinOps Manager</span></div>
+    ${cabecalho}
     <div style="padding:24px"><h2 style="margin:0 0 16px;color:#111827;font-size:16px">${_escHtmlServer(titulo)}</h2><div style="color:#374151;font-size:14px;line-height:1.6">${corpoHtml}</div></div>
     <div style="padding:14px 24px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:11px">Notificação automática — FinOps Manager</div>
   </div>`;
+}
+
+function _emailAppLink(view, label) {
+  try {
+    const url = new URL(ALLOWED_ORIGIN);
+    if (!['http:', 'https:'].includes(url.protocol) || ['localhost', '127.0.0.1', '::1'].includes(url.hostname)) return '';
+    url.pathname = '/';
+    url.search = `?view=${encodeURIComponent(view)}`;
+    url.hash = '';
+    return `<p><a href="${_escHtmlServer(url.href)}">${_escHtmlServer(label)}</a></p>`;
+  } catch (_) {
+    return '';
+  }
 }
 
 // Dedup atômico: uma linha por (tipo,chave); só "ganha o direito" de enviar se não
@@ -8723,18 +8779,13 @@ async function _checkAnomaliasDatabricks() {
   const destinatarios = _parseDestinatarios(cfg.destinatarios_padrao);
   if (!destinatarios.length) return;
   const { custo_diario, usuarios } = await _computeAnomaliasDatabricks();
+  const novas = [];
 
   for (const a of custo_diario) {
     const chave = `custo_diario:${a.escopo_tipo}:${a.escopo_valor || 'global'}:${a.usage_date}`;
     if (!(await _tentarClaimAlerta('anomalia_databricks', chave))) continue;
     const escopoTxt = a.escopo_tipo === 'workspace' ? `workspace ${a.escopo_valor}` : 'todos os workspaces';
-    await _sendEmail({
-      to: destinatarios,
-      subject: `📈 Anomalia de custo Databricks — ${escopoTxt}`,
-      html: _emailTemplate('Anomalia de custo detectada', `
-        <p>Custo de <strong>${_escHtmlServer(escopoTxt)}</strong> em ${new Date(a.usage_date).toLocaleDateString('pt-BR')} ficou fora do padrão histórico (Z-score ${a.zscore.toFixed(2)}).</p>
-        <p>Custo do dia: R$ ${a.custo.toFixed(2)} — média da janela: R$ ${a.media.toFixed(2)} (desvio padrão: R$ ${a.desvio.toFixed(2)})</p>`),
-    });
+    novas.push(`<li style="margin-bottom:10px"><strong>${_escHtmlServer(escopoTxt)}</strong> em ${new Date(a.usage_date).toLocaleDateString('pt-BR')}: custo de R$ ${a.custo.toFixed(2)} (média R$ ${a.media.toFixed(2)}, desvio padrão R$ ${a.desvio.toFixed(2)}, Z-score ${a.zscore.toFixed(2)}).</li>`);
   }
 
   for (const u of usuarios) {
@@ -8743,12 +8794,17 @@ async function _checkAnomaliasDatabricks() {
     const crescimentoTxt = u.crescimento_pct == null
       ? 'apareceu com consumo relevante sem histórico anterior'
       : `cresceu ${(u.crescimento_pct * 100).toFixed(0)}% vs. a média das últimas semanas`;
+    novas.push(`<li style="margin-bottom:10px"><strong>${_escHtmlServer(u.usuario)}</strong> ${_escHtmlServer(crescimentoTxt)}. Consumo dos últimos 7 dias: R$ ${u.custo_recente.toFixed(2)} (R$ ${u.media_diaria_recente.toFixed(2)}/dia).</li>`);
+  }
+
+  if (novas.length) {
     await _sendEmail({
       to: destinatarios,
-      subject: `👤 Consumo Databricks fora do padrão — ${u.usuario}`,
-      html: _emailTemplate('Anomalia de consumo por usuário', `
-        <p><strong>${_escHtmlServer(u.usuario)}</strong> ${crescimentoTxt}.</p>
-        <p>Consumo dos últimos 7 dias: R$ ${u.custo_recente.toFixed(2)} (R$ ${u.media_diaria_recente.toFixed(2)}/dia)</p>`),
+      subject: `📈 ${novas.length} anomalia(s) de consumo Databricks detectada(s)`,
+      html: _emailTemplate(`${novas.length} anomalia(s) Databricks`, `
+        <p>Novas anomalias de custo e consumo identificadas:</p>
+        <ul style="padding-left:18px">${novas.join('')}</ul>
+        ${_emailAppLink('databricks', 'Abrir Databricks no FinOps Manager')}`),
     });
   }
 }
@@ -8767,18 +8823,27 @@ async function _checkReservasVencendo() {
     LEFT JOIN usuarios u ON u.id = rc.criado_por
     WHERE rc.status = 'Ativa' AND rc.data_vencimento <= NOW() + INTERVAL '90 days'
   `);
+  const grupos = new Map();
   for (const reserva of r.rows) {
     const destinatarios = reserva.dono_email ? [reserva.dono_email] : padrao;
     if (!destinatarios.length) continue;
     if (!(await _tentarClaimAlerta('reserva_vencendo', `reserva:${reserva.id}`))) continue;
     const dias = Math.floor((new Date(reserva.data_vencimento) - new Date()) / 86400000);
     const situacao = dias < 0 ? `expirada há ${Math.abs(dias)} dia(s)` : dias === 0 ? 'vence hoje' : `vence em ${dias} dia(s)`;
+    const chaveGrupo = destinatarios.map((email) => email.toLowerCase()).sort().join(',');
+    if (!grupos.has(chaveGrupo)) grupos.set(chaveGrupo, { destinatarios, reservas: [] });
+    grupos.get(chaveGrupo).reservas.push(`<li style="margin-bottom:10px"><strong>${_escHtmlServer(reserva.nome_reserva)}</strong> (${_escHtmlServer(reserva.cloud)} · ${_escHtmlServer(reserva.tipo_recurso)}) ${situacao}. Vencimento: ${new Date(reserva.data_vencimento).toLocaleDateString('pt-BR')}.</li>`);
+  }
+
+  for (const grupo of grupos.values()) {
+    const total = grupo.reservas.length;
     await _sendEmail({
-      to: destinatarios,
-      subject: `🔖 Reserva ${_escHtmlServer(reserva.cloud)} ${dias < 0 ? 'expirada' : 'vencendo'} — ${reserva.nome_reserva}`,
-      html: _emailTemplate('Reserva Cloud vencendo', `
-        <p><strong>${_escHtmlServer(reserva.nome_reserva)}</strong> (${_escHtmlServer(reserva.cloud)} · ${_escHtmlServer(reserva.tipo_recurso)}) ${situacao}.</p>
-        <p>Vencimento: ${new Date(reserva.data_vencimento).toLocaleDateString('pt-BR')}</p>`),
+      to: grupo.destinatarios,
+      subject: `🔖 ${total} reserva(s) vencendo ou vencida(s)`,
+      html: _emailTemplate(`${total} reserva(s) Cloud vencendo`, `
+        <p>Reservas ativas com vencimento nos próximos 90 dias ou já expiradas:</p>
+        <ul style="padding-left:18px">${grupo.reservas.join('')}</ul>
+        ${_emailAppLink('reservas', 'Abrir Reservas no FinOps Manager')}`),
     });
   }
 }
