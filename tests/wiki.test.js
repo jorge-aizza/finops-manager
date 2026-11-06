@@ -67,9 +67,11 @@ test('router exige autenticacao e filtra rascunhos para leitores', async (t) => 
   const queries = [];
   let page;
   let revisionCount = 0;
+  const revisions = [];
   const pool = {
     async query(sql, values = []) {
       queries.push(sql);
+      if (sql.includes('FROM wiki_revisoes WHERE pagina_id=$1 ORDER BY versao DESC')) return { rows: [...revisions].reverse() };
       if (sql.includes('SELECT p.id')) {
         return { rows: [{ id: 1, slug: 'guia', titulo: 'Guia', categoria: 'Geral', resumo: null, status: 'publicado', atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z' }] };
       }
@@ -99,7 +101,11 @@ test('router exige autenticacao e filtra rascunhos para leitores', async (t) => 
           }
           if (sql.startsWith('SELECT * FROM wiki_paginas')) return { rows: page ? [{ ...page }] : [] };
           if (sql.startsWith('SELECT COALESCE(MAX(versao)')) return { rows: [{ versao: revisionCount + 1 }] };
-          if (sql.startsWith('INSERT INTO wiki_revisoes')) { revisionCount += 1; return { rows: [] }; }
+          if (sql.startsWith('INSERT INTO wiki_revisoes')) {
+            revisionCount += 1;
+            revisions.push({ id: revisionCount, versao: values[1], titulo: values[2], categoria: values[3], resumo: values[4], conteudo: values[5], status: values[6], portal_publico: values[7], alterado_por: values[8], alterado_em: '2026-10-30T00:00:00Z' });
+            return { rows: [] };
+          }
           if (sql.startsWith("UPDATE wiki_paginas SET status='publicado'")) {
             page = { ...page, status: 'publicado', atualizado_por: values[1] };
             return { rows: [{ id: page.id, slug: page.slug, titulo: page.titulo, categoria: page.categoria, resumo: page.resumo, status: page.status, atualizado_por: page.atualizado_por, atualizado_em: page.atualizado_em }] };
@@ -159,6 +165,14 @@ test('router exige autenticacao e filtra rascunhos para leitores', async (t) => 
   assert.equal(publishedResponse.status, 200);
   assert.equal((await publishedResponse.json()).status, 'publicado');
   assert.equal(revisionCount, 1);
+
+  const privateHistory = await fetch(`${url}/7/revisoes`, { headers: { Authorization: 'Bearer reader' } });
+  assert.equal(privateHistory.status, 403);
+  const writerHistory = await fetch(`${url}/7/revisoes`, { headers: { Authorization: 'Bearer writer' } });
+  assert.equal(writerHistory.status, 200);
+  assert.match(queries.at(-1), /conteudo/);
+  const revisionsResponse = await writerHistory.json();
+  assert.equal(revisionsResponse[0].conteudo.content[0].content[0].text, 'Procedimento FinOps');
 
   const visiblePage = await fetch(`${url}/guia-de-finops`, { headers: { Authorization: 'Bearer reader' } });
   assert.equal(visiblePage.status, 200);

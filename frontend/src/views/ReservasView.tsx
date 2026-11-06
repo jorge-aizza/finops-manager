@@ -52,6 +52,8 @@ function VencimentoLabel({ dateStr }: { dateStr: string | null }) {
   )
 }
 
+type ReservaFilters = { cloud: string; status: string; scope: string; resourceType: string }
+
 export default function ReservasView() {
   const reservasQuery = useQuery({ queryKey: ['reservas'], queryFn: () => listReservas() })
   const subsQuery = useQuery({ queryKey: ['azure-subscriptions'], queryFn: listSubscriptions })
@@ -63,6 +65,7 @@ export default function ReservasView() {
   const [syncResult, setSyncResult] = useState<SincronizarAzureResult | null>(null)
   const [importResult, setImportResult] = useState<ImportarReservasResult | null>(null)
   const arquivoRef = useRef<HTMLInputElement>(null)
+  const filterDisclosureRef = useRef<HTMLDetailsElement>(null)
 
   const importMutation = useMutation({
     mutationFn: (file: File) => importarReservasCSV(file),
@@ -101,22 +104,27 @@ export default function ReservasView() {
   })
 
   const [search, setSearch] = useState('')
-  const [filterCloud, setFilterCloud] = useState('')
-  const [filterStatus, setFilterStatus] = useState('')
+  const [filterDraft, setFilterDraft] = useState<ReservaFilters>({ cloud: '', status: '', scope: '', resourceType: '' })
+  const [filters, setFilters] = useState<ReservaFilters>({ cloud: '', status: '', scope: '', resourceType: '' })
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<Reserva | null>(null)
 
   const all = reservasQuery.data || []
+  const filterOptions = all.filter((r) => !filterDraft.cloud || r.cloud === filterDraft.cloud)
+  const scopes = [...new Set(filterOptions.map((r) => r.tipo_escopo || 'Shared'))].sort()
+  const resourceTypes = [...new Set(filterOptions.map((r) => r.tipo_recurso))].sort()
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase()
     return all.filter(
       (r) =>
-        (!filterCloud || r.cloud === filterCloud) &&
-        (!filterStatus || r.status === filterStatus) &&
+        (!filters.cloud || r.cloud === filters.cloud) &&
+        (!filters.status || r.status === filters.status) &&
+        (!filters.scope || (r.tipo_escopo || 'Shared') === filters.scope) &&
+        (!filters.resourceType || r.tipo_recurso === filters.resourceType) &&
         (!q || r.nome_reserva.toLowerCase().includes(q) || r.tipo_recurso.toLowerCase().includes(q)),
     )
-  }, [all, search, filterCloud, filterStatus])
+  }, [all, search, filters])
 
   const stats = useMemo(() => {
     const hoje = new Date(); hoje.setHours(0, 0, 0, 0)
@@ -185,20 +193,28 @@ export default function ReservasView() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <details className="filter-disclosure">
+        <details ref={filterDisclosureRef} className="filter-disclosure">
           <summary>Filtros</summary>
           <div className="filter-disclosure-panel">
-            <select className="filter-select" aria-label="Cloud" value={filterCloud} onChange={(e) => setFilterCloud(e.target.value)}>
+            <select className="filter-select" aria-label="Cloud" value={filterDraft.cloud} onChange={(e) => setFilterDraft((current) => ({ ...current, cloud: e.target.value, scope: '', resourceType: '' }))}>
               <option value="">Todas as Clouds</option>
               {CLOUDS.map((c) => (
                 <option key={c}>{c}</option>
               ))}
             </select>
-            <select className="filter-select" aria-label="Status" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+            <select className="filter-select" aria-label="Status" value={filterDraft.status} onChange={(e) => setFilterDraft((current) => ({ ...current, status: e.target.value }))}>
               <option value="">Todos os Status</option>
               <option>Ativa</option>
               <option>Expirada</option>
               <option>Cancelada</option>
+            </select>
+            <select className="filter-select" aria-label="Escopo" value={filterDraft.scope} onChange={(e) => setFilterDraft((current) => ({ ...current, scope: e.target.value }))}>
+              <option value="">Todos os Escopos</option>
+              {scopes.map((scope) => <option key={scope}>{scope}</option>)}
+            </select>
+            <select className="filter-select" aria-label="Tipo de Recurso" value={filterDraft.resourceType} onChange={(e) => setFilterDraft((current) => ({ ...current, resourceType: e.target.value }))}>
+              <option value="">Todos os Tipos de Recurso</option>
+              {resourceTypes.map((resourceType) => <option key={resourceType}>{resourceType}</option>)}
             </select>
             {spsAtivas.length > 1 && (
               <select
@@ -215,6 +231,12 @@ export default function ReservasView() {
                 ))}
               </select>
             )}
+            <button className="btn-primary" onClick={() => {
+              setFilters(filterDraft)
+              if (filterDisclosureRef.current) filterDisclosureRef.current.open = false
+            }}>
+              Confirmar filtros
+            </button>
           </div>
         </details>
         <button

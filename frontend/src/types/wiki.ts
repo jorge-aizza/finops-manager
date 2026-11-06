@@ -43,6 +43,7 @@ export interface WikiRevision {
   titulo: string
   categoria: string
   resumo: string | null
+  conteudo: WikiDocument
   status: WikiStatus
   portal_publico: boolean
   alterado_por: string

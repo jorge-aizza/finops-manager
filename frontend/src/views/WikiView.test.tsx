@@ -69,4 +69,40 @@ describe('WikiView', () => {
     expect(screen.getByRole('button', { name: 'Excluir' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Histórico' })).toBeInTheDocument()
   })
+
+  it('pré-visualiza o snapshot de uma revisão antes de qualquer restauração', async () => {
+    const user = userEvent.setup()
+    window.currentUser = { perfil: 'finops' }
+    const summary = {
+      id: 8, slug: 'custos-azure', titulo: 'Custos Azure', categoria: 'Operação', resumo: 'Resumo atual',
+      status: 'publicado' as const, portal_publico: true, atualizado_por: 'FinOps', atualizado_em: '2026-10-30T00:00:00Z',
+    }
+    vi.mocked(wikiApi.listWikiPages).mockResolvedValue([summary])
+    vi.mocked(wikiApi.getWikiPage).mockResolvedValue({
+      ...summary, criado_por: 'FinOps', criado_em: summary.atualizado_em,
+      conteudo: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Conteúdo atual' }] }] },
+    })
+    vi.mocked(wikiApi.listWikiRevisions).mockResolvedValue([{
+      id: 21, versao: 2, titulo: 'Custos Azure', categoria: 'Operação', resumo: 'Resumo anterior',
+      status: 'publicado', portal_publico: false, alterado_por: 'Outro editor', alterado_em: '2026-10-29T00:00:00Z',
+      conteudo: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Conteúdo da versão anterior' }] }] },
+    }])
+    renderWikiView()
+
+    await user.click(await screen.findByRole('button', { name: /Custos Azure/ }))
+    await user.click(await screen.findByRole('button', { name: 'Histórico' }))
+    await user.click(await screen.findByRole('button', { name: 'Prévia' }))
+
+    expect(await screen.findByRole('heading', { name: 'Prévia da versão 2' })).toBeInTheDocument()
+    expect(screen.getByText('Conteúdo da versão anterior')).toBeInTheDocument()
+    expect(screen.getByText(/Resumo anterior/)).toBeInTheDocument()
+    expect(screen.getByText(/Visibilidade pública/)).toBeInTheDocument()
+    expect(screen.getByText('Novo (versão atual)')).toBeInTheDocument()
+    expect(screen.getByText('Antigo (versão selecionada)')).toBeInTheDocument()
+    const comparison = screen.getByRole('region', { name: 'Comparação do conteúdo' })
+    const diffBody = comparison.querySelector('.wiki-revision-diff-body')
+    expect(diffBody?.querySelector('ins')).toHaveTextContent('atual')
+    expect(diffBody?.querySelector('del')).toHaveTextContent('da versão anterior')
+    expect(wikiApi.restoreWikiRevision).not.toHaveBeenCalled()
+  })
 })

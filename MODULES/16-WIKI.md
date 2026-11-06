@@ -70,7 +70,7 @@ Ao ampliar o editor, a allowlist do backend e as extensões TipTap devem mudar j
 | `POST /api/wiki/pages/:id/publicar` | Publicar rascunho |
 | `POST /api/wiki/pages/:id/arquivar` | Arquivar sem apagar o histórico |
 | `DELETE /api/wiki/pages/:id` | Excluir definitivamente o artigo e suas revisões; somente escritores |
-| `GET /api/wiki/pages/:id/revisoes` | Listar versões anteriores |
+| `GET /api/wiki/pages/:id/revisoes` | Listar versões anteriores com snapshot JSON TipTap, somente para `admin` e `finops` |
 | `POST /api/wiki/pages/:id/revisoes/:revisionId/restaurar` | Restaurar snapshot e preservar o estado anterior |
 | `POST /api/wiki/midias/imagens` | Enviar imagem privada para uso no editor; somente escritores |
 | `GET /api/wiki/midias/:id` | Obter imagem autenticada, conforme propriedade/vínculo e visibilidade do artigo |
@@ -98,4 +98,38 @@ Antes de produção, confirme backup do PostgreSQL conforme `MODULES/06-DATABASE
 
 ## Evolução
 
-Próximos candidatos: importar e revisar artigos selecionados de `docs-usuario.html` e FAQs; comparação visual de revisões; métricas de busca sem resultado. Cada novo formato de conteúdo deve incluir validação no servidor e testes de autorização.
+Próximos candidatos: importar e revisar artigos selecionados de `docs-usuario.html` e FAQs; métricas de busca sem resultado. Cada novo formato de conteúdo deve incluir validação no servidor e testes de autorização.
+
+## Plano de boas práticas: versões e histórico
+
+### Estado atual
+
+- `wiki_revisoes` guarda snapshots do conteúdo anterior com versão, autor, data, status e visibilidade no Portal Público.
+- Edição, arquivamento e restauração preservam o estado anterior em transação; restaurar cria uma nova revisão em vez de apagar versões existentes.
+- A tela de histórico mostra até 100 revisões, permite pré-visualizar o snapshot somente na Wiki privada e destaca campos diferentes e palavras incluídas/removidas antes da restauração. Ainda não compara mudanças de formatação/estrutura TipTap nem registra motivo da alteração.
+- A publicação atualiza o artigo visível imediatamente. Exclusão definitiva remove a página e o histórico relacionado.
+
+### Princípios
+
+- Tratar revisões como imutáveis: correções e restaurações sempre geram uma nova versão, sem editar ou reutilizar snapshots antigos.
+- Registrar identidade do autor, instante, ação, origem da alteração e justificativa curta; usar horário UTC no armazenamento e horário local na interface.
+- Manter conteúdo privado e público no mesmo artigo como estados de publicação distintos. Histórico, metadados de revisão, comparações e restauração ficam somente na Wiki privada para `admin` e `finops`; a Wiki pública apresenta apenas o conteúdo publicado vigente, sem histórico ou ações de revisão.
+- Preferir arquivamento à exclusão; excluir histórico somente por política explícita, perfil autorizado, confirmação e trilha de auditoria.
+- Evitar sobrescrita silenciosa quando dois editores trabalham na mesma versão.
+
+### Plano incremental
+
+1. **Integridade e auditoria**: criar uma revisão inicial ao criar o artigo; classificar eventos (criação, edição, publicação, arquivamento e restauração); adicionar motivo opcional e referência à versão restaurada. Preservar cada mutação e seus vínculos de mídia na mesma transação.
+2. **Comparação e restauração**: evoluir a comparação textual privada existente para também representar mudanças de formatação e estrutura TipTap com contexto visual claro. Restauração deve continuar criando uma nova revisão e atualizando o índice de busca e os vínculos de mídia.
+3. **Publicação controlada**: separar rascunho privado da última versão publicada. Editar um artigo público não deve alterar o conteúdo público até uma ação explícita de publicar; permitir revisar a diferença entre a versão publicada e a proposta. Rascunhos e históricos continuam restritos a `admin` e `finops`.
+4. **Concorrência e recuperação**: exigir a versão-base esperada ao salvar e responder conflito recuperável quando o artigo avançou; manter backup do banco, testar restauração e definir retenção operacional sem apagar histórico automaticamente.
+5. **Testes de autorização e integridade**: cobrir que leitores públicos recebem somente conteúdo publicado; não conseguem listar revisões, ver rascunhos ou restaurar; alterações de visibilidade e conteúdo são versionadas; restauração não apaga o estado anterior; conflitos entre editores não causam perda silenciosa.
+
+### Critérios de aceite
+
+- Toda alteração relevante é atribuível a uma pessoa e a uma versão, e revisões existentes não são editadas.
+- Antes de restaurar, o editor consegue identificar o que mudou entre a versão atual e a selecionada, incluindo conteúdo e estado de publicação.
+- Uma restauração é reversível pela própria linha do tempo e recompõe conteúdo, busca e mídias autorizadas.
+- O Portal Público mostra somente a publicação vigente; mudanças em edição não ficam visíveis antes da publicação explícita.
+- Edição concorrente é detectada e apresentada ao editor sem descartar conteúdo silenciosamente.
+- Exclusão permanente é excepcional, autorizada e coberta por política de retenção e backup testado.

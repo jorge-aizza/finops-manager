@@ -2618,18 +2618,18 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 .ck-chart-empty {
   padding: 42px 20px;
   text-align: center;
-  color: var(--ck-muted);
+  color: var(--ck-muted, var(--text-muted, #b4afb9));
   font-size: 14px;
 }
-.ck-chart-grid { stroke: var(--ck-bar); stroke-width: 1; }
-.ck-chart-axis { fill: var(--ck-muted); font-size: 10px; }
+.ck-chart-grid { stroke: var(--ck-bar, var(--border, rgba(255,255,255,.09))); stroke-width: 1; }
+.ck-chart-axis { fill: var(--ck-muted, var(--text-muted, #b4afb9)); font-size: 10px; }
 .ck-chart-legend {
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
   justify-content: center;
   margin-top: 10px;
-  color: var(--ck-muted);
+  color: var(--ck-muted, var(--text-muted, #b4afb9));
   font-size: 11px;
 }
 .ck-chart-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
@@ -2643,7 +2643,7 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 }
 .ck-chart-stack { display: grid; gap: 16px; align-content: start; min-width: 0; }
 @media (max-width: 1100px) { .ck-analise { grid-template-columns: 1fr; } }
-.ck-chart-pico { fill: var(--ck-destaque); font-size: 11px; font-weight: 800; }
+.ck-chart-pico { fill: var(--ck-destaque, var(--accent, #d49be1)); font-size: 11px; font-weight: 800; }
 
 /* alinhamento do cockpit (.panel-flex): os semaforos ganham altura fixa para
    casar com a coluna dos graficos, rolando a lista por dentro */

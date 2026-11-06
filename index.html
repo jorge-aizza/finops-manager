@@ -3,7 +3,27 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="preload" as="image" href="/react-app/images/Vivo_home.webp" fetchpriority="high">
+  <script>
+    (function () {
+      try {
+        const sessionToken = sessionStorage.getItem('finops_token');
+        const localToken = localStorage.getItem('finops_token');
+        const session = sessionStorage.getItem('finops_session') || localStorage.getItem('finops_session');
+        const token = sessionToken || localToken;
+        if (!session || !token) return;
+        const payloadPart = token.split('.')[1];
+        const base64 = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
+        if (payload.exp * 1000 < Date.now()) return;
+        if (!sessionToken && localToken) {
+          const autoLoginHours = parseInt(localStorage.getItem('finops_auto_login_h') ?? '8', 10);
+          if (autoLoginHours === 0 || Date.now() - payload.iat * 1000 > autoLoginHours * 3_600_000) return;
+        }
+        document.documentElement.setAttribute('data-session-restoring', 'true');
+      } catch {}
+    })();
+  </script>
+  <link rel="preload" as="image" href="/react-app/images/Finops_home.png" fetchpriority="high">
   <link rel="preload" as="image" href="/finops-logo-dark.png" fetchpriority="high">
   <title>FinOps Manager</title>
   <!-- Favicon FinOps -->
@@ -345,10 +365,17 @@
       display: flex; align-items: center; justify-content: center;
       overflow: hidden;
     }
+    .session-restore-screen {
+      position: fixed; inset: 0; z-index: 10001; display: none;
+      align-items: center; justify-content: center; gap: 10px;
+      background: var(--bg); color: var(--text); font-size: 14px;
+    }
+    html[data-session-restoring="true"] #login-screen { display: none !important; }
+    html[data-session-restoring="true"] .session-restore-screen { display: flex; }
     #login-screen {
       background:
         linear-gradient(rgba(16,7,31,.16), rgba(16,7,31,.24)),
-        url('/react-app/images/Vivo_home.webp') center / cover no-repeat;
+        url('/react-app/images/Finops_home.png') center / cover no-repeat;
     }
     #login-screen::before,
     #login-screen::after,
@@ -1043,6 +1070,10 @@
 
 </head>
 <body>
+  <div class="session-restore-screen" role="status" aria-live="polite" aria-atomic="true">
+    <span class="app-startup-spinner" aria-hidden="true"></span>
+    <span>Restaurando sua sessão...</span>
+  </div>
   <!-- SETUP WIZARD — shown only on first run -->
   <div id="setup-wizard" class="login-screen" style="display:none">
     <div class="login-box" style="max-width:520px">

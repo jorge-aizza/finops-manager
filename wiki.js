@@ -454,6 +454,10 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
              SELECT 1 FROM wiki_pagina_midias pm JOIN wiki_paginas p ON p.id=pm.pagina_id
              WHERE pm.midia_id=m.id AND ($3::boolean OR p.status='publicado')
            )
+           OR ($3::boolean AND EXISTS (
+             SELECT 1 FROM wiki_revisoes r
+             WHERE jsonb_path_exists(r.conteudo, '$.**.attrs.mediaId ? (@ == $mediaId)'::jsonpath, jsonb_build_object('mediaId', m.id))
+           ))
          )`,
         [id, editorIdentity(req.user), isWikiWriter(req.user)],
       );
@@ -633,7 +637,7 @@ function createWikiRouter({ pool, getPool, authMiddleware, dbMiddleware }) {
       if (!isWikiWriter(req.user)) throw new WikiError(403, 'Seu perfil não pode consultar o histórico.');
       const id = parseId(req.params.id);
       const { rows } = await resolvePool().query(
-        'SELECT id,versao,titulo,categoria,resumo,status,portal_publico,alterado_por,alterado_em FROM wiki_revisoes WHERE pagina_id=$1 ORDER BY versao DESC LIMIT 100',
+        'SELECT id,versao,titulo,categoria,resumo,conteudo,status,portal_publico,alterado_por,alterado_em FROM wiki_revisoes WHERE pagina_id=$1 ORDER BY versao DESC LIMIT 100',
         [id],
       );
       res.json(rows);

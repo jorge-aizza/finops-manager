@@ -150,17 +150,30 @@ describe('ReservasView', () => {
     expect(await screen.findByText('Nenhuma reserva encontrada')).toBeInTheDocument()
   });
 
-  it('mantém filtros secundários recolhidos e permite filtrar ao expandir', async () => {
+  it('mantém filtros recolhidos e aplica cloud, escopo e tipo de recurso ao confirmar', async () => {
     const user = userEvent.setup()
+    vi.mocked(reservasApi.listReservas).mockResolvedValue([
+      mockReservas[0],
+      { ...mockReservas[0], id: 2, cloud: 'Azure', nome_reserva: 'VM Reserva', tipo_escopo: 'Subscription', tipo_recurso: 'Reserved VM Instances' },
+    ])
     renderWithClient()
     await screen.findByText('EC2-Prod-Reserva')
+    await screen.findByText('VM Reserva')
 
     const toggle = screen.getByText('Filtros')
     expect(toggle.closest('details')).not.toHaveAttribute('open')
     await user.click(toggle)
     await user.selectOptions(screen.getByRole('combobox', { name: 'Cloud' }), 'Azure')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Escopo' }), 'Subscription')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Tipo de Recurso' }), 'Reserved VM Instances')
 
-    expect(await screen.findByText('Nenhuma reserva encontrada')).toBeInTheDocument()
+    expect(screen.getByText('EC2-Prod-Reserva')).toBeInTheDocument()
+    expect(screen.getByText('VM Reserva')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Confirmar filtros' }))
+
+    expect(toggle.closest('details')).not.toHaveAttribute('open')
+    expect(await screen.findByText('VM Reserva')).toBeInTheDocument()
+    expect(screen.queryByText('EC2-Prod-Reserva')).not.toBeInTheDocument()
   });
 
   it('importa um CSV e mostra o resumo do que entrou', async () => {

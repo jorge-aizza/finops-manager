@@ -336,11 +336,19 @@ function enterApp() {
   }
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-shell').style.display = '';
+  document.documentElement.removeAttribute('data-session-restoring');
   const fab = document.getElementById('refresh-fab');
   if (fab) fab.style.display = 'flex';
   updateSidebarUser();
   checkDbStatus();
-  showView('dashboard'); // dashboard é 'view active' estática no HTML mas migrada — precisa passar pela ponte React, não só chamar loadDashboard() direto
+  const viewInicial = _viewInicialPorLink || 'dashboard';
+  _viewInicialPorLink = null;
+  const urlAtual = new URL(location.href);
+  if (urlAtual.searchParams.has('view')) {
+    urlAtual.searchParams.delete('view');
+    history.replaceState(null, '', urlAtual.pathname + urlAtual.search + urlAtual.hash);
+  }
+  showView(viewInicial); // dashboard é 'view active' estática no HTML mas migrada — precisa passar pela ponte React, não só chamar loadDashboard() direto
   clearInterval(_dbStatusInterval);
   _dbStatusInterval = setInterval(checkDbStatus, 30000);
   setTimeout(() => setRefreshInterval(10), 600); // auto 10 min refresh
@@ -659,6 +667,8 @@ let allAcoes = [];
 // bundle React em #react-root em vez de ativar a antiga #view-<nome>
 // (que fica no HTML vazia, sem conteúdo, até a migração terminar de vez).
 const MIGRATED_VIEWS = new Set(['projetos', 'reservas', 'acoes', 'coleta', 'estimativas', 'dashboard', 'calculadora', 'databricks', 'inventario', 'alocacao', 'log-analytics', 'mailing', 'wiki']);
+let _viewInicialPorLink = new URLSearchParams(location.search).get('view');
+if (!_viewInicialPorLink || !MIGRATED_VIEWS.has(_viewInicialPorLink)) _viewInicialPorLink = null;
 
 // ── VIEW ROUTING ──────────────────────────────
 function showView(view) {
@@ -1862,6 +1872,7 @@ async function _consumirEntraHandoff() {
       localStorage.removeItem('finops_token');
       localStorage.removeItem('finops_session');
       await checkFirstRun();
+      document.documentElement.removeAttribute('data-session-restoring');
       return;
     }
     if (!tokFromSS) {
@@ -1872,6 +1883,7 @@ async function _consumirEntraHandoff() {
     enterApp();
   } else {
     await checkFirstRun();
+    document.documentElement.removeAttribute('data-session-restoring');
   }
 })();
 

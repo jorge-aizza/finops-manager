@@ -130,9 +130,12 @@ eram ~157/dia para um destinatário, e de forma recorrente, porque o dedup liber
 Reservas são agrupadas por conjunto de destinatários (responsável quando identificado; senão,
 lista padrão), sem misturar reservas de responsáveis diferentes. Anomalias Databricks de custo e
 usuário são agrupadas em um e-mail por checagem. A deduplicação continua por ocorrência, com
-cooldown individual de 24h; somente ocorrências que ganham o claim entram no resumo. Os links
-para as telas usam `ALLOWED_ORIGIN` e `/?view=reservas` ou `/?view=databricks`; o parâmetro `view`
-é validado contra as telas React migradas e removido após a entrada no app.
+cooldown individual de 24h. Se uma reserva do grupo estiver fora do cooldown, o resumo inclui
+todas as reservas ativas do mesmo destinatário que vencem em até 90 dias, inclusive as que
+acabaram de ser alertadas. O cooldown do grupo só é atualizado depois que o Relay aceita o envio;
+em falha, a checagem seguinte tenta novamente. Os links para as telas usam `ALLOWED_ORIGIN` e
+`/?view=reservas` ou `/?view=databricks`; o parâmetro `view` é validado contra as telas React
+migradas e removido após a entrada no app.
 
 **Logo dos alertas vai embutido, não por URL.**
 O template comum usa `finops-logo.png` como anexo inline `cid:finops-logo@finopsmanager`.

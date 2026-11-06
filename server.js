@@ -1075,6 +1075,32 @@ app.post('/api/integrations/alertas-relay/testar', authMiddleware, adminMiddlewa
   }
 });
 
+app.post('/api/admin/alertas/reservas/forcar-uma-vez', authMiddleware, adminMiddleware, async (_req, res) => {
+  try {
+    if (!(await _alertaAtivo('reserva_vencendo'))) {
+      return res.status(409).json({ error: 'O alerta de reservas está desativado.' });
+    }
+    if (!(await _getSmtpConfig())) {
+      return res.status(409).json({ error: 'Não há relay de alertas configurado e ativo.' });
+    }
+    const liberadas = await pool.query(`
+      UPDATE email_alertas_enviados e
+      SET enviado_em = NOW() - INTERVAL '25 hours'
+      WHERE e.tipo = 'reserva_vencendo'
+        AND EXISTS (
+          SELECT 1 FROM reservas_cloud rc
+          WHERE e.chave = 'reserva:' || rc.id::text
+            AND rc.status = 'Ativa'
+            AND rc.data_vencimento <= NOW() + INTERVAL '90 days'
+        )
+    `);
+    await _checkReservasVencendo();
+    res.json({ ok: true, cooldownLiberado: liberadas.rowCount });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Log das últimas tentativas de e-mail (teste manual + envios reais) — ring buffer em memória,
 // ver `_logEmailAttempt` acima. Serve a UI de Integrações (card SMTP) pra diagnosticar sem
 // precisar de acesso a `pm2 logs`.
@@ -8575,8 +8601,7 @@ async function _sendEmail({ to, subject, html }) {
   const destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
   try {
     const cfg = await _getSmtpConfig();
-    if (!cfg) return;
-    if (!destinatarios.length) return;
+    if (!cfg || !destinatarios.length) return false;
     // Timeouts explícitos (2026-09-02) — sem isso, nodemailer usa o default de 2 MINUTOS pra
     // connectionTimeout/socketTimeout; o frontend aborta a chamada de "Testar Conexão" em 30s
     // (ver `api()` em app.js), então um SMTP lento/bloqueado por firewall (comum — silenciosamente
@@ -8608,6 +8633,7 @@ async function _sendEmail({ to, subject, html }) {
       } : {}),
     });
     _logEmailAttempt({ tipo: 'envio', destinatarios, assunto: subject, ok: true });
+    return true;
   } catch (e) {
     // O log de tentativas (ring buffer, visível na tela de Integrações) registra SEMPRE —
     // é ele que serve pra diagnosticar. O console só repete o mesmo erro uma vez a cada
@@ -8616,6 +8642,7 @@ async function _sendEmail({ to, subject, html }) {
     // authentication data" em 24h) escondendo qualquer erro de verdade no meio.
     _logEmailAttempt({ tipo: 'envio', destinatarios, assunto: subject, ok: false, erro: e.message });
     _avisarFalhaEmail(e.message);
+    return false;
   }
 }
 
@@ -8827,24 +8854,49 @@ async function _checkReservasVencendo() {
   for (const reserva of r.rows) {
     const destinatarios = reserva.dono_email ? [reserva.dono_email] : padrao;
     if (!destinatarios.length) continue;
-    if (!(await _tentarClaimAlerta('reserva_vencendo', `reserva:${reserva.id}`))) continue;
     const dias = Math.floor((new Date(reserva.data_vencimento) - new Date()) / 86400000);
     const situacao = dias < 0 ? `expirada há ${Math.abs(dias)} dia(s)` : dias === 0 ? 'vence hoje' : `vence em ${dias} dia(s)`;
     const chaveGrupo = destinatarios.map((email) => email.toLowerCase()).sort().join(',');
     if (!grupos.has(chaveGrupo)) grupos.set(chaveGrupo, { destinatarios, reservas: [] });
-    grupos.get(chaveGrupo).reservas.push(`<li style="margin-bottom:10px"><strong>${_escHtmlServer(reserva.nome_reserva)}</strong> (${_escHtmlServer(reserva.cloud)} · ${_escHtmlServer(reserva.tipo_recurso)}) ${situacao}. Vencimento: ${new Date(reserva.data_vencimento).toLocaleDateString('pt-BR')}.</li>`);
+    grupos.get(chaveGrupo).reservas.push({
+      chave: `reserva:${reserva.id}`,
+      html: `<li style="margin-bottom:10px"><strong>${_escHtmlServer(reserva.nome_reserva)}</strong> (${_escHtmlServer(reserva.cloud)} · ${_escHtmlServer(reserva.tipo_recurso)}) ${situacao}. Vencimento: ${new Date(reserva.data_vencimento).toLocaleDateString('pt-BR')}.</li>`,
+    });
   }
 
   for (const grupo of grupos.values()) {
     const total = grupo.reservas.length;
-    await _sendEmail({
+    const chaves = grupo.reservas.map((reserva) => reserva.chave);
+    const claims = [];
+    for (const chave of chaves) {
+      if (await _tentarClaimAlerta('reserva_vencendo', chave)) claims.push(chave);
+    }
+    if (!claims.length) continue;
+
+    const enviado = await _sendEmail({
       to: grupo.destinatarios,
       subject: `🔖 ${total} reserva(s) vencendo ou vencida(s)`,
       html: _emailTemplate(`${total} reserva(s) Cloud vencendo`, `
         <p>Reservas ativas com vencimento nos próximos 90 dias ou já expiradas:</p>
-        <ul style="padding-left:18px">${grupo.reservas.join('')}</ul>
+        <ul style="padding-left:18px">${grupo.reservas.map((reserva) => reserva.html).join('')}</ul>
         ${_emailAppLink('reservas', 'Abrir Reservas no FinOps Manager')}`),
     });
+    if (!enviado) {
+      await pool.query(
+        `DELETE FROM email_alertas_enviados
+         WHERE tipo = 'reserva_vencendo' AND chave = ANY($1::text[])`,
+        [claims]
+      );
+      continue;
+    }
+
+    await pool.query(
+      `INSERT INTO email_alertas_enviados (tipo, chave, enviado_em)
+       SELECT 'reserva_vencendo', item.chave, NOW()
+       FROM unnest($1::text[]) AS item(chave)
+       ON CONFLICT (tipo, chave) DO UPDATE SET enviado_em = EXCLUDED.enviado_em`,
+      [chaves]
+    );
   }
 }
 

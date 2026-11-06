@@ -1,0 +1,1 @@
+import{_ as e,m as t}from"./dist-DgX7o2fj.js";import{t as n}from"./WikiExtensions-BEqYPOax.js";import{a as r}from"./client-CAvkVT16.js";var i=r();function a({page:r}){let a=e({extensions:n(),content:r.conteudo,editable:!1,editorProps:{attributes:{class:`wiki-content-body`}}},[r.id,r.atualizado_em]);return(0,i.jsx)(t,{editor:a,className:`wiki-content`})}export{a as default};

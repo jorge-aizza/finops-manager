@@ -1,10 +1,11 @@
 import { lazy, Suspense, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { diffWords } from 'diff'
 import {
   archiveWikiPage, createWikiPage, deleteWikiPage, getWikiPage, listWikiCategories, listWikiPages,
   listWikiRevisions, publishWikiPage, restoreWikiRevision, updateWikiPage,
 } from '../api/wiki'
-import type { WikiPage, WikiPageInput, WikiPageSummary } from '../types/wiki'
+import type { WikiDocument, WikiNode, WikiPage, WikiPageInput, WikiPageSummary, WikiRevision } from '../types/wiki'
 import './WikiView.css'
 
 const WikiArticle = lazy(() => import('./WikiArticle'))
@@ -12,6 +13,29 @@ const WikiEditor = lazy(() => import('./WikiEditor'))
 
 function formatDate(value: string) {
   return new Date(value).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+function changedRevisionFields(current: WikiPage, revision: WikiRevision) {
+  return [
+    current.titulo !== revision.titulo && 'Título',
+    current.categoria !== revision.categoria && 'Categoria',
+    current.resumo !== revision.resumo && 'Resumo',
+    JSON.stringify(current.conteudo) !== JSON.stringify(revision.conteudo) && 'Conteúdo',
+    current.status !== revision.status && 'Status',
+    current.portal_publico !== revision.portal_publico && 'Visibilidade pública',
+  ].filter((field): field is string => Boolean(field))
+}
+
+function wikiDocumentText(document: WikiDocument) {
+  const parts: string[] = []
+  const visit = (node: WikiNode) => {
+    if (node.type === 'text' && node.text) parts.push(node.text)
+    if (node.type === 'wikiImage') parts.push(`[Imagem${node.attrs?.alt ? `: ${node.attrs.alt}` : ''}]`)
+    if (['hardBreak', 'paragraph', 'heading', 'listItem', 'tableCell', 'tableHeader', 'tableRow'].includes(node.type)) parts.push('\n')
+    node.content?.forEach(visit)
+  }
+  document.content.forEach(visit)
+  return parts.join('').replace(/[ \t]+\n/g, '\n').trim()
 }
 
 function WriterActions({ page, onEdit, onPublish, onArchive, onDelete, onHistory }: {
@@ -42,6 +66,7 @@ export default function WikiView() {
   const [editando, setEditando] = useState(false)
   const [criando, setCriando] = useState(false)
   const [mostrarHistorico, setMostrarHistorico] = useState(false)
+  const [previewRevisionId, setPreviewRevisionId] = useState<number | null>(null)
 
   const pagesQuery = useQuery({ queryKey: ['wiki-pages', busca, categoria], queryFn: () => listWikiPages(busca, categoria || undefined) })
   const categoriesQuery = useQuery({ queryKey: ['wiki-categorias'], queryFn: listWikiCategories })
@@ -98,6 +123,7 @@ export default function WikiView() {
       void queryClient.invalidateQueries({ queryKey: ['wiki-page', page.slug] })
       void queryClient.invalidateQueries({ queryKey: ['wiki-revisoes', page.id] })
       setMostrarHistorico(false)
+      setPreviewRevisionId(null)
     },
     onError: (error: Error) => window.showToast?.(error.message, 'error'),
   })
@@ -122,6 +148,21 @@ export default function WikiView() {
   const pages = pagesQuery.data || []
   const selectedPage = pageQuery.data
   const isSaving = createMutation.isPending || updateMutation.isPending
+  const previewRevision = revisionsQuery.data?.find((revision) => revision.id === previewRevisionId)
+  const previewPage = selectedPage && previewRevision ? {
+    ...selectedPage,
+    titulo: previewRevision.titulo,
+    categoria: previewRevision.categoria,
+    resumo: previewRevision.resumo,
+    status: previewRevision.status,
+    portal_publico: previewRevision.portal_publico,
+    atualizado_por: previewRevision.alterado_por,
+    atualizado_em: previewRevision.alterado_em,
+    conteudo: previewRevision.conteudo,
+  } : null
+  const contentDiff = selectedPage && previewRevision
+    ? diffWords(wikiDocumentText(selectedPage.conteudo), wikiDocumentText(previewRevision.conteudo))
+    : []
 
   return (
     <div className="wiki-view">
@@ -139,7 +180,7 @@ export default function WikiView() {
           <option value="">Todas as categorias</option>
           {(categoriesQuery.data || []).map((item) => <option key={item.categoria} value={item.categoria}>{item.categoria} ({item.total})</option>)}
         </select>
-        {canEdit && <button className="btn-primary" onClick={() => { setSlug(null); setCriando(true); setEditando(true); setMostrarHistorico(false) }}>Novo artigo</button>}
+                {canEdit && <button className="btn-primary" onClick={() => { setSlug(null); setCriando(true); setEditando(true); setMostrarHistorico(false); setPreviewRevisionId(null) }}>Novo artigo</button>}
       </div>
 
       <div className="wiki-layout">
@@ -151,7 +192,7 @@ export default function WikiView() {
           <div className="wiki-page-list">
             {pages.map((page) => (
               <button key={page.id} className={`wiki-page-link${slug === page.slug ? ' is-active' : ''}`} onClick={() => {
-                setSlug(page.slug); setEditando(false); setCriando(false); setMostrarHistorico(false)
+                setSlug(page.slug); setEditando(false); setCriando(false); setMostrarHistorico(false); setPreviewRevisionId(null)
               }}>
                 <span className="wiki-page-category">{page.categoria}</span>
                 <strong>{page.titulo}</strong>
@@ -184,11 +225,11 @@ export default function WikiView() {
                 {canEdit && (
                   <WriterActions
                     page={selectedPage}
-                    onEdit={() => { setMostrarHistorico(false); setEditando(true) }}
+                    onEdit={() => { setMostrarHistorico(false); setPreviewRevisionId(null); setEditando(true) }}
                     onPublish={() => publishMutation.mutate(selectedPage.id)}
                     onArchive={() => archivePage(selectedPage)}
                     onDelete={() => deletePage(selectedPage)}
-                    onHistory={() => setMostrarHistorico((value) => !value)}
+                    onHistory={() => { setMostrarHistorico((value) => !value); setPreviewRevisionId(null) }}
                   />
                 )}
               </div>
@@ -201,13 +242,55 @@ export default function WikiView() {
                   {(revisionsQuery.data || []).map((revision) => (
                     <div className="wiki-revision" key={revision.id}>
                       <div><strong>Versão {revision.versao}</strong><span>{revision.alterado_por} · {formatDate(revision.alterado_em)}</span></div>
-                      <button className="btn-ghost" disabled={restoreMutation.isPending} onClick={() => {
-                        if (window.confirm(`Restaurar a versão ${revision.versao}? A versão atual será preservada no histórico.`)) {
-                          restoreMutation.mutate({ pageId: selectedPage.id, revisionId: revision.id })
-                        }
-                      }}>Restaurar</button>
+                      <div className="wiki-revision-actions">
+                        <button className="btn-ghost" aria-expanded={previewRevisionId === revision.id} onClick={() => setPreviewRevisionId((current) => current === revision.id ? null : revision.id)}>
+                          {previewRevisionId === revision.id ? 'Fechar prévia' : 'Prévia'}
+                        </button>
+                        <button className="btn-ghost" disabled={restoreMutation.isPending} onClick={() => {
+                          if (window.confirm(`Restaurar a versão ${revision.versao}? A versão atual será preservada no histórico.`)) {
+                            restoreMutation.mutate({ pageId: selectedPage.id, revisionId: revision.id })
+                          }
+                        }}>Restaurar</button>
+                      </div>
                     </div>
                   ))}
+                  {previewRevision && previewPage && (
+                    <div className="wiki-revision-preview">
+                      <div className="wiki-revision-preview-head">
+                        <div>
+                          <h3>Prévia da versão {previewRevision.versao}</h3>
+                          <span>{previewRevision.alterado_por} · {formatDate(previewRevision.alterado_em)}</span>
+                        </div>
+                        <button className="btn-ghost" onClick={() => setPreviewRevisionId(null)}>Fechar prévia</button>
+                      </div>
+                      <p className="wiki-revision-changes">
+                        <strong>Campos alterados:</strong>{' '}
+                        {changedRevisionFields(selectedPage, previewRevision).join(', ') || 'Nenhuma diferença nos campos registrados'}
+                      </p>
+                      <section className="wiki-revision-diff" aria-label="Comparação do conteúdo">
+                        <h4>Diferenças no conteúdo</h4>
+                        <p className="wiki-revision-diff-legend">
+                          <span className="wiki-diff-legend-added">Novo (versão atual)</span>
+                          <span className="wiki-diff-legend-removed">Antigo (versão selecionada)</span>
+                        </p>
+                        <div className="wiki-revision-diff-body">
+                          {contentDiff.some((part) => part.added || part.removed)
+                            ? contentDiff.map((part, partIndex) => {
+                              const Tag = part.added ? 'del' : part.removed ? 'ins' : 'span'
+                              return <Tag key={`${partIndex}-${part.value}`}>{part.value}</Tag>
+                            })
+                            : <span>Não há diferença textual. Pode haver mudança de formatação ou estrutura.</span>}
+                        </div>
+                      </section>
+                      <div className="wiki-revision-details">
+                        <strong>{previewRevision.titulo}</strong>
+                        <span>{previewRevision.categoria} · {previewRevision.status === 'publicado' ? 'Publicado' : previewRevision.status === 'rascunho' ? 'Rascunho' : 'Arquivado'}</span>
+                        {previewRevision.resumo && <span>{previewRevision.resumo}</span>}
+                        <span>Portal público: {previewRevision.portal_publico ? 'Liberado' : 'Privado'}</span>
+                      </div>
+                      <WikiArticle key={`${selectedPage.id}-revision-${previewRevision.id}`} page={previewPage} />
+                    </div>
+                  )}
                 </section>
               )}
               <WikiArticle key={`${selectedPage.id}-${selectedPage.atualizado_em}`} page={selectedPage} />
