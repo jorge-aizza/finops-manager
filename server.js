@@ -8107,6 +8107,14 @@ async function ensureAzureColetaTable() {
       mensagem            TEXT
     )
   `);
+  // origem nasceu VARCHAR(20) e a reconciliação grava 'reconciliacao_' + origem:
+  // 'reconciliacao_manual' tem exatos 20 e passava; 'reconciliacao_agendado' tem 22 e
+  // estourava com "value too long for type character varying(20)". Como o INSERT é a primeira
+  // instrução do try, a reconciliação SEMANAL falhava antes de fazer qualquer trabalho e sem
+  // nem deixar linha no histórico — só o log do agendador denunciava. A manual, que é a que
+  // alguém testa à mão, passava raspando. Mesmo caso de databricks_budgets.escopo_tipo.
+  // Alargar varchar é idempotente de verdade: repetir não muda nada.
+  await run(`ALTER TABLE azure_inventario_coleta_historico ALTER COLUMN origem TYPE VARCHAR(40)`);
 
   // Corrige linhas órfãs de 'executando' — nada as atualiza depois de um
   // restart/crash do processo (o `_coletaEmExecucao`/`_dbxColetaEmExecucao`
