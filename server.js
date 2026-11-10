@@ -63,6 +63,7 @@ const nodemailer = require('nodemailer');
 const { diasOrfaoNaExclusao } = require('./savingOrfaos');
 const { createPublicWikiRouter, createWikiRouter } = require('./wiki');
 const { createAzureImportJobStore } = require('./azureImportJobStore');
+const { inserirLinhasEmLote } = require('./azureCostsInsert');
 const {
   registrarMesCustoImportado,
   reconstruirMesCustoDiario,
@@ -17605,7 +17606,7 @@ async function _apagarSnapshotAnterior(subId, inicio, fim, rgFilter, progresso) 
   }
   return r.rowCount;
 }
-async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progresso, coletaId = null) {
+async function _importarArquivosAPI(tmpFiles, label, COLS, rgFilter, progresso, coletaId = null) {
   const fs = require('fs');
   let ins = 0, upd = 0, err = 0, linhas = 0;
   // Total que o relatório da Azure TRAZ, para comparar com o que de fato ficou gravado.
@@ -17620,26 +17621,24 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progre
       await _lerCSVBatched(dest, 500, async (batch) => {
         linhas += batch.length;
         const client = await pool.connect();
-        let spCount = 0;
         try {
           await client.query('BEGIN');
+          // Mapeia o lote inteiro antes de gravar: o filtro de RG, a soma de conferência e os
+          // meses afetados são decididos aqui, uma vez por linha, e só o que sobra vai ao banco.
+          const prontas = [];
           for (const raw of batch) {
             const m = _mapRowCSV(raw, `api-${label}`, coletaId);
             if (rgFilter && !rgFilter.has((m.resource_group_name || '').toUpperCase())) continue;
             custoRelatorio += Number(m.cost_in_billing_currency) || 0;
             registrarMesCustoImportado(meses, m.cost_date);
-            const sp = `sp_${spCount++}`;
-            try {
-              await client.query(`SAVEPOINT ${sp}`);
-              const r = await client.query(sql, COLS.map(c => m[c] ?? null));
-              await client.query(`RELEASE SAVEPOINT ${sp}`);
-              if (r.rowCount > 0) ins++; else upd++;
-            } catch (e) {
-              await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-              await client.query(`RELEASE SAVEPOINT ${sp}`);
-              err++;
-            }
+            prontas.push(m);
           }
+          // Gravação em LOTE. Antes era uma linha por comando com SAVEPOINT e RELEASE em volta —
+          // três idas ao banco por linha, medido em ~176 linhas/s, o que fazia um mês da base
+          // passar de 20 horas. O fallback linha-a-linha continua lá dentro para a linha ruim não
+          // derrubar as boas da mesma fatia (ver azureCostsInsert.js).
+          const r = await inserirLinhasEmLote(client, 'azure_costs', COLS, prontas);
+          ins += r.ins; err += r.err;
           await client.query('COMMIT');
           progresso.ins = ins; progresso.upd = upd; progresso.err = err;
         } catch (e) {
@@ -17779,7 +17778,6 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     // 2) SQL de upsert
     await ensureAzureCostsTable();
     const COLS    = Object.keys(_mapRowCSV({}, ''));
-    const ph      = COLS.map((_, i) => `$${i + 1}`).join(', ');
     const updCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
     // INSERT PURO, sem ON CONFLICT. A deduplicação entre coletas é feita pelo DELETE de
     // snapshot (ver _apagarSnapshotAnterior), não por chave única — e o ON CONFLICT que havia
@@ -17788,7 +17786,9 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     // DO UPDATE na primeira e o custo dela sumia. Silencioso: com DO UPDATE o rowCount é sempre
     // 1, então nem ins/upd nem o contador de erro acusavam. Medido contra o portal em 2026-11:
     // 1.118 linhas e R$ 12.518,45 perdidos numa única assinatura em outubro.
-    const sql = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})`;
+    //
+    // O SQL em si é montado por inserirLinhasEmLote (azureCostsInsert.js), que agrupa várias
+    // linhas por comando — aqui só se decidem as COLUNAS.
 
     if (modo === 'subscription') {
       // ── Modo: Subscription Direta ──────────────────────────────────────────
@@ -17810,7 +17810,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           if (arquivos.length > 0) {
             await _apagarSnapshotAnterior(subId, chunk.start, chunk.end, rgFilter, _coletaProgresso);
           }
-          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter, _coletaProgresso, histId);
+          const res      = await _importarArquivosAPI(arquivos, subId, COLS, rgFilter, _coletaProgresso, histId);
           // Conferência de integridade do escopo: o que o relatório da Azure TROUXE tem que ser
           // exatamente o que ficou gravado. Como o snapshot anterior foi apagado logo acima, o
           // que está no banco agora é só esta importação.
@@ -17927,7 +17927,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
             if (arquivos.length > 0) {
               await _apagarSnapshotAnterior(sub.subscriptionId, chunk.start, chunk.end, rgFilter, _coletaProgresso);
             }
-            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter, _coletaProgresso, histId);
+            const res      = await _importarArquivosAPI(arquivos, sub.nome, COLS, rgFilter, _coletaProgresso, histId);
             res.meses.forEach(mes => mesesCustosAlterados.add(mes));
             totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
           }
@@ -17989,7 +17989,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
                 if (isCancelada()) throw new Error('Cancelado pelo usuário');
                 const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
                 const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
-                const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso, histId);
+                const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', COLS, rgFilter, _coletaProgresso, histId);
                 res.meses.forEach(mes => mesesCustosAlterados.add(mes));
                 totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
               }
@@ -18012,7 +18012,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           if (isCancelada()) break;
           const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
           const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
-          const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso, histId);
+          const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', COLS, rgFilter, _coletaProgresso, histId);
           res.meses.forEach(mes => mesesCustosAlterados.add(mes));
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
