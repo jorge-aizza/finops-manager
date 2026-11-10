@@ -109,7 +109,10 @@ function createCbFetch({
   random = Math.random,
   maxFailures = 3,
   openMs = 5 * 60 * 1000,
-  maxPausaMs = 120_000,
+  // Teto do Retry-After. Era 120_000 (2 min), e truncava a pausa pedida pela Azure: a
+  // chamada voltava antes da hora, tomava 429 de novo e esgotava as tentativas. A pausa é por
+  // FAMÍLIA (ver gates), então este teto não bloqueia Inventário/Reservas/Log Analytics.
+  maxPausaMs = 5 * 60 * 1000,
 } = {}) {
   const breakers = new Map();
   const gates = new Map(); // família -> timestamp até quando pausar

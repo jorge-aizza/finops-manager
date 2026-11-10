@@ -193,6 +193,25 @@ app.use((req, res, next) => {
   }
   next();
 });
+// Contexto por requisição: carrega a escolha de exibir custo COM ou SEM o imposto que o
+// sistema soma na apresentação (18,65% Microsoft / 13,83% Marketplace, em portal_config).
+//
+// AsyncLocalStorage em vez de passar um parâmetro: _getImpostoConfig() é o ponto único por
+// onde TODAS as 35 aplicações de imposto passam, mas é chamada de dezenas de rotas que não
+// têm o req à mão. Threading manual significaria mexer em todas elas; aqui um middleware
+// resolve e o ponto único lê. Sobrevive a await, que é o que um contexto por requisição
+// precisa garantir.
+//
+// Por que existe: a Azure NÃO cobra esse imposto. Sem poder desligá-lo, nenhum número de
+// nenhuma tela é comparável ao portal nem ao export, e foi atrás dele que um bug real de
+// perda de linha ficou escondido (R$ 12.518 numa assinatura/mês).
+const { AsyncLocalStorage } = require('node:async_hooks');
+const _ctxRequisicao = new AsyncLocalStorage();
+app.use((req, res, next) => {
+  const semImposto = req.query?.sem_imposto === '1' || req.get('X-Sem-Imposto') === '1';
+  _ctxRequisicao.run({ semImposto }, next);
+});
+
 // Bundle React — migração incremental tela por tela (ver plano em
 // C:\Users\jorge\.claude\plans\magical-gliding-gem.md). Nomes de arquivo
 // fixos (react-app.js/.css), sem hash — configurado em frontend/vite.config.ts.
@@ -2142,6 +2161,25 @@ async function ensureAzureCostsTable() {
       );
   `);
 
+  // coleta_id — qual execução gravou a linha. É o que permite a substituição de snapshot
+  // (ver _coletarSubId) e a auditoria de "este dia veio de qual coleta".
+  // importado_em NÃO serve para isso: não está em COLS, então o ON CONFLICT não o atualiza e
+  // uma linha reconfirmada por uma coleta nova mantém o timestamp antigo.
+  // ADD COLUMN sem default é metadata-only no PG 11+, não reescreve a tabela.
+  // Checa o catálogo ANTES de alterar. `ADD COLUMN IF NOT EXISTS` parece inofensivo quando a
+  // coluna já existe, mas ainda assim pede ACCESS EXCLUSIVE na tabela — e em azure_costs isso
+  // fica na fila atrás de qualquer leitor longo (o cache de tags lê a tabela inteira), travando
+  // o startup por minutos. A consulta ao catálogo não toca na tabela.
+  try {
+    const temColeta = await pool.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name='azure_costs' AND column_name='coleta_id' LIMIT 1`
+    );
+    if (temColeta.rowCount === 0) {
+      await pool.query(`ALTER TABLE azure_costs ADD COLUMN coleta_id BIGINT`);
+      console.log('[Azure] coluna coleta_id criada');
+    }
+  } catch (e) { console.warn('[Azure] coleta_id:', e.message.slice(0, 80)); }
+
   // Marca como pronto imediatamente — migrações e índices rodam em background
   // para não bloquear o startup (ALTER TABLE precisa de lock exclusivo)
   _azureTableReady = true;
@@ -2174,6 +2212,7 @@ async function ensureAzureCostsTable() {
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_importado    ON azure_costs(importado_em)`, 'idx_azure_costs_importado');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg       ON azure_costs(subscription_id, resource_group_name)`, 'idx_azure_costs_sub_rg');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_date     ON azure_costs(subscription_id, cost_date)`, 'idx_azure_costs_sub_date');
+      await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_coleta       ON azure_costs(coleta_id)`, 'idx_azure_costs_coleta');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_rg_upper     ON azure_costs(UPPER(resource_group_name))`, 'idx_azure_costs_rg_upper');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_upper ON azure_costs(subscription_id, UPPER(resource_group_name))`, 'idx_azure_costs_sub_rg_upper');
       await bg(`CREATE INDEX IF NOT EXISTS idx_azure_costs_sub_rg_date  ON azure_costs(subscription_id, UPPER(resource_group_name), cost_date)`, 'idx_azure_costs_sub_rg_date');
@@ -2196,17 +2235,28 @@ async function ensureAzureCostsTable() {
           console.log('[DB] idx_azure_costs_uom_trgm (GIN) ✅');
         }
       } catch (e) { console.warn('[DB] pg_trgm não disponível:', e.message.slice(0,60)); }
-      // Dedup unique — necessário para ON CONFLICT nos imports
-      if (!idxSet.has('idx_azure_costs_dedup')) {
+      // idx_azure_costs_dedup foi REMOVIDO (2026-11-10), não é mais criado.
+      //
+      // Ele era um índice ÚNICO em (assinatura, recurso, dia, medidor, charge_type, quantity) e
+      // servia ao ON CONFLICT das importações. O problema: o relatório da Azure traz linhas
+      // legítimas DIFERENTES que coincidem nesses seis campos, e o DO UPDATE fazia a segunda
+      // sobrescrever a primeira — custo perdido, em silêncio (com DO UPDATE o rowCount é sempre
+      // 1, então nem ins/upd nem erro acusavam). Comprovado contra o portal em 2026-11: o
+      // relatório trazia R$ 315.118,81 e ficavam gravados R$ 302.600,37 — 1.118 linhas engolidas
+      // numa única assinatura em outubro.
+      //
+      // Quem garante que não há duplicata entre coletas agora é a substituição de snapshot
+      // (_apagarSnapshotAnterior): apaga o escopo e reinsere. Não existe mais papel para a chave
+      // única, e mantê-la só reintroduz a perda.
+      if (idxSet.has('idx_azure_costs_dedup')) {
         try {
-          const oldIdx = await pool.query(`SELECT indexdef FROM pg_indexes WHERE tablename='azure_costs' AND indexname='idx_azure_costs_dedup'`);
-          if (oldIdx.rowCount > 0 && !oldIdx.rows[0].indexdef.includes('COALESCE(subscription_id')) {
-            console.log('[Azure] Migrando índice de deduplicação...');
-            await pool.query(`DROP INDEX IF EXISTS idx_azure_costs_dedup`);
-          }
-          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_azure_costs_dedup ON azure_costs(COALESCE(subscription_id,''),COALESCE(resource_id,''),cost_date,COALESCE(meter_id,''),COALESCE(charge_type,''),COALESCE(quantity,0))`);
-          console.log('[Azure] idx_azure_costs_dedup ✅');
-        } catch (e) { console.warn('[Azure] idx_azure_costs_dedup:', e.message.slice(0,80)); }
+          // CONCURRENTLY: pede SHARE UPDATE EXCLUSIVE em vez de ACCESS EXCLUSIVE, então não
+          // entra na fila atrás dos leitores longos de azure_costs (cache de tags, agregações)
+          // nem trava o startup. Em troca não pode rodar dentro de transação — por isso aqui,
+          // solto, e não junto de outras DDLs.
+          await pool.query(`DROP INDEX CONCURRENTLY IF EXISTS idx_azure_costs_dedup`);
+          console.log('[Azure] idx_azure_costs_dedup REMOVIDO — ingestão deixa de descartar linha por colisão de chave');
+        } catch (e) { console.warn('[Azure] falha ao remover idx_azure_costs_dedup:', e.message.slice(0,80)); }
       }
     };
     setTimeout(_bgIdx, 5 * 1000); // 5s delay para não competir com o primeiro request
@@ -3667,7 +3717,7 @@ async function _lerArquivoRows(filePath, filename) {
 }
 
 // ── Mapear linha CSV (camelCase Azure) → objeto DB ───────────────────────────
-function _mapRowCSV(row, nomeArquivo) {
+function _mapRowCSV(row, nomeArquivo, coletaId = null) {
   // Suporta camelCase, PascalCase, "Title case" (MCA) e EA legacy
   // Lookup helper: percorre nomes exatos, retorna o primeiro não-nulo/vazio
   const _p = (...keys) => { for (const k of keys) { const v = row[k]; if (v != null && v !== '') return v; } return null; };
@@ -3748,6 +3798,7 @@ function _mapRowCSV(row, nomeArquivo) {
     benefit_name:                    p('benefitName',                  'BenefitName',                  'Benefit Name'),
     provider:                        p('provider',                     'Provider'),
     arquivo_origem:                  nomeArquivo,
+    coleta_id:                       coletaId,
   };
 }
 
@@ -3920,6 +3971,13 @@ async function _processarImport(tmpPath, originalname, jobId, preserveSourceFile
   const tmpZipFiles = [];
   let totalLinhas = 0, totalIns = 0, totalUpd = 0, totalErr = 0;
   const mesesImportados = new Set();
+  // Arquivos cujo snapshot anterior já foi apagado nesta execução. O escopo de substituição
+  // aqui é o arquivo_origem (= nomeArq), e a limpeza tem que acontecer UMA vez por arquivo:
+  // o CSV entra em lotes de 1000 e o ZIP traz uma entrada por nome, então apagar a cada
+  // chamada de _inserirLinhas destruiria o lote anterior do mesmo arquivo.
+  const escoposLimpos = new Set();
+  // Total que os arquivos TRAZEM, para conferir contra o que ficou gravado.
+  let custoArquivos = 0;
   const errosDet = []; // amostras de erro (máx 50)
 
   function upd(fields) {
@@ -3931,6 +3989,14 @@ async function _processarImport(tmpPath, originalname, jobId, preserveSourceFile
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Substituição de snapshot: reenviar o mesmo arquivo passa a SUBSTITUIR a importação
+      // anterior dele, em vez de somar por cima. Dentro da transação do primeiro lote — se ele
+      // falhar, o DELETE volta atrás junto.
+      if (!escoposLimpos.has(nomeArq)) {
+        escoposLimpos.add(nomeArq);
+        const rDel = await client.query(`DELETE FROM azure_costs WHERE arquivo_origem = $1`, [nomeArq]);
+        if (rDel.rowCount > 0) console.log(`[Azure Import] ${rDel.rowCount} linha(s) da importação anterior de "${nomeArq}" removida(s)`);
+      }
       let spCount = 0;
       for (let i = 0; i < rows.length; i += 200) {
         for (const rawRow of rows.slice(i, i + 200)) {
@@ -3939,6 +4005,7 @@ async function _processarImport(tmpPath, originalname, jobId, preserveSourceFile
             await client.query(`SAVEPOINT ${sp}`);
             const m      = mapFn(rawRow, nomeArq);
             registrarMesCustoImportado(mesesImportados, m.cost_date);
+            custoArquivos += Number(m.cost_in_billing_currency) || 0;
             const values = COLS.map(col => m[col] ?? null);
             const r      = await client.query(sql, values);
             await client.query(`RELEASE SAVEPOINT ${sp}`);
@@ -3985,6 +4052,16 @@ async function _processarImport(tmpPath, originalname, jobId, preserveSourceFile
     const COLS = Object.keys(_mapRowCSV({}, ''));
     const ph   = COLS.map((_, i) => `$${i + 1}`).join(', ');
     const updateCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
+    // Com idx_azure_costs_dedup removido, temConstraint é sempre false e cai no sqlInsert — e um
+    // ON CONFLICT DO NOTHING sem constraint nenhuma nunca conflita, ou seja, vira INSERT puro.
+    // Efeito prático: esta via também deixou de descartar linha por colisão de chave.
+    //
+    // Em troca, reenviar o MESMO arquivo passa a duplicar, porque aqui não há substituição de
+    // escopo como nas coletas. Não foi resolvido junto de propósito: o escopo natural seria o
+    // nome do arquivo, que não é confiável (ZIP traz uma entrada por nome, e o CSV entra em lotes
+    // de 1000 — um DELETE no lugar errado apagaria o lote anterior). Exige desenho próprio e
+    // validação com arquivo real; perder custo em silêncio era o pior dos dois males.
+    // O bloco abaixo fica como está para o dia em que a constraint voltar a existir.
     const sqlUpsert = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})
       ON CONFLICT (COALESCE(subscription_id,''), COALESCE(resource_id,''), cost_date,
                    COALESCE(meter_id,''), COALESCE(charge_type,''), COALESCE(quantity,0))
@@ -4128,6 +4205,29 @@ async function _processarImport(tmpPath, originalname, jobId, preserveSourceFile
       }
     }
 
+    // Conferência de integridade: o que os arquivos TROUXERAM tem que ser o que ficou gravado.
+    // Como o snapshot anterior de cada arquivo foi apagado, o que está no banco sob estes
+    // arquivo_origem é só esta importação. Diferença aqui é linha descartada na gravação —
+    // exatamente o bug que custava R$ 12.518 numa assinatura/mês nas coletas, e que aqui também
+    // existia. Sem esta checagem a perda é invisível: nenhum contador acusa.
+    try {
+      if (escoposLimpos.size > 0) {
+        const rConf = await pool.query(
+          `SELECT COUNT(*)::int AS n, COALESCE(SUM(cost_in_billing_currency), 0) AS brl
+             FROM azure_costs WHERE arquivo_origem = ANY($1)`,
+          [[...escoposLimpos]]
+        );
+        const gravado = Number(rConf.rows[0].brl) || 0;
+        const perda = custoArquivos - gravado;
+        if (Math.abs(perda) > 0.01) {
+          const msg = `Divergência na importação: arquivo R$ ${custoArquivos.toFixed(2)} × gravado R$ ${gravado.toFixed(2)} — diferença de R$ ${perda.toFixed(2)} em ${totalLinhas - Number(rConf.rows[0].n)} linha(s)`;
+          console.warn(`[Azure Import] ⚠ ${msg}`);
+          upd({ aviso_integridade: msg });
+        }
+      }
+    } catch (e) {
+      console.warn('[Azure Import] não foi possível conferir a integridade:', e.message.slice(0, 120));
+    }
     await _sincronizarCustoDiarioMeses('import manual', [...mesesImportados]);
 
     // Log charge_type breakdown para diagnóstico
@@ -4808,10 +4908,20 @@ function _normImpostoCategoria(v) {
 }
 async function _getImpostoConfig() {
   const cfg = await _getPortalConfig();
-  return {
+  const base = {
     microsoft:   _normImpostoCategoria(cfg.imposto_microsoft),
     marketplace: _normImpostoCategoria(cfg.imposto_marketplace),
   };
+  // Pedido com ?sem_imposto=1 (ou header X-Sem-Imposto) recebe o valor CRU da fatura — o
+  // comparável ao portal da Azure. Desliga aqui, no ponto único, e vale para todas as telas.
+  // A taxa é preservada para a resposta poder dizer o que DEIXOU de ser somado.
+  if (_ctxRequisicao.getStore()?.semImposto) {
+    return {
+      microsoft:   { ativo: false, taxa: base.microsoft.taxa },
+      marketplace: { ativo: false, taxa: base.marketplace.taxa },
+    };
+  }
+  return base;
 }
 // `microsoft`/`marketplace` já vêm de SUMs separados por `publisher_type` (CASE na SQL) — soma
 // cada um com seu próprio multiplicador (ou cru, se a categoria não estiver ativa).
@@ -7069,6 +7179,22 @@ if (_multer) {
 // Estado NOVO (v4.2): Map de execuções, chave = "tipo:id" (ex. "api:3", "storage:5")
 // Cada entrada: { iniciadoEm, cancelada, progresso, histId, status, concluidoEm }
 const _coletasEmExecucao = new Map();
+
+// Fila SERIAL das coletas que escrevem em azure_costs.
+// O circuit breaker e a pausa de 429 são por FAMÍLIA de API (azureThrottle.js), não por SP:
+// duas coletas simultâneas disputam a mesma cota da Cost Management API, tomam 429 e derrubam
+// uma à outra. Medido em nov/2026, com os dois SPs disparando no mesmo tick do agendador:
+// 75 das 107 assinaturas ficaram sem nenhum dado, porque o breaker abria e toda assinatura
+// restante falhava na hora. Serializar também evita que o DELETE de substituição de snapshot
+// de uma execução corra junto com o INSERT de outra.
+let _filaColetaCusto = Promise.resolve();
+function _enfileirarColetaCusto(tarefa) {
+  // roda a tarefa tanto no caminho de sucesso quanto no de falha da anterior: uma coleta que
+  // quebra não pode travar a fila das seguintes.
+  const proxima = _filaColetaCusto.then(tarefa, tarefa);
+  _filaColetaCusto = proxima.catch(() => {});
+  return proxima;
+}
 
 function _coletaAtiva(tipo, id) {
   return _coletasEmExecucao.has(`${tipo}:${id}`);
@@ -9423,7 +9549,7 @@ function _iniciarAgendador() {
           `UPDATE azure_storage_config SET proxima_coleta=$1 WHERE id=$2`,
           [proxima, stg.id]
         );
-        _executarColetaStorage('auto', stg.id).catch(e =>
+        _enfileirarColetaCusto(() => _executarColetaStorage('auto', stg.id)).catch(e =>
           console.error(`[Agendador] Erro coleta Storage #${stg.id}:`, e.message)
         );
       }
@@ -9472,7 +9598,7 @@ function _iniciarAgendador() {
           : [];
         const baId = modoSp === 'billing_profile' ? _decryptSecret(sp.billing_account_id) : '';
         const bpId = modoSp === 'billing_profile' ? _decryptSecret(sp.billing_profile_id) : '';
-        _executarColetaAPI(sp.id, baId, bpId, fmt(inicio), fmt(fim), modoSp, subIds, undefined, undefined, 'agendado')
+        _enfileirarColetaCusto(() => _executarColetaAPI(sp.id, baId, bpId, fmt(inicio), fmt(fim), modoSp, subIds, undefined, undefined, 'agendado'))
           .then(async () => {
             // Após coleta regular, processa itens pendentes desta SP
             try {
@@ -9485,7 +9611,7 @@ function _iniciarAgendador() {
                 if (_coletaAtiva('api', sp.id)) { await new Promise(r => setTimeout(r, 500)); }
                 const pSubIds = p.subscription_id ? [p.subscription_id] : subIds;
                 _logColeta(`[Pendente] Iniciando reprocessamento: ${p.descricao || p.data_inicio + '→' + p.data_fim}`);
-                await _executarColetaAPI(sp.id, baId, bpId, p.data_inicio, p.data_fim, modoSp, pSubIds, [], 'ActualCost', 'agendado-pendente')
+                await _enfileirarColetaCusto(() => _executarColetaAPI(sp.id, baId, bpId, p.data_inicio, p.data_fim, modoSp, pSubIds, [], 'ActualCost', 'agendado-pendente'))
                   .catch(e => _logColeta(`[Pendente] Erro: ${e.message}`));
               }
             } catch (e) { console.error('[Agendador] Erro pendentes:', e.message); }
@@ -13738,7 +13864,7 @@ app.post('/api/azure-coleta/sps/:id/coletar-api', authMiddleware, dbMiddleware, 
     if (!subscription_ids || !subscription_ids.length) return res.status(400).json({ error: 'subscription_ids é obrigatório para o modo Subscription Direta' });
   }
   res.json({ ok: true, message: `Coleta via API iniciada (${metricEfetivo})` });
-  _executarColetaAPI(parseInt(req.params.id), billing_account_id || '', billing_profile_id || '', data_inicio, data_fim, modoEfetivo, subscription_ids || [], resource_groups || [], metricEfetivo)
+  _enfileirarColetaCusto(() => _executarColetaAPI(parseInt(req.params.id), billing_account_id || '', billing_profile_id || '', data_inicio, data_fim, modoEfetivo, subscription_ids || [], resource_groups || [], metricEfetivo))
     .catch(e => console.error('[ColetaAPI] Erro:', e.message));
 });
 
@@ -13850,7 +13976,7 @@ app.post('/api/azure-coleta/coletar-todas', authMiddleware, dbMiddleware, async 
     });
     for (const sp of aptas) {
       console.log(`[ColetaTodas] Disparando SP #${sp.id} (${sp.nome}) modo=${sp.modo} ${sp.data_inicio}→${sp.data_fim}`);
-      _executarColetaAPI(sp.id, sp._ba || '', sp._bp || '', sp.data_inicio, sp.data_fim, sp.modo, sp._subIds, [], metricEfetivo, 'manual')
+      _enfileirarColetaCusto(() => _executarColetaAPI(sp.id, sp._ba || '', sp._bp || '', sp.data_inicio, sp.data_fim, sp.modo, sp._subIds, [], metricEfetivo, 'manual'))
         .catch(e => console.error(`[ColetaTodas] Erro SP #${sp.id}:`, e.message));
     }
   } catch (e) { _dbErr(res, e); }
@@ -13948,7 +14074,7 @@ app.post('/api/azure-coleta/reprocessar-mes', authMiddleware, dbMiddleware, asyn
     for (const sp of disparar) {
       const subIds = sp.assinaturas.map((a) => a.subscription_id);
       console.log(`[ReprocessarMes] ${mes} — SP #${sp.sp_id} (${sp.sp_nome}): ${subIds.length} assinatura(s)`);
-      _executarColetaAPI(sp.sp_id, '', '', plano.inicio, plano.fim, 'subscription', subIds, [], 'ActualCost', 'manual')
+      _enfileirarColetaCusto(() => _executarColetaAPI(sp.sp_id, '', '', plano.inicio, plano.fim, 'subscription', subIds, [], 'ActualCost', 'manual'))
         .catch((e) => console.error(`[ReprocessarMes] Erro SP #${sp.sp_id}:`, e.message));
     }
   } catch (e) { _dbErr(res, e); }
@@ -17447,9 +17573,46 @@ async function _gerarRelatorioAPI(getToken, scopeUrl, startDate, endDate, label,
 
 // `progresso` — mesma razão de _gerarRelatorioAPI logo acima: sem passar explícito, as
 // contagens ins/upd/err de uma SP sobrescreviam o card de progresso de outra.
-async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progresso) {
+// Apaga o snapshot anterior de (assinatura, período) antes de inserir o novo.
+//
+// Por que existe: a Azure revisa a quantidade do MESMO dia/recurso/medidor por vários dias
+// enquanto o billing amadurece. Com `granularidade_dias = 7` e execução diária, cada dia é
+// recoletado ~7 vezes — e sem apagar a geração anterior as linhas se somam. Medido em nov/2026:
+// 2,46 milhões de linhas e R$ 6,41 mi de excedente em 4 meses, 21% de outubro.
+//
+// Deduplicar por chave única NÃO resolve e já foi testado contra o banco: a Azure emite várias
+// linhas legítimas com quantidades diferentes dentro da MESMA importação, e em 93% dos grupos
+// nenhuma coluna as distingue (testados meter_sub_category, effective_price, resource_name,
+// service_info2, billing_period, invoice_id). Um ON CONFLICT DO UPDATE sobre essa chave apagaria
+// custo real. A unidade de verdade é o relatório inteiro do período, não a linha.
+//
+// Chamar SEMPRE depois de `_gerarRelatorioAPI` (que já baixou os blobs para disco) e antes de
+// `_importarArquivosAPI`, para a janela sem dado ser a menor possível e o reparo ser local.
+async function _apagarSnapshotAnterior(subId, inicio, fim, rgFilter, progresso) {
+  const params = [subId, inicio, fim];
+  let q = `DELETE FROM azure_costs
+            WHERE subscription_id = $1
+              AND cost_date >= $2::date AND cost_date <= $3::date`;
+  // Com rgFilter ativo a importação só repõe os RGs filtrados — o DELETE precisa do MESMO
+  // recorte, senão apaga o que não vai voltar.
+  if (rgFilter && rgFilter.size) {
+    params.push([...rgFilter]);
+    q += ` AND UPPER(resource_group_name) = ANY($4)`;
+  }
+  const r = await pool.query(q, params);
+  if (r.rowCount > 0) {
+    _logColeta(`  ↺ ${subId} [${inicio}→${fim}]: ${r.rowCount} linha(s) do snapshot anterior removida(s)`, progresso);
+  }
+  return r.rowCount;
+}
+async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progresso, coletaId = null) {
   const fs = require('fs');
   let ins = 0, upd = 0, err = 0, linhas = 0;
+  // Total que o relatório da Azure TRAZ, para comparar com o que de fato ficou gravado.
+  // Linha engolida por colisão de chave no ON CONFLICT não falha e não aparece em nenhum
+  // contador (com DO UPDATE o rowCount é sempre 1) — some em silêncio. Sem esta soma, a perda
+  // só é detectável comparando com o portal, assinatura por assinatura.
+  let custoRelatorio = 0;
   const meses = new Set();
   for (const dest of tmpFiles) {
     try {
@@ -17461,8 +17624,9 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progre
         try {
           await client.query('BEGIN');
           for (const raw of batch) {
-            const m = _mapRowCSV(raw, `api-${label}`);
+            const m = _mapRowCSV(raw, `api-${label}`, coletaId);
             if (rgFilter && !rgFilter.has((m.resource_group_name || '').toUpperCase())) continue;
+            custoRelatorio += Number(m.cost_in_billing_currency) || 0;
             registrarMesCustoImportado(meses, m.cost_date);
             const sp = `sp_${spCount++}`;
             try {
@@ -17490,7 +17654,7 @@ async function _importarArquivosAPI(tmpFiles, label, sql, COLS, rgFilter, progre
       try { fs.unlinkSync(dest); } catch (_) {}
     }
   }
-  return { ins, upd, err, linhas, meses: [...meses] };
+  return { ins, upd, err, linhas, custoRelatorio, meses: [...meses] };
 }
 
 // ── Coleta via Azure Cost Management API ─────────────────────────────────────
@@ -17513,23 +17677,56 @@ function _splitDateRange(startDate, endDate) {
   return chunks;
 }
 
+// Quantas vezes uma mesma chamada pode esperar a janela do breaker sem gastar tentativa.
+// Teto só pra não girar pra sempre caso o breaker nunca feche.
+const _CB_ESPERAS_MAX = 5;
+
+// Segundos até o circuit breaker reabrir, ou null se o erro não for de breaker.
+// A própria mensagem carrega o instante ISO (azureThrottle.js:151), então não precisa
+// consultar o estado do breaker nem saber a família.
+function _segundosAteBreakerFechar(erro) {
+  const msg = (erro && erro.message) || '';
+  if (!msg.includes('Circuit Breaker OPEN')) return null;
+  const m = /(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/.exec(msg);
+  const ate = m ? Date.parse(m[1]) : NaN;
+  if (!Number.isFinite(ate)) return 30;
+  return Math.max(1, Math.ceil((ate - Date.now()) / 1000)) + 2; // folga de 2s
+}
+
 // Executa fn com até `tentativas` tentativas totais, aguardando entre falhas.
 // Lança na última tentativa ou se o usuário cancelar.
 // `progresso`/`isCancelada` — mesma razão das duas funções acima.
+//
+// Breaker aberto NÃO gasta tentativa: a chamada nunca chegou na Azure, então contá-la como
+// falha pune o escopo errado. Antes, as 3 tentativas (30s + 60s) se esgotavam dentro da janela
+// de 5 min do breaker (azureThrottle.js:111) e a assinatura era abandonada sem nunca ter sido
+// consultada — foi o que deixou 75 das 107 assinaturas sem nenhum dado em nov/2026.
 async function _comRetentativa(fn, label, tentativas, progresso, isCancelada) {
-  for (let t = 1; t <= tentativas; t++) {
+  const dormir = async (seg) => {
+    for (let s = 0; s < seg; s++) {
+      if (isCancelada()) throw new Error('Cancelado pelo usuário');
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  };
+  let esperasBreaker = 0;
+  for (let t = 1; t <= tentativas; ) {
     try {
       return await fn();
     } catch (e) {
       if (e.message === 'Cancelado pelo usuário') throw e;
+      const segBreaker = _segundosAteBreakerFechar(e);
+      if (segBreaker !== null && esperasBreaker < _CB_ESPERAS_MAX) {
+        esperasBreaker++;
+        _logColeta(`  ⏸ ${label} — breaker aberto, aguardando ${segBreaker}s (espera ${esperasBreaker}/${_CB_ESPERAS_MAX}, não gasta tentativa)`, progresso);
+        await dormir(segBreaker);
+        continue;
+      }
       if (t === tentativas) throw e;
       const esperaSeg = t * 30; // 30s na 1ª falha, 60s na 2ª
       _logColeta(`  ✗ ${label} — tentativa ${t}/${tentativas}: ${e.message}`, progresso);
       _logColeta(`  ↻ Aguardando ${esperaSeg}s antes de nova tentativa...`, progresso);
-      for (let s = 0; s < esperaSeg; s++) {
-        if (isCancelada()) throw new Error('Cancelado pelo usuário');
-        await new Promise(r => setTimeout(r, 1000));
-      }
+      await dormir(esperaSeg);
+      t++;
     }
   }
 }
@@ -17562,6 +17759,10 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
   const rgFilter = resourceGroups.length ? new Set(resourceGroups.map(r => r.toUpperCase())) : null;
   _logColeta(`Coleta API [${modo}] — ${startDate} → ${endDate}${rgFilter ? ` | ${rgFilter.size} RG(s) filtrado(s)` : ''}`, _coletaProgresso);
   let totalIns = 0, totalUpd = 0, totalErr = 0, totalLinhas = 0;
+  // Assinaturas que nenhum passe conseguiu coletar. Escopo da FUNÇÃO de propósito: as listas
+  // aRetentar/aRetentarBP são block-scoped e não chegam no epílogo, que é onde o status é
+  // gravado. Sem isto, coleta que perdeu 70% das assinaturas gravava status=concluido.
+  const _subsNaoColetadas = [];
   const mesesCustosAlterados = new Set();
   let subCount = 0;
 
@@ -17580,14 +17781,14 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     const COLS    = Object.keys(_mapRowCSV({}, ''));
     const ph      = COLS.map((_, i) => `$${i + 1}`).join(', ');
     const updCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
-    let temIdx = false;
-    try {
-      const ck = await pool.query(`SELECT 1 FROM pg_indexes WHERE tablename='azure_costs' AND indexname='idx_azure_costs_dedup' LIMIT 1`);
-      temIdx = ck.rowCount > 0;
-    } catch (_) {}
-    const sql = temIdx
-      ? `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT (COALESCE(subscription_id,''),COALESCE(resource_id,''),cost_date,COALESCE(meter_id,''),COALESCE(charge_type,''),COALESCE(quantity,0)) DO UPDATE SET ${updCols.map(c => `${c}=EXCLUDED.${c}`).join(',')}`
-      : `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT DO NOTHING`;
+    // INSERT PURO, sem ON CONFLICT. A deduplicação entre coletas é feita pelo DELETE de
+    // snapshot (ver _apagarSnapshotAnterior), não por chave única — e o ON CONFLICT que havia
+    // aqui ENGOLIA linha legítima: quando o relatório da Azure traz duas linhas diferentes que
+    // coincidem em (assinatura, recurso, dia, medidor, charge_type, quantity), a segunda fazia
+    // DO UPDATE na primeira e o custo dela sumia. Silencioso: com DO UPDATE o rowCount é sempre
+    // 1, então nem ins/upd nem o contador de erro acusavam. Medido contra o portal em 2026-11:
+    // 1.118 linhas e R$ 12.518,45 perdidos numa única assinatura em outubro.
+    const sql = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})`;
 
     if (modo === 'subscription') {
       // ── Modo: Subscription Direta ──────────────────────────────────────────
@@ -17604,7 +17805,40 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           if (isCancelada()) throw new Error('Cancelado pelo usuário');
           const label = chunks.length > 1 ? `${subId} [${chunk.start}→${chunk.end}]` : subId;
           const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
-          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter, _coletaProgresso);
+          // arquivos vazio = "sem dados" (404/204/NoDataFound), que _gerarRelatorioAPI devolve
+          // SEM lançar. Apagar nesse caso destruiria o snapshot bom sem repor nada.
+          if (arquivos.length > 0) {
+            await _apagarSnapshotAnterior(subId, chunk.start, chunk.end, rgFilter, _coletaProgresso);
+          }
+          const res      = await _importarArquivosAPI(arquivos, subId, sql, COLS, rgFilter, _coletaProgresso, histId);
+          // Conferência de integridade do escopo: o que o relatório da Azure TROUXE tem que ser
+          // exatamente o que ficou gravado. Como o snapshot anterior foi apagado logo acima, o
+          // que está no banco agora é só esta importação.
+          //
+          // Diferença aqui significa linha engolida pelo ON CONFLICT: duas linhas legítimas do
+          // relatório que coincidem na chave de dedup, e a segunda sobrescreve a primeira. Isso
+          // não falha, não conta erro e não aparece em ins/upd (com DO UPDATE o rowCount é
+          // sempre 1) — sem esta checagem a perda só aparece comparando com o portal, uma
+          // assinatura por vez. Medido em 2026-11 nesta base: 1.118 linhas e R$ 12.518 numa só
+          // assinatura/mês.
+          if (res.linhas > 0) {
+            const paramsConf = [subId, chunk.start, chunk.end];
+            let sqlConf = `SELECT COUNT(*)::int AS n, COALESCE(SUM(cost_in_billing_currency), 0) AS brl
+                             FROM azure_costs
+                            WHERE subscription_id = $1
+                              AND cost_date >= $2::date AND cost_date <= $3::date`;
+            if (rgFilter && rgFilter.size) {
+              paramsConf.push([...rgFilter]);
+              sqlConf += ` AND UPPER(resource_group_name) = ANY($4)`;
+            }
+            const conf = await pool.query(sqlConf, paramsConf);
+            const gravado = Number(conf.rows[0].brl) || 0;
+            const perda = (res.custoRelatorio || 0) - gravado;
+            if (Math.abs(perda) > 0.01) {
+              const linhasPerdidas = res.linhas - Number(conf.rows[0].n);
+              _logColeta(`  ⚠ ${label}: relatório R$ ${(res.custoRelatorio || 0).toFixed(2)} × gravado R$ ${gravado.toFixed(2)} — PERDA de R$ ${perda.toFixed(2)} em ${linhasPerdidas} linha(s)`, _coletaProgresso);
+            }
+          }
           res.meses.forEach(mes => mesesCustosAlterados.add(mes));
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
@@ -17650,6 +17884,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
       }
       if (aRetentar.length > 0) {
         _logColeta(`⚠ ${aRetentar.length} sub(s) não coletada(s) após todos os passes: ${aRetentar.join(', ')}`, _coletaProgresso);
+        _subsNaoColetadas.push(...aRetentar);
         totalErr += aRetentar.length;
       }
 
@@ -17686,7 +17921,13 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
             if (isCancelada()) throw new Error('Cancelado pelo usuário');
             const label = chunks.length > 1 ? `${sub.nome} [${chunk.start}→${chunk.end}]` : sub.nome;
             const arquivos = await _gerarRelatorioAPI(getToken, subScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
-            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter, _coletaProgresso);
+            // Escopo por assinatura: as linhas de Tax/Purchase/Refund da passagem de Billing
+            // Profile vêm SEM subscription_id, então este DELETE não as toca — correto, elas
+            // têm o próprio ciclo mais abaixo.
+            if (arquivos.length > 0) {
+              await _apagarSnapshotAnterior(sub.subscriptionId, chunk.start, chunk.end, rgFilter, _coletaProgresso);
+            }
+            const res      = await _importarArquivosAPI(arquivos, sub.nome, sql, COLS, rgFilter, _coletaProgresso, histId);
             res.meses.forEach(mes => mesesCustosAlterados.add(mes));
             totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
           }
@@ -17731,6 +17972,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
         }
         if (aRetentarBP.length > 0) {
           _logColeta(`⚠ ${aRetentarBP.length} sub(s) não coletada(s) após todos os passes: ${aRetentarBP.map(s => s.nome).join(', ')}`, _coletaProgresso);
+          _subsNaoColetadas.push(...aRetentarBP.map(s => s.subscription_id || s.nome));
           totalErr += aRetentarBP.length;
         }
 
@@ -17747,7 +17989,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
                 if (isCancelada()) throw new Error('Cancelado pelo usuário');
                 const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
                 const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
-                const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso);
+                const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso, histId);
                 res.meses.forEach(mes => mesesCustosAlterados.add(mes));
                 totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
               }
@@ -17770,7 +18012,7 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
           if (isCancelada()) break;
           const label = chunks.length > 1 ? `Billing Profile [${chunk.start}→${chunk.end}]` : 'Billing Profile';
           const arquivos = await _gerarRelatorioAPI(getToken, bpScope, chunk.start, chunk.end, label, metric, _coletaProgresso, isCancelada);
-          const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso);
+          const res      = await _importarArquivosAPI(arquivos, 'Billing Profile', sql, COLS, rgFilter, _coletaProgresso, histId);
           res.meses.forEach(mes => mesesCustosAlterados.add(mes));
           totalIns += res.ins; totalUpd += res.upd; totalErr += res.err; totalLinhas += res.linhas;
         }
@@ -17793,10 +18035,22 @@ async function _executarColetaAPI(spId, billingAccountId, billingProfileId, star
     const msgFinal = modo === 'subscription'
       ? `API Subscription — ${subCount} sub(s) | ${startDate}→${endDate}`
       : `API Billing Profile — ${subCount} sub(s) + Tax | ${startDate}→${endDate}`;
-    const detFinal = JSON.stringify({ tipo: 'api', modo, log: [..._coletaProgresso.log] });
+    // Completude: `concluido` só quando TODAS as assinaturas pedidas entraram e não houve
+    // cancelamento. O cancelamento sai por `break` no laço de subs, não pelo catch — então sem
+    // esta checagem uma coleta interrompida na 2ª de 40 assinaturas gravava `concluido`, que foi
+    // como 75 das 107 assinaturas sumiram em nov/2026 sem ninguém perceber.
+    const _incompleta = _subsNaoColetadas.length > 0 || isCancelada();
+    const _statusFinal = _incompleta ? 'parcial' : 'concluido';
+    const msgCompletude = _incompleta
+      ? ` · ⚠ INCOMPLETA: ${_subsNaoColetadas.length} sub(s) sem dado${isCancelada() ? ' (cancelada)' : ''}`
+      : '';
+    const detFinal = JSON.stringify({
+      tipo: 'api', modo, log: [..._coletaProgresso.log],
+      subs_pedidas: subscriptionIds.length, subs_nao_coletadas: _subsNaoColetadas, cancelada: isCancelada(),
+    });
     await pool.query(
-      `UPDATE azure_coleta_historico SET status='concluido',concluido_em=NOW(),linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
-      [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
+      `UPDATE azure_coleta_historico SET status=$7,concluido_em=NOW(),linhas_inseridas=$1,linhas_atualizadas=$2,linhas_erro=$3,mensagem=$4,detalhes=$5 WHERE id=$6`,
+      [totalIns, totalUpd, totalErr, msgFinal + msgCompletude, detFinal, histId, _statusFinal]
     );
     _validarColeta(histId, subscriptionIds, startDate, endDate).catch(() => {});
     _coletaProgresso.fase = 'Concluído';
@@ -17946,17 +18200,9 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     await ensureAzureCostsTable();
     const COLS    = Object.keys(_mapRowCSV({}, ''));
     const ph      = COLS.map((_, i) => `$${i + 1}`).join(', ');
-    const updCols = COLS.filter(c => !['subscription_id','resource_id','cost_date','meter_id','charge_type','quantity'].includes(c));
-    let temIdx = false;
-    try {
-      const ck = await pool.query(`SELECT 1 FROM pg_indexes WHERE tablename='azure_costs' AND indexname='idx_azure_costs_dedup' LIMIT 1`);
-      temIdx = ck.rowCount > 0;
-    } catch (_) {}
-    const sqlU = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})
-      ON CONFLICT (COALESCE(subscription_id,''),COALESCE(resource_id,''),cost_date,COALESCE(meter_id,''),COALESCE(charge_type,''),COALESCE(quantity,0))
-      DO UPDATE SET ${updCols.map(c => `${c}=EXCLUDED.${c}`).join(',')}`;
-    const sqlI = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph}) ON CONFLICT DO NOTHING`;
-    const sql  = temIdx ? sqlU : sqlI;
+    // INSERT puro — mesma razão da coleta API: a dedup é pelo DELETE do blob logo abaixo, e o
+    // ON CONFLICT engolia linha legítima do relatório em silêncio.
+    const sql = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})`;
 
     for (let bi = 0; bi < blobs.length; bi++) {
       if (isCancelada()) { _logColeta('Cancelado', _coletaProgresso); break; }
@@ -17981,8 +18227,22 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
         const rows = await _lerArquivoRows(tmpFile, blob.name);
         _logColeta(`  ${rows.length} linhas`, _coletaProgresso);
 
+        // Substituição de snapshot no Storage: a coleta relista e reimporta TODOS os blobs do
+        // prefixo a cada execução, então sem apagar a importação anterior deste mesmo blob as
+        // linhas se acumulam a cada rodada. Aqui o escopo não é (assinatura, período) — o
+        // Storage não conhece período — e sim o próprio blob, que é o único discriminador real
+        // (arquivo_origem = caminho completo, com o diretório de execução do export da Azure).
+        // Só apaga se o arquivo trouxe linha: arquivo vazio ou ilegível não pode zerar o que já
+        // estava bom.
+        if (rows.length > 0) {
+          const rDel = await pool.query(`DELETE FROM azure_costs WHERE arquivo_origem = $1`, [blob.name]);
+          if (rDel.rowCount > 0) _logColeta(`  ↺ ${rDel.rowCount} linha(s) da importação anterior deste arquivo removida(s)`, _coletaProgresso);
+        }
+
         const client = await pool.connect();
         let ins = 0, upd = 0, err = 0;
+        // Total que o blob TRAZ, para conferir contra o que ficou gravado.
+        let custoBlob = 0;
         try {
           await client.query('BEGIN');
           let sp = 0;
@@ -17991,8 +18251,9 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
               const spn = `sp_${sp++}`;
               try {
                 await client.query(`SAVEPOINT ${spn}`);
-                const m = _mapRowCSV(raw, blob.name);
+                const m = _mapRowCSV(raw, blob.name, histId);
                 registrarMesCustoImportado(mesesCustosAlterados, m.cost_date);
+                custoBlob += Number(m.cost_in_billing_currency) || 0;
                 const r2 = await client.query(sql, COLS.map(col => m[col] ?? null));
                 await client.query(`RELEASE SAVEPOINT ${spn}`);
                 if (r2.rowCount > 0) ins++; else upd++;
@@ -18006,6 +18267,22 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
           await client.query('COMMIT');
         } catch (e) { await client.query('ROLLBACK'); throw e; }
         finally { client.release(); }
+        // Conferência de integridade do blob: o snapshot anterior dele foi apagado acima, então
+        // o que está gravado sob este arquivo_origem é só esta importação. Diferença = linha
+        // descartada na gravação, que nenhum contador acusa.
+        if (rows.length > 0) {
+          try {
+            const rConf = await pool.query(
+              `SELECT COUNT(*)::int AS n, COALESCE(SUM(cost_in_billing_currency), 0) AS brl FROM azure_costs WHERE arquivo_origem = $1`,
+              [blob.name]
+            );
+            const gravado = Number(rConf.rows[0].brl) || 0;
+            const perda = custoBlob - gravado;
+            if (Math.abs(perda) > 0.01) {
+              _logColeta(`  ⚠ ${blob.name.split('/').pop()}: arquivo R$ ${custoBlob.toFixed(2)} × gravado R$ ${gravado.toFixed(2)} — diferença de R$ ${perda.toFixed(2)} em ${rows.length - Number(rConf.rows[0].n)} linha(s)`, _coletaProgresso);
+            }
+          } catch (e) { _logColeta(`  Aviso: não foi possível conferir ${blob.name.split('/').pop()}: ${e.message.slice(0, 80)}`, _coletaProgresso); }
+        }
         totalIns += ins; totalUpd += upd; totalErr += err;
         _logColeta(`  ins:${ins} upd:${upd} err:${err}`, _coletaProgresso);
         _coletaProgresso.ins = totalIns;
@@ -20186,6 +20463,14 @@ function _logAnalyticsCustoSql(idxInicio, idxFim) {
               AND ${_LA_NAO_RETENCAO} AND ${_LA_NAO_COMMIT} AND ${_LA_NAO_SENTINEL}), 0) AS _la_ing_mp,
   -- Sentinel cobra análise POR CIMA da ingestão, num medidor próprio — é custo do workspace,
   -- mas não é ingestão, e some do radar quando os dois viram um número só.
+  --
+  -- PRECEDÊNCIA dos quatro baldes (eles somam em custo_mes_total, então têm que ser
+  -- mutuamente exclusivos): Sentinel > Commitment Tier > retenção > ingestão. Antes só a
+  -- ingestão excluía os irmãos; os outros três não se excluíam entre si, e uma linha
+  -- meter_category=Sentinel com "Commitment Tier" no meter_name entrava em DOIS baldes e era
+  -- contada duas vezes no total. Sentinel vem primeiro de propósito: a pergunta que o card
+  -- responde é "quanto o Sentinel me custa", e ela continua certa mesmo quando ele está em
+  -- capacidade pré-paga.
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.meter_category = 'Sentinel'), 0) AS _la_sentinel,
@@ -20193,15 +20478,18 @@ function _logAnalyticsCustoSql(idxInicio, idxFim) {
   -- ingestão dá a impressão de que o workspace custa os dois.
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
-              AND ac.meter_name ILIKE '%Commitment Tier%'), 0) AS _la_commit_custo,
+              AND ac.meter_name ILIKE '%Commitment Tier%'
+              AND ${_LA_NAO_SENTINEL}), 0) AS _la_commit_custo,
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type IS DISTINCT FROM 'Marketplace'
-              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_ms,
+              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')
+              AND ${_LA_NAO_COMMIT} AND ${_LA_NAO_SENTINEL}), 0) AS _la_ret_ms,
   COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac
             WHERE UPPER(ac.resource_id) = UPPER(w.resource_id) AND ${janela}
               AND ac.publisher_type = 'Marketplace'
-              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')), 0) AS _la_ret_mp,
+              AND (ac.meter_name ILIKE '%retention%' OR ac.meter_name ILIKE '%retenção%')
+              AND ${_LA_NAO_COMMIT} AND ${_LA_NAO_SENTINEL}), 0) AS _la_ret_mp,
   -- Volume de retenção pela QUANTIDADE que a Azure faturou, não por modelo nosso.
   --
   -- A primeira versão disto calculava GB × dias além de 31 e estava errada: o período incluído
@@ -20283,6 +20571,14 @@ function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
   // assumida pelo cálculo de economia de Commitment Tier logo abaixo).
   const custo_mes_sentinel = _comImpostoSplit(row._la_sentinel, 0, impostoCfg);
   const custo_mes_commitment = _comImpostoSplit(row._la_commit_custo, 0, impostoCfg);
+  // Valor CRU (pré-imposto) de cada balde. O imposto de 18,65%/13,83% é somado por NÓS na
+  // apresentação — a Azure não o cobra na fatura. Sem devolver o cru, não existe número na tela
+  // comparável ao portal nem ao export, e a conferência vira impossível.
+  const _cru = (ms, mp) => (Number(ms) || 0) + (Number(mp) || 0);
+  const custo_mes_ingestao_cru   = _cru(row._la_ing_ms, row._la_ing_mp);
+  const custo_mes_retencao_cru   = _cru(row._la_ret_ms, row._la_ret_mp);
+  const custo_mes_sentinel_cru   = _cru(row._la_sentinel, 0);
+  const custo_mes_commitment_cru = _cru(row._la_commit_custo, 0);
   // Economia REAL do período selecionado — null (não zero) quando não houve cobrança de
   // Commitment Tier nesse período: "não estava contratado" não é o mesmo que "economia zero".
   // Billing de Commitment Tier é sempre Microsoft, nunca Marketplace.
@@ -20316,7 +20612,10 @@ function _aplicarImpostoLogAnalytics(row, impostoCfg, diasJanela) {
   // meses passados são mês civil completo (ver _janelaLogAnalytics).
   const ingestao_media_gb_dia = diasJanela ? (Number(row.ingestao_mes_gb) || 0) / diasJanela : null;
   return { ...row, custo_mes_ingestao, custo_mes_retencao, custo_mes_sentinel, custo_mes_commitment,
-    custo_mes_total: custo_mes_ingestao + custo_mes_retencao + custo_mes_sentinel + custo_mes_commitment, economia_commitment_tier_periodo, ingestao_media_gb_dia };
+    custo_mes_total: custo_mes_ingestao + custo_mes_retencao + custo_mes_sentinel + custo_mes_commitment,
+    custo_mes_ingestao_cru, custo_mes_retencao_cru, custo_mes_sentinel_cru, custo_mes_commitment_cru,
+    custo_mes_total_cru: custo_mes_ingestao_cru + custo_mes_retencao_cru + custo_mes_sentinel_cru + custo_mes_commitment_cru,
+    economia_commitment_tier_periodo, ingestao_media_gb_dia };
 }
 
 app.get('/api/log-analytics/workspaces', authMiddleware, dbMiddleware, async (req, res) => {
