@@ -6,7 +6,7 @@ import { listSPs } from '../api/coleta'
 import { listSubscriptions } from '../api/calculadora'
 import { setInventarioTabListener } from '../bridge'
 import {
-  getAzureInventarioConfig, salvarAzureInventarioConfig, getRetencaoExcluidosPrevia, coletarAzureInventario, getAzureInventarioStatus,
+  getAzureInventarioConfig, salvarAzureInventarioConfig, getRetencaoExcluidosPrevia, getPurgarEfemerosPrevia, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
@@ -704,6 +704,8 @@ export default function InventarioView() {
   const [tagsObrigatorias, setTagsObrigatorias] = useState('')
   const [retencaoExcluidosAtiva, setRetencaoExcluidosAtiva] = useState(false)
   const [retencaoExcluidosDias, setRetencaoExcluidosDias] = useState(180)
+  const [purgarEfemerosAtivo, setPurgarEfemerosAtivo] = useState(false)
+  const [purgarEfemerosDias, setPurgarEfemerosDias] = useState(1)
   const [spId, setSpId] = useState<number | null>(null)
   const [formInicializado, setFormInicializado] = useState(false)
   if (configQuery.data && !formInicializado) {
@@ -712,6 +714,8 @@ export default function InventarioView() {
     setTagsObrigatorias(configQuery.data.tags_obrigatorias || '')
     setRetencaoExcluidosAtiva(configQuery.data.retencao_excluidos_ativa)
     setRetencaoExcluidosDias(configQuery.data.retencao_excluidos_dias)
+    setPurgarEfemerosAtivo(configQuery.data.purgar_efemeros_ativo)
+    setPurgarEfemerosDias(configQuery.data.purgar_efemeros_dias)
     setSpId(configQuery.data.sp_id)
     setFormInicializado(true)
   }
@@ -722,6 +726,12 @@ export default function InventarioView() {
     enabled: tab === 'config' && retencaoExcluidosDias > 0,
   })
 
+  const previaEfemerosQuery = useQuery({
+    queryKey: ['azure-inv-purgar-efemeros-previa', purgarEfemerosDias],
+    queryFn: () => getPurgarEfemerosPrevia(purgarEfemerosDias),
+    enabled: tab === 'config' && purgarEfemerosDias > 0,
+  })
+
   const salvarMutation = useMutation({
     mutationFn: () => salvarAzureInventarioConfig({
       ativo, retencao_dias: retencaoDias, sp_id: spId,
@@ -729,6 +739,8 @@ export default function InventarioView() {
       tags_obrigatorias: tagsObrigatorias.trim() || null,
       retencao_excluidos_ativa: retencaoExcluidosAtiva,
       retencao_excluidos_dias: retencaoExcluidosDias,
+      purgar_efemeros_ativo: purgarEfemerosAtivo,
+      purgar_efemeros_dias: purgarEfemerosDias,
     }),
     onSuccess: () => {
       window.showToast?.('Configuração salva.', 'success')
@@ -1973,10 +1985,29 @@ export default function InventarioView() {
                   </div>
                 )}
               </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={purgarEfemerosAtivo} onChange={(e) => setPurgarEfemerosAtivo(e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
+                Apagar definitivamente recursos que viveram menos de N dias (efêmeros)
+              </label>
+              <div className="form-group" style={{ margin: 0, opacity: purgarEfemerosAtivo ? 1 : 0.5, pointerEvents: purgarEfemerosAtivo ? 'auto' : 'none' }}>
+                <label>Dias de vida mínimos para o recurso ser preservado</label>
+                <input type="number" min={1} value={purgarEfemerosDias} onChange={(e) => setPurgarEfemerosDias(Number(e.target.value) || 1)} style={{ maxWidth: 120 }} disabled={!purgarEfemerosAtivo} />
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Critério diferente da retenção acima: olha quanto tempo o recurso ficou NO AR antes de ser excluído, não há quanto tempo foi excluído. Pensado para discos, placas de rede e VMs de autoescala que nascem e morrem em minutos — medido nesta base, 99,2% dos recursos já excluídos viveram menos de 1 dia. Nunca toca em recursos ativos.
+                </div>
+                {previaEfemerosQuery.data && (
+                  <div style={{ fontSize: 12, marginTop: 6, color: previaEfemerosQuery.data.seriam_removidos > 0 ? 'var(--danger, #d32f2f)' : 'var(--text-muted)' }}>
+                    Com vida {"<"} {previaEfemerosQuery.data.dias} dia(s): <strong>{previaEfemerosQuery.data.seriam_removidos.toLocaleString('pt-BR')}</strong> de {previaEfemerosQuery.data.total_excluidos.toLocaleString('pt-BR')} recursos excluídos seriam removidos na próxima coleta. Ativos ({previaEfemerosQuery.data.total_ativos.toLocaleString('pt-BR')}) não são afetados.
+                  </div>
+                )}
+              </div>
               <button className="btn-primary" style={{ alignSelf: 'flex-start' }} disabled={salvarMutation.isPending} onClick={() => {
                 const qtd = previaExcluidosQuery.data?.seriam_removidos ?? 0
                 if (retencaoExcluidosAtiva && !configQuery.data?.retencao_excluidos_ativa && qtd > 0
                     && !confirm(`Ao ativar, ${qtd.toLocaleString('pt-BR')} recursos excluídos há mais de ${retencaoExcluidosDias} dias serão apagados definitivamente na próxima coleta. Continuar?`)) return
+                const qtdEfemeros = previaEfemerosQuery.data?.seriam_removidos ?? 0
+                if (purgarEfemerosAtivo && !configQuery.data?.purgar_efemeros_ativo && qtdEfemeros > 0
+                    && !confirm(`Ao ativar, ${qtdEfemeros.toLocaleString('pt-BR')} recursos com vida menor que ${purgarEfemerosDias} dia(s) serão apagados definitivamente na próxima coleta. Continuar?`)) return
                 salvarMutation.mutate()
               }}>
                 {salvarMutation.isPending ? 'Salvando...' : 'Salvar'}

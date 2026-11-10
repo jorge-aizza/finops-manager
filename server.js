@@ -8134,6 +8134,14 @@ async function ensureAzureColetaTable() {
   // auditoria — permanência é o padrão, desligado por default). Ver `_purgarRecursosExcluidos`.
   await run(`ALTER TABLE azure_inventario_config ADD COLUMN IF NOT EXISTS retencao_excluidos_ativa BOOLEAN DEFAULT false`);
   await run(`ALTER TABLE azure_inventario_config ADD COLUMN IF NOT EXISTS retencao_excluidos_dias INTEGER DEFAULT 180`);
+  // Purga de EFÊMEROS — critério diferente da retenção acima. retencao_excluidos_* apaga pela
+  // idade do REGISTRO de exclusão (há quanto tempo foi excluído). Esta apaga pelo TEMPO DE
+  // VIDA do recurso (quanto tempo ficou no ar antes de ser excluído). Medido em 2026-11 nesta
+  // base: 1,53 milhão de recursos excluídos, 99,2% com vida < 1 dia — disco, NIC e VM de
+  // autoescala nascendo e morrendo juntos. Desligado por padrão: é DELETE permanente de
+  // histórico, o usuário escolhe ativar. Ver _purgarRecursosEfemeros.
+  await run(`ALTER TABLE azure_inventario_config ADD COLUMN IF NOT EXISTS purgar_efemeros_ativo BOOLEAN DEFAULT false`);
+  await run(`ALTER TABLE azure_inventario_config ADD COLUMN IF NOT EXISTS purgar_efemeros_dias INTEGER DEFAULT 1`);
 
   // ── Governança de crescimento (2026-08-31, pedido do usuário) ────────────────────────────
   // `tags_obrigatorias` — chaves separadas por vírgula (ex: "projeto,centro_custo") checadas
@@ -11050,15 +11058,16 @@ app.post('/api/azure-inventario/config', authMiddleware, dbMiddleware, async (re
     // early-return vazio, e o corpo real daquele endpoint nunca executou em nenhum ambiente.
     // Cadeia morta ponta a ponta, não só "órfão de UI".
     // `retencao_excluidos_*` (2026-09-25): nova retenção opcional de recursos excluídos.
-    const { ativo, retencao_dias, sp_id, subscription_ids, tags_obrigatorias, retencao_excluidos_ativa, retencao_excluidos_dias } = req.body;
+    const { ativo, retencao_dias, sp_id, subscription_ids, tags_obrigatorias, retencao_excluidos_ativa, retencao_excluidos_dias, purgar_efemeros_ativo, purgar_efemeros_dias } = req.body;
     await ensureAzureColetaTable();
     let r = await pool.query(`SELECT id FROM azure_inventario_config ORDER BY id LIMIT 1`);
     if (!r.rows.length) r = await pool.query(`INSERT INTO azure_inventario_config DEFAULT VALUES RETURNING id`);
     const id = r.rows[0].id;
     await pool.query(
-      `UPDATE azure_inventario_config SET ativo=$1, retencao_dias=$2, sp_id=$3, subscription_ids=$4, tags_obrigatorias=$5, retencao_excluidos_ativa=$7, retencao_excluidos_dias=$8, atualizado_em=NOW() WHERE id=$6`,
+      `UPDATE azure_inventario_config SET ativo=$1, retencao_dias=$2, sp_id=$3, subscription_ids=$4, tags_obrigatorias=$5, retencao_excluidos_ativa=$7, retencao_excluidos_dias=$8, purgar_efemeros_ativo=$9, purgar_efemeros_dias=$10, atualizado_em=NOW() WHERE id=$6`,
       [!!ativo, Number(retencao_dias) > 0 ? Number(retencao_dias) : 180, sp_id || null, subscription_ids || null,
-       (tags_obrigatorias || '').trim() || null, id, !!retencao_excluidos_ativa, Number(retencao_excluidos_dias) > 0 ? Number(retencao_excluidos_dias) : 180]
+       (tags_obrigatorias || '').trim() || null, id, !!retencao_excluidos_ativa, Number(retencao_excluidos_dias) > 0 ? Number(retencao_excluidos_dias) : 180,
+       !!purgar_efemeros_ativo, Number(purgar_efemeros_dias) > 0 ? Number(purgar_efemeros_dias) : 1]
     );
     if (ativo) {
       _iniciarInventarioAgendador();
@@ -11091,6 +11100,27 @@ app.get('/api/azure-inventario/retencao-excluidos/previa', authMiddleware, dbMid
       total_excluidos: Number(row.total_excluidos),
       total_ativos: Number(row.total_ativos),
     });
+
+app.get('/api/azure-inventario/purgar-efemeros/previa', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const dias = Number(req.query.dias) > 0 ? Math.floor(Number(req.query.dias)) : 1;
+    const r = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE ativo = false AND excluido_em IS NOT NULL AND ${_invVidaDiasSql()} < $1) AS seriam_removidos,
+         COUNT(*) FILTER (WHERE ativo = false) AS total_excluidos,
+         COUNT(*) FILTER (WHERE ativo = true) AS total_ativos
+       FROM azure_recursos_inventario`,
+      [dias]
+    );
+    const row = r.rows[0];
+    res.json({
+      dias,
+      seriam_removidos: Number(row.seriam_removidos),
+      total_excluidos: Number(row.total_excluidos),
+      total_ativos: Number(row.total_ativos),
+    });
+  } catch (e) { _dbErr(res, e); }
+});
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -12070,6 +12100,15 @@ const _INV_DIAS_MIN_PERSISTENTE = 7;
 const _invIdadeDiasSql = (alias = '') => {
   const t = alias ? alias + '.' : '';
   return `EXTRACT(EPOCH FROM (NOW() - COALESCE(${t}criado_em, ${t}detectado_em::timestamptz))) / 86400`;
+};
+
+// Tempo de vida de um recurso JÁ EXCLUÍDO, em dias — excluido_em menos a mesma origem de
+// idade usada acima (criado_em, ou detectado_em como limite inferior). Diferente de
+// _invIdadeDiasSql: aquela mede até AGORA (vivo ou morto); esta mede até a EXCLUSÃO, só faz
+// sentido para ativo=false. Usada só pela purga de efêmeros (_purgarRecursosEfemeros).
+const _invVidaDiasSql = (alias = '') => {
+  const t = alias ? alias + '.' : '';
+  return `EXTRACT(EPOCH FROM (${t}excluido_em - COALESCE(${t}criado_em, ${t}detectado_em::timestamptz))) / 86400`;
 };
 
 const _ANOM_CRESCIMENTO_MIN_CRIACOES = 3;   // piso — evita ruído de RG que foi de 0→1 recurso/dia
@@ -16662,6 +16701,20 @@ async function _purgarRecursosExcluidos(ativa, dias) {
   if (r.rowCount > 0) _logColetaInv(`Retenção: ${r.rowCount} recurso(s) excluído(s) removido(s) do inventário (> ${d} dias)`);
 }
 
+// Purga de EFÊMEROS — critério diferente da retenção acima: apaga pelo TEMPO DE VIDA do
+// recurso (excluido_em - criado/detectado_em), não pela idade do registro de exclusão.
+// DELETE permanente — opt-in, desligado por padrão (purgar_efemeros_ativo=false).
+async function _purgarRecursosEfemeros(ativa, dias) {
+  if (!ativa) return;
+  const d = Number(dias) > 0 ? Number(dias) : 1;
+  const r = await pool.query(
+    `DELETE FROM azure_recursos_inventario
+      WHERE ativo = false AND excluido_em IS NOT NULL AND ${_invVidaDiasSql()} < $1`,
+    [d]
+  );
+  if (r.rowCount > 0) _logColetaInv(`Purga de efêmeros: ${r.rowCount} recurso(s) com vida < ${d} dia(s) removido(s) do inventário`);
+}
+
 // Resolve GUID→nome via Microsoft Graph (`directoryObjects/getByIds`, batch — até 1000 IDs
 // por chamada, resolve usuário/Service Principal/grupo numa única requisição, sem precisar
 // saber de antemão o tipo de cada um). Best-effort — chamado automaticamente ao final de
@@ -16926,6 +16979,7 @@ async function _coletarInventarioAzure(origem = 'manual') {
     );
     await _purgarAuditoriaInventario(cfg.retencao_dias);
     await _purgarRecursosExcluidos(cfg.retencao_excluidos_ativa, cfg.retencao_excluidos_dias);
+    await _purgarRecursosEfemeros(cfg.purgar_efemeros_ativo, cfg.purgar_efemeros_dias);
     // Best-effort — nunca derruba a coleta principal (já concluída e persistida acima).
     // Falha esperada até o admin conceder Directory.Read.All no Entra ID (ver
     // _graphResolveAutores); só loga, não vira status='erro' no histórico desta coleta.

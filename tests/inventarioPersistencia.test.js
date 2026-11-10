@@ -61,8 +61,10 @@ test('devolve dias, não segundos', () => {
 // tratamentos de NULL divergentes entre elas.
 test('nenhuma consulta de inventário calcula idade por fora do helper', () => {
   // Ignora o corpo do próprio helper — é lá que a conta mora legitimamente.
+  // _invVidaDiasSql (tempo de vida até a exclusão) tem a MESMA forma textual (86400 +
+  // criado_em) que este teste varre — por isso o recorte vai até o FIM dela, não da primeira.
   const ini = SRC.indexOf('const _invIdadeDiasSql')
-  const fim = SRC.indexOf('};', ini) + 2
+  const fim = SRC.indexOf('};', SRC.indexOf('const _invVidaDiasSql', ini)) + 2
   const fora = SRC.slice(0, ini) + SRC.slice(fim)
   const suspeitas = fora
     .split(/\r?\n/)

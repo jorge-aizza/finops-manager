@@ -13,7 +13,7 @@ import type {
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
-  apiFetch<AzureInventarioConfig>('GET', '/azure-inventario/config').then((c) => numFields(c, ['retencao_dias', 'retencao_excluidos_dias']))
+  apiFetch<AzureInventarioConfig>('GET', '/azure-inventario/config').then((c) => numFields(c, ['retencao_dias', 'retencao_excluidos_dias', 'purgar_efemeros_dias']))
 
 export const salvarAzureInventarioConfig = (input: AzureInventarioConfigInput) =>
   apiFetch<{ ok: boolean }>('POST', '/azure-inventario/config', input)
@@ -27,6 +27,11 @@ export interface RetencaoExcluidosPrevia {
 
 export const getRetencaoExcluidosPrevia = (dias: number) =>
   apiFetch<RetencaoExcluidosPrevia>('GET', `/azure-inventario/retencao-excluidos/previa?dias=${dias}`)
+
+// Mesmo formato de resposta da prévia de retenção acima, mas o critério é TEMPO DE VIDA
+// (excluido_em - criado/detectado_em), não idade do registro de exclusão.
+export const getPurgarEfemerosPrevia = (dias: number) =>
+  apiFetch<RetencaoExcluidosPrevia>('GET', `/azure-inventario/purgar-efemeros/previa?dias=${dias}`)
 
 export const coletarAzureInventario = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-inventario/coletar')

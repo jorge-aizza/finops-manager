@@ -16,6 +16,12 @@ export interface AzureInventarioConfig {
   // Retenção de recursos excluídos (2026-09-25): opcionalmente apagar recursos ativo=false há mais de N dias.
   retencao_excluidos_ativa: boolean
   retencao_excluidos_dias: number
+  // Purga de EFÊMEROS (2026-11-10): diferente da retenção acima — apaga pelo TEMPO DE VIDA
+  // do recurso (excluido_em - criado/detectado_em), não pela idade do registro de exclusão.
+  // Medido nesta base: 1,53 milhão de recursos excluídos, 99,2% com vida < 1 dia. DELETE
+  // permanente — desligado por padrão.
+  purgar_efemeros_ativo: boolean
+  purgar_efemeros_dias: number
   criado_em: string
   atualizado_em: string
 }
@@ -28,6 +34,8 @@ export interface AzureInventarioConfigInput {
   tags_obrigatorias: string | null
   retencao_excluidos_ativa: boolean
   retencao_excluidos_dias: number
+  purgar_efemeros_ativo: boolean
+  purgar_efemeros_dias: number
 }
 
 // Governança de crescimento (2026-08-31, pedido do usuário: "quais melhorias vc me sugere
