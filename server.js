@@ -11244,6 +11244,9 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
     }
     if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
     if (resource_group) { params.push(resource_group); where += ` AND UPPER(ri.resource_group) = UPPER($${params.length})`; }
+    // Opt-in: esconde o que ainda não cumpriu a carência. Fora disto a lista mostra tudo, com
+    // o provisório marcado — a convenção do projeto é expor o recorte, não omiti-lo.
+    if (req.query.somente_persistentes === 'true') where += ` AND ${_invIdadeDiasSql('ri')} >= ${_INV_DIAS_MIN_PERSISTENTE}`;
     if (ativo === 'true') where += ` AND ri.ativo = true`;
     else if (ativo === 'false') where += ` AND ri.ativo = false`;
     if (criado_por) { params.push('%' + criado_por + '%'); where += ` AND ri.criado_por ILIKE $${params.length}`; }
@@ -11258,7 +11261,12 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
       `SELECT ri.*,
          COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id) AND ac.publisher_type IS DISTINCT FROM 'Marketplace'), 0) AS custo_acumulado_microsoft,
          COALESCE((SELECT SUM(ac.cost_in_billing_currency) FROM azure_costs ac WHERE UPPER(ac.resource_id) = UPPER(ri.resource_id) AND ac.publisher_type = 'Marketplace'), 0) AS custo_acumulado_marketplace,
-         cac1.nome AS criado_por_nome, cac2.nome AS atualizado_por_nome, cac3.nome AS excluido_por_nome
+         cac1.nome AS criado_por_nome, cac2.nome AS atualizado_por_nome, cac3.nome AS excluido_por_nome,
+         -- Idade e veredito de persistência. A tela NÃO esconde o recurso novo: marca como
+         -- provisório, porque "não contabilizamos ainda" é diferente de "não existe". Dos
+         -- 1,53 milhão de excluídos desta base, 99,2% viveram menos de um dia.
+         FLOOR(${_invIdadeDiasSql('ri')})::int AS idade_dias,
+         (${_invIdadeDiasSql('ri')} >= ${_INV_DIAS_MIN_PERSISTENTE}) AS persistente
        FROM azure_recursos_inventario ri
        LEFT JOIN azure_autores_cache cac1 ON cac1.guid = ri.criado_por
        LEFT JOIN azure_autores_cache cac2 ON cac2.guid = ri.atualizado_por
@@ -11559,6 +11567,10 @@ async function _computeCrescimentoDetalheRaw(data_inicio, data_fim, subsFiltro =
        LEFT JOIN azure_autores_cache ac ON ac.guid = ri.criado_por
        WHERE ri.ativo = true AND ri.criado_em >= $1 AND ri.criado_em < $2::date + INTERVAL '1 day'
          AND NOT (UPPER(COALESCE(ri.resource_group,'')) = ANY($3::text[]))
+         -- Carência: sem ela o ranking premia quem roda autoescala, não quem provisiona.
+         -- Metade dos efêmeros desta base está FORA de RG gerenciado, então o filtro de RG
+         -- logo acima não dá conta sozinho.
+         AND ${_invIdadeDiasSql('ri')} >= ${_INV_DIAS_MIN_PERSISTENTE}
          ${subsFiltro ? 'AND LOWER(ri.subscription_id) = ANY($4)' : ''}
        GROUP BY 1 ORDER BY total DESC LIMIT 10`,
       subsFiltro ? [data_inicio, data_fim, rgsGerenciados, subsFiltro] : [data_inicio, data_fim, rgsGerenciados]
@@ -12037,6 +12049,29 @@ app.get('/api/azure-inventario/recurso-detalhe', authMiddleware, dbMiddleware, a
 // custo por escopo, (3) checagem de tags obrigatórias via azure_costs.tags (já coletado).
 
 const _ANOM_CRESCIMENTO_ZSCORE = 2.5;       // mesmo threshold já validado pro Databricks
+// Dias que um recurso precisa estar no ar para contar como real, e não como ruído de autoescala.
+// Medido em 2026-11 nesta base: dos 1,53 milhão de recursos já excluídos, 99,2% viveram menos
+// de um dia — disco, placa de rede e VM nascendo e morrendo juntos. Filtrar por TIPO ou por RG
+// não resolve: metade desses efêmeros está FORA de RG gerenciado.
+// 7 é o valor que já estava repetido em duas consultas e que a UI já chama de "persistente";
+// aqui vira nome para parar de divergir.
+const _INV_DIAS_MIN_PERSISTENTE = 7;
+
+// Idade do recurso em dias, para uso em SQL.
+//
+// criado_em só existe para quem foi visto NASCER pela Change Analysis. 71% do inventário ativo
+// (26.915 de 37.795) veio da reconciliação — varredura do Resource Graph — e não tem data de
+// criação. Para esses, detectado_em é o limite INFERIOR da idade: o recurso já existia quando o
+// varremos, então ele tem PELO MENOS essa idade.
+//
+// As duas consultas que tinham piso de idade descartavam NULL (uma pela comparação, outra por
+// COALESCE(...,0)), e com isso mediam 19% do parque achando que mediam tudo. O oposto — tratar
+// NULL como "sempre existiu" — inventaria idade que não temos. detectado_em é o meio certo.
+const _invIdadeDiasSql = (alias = '') => {
+  const t = alias ? alias + '.' : '';
+  return `EXTRACT(EPOCH FROM (NOW() - COALESCE(${t}criado_em, ${t}detectado_em::timestamptz))) / 86400`;
+};
+
 const _ANOM_CRESCIMENTO_MIN_CRIACOES = 3;   // piso — evita ruído de RG que foi de 0→1 recurso/dia
 const _ANOM_CRESCIMENTO_MIN_CUSTO = 50;     // piso em R$ — mesmo raciocínio de _ANOM_USER_MIN_CUSTO (Databricks)
 
@@ -12193,9 +12228,9 @@ async function _computeAnomaliasCrescimentoRaw() {
       WITH persistentes AS (
         SELECT subscription_id, DATE_TRUNC('day', CURRENT_TIMESTAMP)::DATE AS dia,
           COUNT(*) AS recursos_persistentes,
-          SUM(CASE WHEN EXTRACT(EPOCH FROM (NOW() - criado_em)) / 86400 >= 7 AND EXTRACT(EPOCH FROM (NOW() - criado_em)) / 86400 < 14 THEN 1 ELSE 0 END) AS novos_persistentes
+          SUM(CASE WHEN ${_invIdadeDiasSql()} >= ${_INV_DIAS_MIN_PERSISTENTE} AND ${_invIdadeDiasSql()} < ${_INV_DIAS_MIN_PERSISTENTE * 2} THEN 1 ELSE 0 END) AS novos_persistentes
         FROM azure_recursos_inventario
-        WHERE ativo = true AND EXTRACT(EPOCH FROM (NOW() - criado_em)) / 86400 >= 7 AND NOT UPPER(COALESCE(resource_group,'')) = ANY($3::text[])
+        WHERE ativo = true AND ${_invIdadeDiasSql()} >= ${_INV_DIAS_MIN_PERSISTENTE} AND NOT UPPER(COALESCE(resource_group,'')) = ANY($3::text[])
         GROUP BY 1, 2
       ), stats AS (
         SELECT subscription_id,
@@ -12568,7 +12603,7 @@ async function _computeConformidadePorSubscription() {
     FROM azure_recursos_inventario ri
     LEFT JOIN azure_recurso_tags t ON t.resource_id_upper = UPPER(ri.resource_id)
     WHERE ri.ativo = true
-      AND COALESCE(EXTRACT(EPOCH FROM (NOW() - ri.criado_em)) / 86400, 0) >= 7
+      AND ${_invIdadeDiasSql('ri')} >= ${_INV_DIAS_MIN_PERSISTENTE}
       AND NOT (UPPER(ri.resource_group) LIKE 'DATABRICKS-RG-%' OR UPPER(ri.resource_group) LIKE 'MANAGED-RG-%' OR UPPER(ri.resource_group) LIKE 'MC_%')
       AND t.tags IS NOT NULL
   `);
