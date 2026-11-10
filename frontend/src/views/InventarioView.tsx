@@ -1010,6 +1010,18 @@ export default function InventarioView() {
                         {r.ativo
                           ? <span style={{ color: 'var(--text-green,var(--green,#22c55e))', fontSize: 11 }}>● Ativo</span>
                           : <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={r.excluido_por ? `Excluído por ${r.excluido_por_nome || r.excluido_por} em ${fmtData(r.excluido_em)}` : ''}>○ Excluído</span>}
+                        {/* Recurso novo aparece MARCADO, não escondido: dos recursos já excluídos
+                            desta base, 99,2% viveram menos de um dia (disco, NIC e VM de autoescala
+                            nascendo e morrendo juntos), mas "ainda não contabilizamos" é diferente
+                            de "não existe". As métricas de persistência é que o deixam de fora. */}
+                        {r.ativo && !r.persistente && (
+                          <span
+                            style={{ color: 'var(--text-orange,var(--orange,#ff8c42))', fontSize: 11, marginLeft: 6 }}
+                            title={`Está no ar há ${r.idade_dias} dia(s). Recursos de autoescala costumam viver menos de um dia, então este ainda não entra nas métricas de recursos persistentes — se sobreviver, entra sozinho.`}
+                          >
+                            ⏳ provisório
+                          </span>
+                        )}
                       </td>
                       <td
                         style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--text-orange,var(--orange,#ff8c42))' : undefined }}

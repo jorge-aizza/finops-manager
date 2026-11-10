@@ -211,6 +211,14 @@ export interface AzureRecursoInventario {
   // reconciliação — recurso existe mas nunca gerou evento desde a ativação do Inventário,
   // por isso sem histórico de criação). Ver server.js, _reconciliarInventarioResourceGraph.
   origem_deteccao?: 'activity_log' | 'resource_graph'
+  // Idade em dias e veredito de carência. A idade cai em detectado_em quando criado_em falta
+  // (71% do inventário ativo vem da reconciliação e não tem data de criação) — detectado_em é
+  // o limite INFERIOR: o recurso já existia quando o Resource Graph o varreu.
+  //
+  // persistente=false NÃO esconde o recurso: a tela o marca como provisório. Dos 1,53 milhão
+  // de recursos já excluídos desta base, 99,2% viveram menos de um dia — ruído de autoescala.
+  idade_dias: number
+  persistente: boolean
 }
 
 export type AzureAuditoriaAcao = 'CRIACAO' | 'ATUALIZACAO' | 'EXCLUSAO'
