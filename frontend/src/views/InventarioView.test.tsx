@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -704,6 +704,64 @@ describe('InventarioView', () => {
     expect(await screen.findByText('vm-nova')).toBeInTheDocument()
     expect(screen.queryByText(/provisório/)).not.toBeInTheDocument()
     expect(screen.getByText('○ Excluído')).toBeInTheDocument()
+  })
+
+  // Pedido do usuário: poder ocultar recurso recém-criado (possível efêmero de autoescala) na
+  // LISTA — diferente do piso de 7 dias já usado nas métricas. Desligado por padrão: a lista
+  // mostra tudo (badge "provisório" cobre esse caso), só esconde se o usuário pedir.
+  it('não envia idade_minima_dias por padrão — nada fica escondido sem pedido', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 1, recursos: [recursoBase as never] })
+    renderWithClient()
+    await screen.findByText('vm-nova')
+    const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+    expect(chamada?.idade_minima_dias).toBeUndefined()
+  })
+
+  it('marcar "ocultar recentes" envia idade_minima_dias=3 (padrão) ao backend', async () => {
+    const user = userEvent.setup()
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 1, recursos: [recursoBase as never] })
+    renderWithClient()
+    await screen.findByText('vm-nova')
+    await user.click(screen.getByText('Filtros'))
+    await user.click(screen.getByRole('checkbox', { name: /Ocultar recursos com menos de/ }))
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBe(3)
+    })
+  })
+
+  it('o input de dias começa desabilitado e só aceita edição com o checkbox marcado', async () => {
+    const user = userEvent.setup()
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 1, recursos: [recursoBase as never] })
+    renderWithClient()
+    await screen.findByText('vm-nova')
+    await user.click(screen.getByText('Filtros'))
+    expect(screen.getByLabelText('Dias mínimos para não ocultar')).toBeDisabled()
+
+    const checkbox = screen.getByRole('checkbox', { name: /Ocultar recursos com menos de/ })
+    await user.click(checkbox)
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBe(3) // padrão, antes de qualquer edição
+    })
+
+    const dias = screen.getByLabelText('Dias mínimos para não ocultar')
+    expect(dias).toBeEnabled()
+    // fireEvent.change em vez de clear()+type(): o onChange do componente faz
+    // `Number(valor) || 3`, e limpar o campo caractere a caractere faz o fallback repor "3" no
+    // meio da digitação (valor vira "35" em vez de "5") — troca o valor inteiro de uma vez.
+    fireEvent.change(dias, { target: { value: '5' } })
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBe(5)
+    })
+
+    // Desmarcando, o filtro para de ser enviado — mesmo com o número ainda preenchido.
+    await user.click(checkbox)
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBeUndefined()
+    })
   })
 
   it('mostra o custo do Resource Group (~aproximado) na lista quando o custo direto do recurso é zero', async () => {

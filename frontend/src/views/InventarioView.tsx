@@ -504,6 +504,12 @@ export default function InventarioView() {
   const [filtroDespRgs, setFiltroDespRgs] = useState<string[]>([])
   const [filtroDespBusca, setFiltroDespBusca] = useState('')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
+  // Opt-in: esconde quem ainda não atingiu esta idade — possível efêmero de autoescala (disco,
+  // NIC e VM que nascem e morrem juntos). Desligado por padrão — a lista mostra tudo, com o
+  // provisório marcado, até o usuário pedir para esconder. Número próprio, independente do piso
+  // de 7 dias usado nas métricas (Anomalias/Conformidade/Top Criadores).
+  const [ocultarRecentes, setOcultarRecentes] = useState(false)
+  const [ocultarRecentesDias, setOcultarRecentesDias] = useState(3)
   const [filtroAcao, setFiltroAcao] = useState('')
   const [filtroTipo, setFiltroTipo] = useState('')
   const [periodoA, setPeriodoA] = useState(defaultPeriodo(60))
@@ -645,11 +651,12 @@ export default function InventarioView() {
   const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
   const historicoQuery = useQuery({ queryKey: ['azure-inv-historico'], queryFn: getAzureInventarioColetaHistorico })
   const recursosQuery = useQuery({
-    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor, escopoRecursos, selectedTenantId],
+    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor, escopoRecursos, selectedTenantId, ocultarRecentes, ocultarRecentesDias],
     queryFn: () => getAzureRecursosInventario({
       ativo: filtroAtivo === 'todos' ? undefined : filtroAtivo === 'ativos',
       criado_por: filtroCriadoPor || undefined,
       sp_id: selectedTenantId,
+      idade_minima_dias: ocultarRecentes ? ocultarRecentesDias : undefined,
       ...(escopoRecursos ? {
         subscription_id: escopoRecursos.subscription_id,
         resource_group: escopoRecursos.resource_group || undefined,
@@ -979,6 +986,18 @@ export default function InventarioView() {
               <summary>Filtros</summary>
               <div className="filter-disclosure-panel">
                 <input className="filter-input" aria-label="Filtrar por quem criou" placeholder="Filtrar por quem criou" value={filtroCriadoPor} onChange={(e) => setFiltroCriadoPor(e.target.value)} />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 8 }}>
+                  <input type="checkbox" checked={ocultarRecentes} onChange={(e) => setOcultarRecentes(e.target.checked)} style={{ width: 'auto' }} />
+                  Ocultar recursos com menos de
+                  <input
+                    type="number" min={1} value={ocultarRecentesDias}
+                    onChange={(e) => setOcultarRecentesDias(Number(e.target.value) || 3)}
+                    disabled={!ocultarRecentes}
+                    style={{ width: 48 }}
+                    aria-label="Dias mínimos para não ocultar"
+                  />
+                  dia(s) <span title="Possíveis efêmeros de autoescala (disco, NIC e VM que nascem e morrem juntos) — medido nesta base, 99,2% dos recursos já excluídos viveram menos de 1 dia. Desligado, a lista mostra tudo e marca o provisório.">ⓘ</span>
+                </label>
               </div>
             </details>
           </div>

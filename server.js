@@ -11274,9 +11274,15 @@ app.get('/api/azure-inventario/recursos', authMiddleware, dbMiddleware, async (r
     }
     if (subscription_id) { params.push(subscription_id); where += ` AND ri.subscription_id = $${params.length}`; }
     if (resource_group) { params.push(resource_group); where += ` AND UPPER(ri.resource_group) = UPPER($${params.length})`; }
-    // Opt-in: esconde o que ainda não cumpriu a carência. Fora disto a lista mostra tudo, com
-    // o provisório marcado — a convenção do projeto é expor o recorte, não omiti-lo.
-    if (req.query.somente_persistentes === 'true') where += ` AND ${_invIdadeDiasSql('ri')} >= ${_INV_DIAS_MIN_PERSISTENTE}`;
+    // Opt-in: esconde o que ainda não atingiu a idade mínima pedida pelo usuário — carência
+    // configurável NA TELA, diferente do piso fixo das métricas (_INV_DIAS_MIN_PERSISTENTE,
+    // usado em Anomalias/Conformidade/Top Criadores). Fora disto a lista mostra tudo, com o
+    // provisório marcado — a convenção do projeto é expor o recorte, não omiti-lo.
+    const idadeMinimaDias = Number(req.query.idade_minima_dias);
+    if (idadeMinimaDias > 0) {
+      params.push(idadeMinimaDias);
+      where += ` AND ${_invIdadeDiasSql('ri')} >= $${params.length}`;
+    }
     if (ativo === 'true') where += ` AND ri.ativo = true`;
     else if (ativo === 'false') where += ` AND ri.ativo = false`;
     if (criado_por) { params.push('%' + criado_por + '%'); where += ` AND ri.criado_por ILIKE $${params.length}`; }
