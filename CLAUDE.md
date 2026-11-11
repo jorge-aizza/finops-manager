@@ -51,6 +51,7 @@ Uma linha por subsistema; os detalhes (funções, tabelas, decisões) ficam no m
 | **Mailing de Comunicados** | Broadcast via relay SMTP próprio, contatos em grupos, editor visual (TipTap) com hyperlinks e tabelas editáveis, acompanhamento por destinatário | `13-MAILING` |
 | **Reservas** | Reservas e Savings Plans; cadastro manual, sync por SP, export via Storage e upload de CSV pela tela convergindo na mesma linha | `14-RESERVAS` |
 | **Wiki** | Base de conhecimento interna, busca PostgreSQL, editor TipTap e histórico de revisões | `16-WIKI` |
+| **Inventário** | Recursos Azure: novo/alterado/excluído via Resource Graph Change Analysis, autoria por Microsoft Graph, carência de dias para recurso efêmero, reconciliação semanal | `17-INVENTARIO` |
 
 ---
 
@@ -99,6 +100,13 @@ cada uma ficam no módulo indicado, não aqui.
 - **A Wiki é privada e o controle de perfil vive no backend.** `admin` e `finops` escrevem; `reader` recebe somente páginas publicadas. Não confie no botão oculto da interface como autorização.
 - **Conteúdo é JSON TipTap validado, nunca HTML arbitrário.** Preserve a allowlist de blocos/marcas e os protocolos seguros de link em `wiki.js`; não use `dangerouslySetInnerHTML` para artigos.
 - **O pool é lazy no Setup Wizard.** O router recebe `getPool`, não uma referência inicial ao `pool`, que começa `null`.
+
+**Inventário** — `MODULES/17-INVENTARIO.md`
+- **A idade de um recurso é `COALESCE(criado_em, detectado_em)`, nunca só `criado_em`.** 71% do inventário ativo veio da reconciliação e não tem data de criação — tratar NULL como "fora da métrica" mede 19% do parque achando que mede tudo. Use `_invIdadeDiasSql(alias)`.
+- **Filtrar efêmero por TIPO ou por RG gerenciado não basta.** Metade dos recursos que nascem e morrem em menos de 1 dia está FORA de RG gerenciado. O corte certo é pela carência de dias (`_INV_DIAS_MIN_PERSISTENTE`), não pelo nome do RG.
+- **Recurso em carência aparece marcado, nunca escondido.** `persistente=false` não sai da lista — vira "⏳ provisório". Omitir faria quem criou algo hoje achar que o Inventário quebrou.
+- **`atualizado_em` não mede idade nem atividade real.** A reconciliação semanal sobrescreve esse campo em todo recurso ativo, parado ou não — ele mediria "quando a reconciliação rodou".
+- **Autoria em GUID cru é permissão faltando, não bug.** Sem `Directory.Read.All` no Service Principal, o Microsoft Graph nunca é chamado — resolve-se no Entra ID, não no código.
 
 **Reservas** — `MODULES/14-RESERVAS.md`
 - **Reserva vinda de relatório precisa colidir com a mesma reserva vinda via SP, não duplicar.** Vale para o export lido do Storage e para o CSV subido pela tela — os dois usam o mesmo mapeador, que reconstrói o `azure_id` no formato da API ARM para cair no mesmo `uq_reservas_azure_id`. Via nova de importação só evita duplicar se reconstruir o MESMO formato de id.
