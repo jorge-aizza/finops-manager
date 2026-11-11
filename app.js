@@ -38,19 +38,36 @@ window.addEventListener('finops:app-view-mounted', hideAppStartupLoading);
 
 function hideLoginPageLoading() {
   const status = document.getElementById('login-page-loading');
-  if (status) status.classList.add('is-ready');
+  if (status) {
+    status.setAttribute('aria-hidden', 'true');
+    status.classList.add('is-ready');
+  }
 }
 
 function waitForLoginAssets() {
-  const pageReady = document.readyState === 'complete'
-    ? Promise.resolve()
-    : new Promise(resolve => window.addEventListener('load', resolve, { once: true }));
-  const logo = document.querySelector('#login-screen .login-logo img');
-  const logoReady = logo?.decode ? logo.decode().catch(() => {}) : Promise.resolve();
-  Promise.all([pageReady, logoReady]).then(hideLoginPageLoading);
+  const logos = [...document.querySelectorAll('#login-page-loading img, #login-screen .login-logo img')];
+  const background = new Image();
+  background.src = '/react-app/images/Finops_home.png';
+  const decode = image => image?.decode ? image.decode().catch(() => {}) : Promise.resolve();
+  return new Promise(resolve => {
+    const timeout = window.setTimeout(() => {
+      document.getElementById('login-screen')?.classList.add('login-background-fallback');
+      resolve();
+    }, 8000);
+    Promise.all([...logos, background].map(decode)).then(() => {
+      window.clearTimeout(timeout);
+      resolve();
+    });
+  });
 }
 
-waitForLoginAssets();
+const loginPageAssetsReady = waitForLoginAssets();
+
+async function finishLoginStartup() {
+  await loginPageAssetsReady;
+  hideLoginPageLoading();
+  document.documentElement.removeAttribute('data-session-restoring');
+}
 
 // ── SETUP WIZARD ──────────────────────────────
 async function checkFirstRun() {
@@ -336,6 +353,7 @@ function enterApp() {
   }
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-shell').style.display = '';
+  hideLoginPageLoading();
   document.documentElement.removeAttribute('data-session-restoring');
   const fab = document.getElementById('refresh-fab');
   if (fab) fab.style.display = 'flex';
@@ -1872,7 +1890,7 @@ async function _consumirEntraHandoff() {
       localStorage.removeItem('finops_token');
       localStorage.removeItem('finops_session');
       await checkFirstRun();
-      document.documentElement.removeAttribute('data-session-restoring');
+      await finishLoginStartup();
       return;
     }
     if (!tokFromSS) {
@@ -1883,7 +1901,7 @@ async function _consumirEntraHandoff() {
     enterApp();
   } else {
     await checkFirstRun();
-    document.documentElement.removeAttribute('data-session-restoring');
+    await finishLoginStartup();
   }
 })();
 

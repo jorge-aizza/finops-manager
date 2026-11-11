@@ -25,7 +25,7 @@ npm start                # Prod: node server.js
 | `calculadora.js` | Cost calculator logic & formulas |
 | `encrypt-env.js` | Environment variable encryption utility |
 | `frontend/` | React app (Vite) — main UI, replaces legacy |
-| `MODULES/` | Documentação detalhada por subsistema (01–16) |
+| `MODULES/` | Documentação detalhada por subsistema (01–18) |
 | `tests/` | Jest/Playwright test suite |
 | `fonts/`, `libs/` | Static assets & libraries |
 
@@ -39,11 +39,13 @@ Uma linha por subsistema; os detalhes (funções, tabelas, decisões) ficam no m
 |-----------|---------------|--------|
 | **Backend API** | Node.js + Express | `01-STARTUP`, `02-ARCHITECTURE` |
 | **Authentication** | JWT, LDAP, Entra ID | `03-AUTHENTICATION` |
+| **Tela de autenticação** | Layout de login, loader FinOps, estados e ações da tela | `18-TELA-DE-AUTENTICACAO` |
 | **Azure Integration** | Resource Manager, Cost API, Resource Graph; coleta por API e por Storage; multi-SP com coleta simultânea e filtro global de Tenant | `04-AZURE-API` |
 | **Databricks** | OAuth M2M, System Tables | `05-DATABRICKS-API` (setup não-técnico: `05-DATABRICKS-SETUP-GUIA`) |
 | **Database** | PostgreSQL, tabelas particionadas | `06-DATABASE` |
 | **Alerts** | SMTP e relay anônimo, dedup, gatilhos; liga/desliga por alerta | `07-EMAIL-ALERTS` |
 | **Frontend** | React (Vite), Strangler fig pattern | `08-FRONTEND-REACT` |
+| **Tema visual** | Tokens de cor, layout claro/escuro, logos e acessibilidade | `17-TEMA-E-VISUAL` |
 | **Cost Rules** | Fórmulas RN-* | `09-CALCULADORA` |
 | **Deployment** | Docker, PM2, systemd | `10-DEPLOYMENT` |
 | **Log Analytics FinOps** | Workspace/tabela/retenção/custo real, Diagnostic Settings, DCR, App Insights, auditoria KQL, Sentinel e Commitment Tier separados, sugestão de tier, progresso e backfill | `11-LOG-ANALYTICS` |

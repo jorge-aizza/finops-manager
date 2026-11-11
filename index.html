@@ -376,6 +376,11 @@
       background:
         linear-gradient(rgba(16,7,31,.16), rgba(16,7,31,.24)),
         url('/react-app/images/Finops_home.png') center / cover no-repeat;
+      background-color: #170d24;
+    }
+    #login-screen.login-background-fallback {
+      background-image: none;
+      background-color: #170d24;
     }
     #login-screen::before,
     #login-screen::after,
@@ -412,7 +417,6 @@
           transparent 1.5deg 9deg
         );
       border-radius: 50%;
-      animation: vivo-rotate 18s linear infinite;
       pointer-events: none;
     }
     /* Camada extra de raios mais finos e rápidos */
@@ -543,10 +547,9 @@
     #login-submit[aria-busy="true"] { gap: 9px; opacity: .84; cursor: progress; }
     #login-submit[aria-busy="true"] .login-submit-spinner { display: inline-block; }
     .login-page-loading {
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-      min-height: 20px; margin-top: 10px; color: var(--text-muted); font-size: 11px;
+      position: fixed; inset: 0; z-index: 10002; display: grid;
+      place-items: center; padding: 24px; background: var(--bg); color: var(--text);
     }
-    .login-page-loading .login-submit-spinner { display: inline-block; }
     .login-page-loading.is-ready { display: none; }
     @keyframes finops-loading-spin { to { transform: rotate(360deg); } }
     .app-startup-loading {
@@ -1226,7 +1229,18 @@
     </div>
   </div>
 
-  <!-- LOGIN SCREEN -->
+      <div id="login-page-loading" class="login-page-loading" role="status" aria-live="polite" aria-atomic="true">
+        <div class="app-startup-content">
+          <div class="app-startup-logo" aria-hidden="true">
+            <img src="/finops-logo.png" alt="" class="finops-logo topbar-logo-light" style="height:72px;width:auto;display:block;">
+            <img src="/finops-logo-dark.png" alt="" class="finops-logo topbar-logo-dark" style="height:72px;width:auto;display:none;">
+          </div>
+          <span class="app-startup-spinner" aria-hidden="true"></span>
+          <span class="app-startup-copy">Carregando a tela de autenticação...</span>
+        </div>
+      </div>
+
+      <!-- LOGIN SCREEN -->
   <div id="login-screen" class="login-screen">
     <div class="login-rays"></div>
     <div class="login-glow"></div>
@@ -1268,11 +1282,6 @@
       </div>
       <div class="login-brand">FinOps Manager</div>
       <div class="login-sub">Faça login para continuar</div>
-      <div id="login-page-loading" class="login-page-loading" role="status" aria-live="polite">
-        <span class="login-submit-spinner" aria-hidden="true"></span>
-        <span>Carregando ferramenta...</span>
-      </div>
-
       <div id="login-error" class="login-error" style="display:none"></div>
 
       <div class="form-group" style="margin-top:24px">
