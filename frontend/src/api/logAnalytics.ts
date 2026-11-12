@@ -26,6 +26,15 @@ export interface LogAnalyticsWorkspace {
   custo_mes_sentinel: number
   /** Capacidade pré-paga (Commitment Tier). Quando contratada, substitui a cobrança por GB. */
   custo_mes_commitment: number
+  /** Os mesmos quatro baldes SEM o imposto que o sistema soma na apresentação (18,65% Microsoft /
+   * 13,83% Marketplace, configurável em portal_config). É este o valor comparável ao portal da
+   * Azure e ao export de faturamento — a Azure não cobra esse imposto na fatura. Quando
+   * custo_mes_total === custo_mes_total_cru, o imposto está desligado. */
+  custo_mes_total_cru: number
+  custo_mes_ingestao_cru: number
+  custo_mes_retencao_cru: number
+  custo_mes_sentinel_cru: number
+  custo_mes_commitment_cru: number
   /** Economia REAL do período selecionado (billing de `azure_costs`, não um snapshot do "agora")
    * — vs Pay-As-You-Go pelo mesmo volume real ingerido nesse período. null = não houve cobrança
    * de Commitment Tier nesse período (não estava contratado então, mesmo que esteja hoje) —

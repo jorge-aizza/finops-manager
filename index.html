@@ -465,7 +465,10 @@
        (pulso central + raios girando), só com a opacidade reduzida — a
        mesma cor roxa dos botões (#9333ea), só que sutil sobre fundo claro
        em vez de brilho forte sobre fundo quase-preto. ── */
-    [data-theme="light"] .login-screen { background: #f0f2f5; }
+    [data-theme="light"] .login-screen {
+      background: url('/react-app/images/login-background.png') center / cover no-repeat,
+                  #f0f2f5;
+    }
     [data-theme="light"] .login-screen::before {
       background: radial-gradient(ellipse at center,
         rgba(147,51,234,.20) 0%,

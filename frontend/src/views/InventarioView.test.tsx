@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -29,6 +29,7 @@ const mockConfig: AzureInventarioConfig = {
   id: 1, ativo: true, retencao_dias: 180, sp_id: 5, subscription_ids: null,
   ultimo_evento_em: '2026-08-29T10:00:00Z', tags_obrigatorias: null, criado_em: '', atualizado_em: '',
   retencao_excluidos_ativa: false, retencao_excluidos_dias: 180,
+  purgar_efemeros_ativo: false, purgar_efemeros_dias: 1,
 }
 const mockStatus: AzureInventarioStatus = {
   em_execucao: false, iniciada_em: null,
@@ -583,7 +584,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 50,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 50,
       }],
     })
     const user = userEvent.setup()
@@ -608,7 +609,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 50,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 50,
       },
       eventos: [], custo_diario: [], custo_resource_group: 0, resource_group_recursos: 0, billing_detalhe: null,
     })
@@ -647,13 +648,120 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 123.45,
       }],
     })
     renderWithClient()
     expect(await screen.findByText('vm-teste')).toBeInTheDocument()
     expect(screen.getByText('R$ 123,45')).toBeInTheDocument()
     expect(screen.getByText('desconhecido')).toBeInTheDocument()
+  })
+
+  // O recurso novo APARECE, marcado — não some por sete dias. Dos recursos já excluídos desta
+  // base, 99,2% viveram menos de um dia, mas "ainda não contabilizamos" é diferente de "não
+  // existe": quem criou algo hoje tem que encontrar na lista.
+  const recursoBase = {
+    id: 1, subscription_id: 'sub-1',
+    resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-nova',
+    resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-nova',
+    criado_por: null, criado_em: '2026-11-10T10:00:00Z', atualizado_por: null, atualizado_em: null,
+    custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null,
+    excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-11-10T10:05:00Z',
+    custo_acumulado: 10,
+  }
+
+  it('marca como provisório o recurso que ainda não cumpriu a carência', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{ ...recursoBase, idade_dias: 1, persistente: false }],
+    })
+    renderWithClient()
+    expect(await screen.findByText('vm-nova')).toBeInTheDocument()
+    expect(screen.getByText(/provisório/)).toBeInTheDocument()
+    expect(screen.getByTitle(/no ar há 1 dia/)).toBeInTheDocument()
+  })
+
+  it('recurso que cumpriu a carência não leva marca nenhuma', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{ ...recursoBase, idade_dias: 30, persistente: true }],
+    })
+    renderWithClient()
+    expect(await screen.findByText('vm-nova')).toBeInTheDocument()
+    expect(screen.queryByText(/provisório/)).not.toBeInTheDocument()
+  })
+
+  it('recurso excluído não ganha marca de provisório, mesmo sendo novo', async () => {
+    // Já morreu: a pergunta "vai sobreviver?" não se aplica mais.
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({
+      total: 1,
+      recursos: [{
+        ...recursoBase, idade_dias: 0, persistente: false,
+        ativo: false, excluido_em: '2026-11-10T12:00:00Z', excluido_por: 'fulano',
+      }],
+    })
+    renderWithClient()
+    expect(await screen.findByText('vm-nova')).toBeInTheDocument()
+    expect(screen.queryByText(/provisório/)).not.toBeInTheDocument()
+    expect(screen.getByText('○ Excluído')).toBeInTheDocument()
+  })
+
+  // Pedido do usuário: poder ocultar recurso recém-criado (possível efêmero de autoescala) na
+  // LISTA — diferente do piso de 7 dias já usado nas métricas. Desligado por padrão: a lista
+  // mostra tudo (badge "provisório" cobre esse caso), só esconde se o usuário pedir.
+  it('não envia idade_minima_dias por padrão — nada fica escondido sem pedido', async () => {
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 1, recursos: [recursoBase as never] })
+    renderWithClient()
+    await screen.findByText('vm-nova')
+    const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+    expect(chamada?.idade_minima_dias).toBeUndefined()
+  })
+
+  it('marcar "ocultar recentes" envia idade_minima_dias=3 (padrão) ao backend', async () => {
+    const user = userEvent.setup()
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 1, recursos: [recursoBase as never] })
+    renderWithClient()
+    await screen.findByText('vm-nova')
+    await user.click(screen.getByText('Filtros'))
+    await user.click(screen.getByRole('checkbox', { name: /Ocultar recursos com menos de/ }))
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBe(3)
+    })
+  })
+
+  it('o input de dias começa desabilitado e só aceita edição com o checkbox marcado', async () => {
+    const user = userEvent.setup()
+    vi.mocked(azureInventarioApi.getAzureRecursosInventario).mockResolvedValue({ total: 1, recursos: [recursoBase as never] })
+    renderWithClient()
+    await screen.findByText('vm-nova')
+    await user.click(screen.getByText('Filtros'))
+    expect(screen.getByLabelText('Dias mínimos para não ocultar')).toBeDisabled()
+
+    const checkbox = screen.getByRole('checkbox', { name: /Ocultar recursos com menos de/ })
+    await user.click(checkbox)
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBe(3) // padrão, antes de qualquer edição
+    })
+
+    const dias = screen.getByLabelText('Dias mínimos para não ocultar')
+    expect(dias).toBeEnabled()
+    // fireEvent.change em vez de clear()+type(): o onChange do componente faz
+    // `Number(valor) || 3`, e limpar o campo caractere a caractere faz o fallback repor "3" no
+    // meio da digitação (valor vira "35" em vez de "5") — troca o valor inteiro de uma vez.
+    fireEvent.change(dias, { target: { value: '5' } })
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBe(5)
+    })
+
+    // Desmarcando, o filtro para de ser enviado — mesmo com o número ainda preenchido.
+    await user.click(checkbox)
+    await waitFor(() => {
+      const chamada = vi.mocked(azureInventarioApi.getAzureRecursosInventario).mock.calls.at(-1)?.[0]
+      expect(chamada?.idade_minima_dias).toBeUndefined()
+    })
   })
 
   it('mostra o custo do Resource Group (~aproximado) na lista quando o custo direto do recurso é zero', async () => {
@@ -663,7 +771,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-x/providers/Microsoft.Compute/disks/disco-efemero',
         resource_type: 'Microsoft.Compute/disks', resource_group: 'databricks-rg-x', nome: 'disco-efemero',
         criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 4200.9, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 0,
+        custo_resource_group: 4200.9, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 0,
       }],
     })
     renderWithClient()
@@ -768,7 +876,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 50,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 50,
       },
       eventos: [], custo_diario: [], custo_resource_group: 0, resource_group_recursos: 0, billing_detalhe: null,
     } as never)
@@ -963,7 +1071,7 @@ describe('InventarioView', () => {
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: 'c5d1363c-9e2c-434d-abfc-3470db9ecd37', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
         criado_por_nome: 'Databricks Automation SP', atualizado_por_nome: null, excluido_por_nome: null,
-        excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 0, custo_resource_group: 0,
+        excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 0, custo_resource_group: 0,
       }],
     })
     renderWithClient()
@@ -1034,7 +1142,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 123.45,
       }],
     })
     vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
@@ -1042,7 +1150,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 123.45,
       },
       eventos: [
         { id: 1, subscription_id: 'sub-1', resource_id: 'r1', resource_type: null, resource_group: null, nome: null, acao: 'CRIACAO', autor: 'joao@vivo.com.br', quando: '2026-08-20T10:00:00Z', operation_name: null, correlation_id: null, criado_em: '', autor_nome: null },
@@ -1077,7 +1185,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 123.45,
       }],
     })
     vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
@@ -1085,7 +1193,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 123.45,
       },
       eventos: [], custo_diario: [], custo_resource_group: 0, resource_group_recursos: 0, billing_detalhe: null,
     })
@@ -1116,7 +1224,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-x/providers/Microsoft.Compute/disks/disco-x',
         resource_type: 'Microsoft.Compute/disks', resource_group: 'databricks-rg-x', nome: 'disco-x',
         criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 0,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 0,
       }],
     })
     vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
@@ -1124,7 +1232,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-x/providers/Microsoft.Compute/disks/disco-x',
         resource_type: 'Microsoft.Compute/disks', resource_group: 'databricks-rg-x', nome: 'disco-x',
         criado_por: null, criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 0,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 0,
       },
       eventos: [],
       custo_diario: [],
@@ -1154,7 +1262,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 123.45,
       }],
     })
     vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
@@ -1162,7 +1270,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-teste',
         resource_type: 'Microsoft.Compute/virtualMachines', resource_group: 'rg-1', nome: 'vm-teste',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-20T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', custo_acumulado: 123.45,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-20T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 123.45,
       },
       eventos: [],
       custo_diario: [],
@@ -1185,7 +1293,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-dbw-teste/providers/Microsoft.Network/networkInterfaces/nic-efemera',
         resource_type: 'Microsoft.Network/networkInterfaces', resource_group: 'databricks-rg-dbw-teste', nome: 'nic-efemera',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-31T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-31T10:05:00Z', custo_acumulado: 0,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-31T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 0,
       }],
     })
     vi.mocked(azureInventarioApi.getAzureRecursoDetalhe).mockResolvedValue({
@@ -1193,7 +1301,7 @@ describe('InventarioView', () => {
         id: 1, subscription_id: 'sub-1', resource_id: '/subscriptions/sub-1/resourceGroups/databricks-rg-dbw-teste/providers/Microsoft.Network/networkInterfaces/nic-efemera',
         resource_type: 'Microsoft.Network/networkInterfaces', resource_group: 'databricks-rg-dbw-teste', nome: 'nic-efemera',
         criado_por: 'joao@vivo.com.br', criado_em: '2026-08-31T10:00:00Z', atualizado_por: null, atualizado_em: null,
-        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-31T10:05:00Z', custo_acumulado: 0,
+        custo_resource_group: 0, criado_por_nome: null, atualizado_por_nome: null, excluido_por_nome: null, excluido_por: null, excluido_em: null, ativo: true, detectado_em: '2026-08-31T10:05:00Z', idade_dias: 30, persistente: true, custo_acumulado: 0,
       },
       eventos: [],
       custo_diario: [],

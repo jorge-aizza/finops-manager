@@ -51,6 +51,10 @@ const wsSharedServices: LogAnalyticsWorkspace = {
   ingestao_mes_gb: 6000, recomendacoes_abertas: 1, tabelas_retencao_customizada: 2,
   custo_mes_total: 10000, custo_mes_ingestao: 3000, custo_mes_retencao: 0,
   custo_mes_sentinel: 4000, custo_mes_commitment: 3000,
+  // Cru = sem o imposto de 18,65% que o sistema soma na apresentação. Valores redondos de
+  // propósito: o que os testes checam é QUAL dos dois lados a tela usa, não a aritmética.
+  custo_mes_total_cru: 8000, custo_mes_ingestao_cru: 2400, custo_mes_retencao_cru: 0,
+  custo_mes_sentinel_cru: 3200, custo_mes_commitment_cru: 2400,
   economia_commitment_tier_periodo: 500, ingestao_media_gb_dia: 200,
   retencao_gb_faturado: 0, dias_com_gb: 30, dias_janela: 30,
 }
@@ -62,6 +66,8 @@ const wsBasic: LogAnalyticsWorkspace = {
   ingestao_mes_gb: 500, recomendacoes_abertas: 0, tabelas_retencao_customizada: 0,
   custo_mes_total: 1250, custo_mes_ingestao: 1200, custo_mes_retencao: 50,
   custo_mes_sentinel: 0, custo_mes_commitment: 0,
+  custo_mes_total_cru: 1000, custo_mes_ingestao_cru: 960, custo_mes_retencao_cru: 40,
+  custo_mes_sentinel_cru: 0, custo_mes_commitment_cru: 0,
   economia_commitment_tier_periodo: null, ingestao_media_gb_dia: 16.67,
   retencao_gb_faturado: 20, dias_com_gb: 30, dias_janela: 30,
 }
@@ -153,6 +159,9 @@ const mockTabelasResposta: LogAnalyticsTabelasResposta = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // A preferência de imposto vive em localStorage para sobreviver à navegação entre telas —
+  // e por isso vaza de um teste para o outro se não for limpa aqui.
+  localStorage.clear()
   window.showToast = vi.fn()
   vi.mocked(coletaApi.listSPs).mockResolvedValue([])
   // A barra de progresso das coletas consulta isto ao montar; sem o default a query resolve
@@ -197,6 +206,82 @@ describe('LogAnalyticsView', () => {
     expect(screen.getByText('Commitment Tier (Outubro/2026)')).toBeInTheDocument()
     expect(screen.getByText('R$ 3.000,00')).toBeInTheDocument() // custo_mes_commitment
     expect(screen.getByText('R$ 50,00')).toBeInTheDocument() // custo_mes_retencao: 0 + 50
+  })
+
+
+  // O imposto (18,65% Microsoft / 13,83% Marketplace) é somado pelo SISTEMA na apresentação — a
+  // Azure não o cobra. Sem poder desligar, nenhum número da tela é comparável ao portal, que foi
+  // a origem do "os custos não batem".
+  it('deixa alternar entre valor com imposto e valor cru, e diz qual está na tela', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('rg-shared')
+
+    // Padrão: com imposto (10000 + 1250), e o rótulo avisa.
+    expect(screen.getByText('R$ 11.250,00')).toBeInTheDocument()
+    expect(screen.getByText(/Custo \(Outubro\/2026, real · com imposto\)/)).toBeInTheDocument()
+    expect(screen.getByText(/NÃO batem com o portal da Azure/)).toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Incluir imposto'))
+
+    // Cru: 8000 + 1000 — é o que bate com o portal e com o export.
+    expect(screen.getByText('R$ 9.000,00')).toBeInTheDocument()
+    expect(screen.queryByText('R$ 11.250,00')).not.toBeInTheDocument()
+    expect(screen.getByText(/Custo \(Outubro\/2026, real · sem imposto\)/)).toBeInTheDocument()
+    expect(screen.getByText(/bate com o portal da Azure/)).toBeInTheDocument()
+  })
+
+  it('alternar o imposto troca TODOS os baldes, não só o total', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('rg-shared')
+    await user.click(screen.getByLabelText('Incluir imposto'))
+    expect(screen.getByText('R$ 3.360,00')).toBeInTheDocument() // ingestão crua: 2400 + 960
+    expect(screen.getByText('R$ 3.200,00')).toBeInTheDocument() // Sentinel cru
+    expect(screen.getByText('R$ 2.400,00')).toBeInTheDocument() // Commitment cru
+    expect(screen.getByText('R$ 40,00')).toBeInTheDocument()    // retenção crua
+  })
+
+
+  // A preferência vale para TODAS as telas de custo, não só esta: o cliente de API manda o
+  // header X-Sem-Imposto e o backend resolve no ponto único. Por isso ela persiste.
+  it('alternar o imposto grava a preferência global que as outras telas honram', async () => {
+    const user = userEvent.setup()
+    renderWithClient()
+    await screen.findByText('rg-shared')
+    expect(localStorage.getItem('finops_sem_imposto')).toBeNull()
+
+    await user.click(screen.getByLabelText('Incluir imposto'))
+    expect(localStorage.getItem('finops_sem_imposto')).toBe('1')
+
+    await user.click(screen.getByLabelText('Incluir imposto'))
+    expect(localStorage.getItem('finops_sem_imposto')).toBeNull()
+  })
+
+  it('abre já sem imposto quando a preferência global está gravada', async () => {
+    localStorage.setItem('finops_sem_imposto', '1')
+    renderWithClient()
+    await screen.findByText('rg-shared')
+    // cru: 8000 + 1000 — sem precisar clicar em nada
+    expect(screen.getByText('R$ 9.000,00')).toBeInTheDocument()
+    expect(screen.getByText(/Custo \(Outubro\/2026, real · sem imposto\)/)).toBeInTheDocument()
+  })
+
+  it('sem imposto configurado, a alternância nem aparece', async () => {
+    // cru === com imposto ⇒ nada a alternar, e o rótulo não deve insinuar que há imposto.
+    const semImposto = mockWorkspaces.map((w) => ({
+      ...w,
+      custo_mes_total: w.custo_mes_total_cru,
+      custo_mes_ingestao: w.custo_mes_ingestao_cru,
+      custo_mes_retencao: w.custo_mes_retencao_cru,
+      custo_mes_sentinel: w.custo_mes_sentinel_cru,
+      custo_mes_commitment: w.custo_mes_commitment_cru,
+    }))
+    vi.mocked(logAnalyticsApi.getLogAnalyticsWorkspaces).mockResolvedValue(semImposto)
+    renderWithClient()
+    await screen.findByText('rg-shared')
+    expect(screen.queryByLabelText('Incluir imposto')).not.toBeInTheDocument()
+    expect(screen.getByText('Custo (Outubro/2026, real)')).toBeInTheDocument()
   })
 
   it('não mostra os cards de Sentinel/Commitment Tier quando nenhum workspace tem esse custo', async () => {

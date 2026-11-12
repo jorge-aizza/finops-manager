@@ -16,6 +16,12 @@ export interface AzureInventarioConfig {
   // Retenção de recursos excluídos (2026-09-25): opcionalmente apagar recursos ativo=false há mais de N dias.
   retencao_excluidos_ativa: boolean
   retencao_excluidos_dias: number
+  // Purga de EFÊMEROS (2026-11-10): diferente da retenção acima — apaga pelo TEMPO DE VIDA
+  // do recurso (excluido_em - criado/detectado_em), não pela idade do registro de exclusão.
+  // Medido nesta base: 1,53 milhão de recursos excluídos, 99,2% com vida < 1 dia. DELETE
+  // permanente — desligado por padrão.
+  purgar_efemeros_ativo: boolean
+  purgar_efemeros_dias: number
   criado_em: string
   atualizado_em: string
 }
@@ -28,6 +34,8 @@ export interface AzureInventarioConfigInput {
   tags_obrigatorias: string | null
   retencao_excluidos_ativa: boolean
   retencao_excluidos_dias: number
+  purgar_efemeros_ativo: boolean
+  purgar_efemeros_dias: number
 }
 
 // Governança de crescimento (2026-08-31, pedido do usuário: "quais melhorias vc me sugere
@@ -211,6 +219,14 @@ export interface AzureRecursoInventario {
   // reconciliação — recurso existe mas nunca gerou evento desde a ativação do Inventário,
   // por isso sem histórico de criação). Ver server.js, _reconciliarInventarioResourceGraph.
   origem_deteccao?: 'activity_log' | 'resource_graph'
+  // Idade em dias e veredito de carência. A idade cai em detectado_em quando criado_em falta
+  // (71% do inventário ativo vem da reconciliação e não tem data de criação) — detectado_em é
+  // o limite INFERIOR: o recurso já existia quando o Resource Graph o varreu.
+  //
+  // persistente=false NÃO esconde o recurso: a tela o marca como provisório. Dos 1,53 milhão
+  // de recursos já excluídos desta base, 99,2% viveram menos de um dia — ruído de autoescala.
+  idade_dias: number
+  persistente: boolean
 }
 
 export type AzureAuditoriaAcao = 'CRIACAO' | 'ATUALIZACAO' | 'EXCLUSAO'

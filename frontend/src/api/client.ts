@@ -19,6 +19,33 @@ export function getToken(): string | null {
   return sessionStorage.getItem('finops_token') || localStorage.getItem('finops_token')
 }
 
+// Preferência de exibição de custo: COM ou SEM o imposto que o SISTEMA soma na apresentação
+// (18,65% Microsoft / 13,83% Marketplace, configurado em portal_config). A Azure não cobra
+// esse imposto — sem poder desligá-lo, nenhum número de nenhuma tela é comparável ao portal
+// nem ao export.
+//
+// Fica aqui, no cliente único, para valer em TODAS as telas de custo de uma vez: o backend
+// resolve no ponto único (_getImpostoConfig) a partir deste header.
+// localStorage por viewer e envolto em try: em janela privada o acesso pode lançar.
+const CHAVE_SEM_IMPOSTO = 'finops_sem_imposto'
+
+export function getSemImposto(): boolean {
+  try {
+    return localStorage.getItem(CHAVE_SEM_IMPOSTO) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function setSemImposto(semImposto: boolean): void {
+  try {
+    if (semImposto) localStorage.setItem(CHAVE_SEM_IMPOSTO, '1')
+    else localStorage.removeItem(CHAVE_SEM_IMPOSTO)
+  } catch {
+    /* janela privada ou storage bloqueado — a preferência vale só para esta navegação */
+  }
+}
+
 export async function apiFetch<T>(
   method: string,
   path: string,
@@ -31,6 +58,7 @@ export async function apiFetch<T>(
     const token = getToken()
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (token) headers['Authorization'] = 'Bearer ' + token
+    if (getSemImposto()) headers['X-Sem-Imposto'] = '1'
 
     const res = await fetch(API_BASE + path, {
       method,

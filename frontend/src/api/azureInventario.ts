@@ -13,7 +13,7 @@ import type {
 } from '../types/azureInventario'
 
 export const getAzureInventarioConfig = () =>
-  apiFetch<AzureInventarioConfig>('GET', '/azure-inventario/config').then((c) => numFields(c, ['retencao_dias', 'retencao_excluidos_dias']))
+  apiFetch<AzureInventarioConfig>('GET', '/azure-inventario/config').then((c) => numFields(c, ['retencao_dias', 'retencao_excluidos_dias', 'purgar_efemeros_dias']))
 
 export const salvarAzureInventarioConfig = (input: AzureInventarioConfigInput) =>
   apiFetch<{ ok: boolean }>('POST', '/azure-inventario/config', input)
@@ -27,6 +27,11 @@ export interface RetencaoExcluidosPrevia {
 
 export const getRetencaoExcluidosPrevia = (dias: number) =>
   apiFetch<RetencaoExcluidosPrevia>('GET', `/azure-inventario/retencao-excluidos/previa?dias=${dias}`)
+
+// Mesmo formato de resposta da prévia de retenção acima, mas o critério é TEMPO DE VIDA
+// (excluido_em - criado/detectado_em), não idade do registro de exclusão.
+export const getPurgarEfemerosPrevia = (dias: number) =>
+  apiFetch<RetencaoExcluidosPrevia>('GET', `/azure-inventario/purgar-efemeros/previa?dias=${dias}`)
 
 export const coletarAzureInventario = () =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-inventario/coletar')
@@ -59,6 +64,10 @@ export interface AzureRecursosFiltros {
   excluir_gerenciados?: boolean
   /** Filtro de Tenant: as SPs não compartilham assinaturas, então o backend recorta por `subscription_id`. */
   sp_id?: number | null
+  /** Opt-in: esconde quem ainda não atingiu esta idade (dias) — possível efêmero de autoescala.
+   * Independente do piso de 7 dias usado nas métricas (Anomalias/Conformidade/Top Criadores):
+   * aqui é o usuário quem escolhe o número, na tela, só para esta lista. */
+  idade_minima_dias?: number
 }
 export const getAzureRecursosInventario = (filtros?: AzureRecursosFiltros) => {
   const q = new URLSearchParams()
@@ -70,6 +79,7 @@ export const getAzureRecursosInventario = (filtros?: AzureRecursosFiltros) => {
   if (filtros?.data_inicio) q.set('data_inicio', filtros.data_inicio)
   if (filtros?.data_fim) q.set('data_fim', filtros.data_fim)
   if (filtros?.sp_id) q.set('sp_id', String(filtros.sp_id))
+  if (filtros?.idade_minima_dias) q.set('idade_minima_dias', String(filtros.idade_minima_dias))
   const qs = q.toString()
   return apiFetch<{ total: number; recursos: AzureRecursoInventario[] }>('GET', '/azure-inventario/recursos' + (qs ? '?' + qs : '')).then((r) => ({
     ...r,

@@ -6,7 +6,7 @@ import { listSPs } from '../api/coleta'
 import { listSubscriptions } from '../api/calculadora'
 import { setInventarioTabListener } from '../bridge'
 import {
-  getAzureInventarioConfig, salvarAzureInventarioConfig, getRetencaoExcluidosPrevia, coletarAzureInventario, getAzureInventarioStatus,
+  getAzureInventarioConfig, salvarAzureInventarioConfig, getRetencaoExcluidosPrevia, getPurgarEfemerosPrevia, coletarAzureInventario, getAzureInventarioStatus,
   getAzureInventarioColetaHistorico, limparAzureInventarioColetaHistorico,
   getAzureRecursosInventario, getAzureAuditoriaEventos, getAzureInventarioComparativo,
   resolverAutoresInventario, getAzureResumoPorAssinatura, reconciliarAzureInventario,
@@ -504,6 +504,12 @@ export default function InventarioView() {
   const [filtroDespRgs, setFiltroDespRgs] = useState<string[]>([])
   const [filtroDespBusca, setFiltroDespBusca] = useState('')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
+  // Opt-in: esconde quem ainda não atingiu esta idade — possível efêmero de autoescala (disco,
+  // NIC e VM que nascem e morrem juntos). Desligado por padrão — a lista mostra tudo, com o
+  // provisório marcado, até o usuário pedir para esconder. Número próprio, independente do piso
+  // de 7 dias usado nas métricas (Anomalias/Conformidade/Top Criadores).
+  const [ocultarRecentes, setOcultarRecentes] = useState(false)
+  const [ocultarRecentesDias, setOcultarRecentesDias] = useState(3)
   const [filtroAcao, setFiltroAcao] = useState('')
   const [filtroTipo, setFiltroTipo] = useState('')
   const [periodoA, setPeriodoA] = useState(defaultPeriodo(60))
@@ -645,11 +651,12 @@ export default function InventarioView() {
   const subsQuery = useQuery({ queryKey: ['calc-subscriptions'], queryFn: listSubscriptions })
   const historicoQuery = useQuery({ queryKey: ['azure-inv-historico'], queryFn: getAzureInventarioColetaHistorico })
   const recursosQuery = useQuery({
-    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor, escopoRecursos, selectedTenantId],
+    queryKey: ['azure-inv-recursos', filtroAtivo, filtroCriadoPor, escopoRecursos, selectedTenantId, ocultarRecentes, ocultarRecentesDias],
     queryFn: () => getAzureRecursosInventario({
       ativo: filtroAtivo === 'todos' ? undefined : filtroAtivo === 'ativos',
       criado_por: filtroCriadoPor || undefined,
       sp_id: selectedTenantId,
+      idade_minima_dias: ocultarRecentes ? ocultarRecentesDias : undefined,
       ...(escopoRecursos ? {
         subscription_id: escopoRecursos.subscription_id,
         resource_group: escopoRecursos.resource_group || undefined,
@@ -704,6 +711,8 @@ export default function InventarioView() {
   const [tagsObrigatorias, setTagsObrigatorias] = useState('')
   const [retencaoExcluidosAtiva, setRetencaoExcluidosAtiva] = useState(false)
   const [retencaoExcluidosDias, setRetencaoExcluidosDias] = useState(180)
+  const [purgarEfemerosAtivo, setPurgarEfemerosAtivo] = useState(false)
+  const [purgarEfemerosDias, setPurgarEfemerosDias] = useState(1)
   const [spId, setSpId] = useState<number | null>(null)
   const [formInicializado, setFormInicializado] = useState(false)
   if (configQuery.data && !formInicializado) {
@@ -712,6 +721,8 @@ export default function InventarioView() {
     setTagsObrigatorias(configQuery.data.tags_obrigatorias || '')
     setRetencaoExcluidosAtiva(configQuery.data.retencao_excluidos_ativa)
     setRetencaoExcluidosDias(configQuery.data.retencao_excluidos_dias)
+    setPurgarEfemerosAtivo(configQuery.data.purgar_efemeros_ativo)
+    setPurgarEfemerosDias(configQuery.data.purgar_efemeros_dias)
     setSpId(configQuery.data.sp_id)
     setFormInicializado(true)
   }
@@ -722,6 +733,12 @@ export default function InventarioView() {
     enabled: tab === 'config' && retencaoExcluidosDias > 0,
   })
 
+  const previaEfemerosQuery = useQuery({
+    queryKey: ['azure-inv-purgar-efemeros-previa', purgarEfemerosDias],
+    queryFn: () => getPurgarEfemerosPrevia(purgarEfemerosDias),
+    enabled: tab === 'config' && purgarEfemerosDias > 0,
+  })
+
   const salvarMutation = useMutation({
     mutationFn: () => salvarAzureInventarioConfig({
       ativo, retencao_dias: retencaoDias, sp_id: spId,
@@ -729,6 +746,8 @@ export default function InventarioView() {
       tags_obrigatorias: tagsObrigatorias.trim() || null,
       retencao_excluidos_ativa: retencaoExcluidosAtiva,
       retencao_excluidos_dias: retencaoExcluidosDias,
+      purgar_efemeros_ativo: purgarEfemerosAtivo,
+      purgar_efemeros_dias: purgarEfemerosDias,
     }),
     onSuccess: () => {
       window.showToast?.('Configuração salva.', 'success')
@@ -967,6 +986,18 @@ export default function InventarioView() {
               <summary>Filtros</summary>
               <div className="filter-disclosure-panel">
                 <input className="filter-input" aria-label="Filtrar por quem criou" placeholder="Filtrar por quem criou" value={filtroCriadoPor} onChange={(e) => setFiltroCriadoPor(e.target.value)} />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 8 }}>
+                  <input type="checkbox" checked={ocultarRecentes} onChange={(e) => setOcultarRecentes(e.target.checked)} style={{ width: 'auto' }} />
+                  Ocultar recursos com menos de
+                  <input
+                    type="number" min={1} value={ocultarRecentesDias}
+                    onChange={(e) => setOcultarRecentesDias(Number(e.target.value) || 3)}
+                    disabled={!ocultarRecentes}
+                    style={{ width: 48 }}
+                    aria-label="Dias mínimos para não ocultar"
+                  />
+                  dia(s) <span title="Possíveis efêmeros de autoescala (disco, NIC e VM que nascem e morrem juntos) — medido nesta base, 99,2% dos recursos já excluídos viveram menos de 1 dia. Desligado, a lista mostra tudo e marca o provisório.">ⓘ</span>
+                </label>
               </div>
             </details>
           </div>
@@ -1010,6 +1041,18 @@ export default function InventarioView() {
                         {r.ativo
                           ? <span style={{ color: 'var(--text-green,var(--green,#22c55e))', fontSize: 11 }}>● Ativo</span>
                           : <span style={{ color: 'var(--text-muted)', fontSize: 11 }} title={r.excluido_por ? `Excluído por ${r.excluido_por_nome || r.excluido_por} em ${fmtData(r.excluido_em)}` : ''}>○ Excluído</span>}
+                        {/* Recurso novo aparece MARCADO, não escondido: dos recursos já excluídos
+                            desta base, 99,2% viveram menos de um dia (disco, NIC e VM de autoescala
+                            nascendo e morrendo juntos), mas "ainda não contabilizamos" é diferente
+                            de "não existe". As métricas de persistência é que o deixam de fora. */}
+                        {r.ativo && !r.persistente && (
+                          <span
+                            style={{ color: 'var(--text-orange,var(--orange,#ff8c42))', fontSize: 11, marginLeft: 6 }}
+                            title={`Está no ar há ${r.idade_dias} dia(s). Recursos de autoescala costumam viver menos de um dia, então este ainda não entra nas métricas de recursos persistentes — se sobreviver, entra sozinho.`}
+                          >
+                            ⏳ provisório
+                          </span>
+                        )}
                       </td>
                       <td
                         style={{ textAlign: 'right', fontWeight: 700, color: usaFallbackRg ? 'var(--text-orange,var(--orange,#ff8c42))' : undefined }}
@@ -1961,10 +2004,29 @@ export default function InventarioView() {
                   </div>
                 )}
               </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={purgarEfemerosAtivo} onChange={(e) => setPurgarEfemerosAtivo(e.target.checked)} style={{ width: 'auto', flexShrink: 0 }} />
+                Apagar definitivamente recursos que viveram menos de N dias (efêmeros)
+              </label>
+              <div className="form-group" style={{ margin: 0, opacity: purgarEfemerosAtivo ? 1 : 0.5, pointerEvents: purgarEfemerosAtivo ? 'auto' : 'none' }}>
+                <label>Dias de vida mínimos para o recurso ser preservado</label>
+                <input type="number" min={1} value={purgarEfemerosDias} onChange={(e) => setPurgarEfemerosDias(Number(e.target.value) || 1)} style={{ maxWidth: 120 }} disabled={!purgarEfemerosAtivo} />
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Critério diferente da retenção acima: olha quanto tempo o recurso ficou NO AR antes de ser excluído, não há quanto tempo foi excluído. Pensado para discos, placas de rede e VMs de autoescala que nascem e morrem em minutos — medido nesta base, 99,2% dos recursos já excluídos viveram menos de 1 dia. Nunca toca em recursos ativos.
+                </div>
+                {previaEfemerosQuery.data && (
+                  <div style={{ fontSize: 12, marginTop: 6, color: previaEfemerosQuery.data.seriam_removidos > 0 ? 'var(--danger, #d32f2f)' : 'var(--text-muted)' }}>
+                    Com vida {"<"} {previaEfemerosQuery.data.dias} dia(s): <strong>{previaEfemerosQuery.data.seriam_removidos.toLocaleString('pt-BR')}</strong> de {previaEfemerosQuery.data.total_excluidos.toLocaleString('pt-BR')} recursos excluídos seriam removidos na próxima coleta. Ativos ({previaEfemerosQuery.data.total_ativos.toLocaleString('pt-BR')}) não são afetados.
+                  </div>
+                )}
+              </div>
               <button className="btn-primary" style={{ alignSelf: 'flex-start' }} disabled={salvarMutation.isPending} onClick={() => {
                 const qtd = previaExcluidosQuery.data?.seriam_removidos ?? 0
                 if (retencaoExcluidosAtiva && !configQuery.data?.retencao_excluidos_ativa && qtd > 0
                     && !confirm(`Ao ativar, ${qtd.toLocaleString('pt-BR')} recursos excluídos há mais de ${retencaoExcluidosDias} dias serão apagados definitivamente na próxima coleta. Continuar?`)) return
+                const qtdEfemeros = previaEfemerosQuery.data?.seriam_removidos ?? 0
+                if (purgarEfemerosAtivo && !configQuery.data?.purgar_efemeros_ativo && qtdEfemeros > 0
+                    && !confirm(`Ao ativar, ${qtdEfemeros.toLocaleString('pt-BR')} recursos com vida menor que ${purgarEfemerosDias} dia(s) serão apagados definitivamente na próxima coleta. Continuar?`)) return
                 salvarMutation.mutate()
               }}>
                 {salvarMutation.isPending ? 'Salvando...' : 'Salvar'}

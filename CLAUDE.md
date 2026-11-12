@@ -53,6 +53,7 @@ Uma linha por subsistema; os detalhes (funções, tabelas, decisões) ficam no m
 | **Mailing de Comunicados** | Broadcast via relay SMTP próprio, contatos em grupos, editor visual (TipTap) com hyperlinks e tabelas editáveis, acompanhamento por destinatário | `13-MAILING` |
 | **Reservas** | Reservas e Savings Plans; cadastro manual, sync por SP, export via Storage e upload de CSV pela tela convergindo na mesma linha | `14-RESERVAS` |
 | **Wiki** | Base de conhecimento interna, busca PostgreSQL, editor TipTap e histórico de revisões | `16-WIKI` |
+| **Inventário** | Recursos Azure: novo/alterado/excluído via Resource Graph Change Analysis, autoria por Microsoft Graph, carência de dias para recurso efêmero, reconciliação semanal | `17-INVENTARIO` |
 
 ---
 
@@ -67,6 +68,12 @@ cada uma ficam no módulo indicado, não aqui.
 - **Atribuição de SP é por `subscription_id`, nunca por `sp_id`.** `azure_costs` não tem coluna de SP.
 - **Coletas simultâneas: estado por execução, não global.** `_coletasEmExecucao` é um Map (`api:7`, `storage:3`); os getters globais resolvem para a PRIMEIRA entrada. Passe `progresso`/`isCancelada` por parâmetro — `_logColeta(msg, progresso)` exige o 2º argumento.
 - **`azure_price_list` está inteiro em USD** (`retail_price_brl` é NULL nas 546 mil linhas). Nunca escreva "R$" na frente de `retail_price`; o catálogo só serve para a FORMA da escada de preço, a escala vem da fatura.
+- **A unidade de verdade da ingestão é o RELATÓRIO do período, não a linha.** Nunca deduplique `azure_costs` por chave natural: a Azure emite linhas legítimas diferentes que coincidem em (assinatura, recurso, dia, medidor, `charge_type`, `quantity`), e um `ON CONFLICT DO UPDATE` sobre elas **apaga custo real em silêncio** (com `DO UPDATE` o `rowCount` é sempre 1 — nenhum contador acusa). Medido: R$ 12.518 em 1.118 linhas numa assinatura/mês. Quem evita duplicata é o DELETE do escopo antes de inserir (`_apagarSnapshotAnterior`), não chave única.
+- **Toda via de ingestão apaga o escopo antes de inserir, e confere depois.** API por (assinatura, período do chunk), Storage e upload manual por `arquivo_origem`. O DELETE só roda se o relatório trouxe linha — `_gerarRelatorioAPI` devolve `[]` em "sem dados" SEM lançar, e apagar aí destrói dado bom sem repor. Com `rgFilter` ativo o DELETE usa o MESMO recorte, senão apaga o que a importação não vai restaurar.
+- **Se o total do arquivo não bater com o gravado, a importação avisa.** É o único detector dessa classe de perda; sem ele só comparando com o portal, assinatura por assinatura.
+- **Breaker aberto não gasta tentativa de `_comRetentativa`.** A janela do breaker é de 5 min e as 3 tentativas somam 90s: sem isso a assinatura é abandonada sem nunca ter sido consultada (foi como 75 das 107 ficaram sem dado em nov/2026). E coletas de custo são serializadas numa fila — o breaker é por FAMÍLIA de API, não por SP, então dois SPs simultâneos se derrubam.
+- **`status='concluido'` não prova completude** — cancelamento sai por `break`, não pelo catch. Coleta que perdeu assinatura grava `parcial` com a lista.
+- **DDL em `azure_costs` no startup entra na fila atrás de leitor longo.** `ADD COLUMN IF NOT EXISTS` pede ACCESS EXCLUSIVE mesmo quando a coluna já existe — cheque o catálogo antes. Para índice, use `DROP INDEX CONCURRENTLY`.
 
 **Log Analytics** — `MODULES/11-LOG-ANALYTICS.md`
 - **Pedir período maior que a retenção NÃO dá erro — devolve vazio.** Toda janela parametrizável passa pelo clamp de `_laRetencaoTabela()` antes de sair. Use `retencao_dias`, nunca `retencao_total_dias`. Clamp do volume é por workspace; o da atribuição por recurso é por TABELA.
@@ -95,6 +102,13 @@ cada uma ficam no módulo indicado, não aqui.
 - **A Wiki é privada e o controle de perfil vive no backend.** `admin` e `finops` escrevem; `reader` recebe somente páginas publicadas. Não confie no botão oculto da interface como autorização.
 - **Conteúdo é JSON TipTap validado, nunca HTML arbitrário.** Preserve a allowlist de blocos/marcas e os protocolos seguros de link em `wiki.js`; não use `dangerouslySetInnerHTML` para artigos.
 - **O pool é lazy no Setup Wizard.** O router recebe `getPool`, não uma referência inicial ao `pool`, que começa `null`.
+
+**Inventário** — `MODULES/17-INVENTARIO.md`
+- **A idade de um recurso é `COALESCE(criado_em, detectado_em)`, nunca só `criado_em`.** 71% do inventário ativo veio da reconciliação e não tem data de criação — tratar NULL como "fora da métrica" mede 19% do parque achando que mede tudo. Use `_invIdadeDiasSql(alias)`.
+- **Filtrar efêmero por TIPO ou por RG gerenciado não basta.** Metade dos recursos que nascem e morrem em menos de 1 dia está FORA de RG gerenciado. O corte certo é pela carência de dias (`_INV_DIAS_MIN_PERSISTENTE`), não pelo nome do RG.
+- **Recurso em carência aparece marcado, nunca escondido.** `persistente=false` não sai da lista — vira "⏳ provisório". Omitir faria quem criou algo hoje achar que o Inventário quebrou.
+- **`atualizado_em` não mede idade nem atividade real.** A reconciliação semanal sobrescreve esse campo em todo recurso ativo, parado ou não — ele mediria "quando a reconciliação rodou".
+- **Autoria em GUID cru é permissão faltando, não bug.** Sem `Directory.Read.All` no Service Principal, o Microsoft Graph nunca é chamado — resolve-se no Entra ID, não no código.
 
 **Reservas** — `MODULES/14-RESERVAS.md`
 - **Reserva vinda de relatório precisa colidir com a mesma reserva vinda via SP, não duplicar.** Vale para o export lido do Storage e para o CSV subido pela tela — os dois usam o mesmo mapeador, que reconstrói o `azure_id` no formato da API ARM para cair no mesmo `uq_reservas_azure_id`. Via nova de importação só evita duplicar se reconstruir o MESMO formato de id.

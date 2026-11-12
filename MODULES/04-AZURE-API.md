@@ -164,3 +164,91 @@ Coisas que já custaram bug em produção. O índice resumido de todas fica em `
 
 **`azure_price_list` está inteiro em USD — `retail_price_brl` é NULL nas 546 mil linhas.**
 Nunca escreva "R$" na frente de `retail_price`. Esta conta tem desconto de contrato muito abaixo da tabela pública (medido: ~31% na ingestão, ~68% no Sentinel), então o catálogo só serve para a **forma** da escada de preço; a escala vem da fatura (ver `_sugerirCommitmentTier`, que calibra pelo preço real por GB).
+
+## Ingestão de custo: substituição de snapshot (2026-11-10)
+
+O custo exibido não batia com o portal. Validado contra 4 assinaturas em outubro/2026 (valores
+crus, sem o imposto da apresentação): o sistema estava **+9,36%** acima no agregado, uma delas
++25,8%. Depois das correções as quatro fecham **ao centavo**.
+
+Eram dois defeitos independentes, em direções opostas — por isso a divergência era errática.
+
+### 1. Linha legítima descartada na gravação
+
+`idx_azure_costs_dedup` era único em `(subscription_id, resource_id, cost_date, meter_id,
+charge_type, quantity)`. O relatório da Azure traz linhas **diferentes** que coincidem nesses seis
+campos, e o `ON CONFLICT DO UPDATE` fazia a segunda sobrescrever a primeira.
+
+Invisível por construção: com `DO UPDATE` o `rowCount` é sempre 1, então `ins`/`upd` e o contador
+de erro ficavam mudos. A prova veio instrumentando a importação:
+
+```
+⚠ edf81567: relatório R$ 315.118,81 × gravado R$ 302.600,37
+   — PERDA de R$ 12.518,45 em 1.118 linha(s)
+```
+
+R$ 315.118,81 é exatamente o que o portal mostra. O dado chegava correto e era descartado por nós.
+
+**O índice foi removido** e as coletas usam `INSERT` puro.
+
+### 2. Snapshots acumulados
+
+`granularidade_dias = 7` com execução diária: cada dia era recoletado ~7 vezes. A Azure revisa a
+quantidade enquanto o billing amadurece e nenhuma via apagava o snapshot anterior, então as
+revisões viravam linhas novas que se somavam. Caso real (13/10, mesmo recurso, mesmo medidor,
+preço 3,289): três linhas de três importações, 148,7 / 238,8 / 248,9 de quantidade — correto era
+R$ 4.272,49, somado dava R$ 10.925,56. Total medido: **2,46 M linhas, R$ 6,41 mi em 4 meses**.
+
+### Por que NÃO se resolve com chave natural
+
+Testado contra o banco e descartado:
+
+| Chave testada | Linhas da MESMA importação que seriam apagadas | Custo real perdido |
+|---|---|---|
+| `+unit_price +pricing_model` | 430.244 | R$ 606.355 |
+| `+additional_info` (md5) | 266.086 | R$ 403.524 |
+
+Em 93% dos grupos restantes **nenhuma** coluna distingue as linhas (testados `meter_sub_category`,
+`effective_price`, `resource_name`, `service_info2`, `billing_period`, `invoice_id` — todos variam
+em zero grupos). "Última importação por (assinatura, dia)" também é destrutivo: daria R$ 71 mil
+onde o portal diz R$ 252 mil.
+
+**A unidade de verdade é o relatório do período, não a linha.**
+
+### Como funciona agora
+
+`_apagarSnapshotAnterior` apaga o escopo **entre o download e a inserção** — os blobs já estão em
+disco, então a janela sem dado é curta e a retentativa reapaga e reinsere, autocorretiva. Escopo
+por via: API = (assinatura, período do chunk); Storage e upload manual = `arquivo_origem`.
+
+Guardas que não podem sair:
+- **Só apaga se o relatório trouxe arquivo.** `_gerarRelatorioAPI` devolve `[]` em 404/204/
+  `NoDataFound` SEM lançar; apagar aí destrói dado bom e não repõe nada.
+- **Com `rgFilter` ativo o DELETE aplica o MESMO filtro**, senão apaga o que não será restaurado.
+- **Usa as strings `chunk.start`/`chunk.end`**, nunca datas reconstruídas (`_splitDateRange` tem
+  dependência implícita de fuso).
+
+### Conferência permanente
+
+As três vias comparam o total que o arquivo traz com o que ficou gravado e alertam na diferença.
+Foi esse detector que produziu a prova acima — sem ele a perda só aparece comparando com o portal,
+uma assinatura por vez.
+
+### Coleta que não terminava
+
+75 das 107 assinaturas ficaram sem nenhum dado em novembro/2026. Causa: os dois SPs disparavam no
+mesmo tick, tomavam 429, e três falhas abriam o breaker da família `custo` inteira
+(`azureThrottle.js`, `openMs` 5 min). `_comRetentativa` gastava as 3 tentativas em 30s+60s **dentro
+da janela**, e a assinatura era abandonada sem nunca ter sido consultada.
+
+Agora: espera do breaker não consome tentativa; coletas de custo são serializadas numa fila (o
+breaker é por família, não por SP); `maxPausaMs` subiu de 2 para 5 min para não truncar o
+`Retry-After`; e coleta incompleta grava `status='parcial'` com as assinaturas que faltaram —
+`concluido` não provava completude, porque cancelamento sai por `break`, não pelo catch.
+
+### Aplicar numa base com dados
+
+A correção **não conserta linha já gravada** — só muda como se grava. Mas não precisa truncar:
+recoletar um (assinatura, mês) substitui no lugar. Atenção ao efeito colateral: com janela de 7
+dias, os dias recentes se autocuram a cada coleta e o histórico não, então meses antigos continuam
+errados até serem recoletados explicitamente.

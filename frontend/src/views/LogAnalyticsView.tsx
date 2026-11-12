@@ -15,6 +15,7 @@ import CmsMultiSelect from '../components/CmsMultiSelect'
 import LogAnalyticsProgressoBar from '../components/LogAnalyticsProgressoBar'
 import { TenantSelector } from '../components/TenantSelector'
 import { useTenantFilter } from '../contexts/TenantFilterContext'
+import { getSemImposto, setSemImposto } from '../api/client'
 
 // v1 (2026-09-29): descoberta de workspaces + ingestão diária por tabela + as 5 regras do
 // motor de FinOps + export Excel. v1.1 (mesmo dia): retenção por tabela (ARM Tables - List) +
@@ -133,6 +134,10 @@ export default function LogAnalyticsView() {
   // banco (painel, rankings e exports), não sobre a resposta já agregada.
   const [workspaceFiltro, setWorkspaceFiltro] = useState<string[]>([])
   const [baldeAberto, setBaldeAberto] = useState<string | null>(null)
+  // Padrão é COM imposto (é o custo real para a empresa); desligar dá o número que bate com o
+  // portal da Azure e com o export. Estado inicial vem da preferência global para a escolha
+  // sobreviver à navegação entre telas.
+  const [mostrarComImposto, setMostrarComImposto] = useState(() => !getSemImposto())
   const detalheRef = useRef<HTMLDivElement>(null)
   const coletaIniciadaEmRef = useRef<string | null>(null)
   const aguardandoColetaRef = useRef(false)
@@ -419,12 +424,23 @@ export default function LogAnalyticsView() {
   // menos dias. É a diferença entre não poder responder e responder com menos confiança.
   const gbMediaExibida = gbParcial && diasComGb > 0 ? gbIngerido / diasComGb : gbMediaDia
 
-  const custoTotal = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_total) || 0), 0)
-  const custoIngestao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_ingestao) || 0), 0)
-  const custoRetencao = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_retencao) || 0), 0)
+  // Imposto: o sistema soma 18,65% (Microsoft) / 13,83% (Marketplace) na APRESENTAÇÃO — a Azure
+  // não cobra isso na fatura. Sem poder desligar, nenhum número da tela é comparável ao portal
+  // nem ao export, e a conferência fica impossível. O backend devolve os dois lados.
+  const impostoAtivo = workspacesExibidos.some(
+    (w) => Number(w.custo_mes_total) !== Number(w.custo_mes_total_cru)
+  )
+  const soma = (comImpostoCampo: keyof LogAnalyticsWorkspace, cruCampo: keyof LogAnalyticsWorkspace) =>
+    workspacesExibidos.reduce(
+      (a, w) => a + (Number(w[mostrarComImposto ? comImpostoCampo : cruCampo]) || 0),
+      0
+    )
+  const custoTotal = soma('custo_mes_total', 'custo_mes_total_cru')
+  const custoIngestao = soma('custo_mes_ingestao', 'custo_mes_ingestao_cru')
+  const custoRetencao = soma('custo_mes_retencao', 'custo_mes_retencao_cru')
   // Sentinel e capacidade pré-paga vinham somados dentro de "ingestão" e sumiam do radar.
-  const custoSentinel = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_sentinel) || 0), 0)
-  const custoCommitment = workspacesExibidos.reduce((a, w) => a + (Number(w.custo_mes_commitment) || 0), 0)
+  const custoSentinel = soma('custo_mes_sentinel', 'custo_mes_sentinel_cru')
+  const custoCommitment = soma('custo_mes_commitment', 'custo_mes_commitment_cru')
   const tabelasCustomizadas = workspacesExibidos.reduce((a, w) => a + (Number(w.tabelas_retencao_customizada) || 0), 0)
   const economiaCommitmentTier = workspacesExibidos.reduce((a, w) => a + (Number(w.economia_commitment_tier_periodo) || 0), 0)
   const mesLabel = resumoQuery.data?.mes_label || mesOpcoes().find((o) => o.value === mes)?.label || mes
@@ -552,9 +568,35 @@ export default function LogAnalyticsView() {
           usuário clica. Não renderiza nada quando não há execução recente. */}
       <LogAnalyticsProgressoBar />
 
+      {impostoAtivo && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 10px', fontSize: 13 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={mostrarComImposto}
+              onChange={(e) => {
+                setMostrarComImposto(e.target.checked)
+                // Esta tela alterna na hora, pelos campos _cru que o backend já devolve. As
+                // DEMAIS telas de custo honram a preferência global no próximo fetch — por isso
+                // o mesmo controle grava as duas coisas: um controle, resultado coerente em
+                // todo o sistema.
+                setSemImposto(!e.target.checked)
+              }}
+            />
+            <span>Incluir imposto</span>
+          </label>
+          <span style={{ color: 'var(--text-muted)' }}>
+            {mostrarComImposto
+              ? 'Valores com o imposto que o sistema adiciona — NÃO batem com o portal da Azure.'
+              : 'Valores crus da fatura — é o que bate com o portal da Azure e com o export.'}
+          </span>
+        </div>
+      )}
       <div className="stats-grid-5">
         <div className="stat-card accent">
-          <div className="stat-label">Custo ({mesLabel}, real)</div>
+          <div className="stat-label">
+            Custo ({mesLabel}, real{impostoAtivo ? (mostrarComImposto ? ' · com imposto' : ' · sem imposto') : ''})
+          </div>
           <div className="stat-value">{fmtBRL(custoTotal)}</div>
         </div>
         <div className="stat-card">
