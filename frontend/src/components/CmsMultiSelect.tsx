@@ -22,6 +22,7 @@ interface CmsMultiSelectProps {
   searchPlaceholder: string
   triggerLabel: string
   loading?: boolean
+  allowCustomValues?: boolean
   onChange: (values: string[]) => void
   // Conteúdo extra mostrado no lugar de "Nenhum resultado" quando `options`
   // (não `filtered`) está vazio — ou seja, quando não há dados nenhum, não
@@ -37,6 +38,7 @@ export default function CmsMultiSelect({
   searchPlaceholder,
   triggerLabel,
   loading,
+  allowCustomValues = false,
   onChange,
   emptyState,
 }: CmsMultiSelectProps) {
@@ -107,6 +109,9 @@ export default function CmsMultiSelect({
   const filtered = search
     ? options.filter((o) => o.label.toLowerCase().includes(search.toLowerCase()))
     : options
+  const customValue = search.trim()
+  const showCustomValue = allowCustomValues && !!customValue
+    && !options.some((o) => o.value.toLowerCase() === customValue.toLowerCase())
 
   return (
     <div className="cms-wrap" ref={wrapRef}>
@@ -135,21 +140,34 @@ export default function CmsMultiSelect({
               <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</div>
             ) : options.length === 0 && emptyState ? (
               emptyState
-            ) : filtered.length === 0 ? (
+            ) : filtered.length === 0 && !showCustomValue ? (
               <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum resultado</div>
             ) : (
-              filtered.map((o) => (
-                <label className="cms-option" key={o.value} style={o.parentValue ? { paddingLeft: 28 } : undefined}>
-                  <input
-                    type="checkbox"
-                    checked={pending.has(o.value)}
-                    onChange={(e) => toggleOpcao(o.value, e.target.checked)}
-                  />
-                  {o.parentValue && <span style={{ color: 'var(--text-muted)' }}>↳ </span>}
-                  <span className="cms-option-label" title={o.label}>{o.label}</span>
-                  {o.sublabel && <span className="cms-option-sub" style={{ color: 'var(--text-muted)' }}>{o.sublabel}</span>}
-                </label>
-              ))
+              <>
+                {filtered.map((o) => (
+                  <label className="cms-option" key={o.value} style={o.parentValue ? { paddingLeft: 28 } : undefined}>
+                    <input
+                      type="checkbox"
+                      checked={pending.has(o.value)}
+                      onChange={(e) => toggleOpcao(o.value, e.target.checked)}
+                    />
+                    {o.parentValue && <span style={{ color: 'var(--text-muted)' }}>↳ </span>}
+                    <span className="cms-option-label" title={o.label}>{o.label}</span>
+                    {o.sublabel && <span className="cms-option-sub" style={{ color: 'var(--text-muted)' }}>{o.sublabel}</span>}
+                  </label>
+                ))}
+                {showCustomValue && (
+                  <label className="cms-option" key={`custom-${customValue}`}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Usar texto "${customValue}"`}
+                      checked={pending.has(customValue)}
+                      onChange={(e) => toggleOpcao(customValue, e.target.checked)}
+                    />
+                    <span className="cms-option-label">Usar texto: &quot;{customValue}&quot;</span>
+                  </label>
+                )}
+              </>
             )}
           </div>
           <div className="cms-footer">

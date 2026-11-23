@@ -2,10 +2,71 @@
 
 ## Service Principal Setup
 
-**Required permissions (Reader role covers all)**:
-- Microsoft.Resources (subscriptions, resource groups, resources)
-- Microsoft.CostManagement (billing data)
-- Microsoft.Authorization (resource properties via Graph)
+### Azure RBAC
+
+Assign the built-in **Reader** role to the Service Principal at the scope of every
+subscription registered in the system. This is the supported baseline for the system's
+read-only ARM, Resource Graph, Change Analysis, and Cost Management queries. Do not assign
+Owner or Contributor to a collection SP.
+
+If a custom role is required instead, it must preserve the read operations needed by those
+APIs. To read Azure Activity Log events for auditing, it must also include
+`Microsoft.Insights/eventtypes/values/read`; this permission alone does not implement event
+ingestion (see **17-INVENTARIO.md**).
+
+### Azure resource operations (future write/delete modules)
+
+Keep the collection SP read-only. For modules that create, update, stop/start, deallocate,
+or delete Azure resources, use a **separate operational SP** and assign the built-in
+**Contributor** role only at the resource group (or individual resource) scopes where the
+tool is allowed to operate. Contributor permits resource writes and deletes but does not
+permit role assignment management. Do not assign it at tenant or subscription scope unless
+the product requirements explicitly authorize operations across that entire scope.
+
+For stricter least privilege, use a custom role limited to the exact resource providers and
+operations exposed by the modules. For example, VM lifecycle actions include
+`Microsoft.Compute/virtualMachines/start/action`,
+`Microsoft.Compute/virtualMachines/powerOff/action`,
+`Microsoft.Compute/virtualMachines/deallocate/action`, and
+`Microsoft.Compute/virtualMachines/restart/action`; VM update and deletion also require the
+provider's corresponding `write` and `delete` actions. This list is not a universal role:
+each resource type has its own actions, so finalize the custom role from the implemented
+operation allowlist. Include `Microsoft.Insights/eventtypes/values/read` if the operational
+SP also reads Activity Log events.
+
+**Actor attribution:** Azure Activity Log records the principal that called ARM. When the
+tool calls Azure using an operational SP, Azure will attribute the operation to that SP,
+not automatically to the human signed in to the tool. The application must separately audit
+the authenticated user, requested action, resource ID, outcome, and Azure correlation/request
+ID, then correlate that record with the Activity Log. For actions performed directly by a
+human in Azure, Activity Log can identify that human principal.
+
+### Microsoft Graph application permission
+
+To display friendly names instead of author GUIDs, grant the **Microsoft Graph** application
+permission `Directory.Read.All` to the same App Registration used by the Inventory SP. This
+is an Entra ID API permission, not an Azure RBAC role.
+
+In the Azure portal:
+
+1. Open **Microsoft Entra ID → App registrations** and select the app whose
+  **Application (client) ID** matches the `client_id` configured for the Inventory SP.
+2. Open **API permissions → Add a permission → Microsoft Graph → Application permissions**.
+3. Search for and select `Directory.Read.All`, then choose **Add permissions**.
+4. Choose **Grant admin consent for [tenant]** and confirm with an administrator authorized
+  to grant tenant-wide consent.
+5. Allow consent to propagate and renew the Graph access token. Existing tokens do not gain
+  the permission; the new token must contain `Directory.Read.All` in its `roles` claim.
+
+Choose **Application permissions**, not **Delegated permissions**, because the system uses
+client credentials without an interactive user. Do not grant `Directory.ReadWrite.All` for
+this read-only lookup. Without admin consent, author-name resolution cannot work.
+
+### Optional: Log Analytics
+
+If this SP is used to query Log Analytics workspaces, assign **Log Analytics Reader** at
+each workspace. This is separate from the subscription's Azure Resource Manager Reader
+assignment; it is not required when the Log Analytics feature is not used.
 
 **Naming convention:**
 ```
@@ -39,6 +100,20 @@ GET /subscriptions/{id}/providers/Microsoft.CostManagement/query
 ```
 
 Returns: `azure_costs` export (meter_id, qty, cost_usd, charge_type, etc.)
+
+### Cost Export via Storage
+
+`azure_storage_config.storage_prefix` may include `{periodo}`. The Storage reader expands it
+to the current month folder `YYYYMM01-YYYYMMDD` for automatic runs, or to an explicitly chosen
+month for manual reprocessing. A daily Azure Cost Management export is month-to-date, so the
+latest completed run is the snapshot for that month. The importer chooses the latest GUID run
+from its manifest, verifies every listed partition and byte count, then stages and checks the
+parsed row count against `dataRowCount`. Only after all checks pass does one transaction replace
+rows whose `arquivo_origem` is under that month folder. A missing manifest, missing partition,
+parse/insert error, or row-count mismatch leaves the previous snapshot untouched. Reprocessing
+uses the run GUID shown by Test; if a newer run appears before execution, it asks for a new test.
+The Test button performs no import. Optional Price List and Reservations prefixes are skipped
+during a cost-only month reprocess.
 
 ### 3. Resource Graph (RP/RP)
 **Endpoint**: `https://management.azure.com/providers/Microsoft.ResourceGraph/resources`
@@ -129,6 +204,13 @@ exatamente essa a origem dos vazamentos de log entre SPs corrigidos na v4.2 (26 
 `LIMIT 1` + `return`), persistindo `proxima_coleta` antes de disparar e usando fire-and-forget.
 A safety valve de 6h itera o Map e reseta entradas travadas individualmente; `_cbCore.reset()`
 é global, então só é chamado se não houver outra execução saudável em andamento.
+
+**Storage** — cada `azure_storage_config` pertence a uma SP (`sp_id`). Com mais de uma SP
+ativa e habilitada para Storage, vincule explicitamente cada Storage à credencial que lê aquele
+container. Configurações antigas com `sp_id` nulo continuam usando a SP padrão com aviso no log,
+para não interromper agendamentos existentes; ao criar/editar uma configuração com múltiplas SPs,
+a tela exige a escolha explícita. O agendador, o teste de acesso e a execução manual usam a mesma
+resolução. Uma SP inativa ou com Storage desabilitado não agenda a configuração.
 
 **Circuit breaker compartilhado (decisão deliberada)** — `azureThrottle.js` / `_cbCore` continuam
 particionados por família de API (custo, resourcegraph…), não por SP. Uma SP que toma 429 pode

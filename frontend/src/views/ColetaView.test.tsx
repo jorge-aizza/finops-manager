@@ -104,6 +104,29 @@ describe('ColetaView', () => {
     expect(screen.getByText('stfinops')).toBeInTheDocument()
   });
 
+  it('exige SP explícita ao criar Storage quando há mais de uma SP habilitada', async () => {
+    const user = userEvent.setup()
+    vi.mocked(coletaApi.listSPs).mockResolvedValue([
+      { ...mockSPs[0], id: 1, nome: 'SP Produção', coletar_storage: true },
+      { ...mockSPs[0], id: 2, nome: 'SP 4P', is_padrao: false, coletar_storage: true },
+    ])
+    vi.mocked(coletaApi.createStorage).mockResolvedValue({ ok: true, id: 2 })
+    renderWithClient()
+    await screen.findByText('Storage Principal')
+
+    await user.click(screen.getByRole('button', { name: 'Novo Storage' }))
+    await user.type(screen.getByLabelText('Storage Account *'), 'storage4p')
+    await user.type(screen.getByLabelText('Container *'), 'billing')
+    await user.click(screen.getByRole('button', { name: 'Salvar' }))
+
+    expect(window.showToast).toHaveBeenCalledWith('Selecione a Service Principal deste Storage.', 'error')
+    expect(coletaApi.createStorage).not.toHaveBeenCalled()
+
+    await user.selectOptions(screen.getByLabelText('Service Principal *'), '2')
+    await user.click(screen.getByRole('button', { name: 'Salvar' }))
+    await waitFor(() => expect(coletaApi.createStorage).toHaveBeenCalledWith(expect.objectContaining({ sp_id: 2 })))
+  });
+
   it('renderiza a grade de cobertura por mês', async () => {
     renderWithClient()
     const cell = await screen.findByTitle('65% de cobertura — 1.200 registros')

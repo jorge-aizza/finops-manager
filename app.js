@@ -51,7 +51,6 @@ function waitForLoginAssets() {
   const decode = image => image?.decode ? image.decode().catch(() => {}) : Promise.resolve();
   return new Promise(resolve => {
     const timeout = window.setTimeout(() => {
-      document.getElementById('login-screen')?.classList.add('login-background-fallback');
       resolve();
     }, 8000);
     Promise.all([...logos, background].map(decode)).then(() => {
@@ -4812,10 +4811,12 @@ async function _loadColetaApiSPSelect() {
     _coletaApiSPCache = sps;
     const wrap = document.getElementById('api-wizard-sp-wrap');
     if (!wrap) return;
-    const ativas = sps.filter(s => s.ativo);
+    const ativas = sps.filter(s => s.ativo && s.coletar_billing_api !== false);
     if (!ativas.length) {
+      const spParaConfigurar = sps.find(s => s.ativo);
       wrap.innerHTML = `<div class="stat-card" style="padding:16px 20px;text-align:center;color:var(--text-muted);font-size:13px">
-        Nenhuma SP ativa. <button class="btn-ghost" style="font-size:12px;padding:4px 12px;margin-left:8px" onclick="openSPModal(null)">+ Cadastrar SP</button>
+        ${spParaConfigurar ? 'Nenhuma SP ativa está habilitada para Billing via API.' : 'Nenhuma SP ativa.'}
+        <button class="btn-ghost" style="font-size:12px;padding:4px 12px;margin-left:8px" onclick="openSPModal(${spParaConfigurar ? spParaConfigurar.id : 'null'})">${spParaConfigurar ? 'Configurar SP' : '+ Cadastrar SP'}</button>
       </div>`;
       return;
     }
@@ -5666,6 +5667,10 @@ function openSPModal(id) {
   document.getElementById('sp-modo-coleta').value      = 'billing_profile';
   spToggleModo('billing_profile'); // reseta picker via _spResetPicker
   document.getElementById('sp-ativo').checked          = true;
+  document.getElementById('sp-coletar-billing-api').checked = true;
+  document.getElementById('sp-coletar-inventario').checked = true;
+  document.getElementById('sp-coletar-storage').checked = true;
+  document.getElementById('sp-coletar-reservas-api').checked = true;
   // Reseta destaque da seção de Billing
   const _bSec = document.getElementById('sp-billing-section');
   const _bLbl = document.getElementById('sp-billing-section-lbl');
@@ -5691,6 +5696,10 @@ function openSPModal(id) {
         spBuscarSubs();
       }
       document.getElementById('sp-ativo').checked = sp.ativo;
+      document.getElementById('sp-coletar-billing-api').checked = sp.coletar_billing_api !== false;
+      document.getElementById('sp-coletar-inventario').checked = sp.coletar_inventario !== false;
+      document.getElementById('sp-coletar-storage').checked = sp.coletar_storage !== false;
+      document.getElementById('sp-coletar-reservas-api').checked = sp.coletar_reservas_api !== false;
       const spDiaEl = document.getElementById('sp-dia');
       if (sp.dia_execucao && spDiaEl) spDiaEl.value = sp.dia_execucao;
       if (sp.granularidade_dias) _setGran('sp', sp.granularidade_dias);
@@ -5927,6 +5936,10 @@ async function saveSP() {
       billing_profile_id: modo === 'billing_profile' ? (document.getElementById('sp-billing-profile').value.trim() || null) : null,
       subscription_ids:   modo === 'subscription'    ? _spGetSubscriptionIds() : null,
       ativo:              document.getElementById('sp-ativo').checked,
+      coletar_billing_api: document.getElementById('sp-coletar-billing-api').checked,
+      coletar_inventario: document.getElementById('sp-coletar-inventario').checked,
+      coletar_storage: document.getElementById('sp-coletar-storage').checked,
+      coletar_reservas_api: document.getElementById('sp-coletar-reservas-api').checked,
       dia_execucao:       parseInt(document.getElementById('sp-dia')?.value) || 5,
       granularidade_dias: _getGran('sp'),
     };
@@ -6677,6 +6690,7 @@ async function loadStorageList() {
         <td style="white-space:nowrap;text-align:right">
           <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="testarStorageDireto(${s.id})">Testar</button>
           <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px;border-color:var(--green);color:var(--green)" onclick="executarStorage(${s.id})">▶</button>
+          <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="openStorageReprocessModal(${s.id})" title="Reprocessar custos de um mês escolhido">Reprocessar mês</button>
           <button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" onclick="openStorageModal(${s.id})">✏</button>
           <button class="btn-ghost" style="font-size:10px;padding:3px 8px;border-color:var(--danger);color:var(--danger)" onclick="deleteStorage(${s.id},'${(s.nome||'Storage').replace(/'/g,"\\'")}')">🗑</button>
         </td>
@@ -6755,6 +6769,9 @@ function openStorageModal(id) {
   document.getElementById('storage-container').value = '';
   document.getElementById('storage-prefix').value    = '';
   document.getElementById('storage-pl-prefix').value = '';
+  document.getElementById('storage-reservas-prefix').value = '';
+  document.getElementById('storage-coletar-price-list').checked = true;
+  document.getElementById('storage-coletar-reservas').checked = true;
   document.getElementById('storage-ativo').checked   = true;
   document.getElementById('storage-auto-ativo').checked = false;
   document.getElementById('storage-sched-body').style.display = 'none';
@@ -6766,11 +6783,13 @@ function openStorageModal(id) {
   // Popular dropdown de SPs
   api('GET', '/azure-coleta/sps').then(sps => {
     const sel = document.getElementById('storage-sp-id');
-    sel.innerHTML = '<option value="">— Usar primeira SP ativa (padrão) —</option>';
+    sel.innerHTML = '<option value="">— Usar primeira SP ativa habilitada para Storage —</option>';
     (sps || []).forEach(sp => {
       const opt = document.createElement('option');
       opt.value = sp.id;
-      opt.textContent = `${sp.nome} (${sp.client_id || '—'})`;
+      const permitida = sp.ativo && sp.coletar_storage !== false;
+      opt.textContent = `${sp.nome} (${sp.client_id || '—'})${permitida ? '' : ' — Storage desabilitado'}`;
+      opt.disabled = !permitida;
       sel.appendChild(opt);
     });
     if (id) {
@@ -6782,6 +6801,9 @@ function openStorageModal(id) {
         document.getElementById('storage-container').value = s.storage_container || '';
         document.getElementById('storage-prefix').value    = s.storage_prefix || '';
         document.getElementById('storage-pl-prefix').value = s.price_list_prefix || '';
+        document.getElementById('storage-reservas-prefix').value = s.reservas_prefix || '';
+        document.getElementById('storage-coletar-price-list').checked = s.coletar_price_list !== false;
+        document.getElementById('storage-coletar-reservas').checked = s.coletar_reservas !== false;
         document.getElementById('storage-ativo').checked   = s.ativo;
         sel.value = s.sp_id || '';
         const temSched = s.hora_execucao != null && s.dias_semana;
@@ -6810,6 +6832,9 @@ async function saveStorage() {
     storage_container: document.getElementById('storage-container').value.trim(),
     storage_prefix:      document.getElementById('storage-prefix').value.trim(),
     price_list_prefix:   document.getElementById('storage-pl-prefix').value.trim() || null,
+    reservas_prefix:     document.getElementById('storage-reservas-prefix').value.trim() || null,
+    coletar_price_list:  document.getElementById('storage-coletar-price-list').checked,
+    coletar_reservas:    document.getElementById('storage-coletar-reservas').checked,
     ativo:               document.getElementById('storage-ativo').checked,
     sp_id:             spVal ? parseInt(spVal) : null,
   };
@@ -6861,7 +6886,7 @@ async function testarStorageDireto(id) {
   showToast('Testando conexão com Storage...', 'info');
   try {
     const r = await api('POST', `/azure-coleta/storages/${id}/testar`);
-    showToast(`✔ ${r.total} arquivo(s) · ${r.totalSizeMB} MB`, 'success');
+    showToast(`✔ ${r.total} partição(ões) · ${r.manifestRows ?? '—'} linha(s) · run ${r.runId || 'não identificado'} · ${r.totalSizeMB} MB`, 'success');
   } catch (e) { showToast('Falha: ' + e.message, 'error'); }
 }
 
@@ -6875,7 +6900,7 @@ async function testarStorageModal() {
   try {
     const r = await api('POST', `/azure-coleta/storages/${id}/testar`);
     res.style.color = 'var(--green)';
-    res.textContent = `✔ OK · ${r.total} arquivo(s) CSV/Parquet · ${r.totalSizeMB} MB`;
+    res.textContent = `✔ OK · run ${r.runId || 'não identificado'} · ${r.total} partição(ões) · ${r.manifestRows ?? '—'} linha(s) · ${r.totalSizeMB} MB`;
   } catch (e) { res.style.color = 'var(--danger)'; res.textContent = 'Falha: ' + e.message; }
 }
 
@@ -6888,6 +6913,64 @@ async function executarStorage(id) {
     setTimeout(loadColetaStatus, 1000);
     setTimeout(loadColetaHistorico, 2000);
   } catch (e) { resumeInactivityTimer(); showToast('Erro: ' + e.message, 'error'); }
+}
+
+let _storageReprocess = { id: null, mes: '', validado: false, total: 0, prefix: '', runId: '', manifestRows: 0 };
+
+function openStorageReprocessModal(id) {
+  const hoje = new Date();
+  _storageReprocess = { id, mes: `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`, validado: false, total: 0, prefix: '', runId: '', manifestRows: 0 };
+  document.getElementById('storage-reprocess-mes').value = _storageReprocess.mes;
+  document.getElementById('storage-reprocess-result').style.display = 'none';
+  document.getElementById('storage-reprocess-run').disabled = true;
+  document.getElementById('modal-storage-reprocess').classList.add('open');
+}
+
+function closeStorageReprocessModal() {
+  document.getElementById('modal-storage-reprocess').classList.remove('open');
+}
+
+async function testarStorageMes() {
+  const mes = document.getElementById('storage-reprocess-mes').value;
+  const res = document.getElementById('storage-reprocess-result');
+  res.style.display = '';
+  res.style.color = 'var(--text-muted)';
+  res.textContent = 'Validando pasta mensal...';
+  _storageReprocess = { ..._storageReprocess, mes, validado: false, total: 0, prefix: '', runId: '', manifestRows: 0 };
+  document.getElementById('storage-reprocess-run').disabled = true;
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
+    res.style.color = 'var(--danger)'; res.textContent = 'Selecione um mês válido.'; return;
+  }
+  try {
+    const r = await api('POST', `/azure-coleta/storages/${_storageReprocess.id}/testar`, { mes });
+    if (!r.periodoConfiguravel) {
+      res.style.color = 'var(--danger)';
+      res.textContent = `O prefixo configurado não contém {periodo}; a pasta testada foi ${r.prefix || '(raiz)'}. Edite o Storage antes de reprocessar.`;
+      return;
+    }
+    const snapshotValido = r.total > 0 && r.manifestRows > 0;
+    _storageReprocess = { ..._storageReprocess, mes, validado: snapshotValido, total: r.total, prefix: r.prefix, runId: r.runId, manifestRows: r.manifestRows };
+    res.style.color = snapshotValido ? 'var(--green)' : 'var(--danger)';
+    const exemplos = (r.preview || []).slice(0, 3).map(blob => blob.name).join(' · ');
+    res.textContent = `${snapshotValido ? '' : 'Snapshot sem dados válidos · '}` + `Run ${r.runId} · ${r.manifestRows} linha(s) · ${r.total} partição(ões) · ${r.totalSizeMB} MB · ${r.prefix}${exemplos ? ` · ${exemplos}` : ''}`;
+    document.getElementById('storage-reprocess-run').disabled = !snapshotValido;
+  } catch (e) {
+    res.style.color = 'var(--danger)'; res.textContent = `Falha ao validar: ${e.message}`;
+  }
+}
+
+async function reprocessarStorageMes() {
+  const { id, mes, validado, total, prefix, runId, manifestRows } = _storageReprocess;
+  if (!validado || total < 1 || !runId) { showToast('Teste o mês e confirme um snapshot completo antes de reprocessar.', 'error'); return; }
+  if (!confirm(`Aplicar o snapshot ${runId} de ${mes}?\n\n${manifestRows} linhas em ${total} partição(ões). O snapshot anterior desse mês será substituído somente após validação completa.`)) return;
+  try {
+    suspendInactivityTimer();
+    await api('POST', `/azure-coleta/storages/${id}/reprocessar-mes`, { mes, runId });
+    closeStorageReprocessModal();
+    showToast(`Reprocessamento de ${mes} iniciado.`, 'success');
+    setTimeout(loadColetaStatus, 1000);
+    setTimeout(loadColetaHistorico, 2000);
+  } catch (e) { resumeInactivityTimer(); showToast('Erro ao reprocessar mês: ' + e.message, 'error'); }
 }
 
 async function limparHistoricoColeta() {

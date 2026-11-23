@@ -5,7 +5,7 @@ import type {
 } from '../types/databricksColeta'
 import type {
   DatabricksAlerta, DatabricksAnomalias, DatabricksBudget, DatabricksBudgetInput, DatabricksResumo,
-  DatabricksCotas,
+  DatabricksCotas, DatabricksGenieCotasInternas,
 } from '../types/databricksResumo'
 import type { HistoricoItem, PurgeResult } from '../types/coleta'
 import type { DatabricksJobRunsResposta } from '../types/databricksJobRuns'
@@ -14,7 +14,7 @@ import type {
   DatabricksAiGatewayResposta, DatabricksStorageOtimizacaoResposta,
 } from '../types/databricksAudit'
 
-const NUM_FIELDS: (keyof DatabricksConfig)[] = ['granularidade_dias', 'dia_execucao', 'hora_execucao']
+const NUM_FIELDS: (keyof DatabricksConfig)[] = ['granularidade_dias', 'granularidade_auxiliar_dias', 'dia_execucao', 'hora_execucao']
 const normalize = (c: DatabricksConfig) => numFields(c, NUM_FIELDS)
 
 export const listDatabricksConfigs = () =>
@@ -45,8 +45,8 @@ export const testarDatabricksConfig = (id: number) =>
   apiFetch<TestarDatabricksResponse>('POST', '/databricks-coleta/config/' + id + '/testar', undefined, 180000)
 
 // ── Fase 2 — coleta real + agendamento ──────────────────────────
-export const coletarDatabricks = (id: number, data_inicio: string, data_fim: string) =>
-  apiFetch<{ ok: boolean; message: string }>('POST', '/databricks-coleta/config/' + id + '/coletar', { data_inicio, data_fim })
+export const coletarDatabricks = (id: number, data_inicio: string, data_fim: string, incluir_auxiliares = true) =>
+  apiFetch<{ ok: boolean; message: string; queued?: boolean }>('POST', '/databricks-coleta/config/' + id + '/coletar', { data_inicio, data_fim, incluir_auxiliares })
 
 export const getDatabricksStatus = () => apiFetch<DatabricksColetaStatus>('GET', '/databricks-coleta/status')
 
@@ -135,9 +135,14 @@ const rangeQS = (r: DatabricksCotaRange) => {
   return q
 }
 
-export const getDatabricksCotas = (r: DatabricksCotaRange = {}, soGenie = false) => {
+export const getDatabricksCotas = (
+  r: DatabricksCotaRange = {}, soGenie = false, completo = false,
+  tags?: { key: string; value?: { operator?: string; values?: string[] } }[],
+) => {
   const q = rangeQS(r)
   if (soGenie) q.set('genie', '1')
+  if (completo) q.set('completo', '1')
+  if (tags?.length) q.set('tag_filters', JSON.stringify(tags))
   return apiFetch<DatabricksCotas>('GET', '/databricks-coleta/cotas?' + q.toString())
     .then((c) => ({
       ...c,
@@ -160,6 +165,9 @@ export const getDatabricksCotas = (r: DatabricksCotaRange = {}, soGenie = false)
       },
     }))
 }
+
+export const getDatabricksGenieCotasInternas = (period: DatabricksGenieCotasInternas['periodo'] = 'month') =>
+  apiFetch<DatabricksGenieCotasInternas>('GET', `/databricks-coleta/genie-cotas?period=${period}`, undefined, 360000)
 
 export const getDatabricksAlertas = () =>
   apiFetch<DatabricksAlerta[]>('GET', '/databricks-coleta/alertas').then((rows) =>

@@ -58,7 +58,17 @@ describe('PortalApp', () => {
   it('mostra o estado de carregando antes da config chegar', async () => {
     vi.mocked(portalApi.getPortalConfig).mockReturnValue(new Promise(() => {}))
     renderWithClient()
-    expect(screen.getByText('Carregando portal...')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Carregando portal...')
+    expect(document.querySelectorAll('#portal-loading img[alt="FinOps"]')).toHaveLength(2)
+    expect(document.querySelector('#portal-loading .portal-spinner')).toBeInTheDocument()
+  });
+
+  it('mostra o aviso global após 2 segundos com uma consulta sem dados pendente', async () => {
+    vi.mocked(portalApi.getPortalConfig).mockReturnValue(new Promise(() => {}))
+    renderWithClient()
+
+    expect(screen.queryByText('Consultando...')).not.toBeInTheDocument()
+    expect(await screen.findByText('Consultando...', {}, { timeout: 3000 })).toBeInTheDocument()
   });
 
     it('inclui a Wiki pública como serviço configurável e abre sua rota', async () => {

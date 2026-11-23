@@ -501,6 +501,7 @@ export default function InventarioView() {
   const [filtroAtivo, setFiltroAtivo] = useState<'todos' | 'ativos' | 'excluidos'>('ativos')
   const [filtroDesperdicioDias, setFiltroDesperdicioDias] = useState(0)
   const [filtroDespTipos, setFiltroDespTipos] = useState<AzureDesperdicioCategoria[]>([])
+  const [filtroDespAssinaturas, setFiltroDespAssinaturas] = useState<string[]>([])
   const [filtroDespRgs, setFiltroDespRgs] = useState<string[]>([])
   const [filtroDespBusca, setFiltroDespBusca] = useState('')
   const [filtroCriadoPor, setFiltroCriadoPor] = useState('')
@@ -588,13 +589,23 @@ export default function InventarioView() {
   const passaBusca = (i: typeof despItens[number]) => !despBuscaNorm
     || (i.nome || i.resource_id).toLowerCase().includes(despBuscaNorm)
     || (i.subscription_name || '').toLowerCase().includes(despBuscaNorm)
+  const nomeAssinatura = (i: typeof despItens[number]) => i.subscription_name || i.subscription_id
+  const passaAssinatura = (i: typeof despItens[number]) => !filtroDespAssinaturas.length || filtroDespAssinaturas.some((nome) => nomeAssinatura(i).toLowerCase().includes(nome.trim().toLowerCase()))
   const passaRg = (i: typeof despItens[number]) => !filtroDespRgs.length || (!!i.resource_group && filtroDespRgs.includes(i.resource_group))
+  const despAssinaturaContagem = new Map<string, number>()
+  for (const i of despItens) {
+    if (!passaRg(i) || !passaDias(i) || !passaBusca(i) || (filtroDespTipos.length && !filtroDespTipos.includes(i.categoria))) continue
+    const nome = nomeAssinatura(i)
+    despAssinaturaContagem.set(nome, (despAssinaturaContagem.get(nome) ?? 0) + 1)
+  }
+  for (const assinatura of filtroDespAssinaturas) if (!despAssinaturaContagem.has(assinatura)) despAssinaturaContagem.set(assinatura, 0)
+  const despAssinaturas = Array.from(despAssinaturaContagem.keys()).sort((a, b) => a.localeCompare(b))
   // Base = todos os filtros menos o de tipo: os cartões por tipo mostram o que sobraria ao clicar em cada um.
-  const despBase = despItens.filter((i) => passaRg(i) && passaDias(i) && passaBusca(i))
+  const despBase = despItens.filter((i) => passaAssinatura(i) && passaRg(i) && passaDias(i) && passaBusca(i))
   // Opções de Resource Group com a contagem que sobra nos demais filtros (inclusive tipo); RG já marcado nunca some.
   const despRgContagem = new Map<string, number>()
   for (const i of despItens) {
-    if (!i.resource_group || !passaDias(i) || !passaBusca(i)) continue
+    if (!i.resource_group || !passaAssinatura(i) || !passaDias(i) || !passaBusca(i)) continue
     if (filtroDespTipos.length && !filtroDespTipos.includes(i.categoria)) continue
     despRgContagem.set(i.resource_group, (despRgContagem.get(i.resource_group) ?? 0) + 1)
   }
@@ -615,8 +626,11 @@ export default function InventarioView() {
       return { categoria: c.categoria, itens: doTipo.length, custo: doTipo.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0) }
     })
     .filter((c) => c.itens > 0 || filtroDespTipos.includes(c.categoria))
-  const despTemFiltro = !!(filtroDespTipos.length || filtroDespRgs.length || filtroDesperdicioDias || despBuscaNorm)
-  const limparFiltrosDesp = () => { setFiltroDespTipos([]); setFiltroDespRgs([]); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
+  const despTemFiltro = !!(filtroDespTipos.length || filtroDespAssinaturas.length || filtroDespRgs.length || filtroDesperdicioDias || despBuscaNorm)
+  const limparFiltrosDesp = () => { setFiltroDespTipos([]); setFiltroDespAssinaturas([]); setFiltroDespRgs([]); setFiltroDesperdicioDias(0); setFiltroDespBusca('') }
+  const despAssinaturaLabel = filtroDespAssinaturas.length === 0 ? 'Todas as assinaturas'
+    : filtroDespAssinaturas.length === 1 ? filtroDespAssinaturas[0]
+    : `${filtroDespAssinaturas.length} assinaturas selecionadas`
   const despRgLabel = filtroDespRgs.length === 0 ? 'Todos os Resource Groups'
     : filtroDespRgs.length === 1 ? filtroDespRgs[0]
     : `${filtroDespRgs.length} Resource Groups`
@@ -625,6 +639,7 @@ export default function InventarioView() {
     : `${filtroDespTipos.length} tipos selecionados`
   const despFiltrosDescricao = [
     filtroDespTipos.length ? `Tipos: ${filtroDespTipos.map((t) => DESPERDICIO_LABEL[t]?.replace(/^\S+\s/, '') || t).join(', ')}` : '',
+    filtroDespAssinaturas.length ? `Assinaturas: ${filtroDespAssinaturas.join(', ')}` : '',
     filtroDespRgs.length ? `Resource Groups: ${filtroDespRgs.join(', ')}` : '',
     filtroDesperdicioDias ? `Órfão há ${filtroDesperdicioDias}+ dias` : '',
     despBuscaNorm ? `Busca: "${filtroDespBusca.trim()}"` : '',
@@ -632,7 +647,7 @@ export default function InventarioView() {
   const [despPdfHtml, setDespPdfHtml] = useState<string | null>(null)
   const [despSavingAberto, setDespSavingAberto] = useState(false)
   const exportarDespExcelMutation = useMutation({
-    mutationFn: () => baixarAzureDesperdicioExcel(despFiltrados, despFiltrosDescricao),
+    mutationFn: (exportacao: { itens: typeof despFiltrados; filtros: string }) => baixarAzureDesperdicioExcel(exportacao.itens, exportacao.filtros),
     onError: (e: Error) => window.showToast?.('Erro ao exportar: ' + e.message, 'error'),
   })
   const redeQuery = useQuery({
@@ -1543,7 +1558,7 @@ export default function InventarioView() {
                   <button
                     className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 12 }}
                     disabled={exportarDespExcelMutation.isPending || despFiltrados.length === 0}
-                    onClick={() => exportarDespExcelMutation.mutate()}
+                    onClick={() => exportarDespExcelMutation.mutate({ itens: despFiltrados, filtros: despFiltrosDescricao })}
                     title="Exporta os recursos filtrados na tela, no mesmo layout do Excel de Ações FinOps"
                   >
                     {exportarDespExcelMutation.isPending ? 'Exportando...' : '📊 Exportar Excel'}
@@ -1596,6 +1611,16 @@ export default function InventarioView() {
                   </div>
                   <div style={{ minWidth: 260 }}>
                     <CmsMultiSelect
+                      values={filtroDespAssinaturas}
+                      options={despAssinaturas.map((nome) => ({ value: nome, label: nome, sublabel: String(despAssinaturaContagem.get(nome) ?? 0) }))}
+                      searchPlaceholder="Buscar assinatura..."
+                      triggerLabel={despAssinaturaLabel}
+                      allowCustomValues
+                      onChange={setFiltroDespAssinaturas}
+                    />
+                  </div>
+                  <div style={{ minWidth: 260 }}>
+                    <CmsMultiSelect
                       values={filtroDespRgs}
                       options={despRgs.map((rg) => ({ value: rg, label: rg, sublabel: String(despRgContagem.get(rg) ?? 0) }))}
                       searchPlaceholder="Buscar Resource Group..."
@@ -1619,7 +1644,7 @@ export default function InventarioView() {
                   )}
                 </div>
 
-                <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', marginBottom: 12 }}>
+                <div className="stats-grid inventario-waste-stats" style={{ alignItems: 'stretch', gap: 12, marginBottom: 12 }}>
                   <div className="stat-card yellow-card">
                     <div className="stat-label">Desperdício estimado por mês</div>
                     <div className="stat-value" style={{ color: 'var(--text-orange,var(--orange,#ff8c42))' }}>{fmtBRLCurto(despCustoMensal)}</div>
@@ -1639,62 +1664,100 @@ export default function InventarioView() {
                       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtBRLCurto(despValidarCustoMensal)}/mês</div>
                     </div>
                   )}
-                  {/* Economia realizada — o contraponto do desperdício: o que já foi eliminado.
+                </div>
+                {/* Economia realizada — o contraponto do desperdício: o que já foi eliminado.
                       Aparece quando há QUALQUER coisa apurada, contabilizada ou não. Condicionar
                       só ao total escondia o card justamente no caso mais confuso: exclusões que
                       existiram mas não atingiram o piso de dias como órfão. Aí o usuário não
                       veria nem o zero nem o motivo dele. O que continua não acontecendo é exibir
                       "R$ 0" sem nada por trás — sem apuração nenhuma, o bloco não entra. */}
-                  {desperdicioQuery.data?.saving
-                    && (desperdicioQuery.data.saving.recursos_eliminados > 0
-                      || desperdicioQuery.data.saving.nao_contabilizados_piso > 0
-                      || desperdicioQuery.data.saving.nao_contabilizados_manual > 0) && (
-                    <>
-                      <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
-                        <div className="stat-label">💰 Economia realizada por mês</div>
-                        <div className="stat-value" style={{ color: 'var(--text-green,var(--green,#22c55e))' }}>
-                          {fmtBRLCurto(desperdicioQuery.data.saving.economia_mensal)}
+                {desperdicioQuery.data?.saving
+                  && (desperdicioQuery.data.saving.recursos_eliminados > 0
+                    || desperdicioQuery.data.saving.nao_contabilizados_piso > 0
+                    || desperdicioQuery.data.saving.nao_contabilizados_manual > 0) && (
+                  <div className="stats-grid inventario-waste-stats inventario-saving-grid" style={{ alignItems: 'stretch', gap: 12, marginBottom: 12 }}>
+                        {(!desperdicioQuery.data.saving_portal_publico || desperdicioQuery.data.saving_portal_publico.recursos_eliminados > 0) && (
+                        <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
+                          <div className="stat-label">💰 Economia já realizada</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Mensal líquido</div>
+                          <div className="stat-value" style={{ fontSize: 20, whiteSpace: 'nowrap', color: 'var(--text-green,var(--green,#22c55e))' }}>
+                            {fmtBRLCurto(desperdicioQuery.data.saving_portal_publico?.economia_mensal ?? desperdicioQuery.data.saving.economia_mensal)}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Acumulado líquido</div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {fmtBRLCurto(desperdicioQuery.data.saving_portal_publico?.economia_acumulada ?? desperdicioQuery.data.saving.economia_acumulada)}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                            {(desperdicioQuery.data.saving_portal_publico?.recursos_eliminados ?? desperdicioQuery.data.saving.recursos_eliminados)} recurso(s) eliminado(s)
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                            Saving bruto de discos: {fmtBRLCurto(desperdicioQuery.data.saving.saving_disco_mensal ?? desperdicioQuery.data.saving.economia_mensal_bruta)}/mês
+                          </div>
+                          {desperdicioQuery.data.saving.sem_custo_conhecido > 0 && (
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{desperdicioQuery.data.saving.sem_custo_conhecido} sem custo conhecido</div>
+                          )}
+                          {desperdicioQuery.data.saving.para_validacao > 0 && (
+                            <div style={{ fontSize: 11, color: 'var(--text-orange,var(--orange,#ff8c42))' }}
+                              title="Disco de PVC/AKS ou ASR: a exclusão pode ser ciclo de vida do cluster, não ação de FinOps">
+                              ⚠ {desperdicioQuery.data.saving.para_validacao} em validação (AKS/ASR), {fmtBRLCurto(desperdicioQuery.data.saving.para_validacao_custo_mensal)}/mês
+                            </div>
+                          )}
+                          {desperdicioQuery.data.saving.nao_contabilizados_piso > 0 && (
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
+                              title={`O fluxo espera ${desperdicioQuery.data.saving.dias_min_orfao} dias como órfão; os itens continuam visíveis no detalhe.`}>
+                              {desperdicioQuery.data.saving.nao_contabilizados_piso} abaixo do piso de {desperdicioQuery.data.saving.dias_min_orfao} dias
+                            </div>
+                          )}
+                          <button
+                            type="button" className="btn-ghost"
+                            style={{ fontSize: 11, marginTop: 6, padding: 0, textDecoration: 'underline' }}
+                            onClick={() => setDespSavingAberto((v) => !v)}
+                          >
+                            {despSavingAberto ? 'Ocultar detalhes' : 'Ver detalhes'}
+                          </button>
                         </div>
-                        {desperdicioQuery.data.saving.desconto_mensal_snapshots > 0 && (
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
-                            title="Snapshots de retenção dos 90 dias ainda custam — já descontados deste valor">
-                            {fmtBRLCurto(desperdicioQuery.data.saving.economia_mensal_bruta)} − {fmtBRLCurto(desperdicioQuery.data.saving.desconto_mensal_snapshots)} em snapshots
-                          </div>
                         )}
-                      </div>
-                      <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
-                        <div className="stat-label">Economia acumulada</div>
-                        <div className="stat-value">{fmtBRLCurto(desperdicioQuery.data.saving.economia_acumulada)}</div>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          {desperdicioQuery.data.saving.recursos_eliminados} recurso(s) eliminado(s)
-                          {desperdicioQuery.data.saving.sem_custo_conhecido > 0 && ` · ${desperdicioQuery.data.saving.sem_custo_conhecido} sem custo conhecido`}
+                        <div className="stat-card">
+                          <div className="stat-label">Saving de snapshots</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Mensal após exclusão</div>
+                          <div className="stat-value" style={{ fontSize: 20, whiteSpace: 'nowrap', color: 'var(--text-green,var(--green,#22c55e))' }}>
+                            {fmtBRLCurto(desperdicioQuery.data.saving.saving_snapshots_mensal ?? 0)}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Acumulado estimado</div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {fmtBRLCurto(desperdicioQuery.data.saving.saving_snapshots_acumulado ?? 0)}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                            Conta como Saving somente após a exclusão confirmada do snapshot.
+                          </div>
                         </div>
-                        {/* Os dois avisos abaixo existem porque o total desta tela conta TUDO
-                            que foi excluído — inclusive o que merece ressalva. Quem olha aqui
-                            tem contexto pra julgar, mas precisa ver a ressalva junto do número. */}
-                        {desperdicioQuery.data.saving.para_validacao > 0 && (
-                          <div style={{ fontSize: 11, color: 'var(--text-orange,var(--orange,#ff8c42))' }}
-                            title="Disco de PVC/AKS ou ASR: o estado do recurso não prova abandono, então a exclusão pode ter sido o ciclo de vida do cluster e não o processo de FinOps">
-                            ⚠ {desperdicioQuery.data.saving.para_validacao} em validação (AKS/ASR) dentro do total, {fmtBRLCurto(desperdicioQuery.data.saving.para_validacao_custo_mensal)}/mês
+                        <div className="stat-card">
+                          <div className="stat-label">Snapshots retidos</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Custo mensal</div>
+                          <div className="stat-value" style={{ fontSize: 20, whiteSpace: 'nowrap' }}>
+                            {fmtBRLCurto(desperdicioQuery.data.saving.desconto_mensal_snapshots)}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Custo acumulado estimado</div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {fmtBRLCurto(desperdicioQuery.data.saving.custo_acumulado_snapshots ?? 0)}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                            Abatido do Saving líquido comparável ao portal público.
+                          </div>
+                        </div>
+                        {(desperdicioQuery.data.saving.saving_outros_mensal ?? 0) > 0 && (
+                          <div className="stat-card" style={{ borderColor: 'var(--green,#22c55e)' }}>
+                            <div className="stat-label">Saving de outros recursos</div>
+                            <div className="stat-value" style={{ fontSize: 22, whiteSpace: 'nowrap', color: 'var(--text-green,var(--green,#22c55e))' }}>
+                              {fmtBRLCurto(desperdicioQuery.data.saving.saving_outros_mensal ?? 0)}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }}>/mês</span>
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                              Acumulado estimado: {fmtBRLCurto(desperdicioQuery.data.saving.saving_outros_acumulado ?? 0)}
+                            </div>
                           </div>
                         )}
-                        {desperdicioQuery.data.saving.nao_contabilizados_piso > 0 && (
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}
-                            title={`O fluxo espera ${desperdicioQuery.data.saving.dias_min_orfao} dias com o recurso órfão antes de agir. Exclusão mais rápida não veio do processo — foi o ciclo de vida da própria infra. Os itens continuam visíveis no detalhe.`}>
-                            {desperdicioQuery.data.saving.nao_contabilizados_piso} não contabilizado(s): menos de {desperdicioQuery.data.saving.dias_min_orfao} dias como órfão
-                          </div>
-                        )}
-                        <button
-                          type="button" className="btn-ghost"
-                          style={{ fontSize: 11, marginTop: 6, padding: 0, textDecoration: 'underline' }}
-                          onClick={() => setDespSavingAberto((v) => !v)}
-                        >
-                          {despSavingAberto ? 'Ocultar detalhes' : 'Ver detalhes'}
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
+                  </div>
+                )}
 
                 {despSavingAberto && desperdicioQuery.data?.saving && (
                   <div className="card" style={{ marginBottom: 12 }}>
@@ -1706,7 +1769,7 @@ export default function InventarioView() {
                       <table className="data-table">
                         <thead>
                           <tr>
-                            <th>Recurso</th><th>Tipo</th><th>Resource Group</th>
+                            <th>Recurso</th><th>ID da assinatura</th><th>Tipo</th><th>Resource Group</th>
                             <th>Excluído em</th><th>Excluído por</th>
                             <th style={{ textAlign: 'right' }}>Dias como órfão</th>
                             <th style={{ textAlign: 'right' }}>Custo/mês</th>
@@ -1741,6 +1804,7 @@ export default function InventarioView() {
                                   </div>
                                 )}
                               </td>
+                              <td style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{i.subscription_id || '—'}</td>
                               <td>{DESPERDICIO_LABEL[i.categoria] ?? i.categoria}</td>
                               <td>{i.resource_group || '—'}</td>
                               <td>{new Date(i.excluido_em).toLocaleDateString('pt-BR')}</td>
@@ -1829,6 +1893,24 @@ export default function InventarioView() {
               <div className="card-header">
                 <span className="card-title">Recursos ociosos</span>
                 <span className="badge">{despTemFiltro ? `${despPronto.length} de ${despItens.length}` : despPronto.length}</span>
+                <button
+                  className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 12 }}
+                  disabled={exportarDespExcelMutation.isPending || despPronto.length === 0}
+                  onClick={() => exportarDespExcelMutation.mutate({ itens: despPronto, filtros: `${despFiltrosDescricao} | Seção: Recursos ociosos` })}
+                  aria-label="Exportar Excel - Recursos ociosos"
+                  title="Exporta os recursos ociosos que passaram pelos filtros selecionados"
+                >
+                  📊 Excel
+                </button>
+                <button
+                  className="btn-ghost" style={{ fontSize: 12 }}
+                  disabled={despPronto.length === 0}
+                  onClick={() => setDespPdfHtml(buildDesperdicioPdfHtml(despPronto, `${despFiltrosDescricao} | Seção: Recursos ociosos`))}
+                  aria-label="Exportar PDF - Recursos ociosos"
+                  title="Gera PDF dos recursos ociosos que passaram pelos filtros selecionados"
+                >
+                  📄 PDF
+                </button>
               </div>
               {despPronto.length === 0 && (
                 <div style={{ padding: '0 20px 16px', fontSize: 12, color: 'var(--text-muted)' }}>Nenhum recurso bate com os filtros selecionados.</div>
@@ -1837,19 +1919,22 @@ export default function InventarioView() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Recurso</th><th>Assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
+                      <th>Recurso</th><th>Assinatura</th><th>ID da assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
                       <th style={{ textAlign: 'right' }}>Tam.</th>
                       <th style={{ textAlign: 'right' }}>Custo/mês</th>
-                      <th style={{ textAlign: 'right' }}>Dias Órfão</th>
+                      <th style={{ textAlign: 'right', minWidth: 110 }}>Dias ocioso</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {despPronto.map((it) => (
-                      <tr key={it.resource_id}>
+                    {despPronto.map((it) => {
+                      const diasOcioso = it.dias_ocioso !== undefined ? it.dias_ocioso : (it.dias_estado_atual ?? it.dias_orfao)
+                      const tituloDiasOcioso = it.fonte_dias_ocioso === 'azure' ? 'Duração baseada na data informada pela Azure' : it.fonte_dias_ocioso === 'coleta' ? 'Duração baseada no histórico de coletas da ferramenta' : it.dias_ocioso === undefined ? 'Duração recebida do servidor anterior' : 'Sem histórico recente suficiente para calcular a duração'
+                      return <tr key={it.resource_id}>
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.resource_id}>
                           {it.nome || it.resource_id}
                         </td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.subscription_name || '—'}</td>
+                        <td style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{it.subscription_id || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{DESPERDICIO_LABEL[it.categoria] || it.categoria}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.resource_group || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.sku || '—'}</td>
@@ -1861,13 +1946,13 @@ export default function InventarioView() {
                           {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
                         </td>
                         <td
-                          style={{ textAlign: 'right', fontSize: 12, color: it.dias_orfao !== null ? 'var(--red,#ff4d6a)' : 'var(--text-muted)' }}
-                          title={it.marcado_orfao_em ? `Órfão desde ${new Date(it.marcado_orfao_em).toLocaleDateString('pt-BR')}` : ''}
+                          style={{ textAlign: 'right', fontSize: 12, color: diasOcioso != null ? 'var(--text)' : 'var(--text-muted)' }}
+                          title={tituloDiasOcioso}
                         >
-                          {it.dias_orfao !== null ? `${it.dias_orfao}d` : '—'}
+                          {diasOcioso == null ? 'Sem histórico' : `${diasOcioso}d`}
                         </td>
                       </tr>
-                    ))}
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1879,6 +1964,24 @@ export default function InventarioView() {
               <div className="card-header">
                 <span className="card-title">⚠️ Discos para validação</span>
                 <span className="badge">{despParaValidar.length}</span>
+                <button
+                  className="btn-ghost" style={{ marginLeft: 'auto', fontSize: 12 }}
+                  disabled={exportarDespExcelMutation.isPending || despParaValidar.length === 0}
+                  onClick={() => exportarDespExcelMutation.mutate({ itens: despParaValidar, filtros: `${despFiltrosDescricao} | Seção: Discos para validação` })}
+                  aria-label="Exportar Excel - Discos para validação"
+                  title="Exporta os discos para validação que passaram pelos filtros selecionados"
+                >
+                  📊 Excel
+                </button>
+                <button
+                  className="btn-ghost" style={{ fontSize: 12 }}
+                  disabled={despParaValidar.length === 0}
+                  onClick={() => setDespPdfHtml(buildDesperdicioPdfHtml(despParaValidar, `${despFiltrosDescricao} | Seção: Discos para validação`))}
+                  aria-label="Exportar PDF - Discos para validação"
+                  title="Gera PDF dos discos para validação que passaram pelos filtros selecionados"
+                >
+                  📄 PDF
+                </button>
               </div>
               <div style={{ padding: '0 20px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
                 Discos de PVC do AKS (podem voltar a ser montados por um Pod) e discos marcados como ASR pelos times
@@ -1889,9 +1992,10 @@ export default function InventarioView() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Recurso</th><th>Assinatura</th><th>Motivo</th><th>Resource Group</th><th>SKU</th>
+                      <th>Recurso</th><th>Assinatura</th><th>ID da assinatura</th><th>Motivo</th><th>Resource Group</th><th>SKU</th>
                       <th style={{ textAlign: 'right' }}>Tam.</th>
                       <th style={{ textAlign: 'right' }}>Custo/mês</th>
+                      <th style={{ textAlign: 'right' }}>Dias ocioso</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1903,6 +2007,7 @@ export default function InventarioView() {
                             {it.nome || it.resource_id}
                           </td>
                           <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.subscription_name || '—'}</td>
+                          <td style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{it.subscription_id || '—'}</td>
                           <td>
                             {motivo && (
                               <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 6, color: motivo.color, background: motivo.bg }}>
@@ -1915,6 +2020,12 @@ export default function InventarioView() {
                           <td style={{ textAlign: 'right', fontSize: 12 }}>{it.tamanho_gb ? it.tamanho_gb + ' GB' : '—'}</td>
                           <td style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--text-orange,var(--orange,#ff8c42))' : 'var(--text-muted)' }}>
                             {it.custo_mensal_estimado === null ? '—' : fmtBRLCurto(it.custo_mensal_estimado)}
+                          </td>
+                          <td
+                            style={{ textAlign: 'right', fontSize: 12, color: (it.dias_ocioso !== undefined ? it.dias_ocioso : (it.dias_estado_atual ?? it.dias_orfao)) != null ? 'var(--text)' : 'var(--text-muted)' }}
+                            title={it.fonte_dias_ocioso === 'azure' ? 'Duração baseada na data informada pela Azure' : it.fonte_dias_ocioso === 'coleta' ? 'Duração baseada no histórico de coletas da ferramenta' : it.dias_ocioso === undefined ? 'Duração recebida do servidor anterior' : 'Sem histórico recente suficiente para calcular a duração'}
+                          >
+                            {(it.dias_ocioso !== undefined ? it.dias_ocioso : (it.dias_estado_atual ?? it.dias_orfao)) == null ? 'Sem histórico' : `${it.dias_ocioso !== undefined ? it.dias_ocioso : (it.dias_estado_atual ?? it.dias_orfao)}d`}
                           </td>
                         </tr>
                       )
@@ -1970,8 +2081,9 @@ export default function InventarioView() {
                 </div>
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                A coleta percorre <strong>todas as Service Principals ativas</strong>, cada assinatura com a credencial
-                da sua própria SP. Para incluir ou remover assinaturas, edite a Service Principal em Coleta Azure.
+                A coleta considera <strong>todas as Service Principals ativas</strong> e roteia cada assinatura
+                para uma credencial que tenha acesso RBAC confirmado. Em duplicatas, a SP padrão só desempata
+                quando ambas conseguem acessar a assinatura. O escopo de billing continua independente.
               </div>
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Retenção do log de Auditoria (dias)</label>

@@ -14,12 +14,17 @@ interface FormState {
   billing_account_id: string
   billing_profile_id: string
   ativo: boolean
+  coletar_billing_api: boolean
+  coletar_inventario: boolean
+  coletar_storage: boolean
+  coletar_reservas_api: boolean
 }
 
 function emptyForm(): FormState {
   return {
     nome: '', expiracao_secret: '', tenant_id: '', client_id: '', client_secret: '',
     modo_coleta: 'billing_profile', billing_account_id: '', billing_profile_id: '', ativo: true,
+    coletar_billing_api: true, coletar_inventario: true, coletar_storage: true, coletar_reservas_api: true,
   }
 }
 
@@ -34,6 +39,10 @@ function fromSP(sp: ServicePrincipal): FormState {
     billing_account_id: sp.billing_account_id || '',
     billing_profile_id: sp.billing_profile_id || '',
     ativo: sp.ativo,
+    coletar_billing_api: sp.coletar_billing_api !== false,
+    coletar_inventario: sp.coletar_inventario !== false,
+    coletar_storage: sp.coletar_storage !== false,
+    coletar_reservas_api: sp.coletar_reservas_api !== false,
   }
 }
 
@@ -136,6 +145,10 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
       ativo: form.ativo,
       dia_execucao: sp?.dia_execucao ?? 5,
       granularidade_dias: granModo === 'fixa' ? parseInt(granFixa, 10) : Math.max(1, granDiasLivre),
+      coletar_billing_api: form.coletar_billing_api,
+      coletar_inventario: form.coletar_inventario,
+      coletar_storage: form.coletar_storage,
+      coletar_reservas_api: form.coletar_reservas_api,
     }
     if (form.client_secret) input.client_secret = form.client_secret
     saveMutation.mutate(input)
@@ -236,6 +249,40 @@ export default function SPModal({ sp, onClose }: SPModalProps) {
             <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input id="sp-ativo" type="checkbox" checked={form.ativo} onChange={(e) => setForm({ ...form, ativo: e.target.checked })} style={{ width: 'auto' }} />
               <label htmlFor="sp-ativo" style={{ margin: 0 }}>Ativo</label>
+            </div>
+
+            <div className="form-group" style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Serviços permitidos para esta SP</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input type="checkbox" checked={form.coletar_billing_api} onChange={(e) => setForm({ ...form, coletar_billing_api: e.target.checked })} style={{ width: 'auto', marginTop: 2 }} />
+                  <span>
+                    <strong>Billing via API</strong><br />
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Permite coletas manuais e agendadas.</span>
+                  </span>
+                </label>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input type="checkbox" checked={form.coletar_inventario} onChange={(e) => setForm({ ...form, coletar_inventario: e.target.checked })} style={{ width: 'auto', marginTop: 2 }} />
+                  <span>
+                    <strong>Inventário / Resource Graph</strong><br />
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Inclui consultas Azure por assinatura.</span>
+                  </span>
+                </label>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input type="checkbox" checked={form.coletar_storage} onChange={(e) => setForm({ ...form, coletar_storage: e.target.checked })} style={{ width: 'auto', marginTop: 2 }} />
+                  <span>
+                    <strong>Autenticação Storage</strong><br />
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Permite usar esta SP nas configs Storage.</span>
+                  </span>
+                </label>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input type="checkbox" checked={form.coletar_reservas_api} onChange={(e) => setForm({ ...form, coletar_reservas_api: e.target.checked })} style={{ width: 'auto', marginTop: 2 }} />
+                  <span>
+                    <strong>Reservas via API</strong><br />
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Reservas e Savings Plans por ARM.</span>
+                  </span>
+                </label>
+              </div>
             </div>
           </form>
         </div>

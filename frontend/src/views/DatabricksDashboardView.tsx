@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { deleteDatabricksBudget, getDatabricksAnomalias, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
-import { deleteGenieBudget, listGenieBudgets } from '../api/genieBudgets'
+import { deleteDatabricksBudget, getDatabricksAnomalias, getDatabricksCotas, getDatabricksResumo, listDatabricksBudgets, updateDatabricksBudget, type DatabricksResumoFiltros } from '../api/databricksColeta'
+import { deleteGenieBudget, listGenieBudgets, listGenieWorkspaces, resolveGenieUserPrincipals, updateGenieBudgetPrincipalOverride } from '../api/genieBudgets'
 import type { DatabricksBudget, DatabricksResumoMes } from '../types/databricksResumo'
 import type { GenieBudget } from '../types/genieBudgets'
 import DatabricksBudgetModal from '../components/DatabricksBudgetModal'
@@ -12,6 +12,7 @@ import DatabricksQueryHistoryCard from '../components/DatabricksQueryHistoryCard
 import DatabricksAiGatewayCard from '../components/DatabricksAiGatewayCard'
 import DatabricksStorageOtimizacaoCard from '../components/DatabricksStorageOtimizacaoCard'
 import GenieBudgetModal from '../components/GenieBudgetModal'
+import GenieBudgetUsersModal, { calcularUsuariosQuotaGenie } from '../components/GenieBudgetUsersModal'
 import { forecastLinear } from '../lib/forecastLinear'
 import { setDatabricksTabListener } from '../bridge'
 
@@ -19,27 +20,29 @@ type DbxTab = 'dashboard' | 'orcamentos' | 'cotas' | 'quotas'
 // Rotulo da aba != titulo do hero: na fileira o texto precisa ser curto, no
 // hero ele pode ser descritivo ("Dashboard Databricks", "Quotas Genie").
 const DBX_TAB_LABEL: Record<DbxTab, string> = {
-  dashboard: 'Dashboard',
+  dashboard: 'Consumo',
   orcamentos: 'Orçamentos e Anomalias',
   cotas: 'Cotas',
   quotas: 'Genie (nativo)',
 }
 
 const DBX_TAB_INFO: Record<DbxTab, { titulo: string; sub: string }> = {
-  dashboard: { titulo: 'Dashboard Databricks', sub: 'Consumo mensal, custo por workspace/SKU/usuário/job/cluster/warehouse e free-tier vs. pago' },
+  dashboard: { titulo: 'Consumo Databricks', sub: 'Análise detalhada por período, workspace/SKU/usuário/job/cluster/warehouse e free-tier vs. pago' },
   orcamentos: { titulo: 'Orçamentos e Anomalias', sub: 'Orçamentos internos com alerta por e-mail e detecção automática de anomalias de consumo' },
   cotas: { titulo: 'Cotas', sub: 'Consumo do mês contra o teto configurado, por workspace e por usuário — semáforo derivado de databricks_consumo' },
   quotas: { titulo: 'Quotas Genie', sub: 'Limites nativos do Databricks (Unity AI Gateway) para o uso do Genie — por workspace, usuário ou grupo' },
 }
 
-function escopoLabel(b: DatabricksBudget): string {
-  if (b.escopo_tipo === 'workspace') return b.workspace_id || '—'
+function escopoLabel(b: DatabricksBudget, workspaceNames: Map<string, string>): string {
+  if (b.escopo_tipo === 'workspace' || b.escopo_tipo === 'workspace_por_usuario')
+    return b.workspace_id ? workspaceNames.get(b.workspace_id) || 'Nome indisponível' : '—'
   if (b.escopo_tipo === 'tag') return `${b.tag_key} = ${b.tag_valor}`
+  if (b.escopo_tipo === 'usuario') return b.usuario || '—'
   return 'Todos os workspaces'
 }
 
-function fmtBRL(v: number): string {
-  return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+function fmtUSD(v: number): string {
+  return 'US$ ' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 // DBU = Databricks Unit — unidade nativa de consumo (usage_quantity), não moeda.
@@ -113,9 +116,9 @@ function RankingCard({ title, color, items, hint, activeValue, onToggle, onVerAn
                       ⚠️
                     </span>
                   )}
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.label}</span>
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.label}</span>
                 </span>
-                <span style={{ fontWeight: 700, color, flexShrink: 0, marginLeft: 6 }}>{fmtBRL(item.custo)}</span>
+                <span style={{ fontWeight: 700, color, flexShrink: 0, marginLeft: 6 }}>{fmtUSD(item.custo)}</span>
               </div>
               <div style={{ height: 6, borderRadius: 3, background: 'var(--bg)', overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: pct + '%', background: color, borderRadius: 3 }} />
@@ -193,11 +196,11 @@ function MonthlyBarChart({ data, mesSelecionado, onSelectMes }: {
           const freeH = free > 0 ? (free / max) * plotH : 0
           const totalH = pagoH + gap + freeH
           const topY = baseY - totalH
-          const breakdown = free > 0 ? ` — Pago: ${fmtBRL(pago)} · Free: ${fmtBRL(free)}` : ''
+          const breakdown = free > 0 ? ` — Pago: ${fmtUSD(pago)} · Free: ${fmtUSD(free)}` : ''
           const selecionavel = !d.previsto && !!onSelectMes
           const selecionado = mesSelecionado === d.mes
           const opacidade = mesSelecionado && !selecionado ? 0.35 : 1
-          const titulo = `${mesLabel(d.mes)}: ${fmtBRL(d.custo)}${d.previsto ? ' (previsão — tendência linear)' : breakdown}${selecionavel ? (selecionado ? ' — clique para remover o filtro' : ' — clique para detalhar este mês') : ''}`
+          const titulo = `${mesLabel(d.mes)}: ${fmtUSD(d.custo)}${d.previsto ? ' (previsão — tendência linear)' : breakdown}${selecionavel ? (selecionado ? ' — clique para remover o filtro' : ' — clique para detalhar este mês') : ''}`
           return (
             <g
               key={d.mes}
@@ -228,7 +231,7 @@ function MonthlyBarChart({ data, mesSelecionado, onSelectMes }: {
               )}
               {d.custo > 0.005 && (
                 <text x={x + barW / 2} y={Math.max(10, topY - 6)} fontSize={9.5} fontWeight={700} fill="var(--text)" textAnchor="middle">
-                  {fmtBRL(d.custo)}
+                  {fmtUSD(d.custo)}
                 </text>
               )}
               <text x={x + barW / 2} y={H - PAD_BOTTOM + 14} fontSize={10} fontWeight={selecionado ? 700 : 400} fill={selecionado ? 'var(--text)' : 'var(--text-muted)'} textAnchor="middle">
@@ -253,7 +256,6 @@ function MonthlyBarChart({ data, mesSelecionado, onSelectMes }: {
 
 // Últimos 6 meses — mesmo default usado no servidor (GET /resumo sem
 // data_inicio/data_fim) — calculado aqui também pra inicializar os
-// date-pickers já em sincronia com a primeira busca, sem precisar de um
 // efeito esperando a resposta pra "descobrir" o período.
 function defaultPeriodo(): { inicio: string; fim: string } {
   const fim = new Date()
@@ -271,7 +273,8 @@ const FILTRO_LABELS: Record<keyof DatabricksResumoFiltros, string> = {
   warehouse_id: 'Warehouse',
   mes: 'Mês',
 }
-function labelFiltroValor(campo: keyof DatabricksResumoFiltros, valor: string): string {
+function labelFiltroValor(campo: keyof DatabricksResumoFiltros, valor: string, workspaceNames: Map<string, string>): string {
+  if (campo === 'workspace_id') return workspaceNames.get(valor) || 'Nome indisponível'
   if (campo === 'usuario' && valor === '__vazio__') return 'Não identificado'
   if (campo === 'mes') return mesLabel(valor)
   return valor
@@ -303,6 +306,7 @@ export default function DatabricksDashboardView() {
     // antigos visíveis (só `isFetching` fica true) até a resposta nova chegar — sem
     // colapso de altura, sem pulo de scroll.
     placeholderData: keepPreviousData,
+    staleTime: 30_000,
   })
 
   // Lista de workspaces pro dropdown de orçamento — query PRÓPRIA, com range bem largo
@@ -315,7 +319,21 @@ export default function DatabricksDashboardView() {
     queryFn: () => getDatabricksResumo('2015-01-01', new Date().toISOString().slice(0, 10)),
     staleTime: 5 * 60 * 1000,
   })
-  const workspaces = (workspacesQuery.data?.por_workspace || []).map((w) => w.workspace_id)
+  const workspaceIds = [...new Set([
+    ...(workspacesQuery.data?.por_workspace || []).map((w) => w.workspace_id),
+    ...(resumoQuery.data?.por_workspace || []).map((w) => w.workspace_id),
+  ])].sort()
+  const workspaceNamesQuery = useQuery({
+    queryKey: ['genie-workspaces', workspaceIds.join(',')],
+    queryFn: () => listGenieWorkspaces(workspaceIds),
+    enabled: workspaceIds.length > 0,
+    staleTime: 5 * 60 * 1000,
+  })
+  const workspaceNameById = new Map((workspaceNamesQuery.data || []).map((ws) => [ws.workspace_id, ws.nome]))
+  const workspaces = workspaceIds.map((workspace_id) => ({
+    workspace_id,
+    nome: workspaceNameById.get(workspace_id) || 'Nome indisponível',
+  }))
 
   function toggleFiltro(campo: keyof DatabricksResumoFiltros, valor: string) {
     setFiltros((f) => (f[campo] === valor ? { ...f, [campo]: undefined } : { ...f, [campo]: valor }))
@@ -416,7 +434,7 @@ export default function DatabricksDashboardView() {
             <button className="btn-primary" disabled={!inicioInput || !fimInput} onClick={() => setPeriodo({ inicio: inicioInput, fim: fimInput })}>
               Buscar
             </button>
-            {resumoQuery.isFetching && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Carregando...</span>}
+            {resumoQuery.isFetching && <span role="status" style={{ fontSize: 12, color: 'var(--text-muted)' }}>Atualizando dados...</span>}
           </div>
 
           {(Object.entries(filtros) as [keyof DatabricksResumoFiltros, string | undefined][]).some(([, v]) => v) && (
@@ -432,7 +450,7 @@ export default function DatabricksDashboardView() {
                     title="Clique para remover este filtro"
                     onClick={() => setFiltros((f) => ({ ...f, [campo]: undefined }))}
                   >
-                    {FILTRO_LABELS[campo]}: {labelFiltroValor(campo, valor)} ✕
+                    {FILTRO_LABELS[campo]}: {labelFiltroValor(campo, valor, workspaceNameById)} ✕
                   </span>
                 ))}
               <button className="btn-ghost" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setFiltros({})}>
@@ -453,25 +471,25 @@ export default function DatabricksDashboardView() {
               <div className="stats-grid">
                 <div className="stat-card accent">
                   <div className="stat-label">Custo Total no Período</div>
-                  <div className="stat-value">{fmtBRL(resumo.total_custo)}</div>
+                  <div className="stat-value">{fmtUSD(resumo.total_custo)}</div>
                   <div className="stat-sub">{resumo.periodo.inicio} → {resumo.periodo.fim}</div>
                 </div>
                 <div className="stat-card green-card">
                   <div className="stat-label">Free-tier</div>
-                  <div className="stat-value green">{fmtBRL(totalFree)}</div>
+                  <div className="stat-value green">{fmtUSD(totalFree)}</div>
                   <div className="stat-sub">{pctFree}% do consumo</div>
                 </div>
                 <div className="stat-card">
                   <div className="stat-label">Pago</div>
-                  <div className="stat-value">{fmtBRL(totalPago)}</div>
+                  <div className="stat-value">{fmtUSD(totalPago)}</div>
                   <div className="stat-sub">{100 - pctFree}% do consumo</div>
                 </div>
               </div>
 
               {totalFreePago > 0 && (
                 <div style={{ display: 'flex', height: 10, borderRadius: 5, overflow: 'hidden', border: '1px solid var(--border)' }}>
-                  <div style={{ width: pctFree + '%', background: 'var(--green,#22c55e)' }} title={`Free-tier: ${fmtBRL(totalFree)}`} />
-                  <div style={{ width: (100 - pctFree) + '%', background: 'var(--accent)' }} title={`Pago: ${fmtBRL(totalPago)}`} />
+                  <div style={{ width: pctFree + '%', background: 'var(--green,#22c55e)' }} title={`Free-tier: ${fmtUSD(totalFree)}`} />
+                  <div style={{ width: (100 - pctFree) + '%', background: 'var(--accent)' }} title={`Pago: ${fmtUSD(totalPago)}`} />
                 </div>
               )}
 
@@ -522,7 +540,9 @@ export default function DatabricksDashboardView() {
                   title="Por Workspace"
                   color="var(--accent)"
                   items={resumo.por_workspace.map((w) => ({
-                    custo: w.custo, label: w.workspace_id, value: w.workspace_id,
+                    custo: w.custo,
+                    label: workspaceNameById.get(w.workspace_id) || 'Nome indisponível',
+                    value: w.workspace_id,
                     atencao: workspacesComAnomalia.has(w.workspace_id),
                   }))}
                   activeValue={filtros.workspace_id ?? null}
@@ -611,8 +631,10 @@ export default function DatabricksDashboardView() {
                   {(budgetsQuery.data || []).map((b) => (
                     <tr key={b.id}>
                       <td>{b.nome}</td>
-                      <td>{escopoLabel(b)}</td>
-                      <td>{fmtBRL(b.valor_mensal)}</td>
+                      <td>{b.workspace_id && ['workspace', 'workspace_por_usuario'].includes(b.escopo_tipo)
+                        ? <strong>{workspaceNameById.get(b.workspace_id) || 'Nome indisponível'}</strong>
+                        : escopoLabel(b, workspaceNameById)}</td>
+                      <td>{fmtUSD(b.valor_mensal)}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{b.threshold_atencao}% / {b.threshold_critico}%</td>
                       <td><input type="checkbox" checked={b.ativo} onChange={() => toggleAtivoMutation.mutate(b)} /></td>
                       <td>
@@ -635,7 +657,7 @@ export default function DatabricksDashboardView() {
             </div>
           </div>
 
-          <AnomaliasCard />
+          <AnomaliasCard workspaceNameById={workspaceNameById} />
         </>
       )}
 
@@ -655,7 +677,7 @@ export default function DatabricksDashboardView() {
 // server.js — filtrar pelo period-picker do topo não faria sentido pra esse tipo de
 // análise). Sem drill-down aqui — anomalias já são, por definição, uma lista curta de
 // exceções, não um agregado pra detalhar mais.
-function AnomaliasCard() {
+function AnomaliasCard({ workspaceNameById }: { workspaceNameById: Map<string, string> }) {
   const anomaliasQuery = useQuery({ queryKey: ['databricks-anomalias'], queryFn: getDatabricksAnomalias })
   const anomalias = anomaliasQuery.data
   const total = (anomalias?.custo_diario.length ?? 0) + (anomalias?.usuarios.length ?? 0)
@@ -681,10 +703,12 @@ function AnomaliasCard() {
               {anomalias.custo_diario.map((a, i) => (
                 <tr key={'cd' + i}>
                   <td>📈 Custo diário</td>
-                  <td>{a.escopo_tipo === 'workspace' ? a.escopo_valor : 'Global'}</td>
+                  <td>{a.escopo_tipo === 'workspace' && a.escopo_valor
+                    ? <strong>{workspaceNameById.get(a.escopo_valor) || 'Nome indisponível'}</strong>
+                    : 'Global'}</td>
                   <td>
-                    {new Date(a.usage_date + 'T00:00:00').toLocaleDateString('pt-BR')} — {fmtBRL(a.custo)}
-                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> (média {fmtBRL(a.media)})</span>
+                    {new Date(a.usage_date + 'T00:00:00').toLocaleDateString('pt-BR')} — {fmtUSD(a.custo)}
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> (média {fmtUSD(a.media)})</span>
                   </td>
                   <td style={{ color: 'var(--orange,#ff8c42)', fontWeight: 700 }}>Z {a.zscore >= 0 ? '+' : ''}{a.zscore.toFixed(2)}</td>
                 </tr>
@@ -694,8 +718,8 @@ function AnomaliasCard() {
                   <td>👤 Usuário</td>
                   <td>{u.usuario}</td>
                   <td>
-                    Últimos 7 dias: {fmtBRL(u.custo_recente)}
-                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> (histórico: {fmtBRL(u.media_diaria_historica)}/dia)</span>
+                    Últimos 7 dias: {fmtUSD(u.custo_recente)}
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> (histórico: {fmtUSD(u.media_diaria_historica)}/dia)</span>
                   </td>
                   <td style={{ color: 'var(--orange,#ff8c42)', fontWeight: 700 }}>
                     {u.crescimento_pct == null ? 'Novo' : `+${(u.crescimento_pct * 100).toFixed(0)}%`}
@@ -710,14 +734,6 @@ function AnomaliasCard() {
   )
 }
 
-function genieEscopoLabel(b: GenieBudget): string {
-  const wsIds = b.filter?.workspace_id?.values
-  if (wsIds?.length) return `Workspaces: ${wsIds.join(', ')}`
-  const tags = b.filter?.tags
-  if (tags?.length) return tags.map((t) => `${t.key} = ${t.value?.values?.join('/') ?? '?'}`).join(', ')
-  return 'Toda a conta'
-}
-
 // Quotas Genie via Databricks Account Budgets API (2026-08-28) — diferente do card
 // "Orçamentos" acima (calculado por nós sobre databricks_consumo, só alerta): isto lista/
 // cria/exclui budgets NATIVOS do Databricks (resource_type=UNITY_AI_GATEWAY), aplicados
@@ -729,7 +745,96 @@ function GenieBudgetsCard() {
   const queryClient = useQueryClient()
   const [modalOpen, setModalOpen] = useState(false)
   const [editingBudget, setEditingBudget] = useState<GenieBudget | null>(null)
+  const [usuariosBudget, setUsuariosBudget] = useState<GenieBudget | null>(null)
+  const [usuariosBudgetEscopo, setUsuariosBudgetEscopo] = useState<'padrao' | 'overrides'>('padrao')
+  const hoje = new Date()
+  const ymd = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  const inicioMes = ymd(new Date(hoje.getFullYear(), hoje.getMonth(), 1))
+  const fimMes = ymd(hoje)
+  const mesAtual = inicioMes.slice(0, 7)
   const budgetsQuery = useQuery({ queryKey: ['genie-budgets'], queryFn: listGenieBudgets })
+  const genieBudgets = budgetsQuery.data?.budgets ?? []
+  const consumoQuery = useQuery({
+    queryKey: ['genie-workspace-consumo', mesAtual],
+    queryFn: () => getDatabricksCotas({ data_inicio: inicioMes, data_fim: fimMes }, true),
+  })
+  const porUsuario = consumoQuery.data?.por_usuario ?? []
+  const budgetsPorUsuario = genieBudgets.filter((budget) =>
+    budget.alert_configurations?.some((alerta) =>
+      alerta.scope_type === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER' || (alerta.principal_overrides?.length ?? 0) > 0,
+    ))
+  const workspacesPorUsuario = [...new Set(budgetsPorUsuario.flatMap((budget) =>
+    budget.filter?.workspace_id?.values?.map(String) ?? [],
+  ))]
+  const usuariosAtivos = [...new Set(porUsuario
+    .filter((row) => !workspacesPorUsuario.length || workspacesPorUsuario.includes(String(row.workspace_id)))
+    .map((row) => row.usuario.trim()).filter(Boolean))]
+  const temQuotaPorUsuario = budgetsPorUsuario.length > 0
+  const principalsQuery = useQuery({
+    queryKey: ['genie-active-user-principals', usuariosAtivos.join(',')],
+    queryFn: () => resolveGenieUserPrincipals(usuariosAtivos),
+    enabled: budgetsQuery.isSuccess && consumoQuery.isSuccess && temQuotaPorUsuario && usuariosAtivos.length > 0,
+    retry: false,
+  })
+  const tagsBudgetSelecionado = usuariosBudget?.filter?.tags ?? []
+  const consumoTagsQuery = useQuery({
+    queryKey: ['genie-budget-tagged-spend', usuariosBudget?.budget_configuration_id ?? '', inicioMes, fimMes, JSON.stringify(tagsBudgetSelecionado)],
+    queryFn: () => getDatabricksCotas(
+      { data_inicio: inicioMes, data_fim: fimMes }, true, false, tagsBudgetSelecionado,
+    ),
+    enabled: !!usuariosBudget && tagsBudgetSelecionado.length > 0,
+    retry: false,
+  })
+  const consumoUsuariosModal = tagsBudgetSelecionado.length
+    ? consumoTagsQuery.data?.por_usuario ?? []
+    : porUsuario
+  const consumoFiltradoPorTags = tagsBudgetSelecionado.length > 0
+    && consumoTagsQuery.isSuccess && consumoTagsQuery.data?.tag_filters_applied === true
+  const erroConsumoTags = tagsBudgetSelecionado.length > 0 && consumoTagsQuery.isSuccess
+    && !consumoFiltradoPorTags
+    ? 'O backend ainda não confirmou a aplicação das tags; atualize o serviço para habilitar o progresso.'
+    : tagsBudgetSelecionado.length > 0 && consumoTagsQuery.isError
+      ? (consumoTagsQuery.error as Error).message : null
+  const resultadoUsuariosModal = usuariosBudget
+    ? calcularUsuariosQuotaGenie(
+      usuariosBudget, consumoUsuariosModal, principalsQuery.data ?? [],
+      consumoFiltradoPorTags,
+    )
+    : null
+  const idsParaResolver = [...new Set([
+    ...genieBudgets.flatMap((budget) => budget.filter?.workspace_id?.values?.map(String) ?? []),
+  ])]
+  const nomesQuery = useQuery({
+    queryKey: ['genie-workspaces', idsParaResolver.join(',')],
+    queryFn: () => listGenieWorkspaces(idsParaResolver),
+  })
+  const nomePorWorkspace = new Map((nomesQuery.data ?? []).map((ws) => [ws.workspace_id, ws.nome]))
+  const workspaces = (consumoQuery.data?.por_workspace ?? []).map((ws) => ({
+    ...ws,
+    nome: nomePorWorkspace.get(String(ws.workspace_id)) || 'Nome indisponível',
+  }))
+  const workspaceOptionsMap = new Map((nomesQuery.data ?? []).map((ws) => [ws.workspace_id, {
+    workspace_id: ws.workspace_id,
+    nome: ws.nome,
+    custo: null as number | null,
+  }]))
+  for (const ws of workspaces) {
+    const workspace_id = String(ws.workspace_id)
+    workspaceOptionsMap.set(workspace_id, {
+      workspace_id,
+      nome: nomePorWorkspace.get(workspace_id) || 'Nome indisponível',
+      custo: ws.custo,
+    })
+  }
+  for (const id of genieBudgets.flatMap((budget) => budget.filter?.workspace_id?.values?.map(String) ?? [])) {
+    if (!workspaceOptionsMap.has(id)) workspaceOptionsMap.set(id, { workspace_id: id, nome: 'Nome indisponível', custo: null })
+  }
+  const workspaceOptions = [...workspaceOptionsMap.values()].sort((a, b) => a.nome.localeCompare(b.nome))
+  const consumoPorWorkspace = new Map(workspaces.map((ws) => [String(ws.workspace_id), ws.custo]))
+  const dbusPorWorkspace = new Map(workspaces.map((ws) => [String(ws.workspace_id), ws.dbus]))
+  const idsSemNome = [...new Set(genieBudgets
+    .flatMap((budget) => budget.filter?.workspace_id?.values?.map(String) ?? [])
+    .filter((id) => !nomePorWorkspace.has(id)))]
 
   function handleEdit(b: GenieBudget) {
     setEditingBudget(b)
@@ -750,6 +855,21 @@ function GenieBudgetsCard() {
     onError: (e: Error) => window.showToast?.('Erro ao excluir quota Genie: ' + e.message, 'error'),
   })
 
+  const updatePrincipalOverrideMutation = useMutation({
+    mutationFn: ({ budgetId, principalId, monthlyLimit, confirmarBloqueio }: {
+      budgetId: string; principalId: number; monthlyLimit: number; confirmarBloqueio: boolean
+    }) => updateGenieBudgetPrincipalOverride(budgetId, principalId, {
+      monthly_limit_usd: monthlyLimit,
+      confirmar_bloqueio: confirmarBloqueio,
+    }),
+    onSuccess: () => {
+      window.showToast?.('Limite individual atualizado no Databricks.', 'success')
+      queryClient.invalidateQueries({ queryKey: ['genie-budgets'] })
+      setUsuariosBudget(null)
+    },
+    onError: (e: Error) => window.showToast?.('Erro ao atualizar limite individual: ' + e.message, 'error'),
+  })
+
   function handleDelete(b: GenieBudget) {
     if (!confirm(`Excluir a quota Genie "${b.display_name}" no Databricks? Isso remove o limite/bloqueio configurado lá, não só localmente.`)) return
     deleteMutation.mutate(b.budget_configuration_id)
@@ -759,7 +879,8 @@ function GenieBudgetsCard() {
     <div className="card">
       <div className="card-header">
         <span className="card-title">🧞 Quotas Genie (Databricks nativo)</span>
-        <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>{budgetsQuery.data?.length ?? 0}</span>
+        <span className="badge" style={{ marginLeft: 8, fontSize: 10 }}>{genieBudgets.length} Genie</span>
+        {budgetsQuery.data && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>de {budgetsQuery.data.account_total} budgets na conta</span>}
         <button className="btn-primary" style={{ marginLeft: 'auto' }} onClick={() => { setEditingBudget(null); setModalOpen(true) }}>
           Nova Quota Genie
         </button>
@@ -768,7 +889,22 @@ function GenieBudgetsCard() {
         Limites nativos do Databricks (Unity AI Gateway) pro uso do Genie — aplicados pelo próprio Databricks,
         não pelo FinOps Manager. Exige a conexão padrão (Coleta Databricks) em modo OAuth M2M com Account Admin.
       </div>
-      {budgetsQuery.data?.some((b) => b._demo) && (
+      {budgetsQuery.data && budgetsQuery.data.account_total > budgetsQuery.data.genie_total && (
+        <div style={{ padding: '0 20px 10px', fontSize: 11, color: 'var(--text-muted)' }}>
+          {budgetsQuery.data.account_total - budgetsQuery.data.genie_total} budget(s) da conta são de outros tipos (por exemplo, All resources) e não aparecem nesta lista Genie.
+        </div>
+      )}
+      {nomesQuery.isError && (
+        <div role="status" style={{ margin: '0 20px 12px', padding: '8px 12px', fontSize: 12, color: 'var(--orange,#ff8c42)', background: 'color-mix(in srgb, var(--orange,#ff8c42) 10%, transparent)' }}>
+          Não foi possível consultar os nomes dos workspaces: {(nomesQuery.error as Error).message}.
+        </div>
+      )}
+      {nomesQuery.isSuccess && idsSemNome.length > 0 && (
+        <div role="status" style={{ margin: '0 20px 12px', padding: '8px 12px', fontSize: 12, color: 'var(--orange,#ff8c42)', background: 'color-mix(in srgb, var(--orange,#ff8c42) 10%, transparent)' }}>
+          Nome não encontrado pela Account API para alguns workspaces. Os itens aparecem como “Nome indisponível”.
+        </div>
+      )}
+      {genieBudgets.some((b) => b._demo) && (
         <div style={{
           margin: '0 20px 12px', padding: '8px 12px', fontSize: 12, borderRadius: 6,
           color: 'var(--orange,#ff8c42)',
@@ -788,23 +924,161 @@ function GenieBudgetsCard() {
       {budgetsQuery.isSuccess && (
         <div className="table-wrapper">
           <table className="data-table">
-            <thead><tr><th>Nome</th><th>Escopo</th><th>Limite (US$)</th><th>Ação</th><th>Ações</th></tr></thead>
+            <thead><tr><th>Quota</th><th>Workspace</th><th>Consumo Genie no mês</th><th>Limite mensal</th><th>Níveis</th><th>Status de usuários</th><th>Ações</th></tr></thead>
             <tbody>
-              {budgetsQuery.data.map((b) => {
-                const alerta = b.alert_configurations?.[0]
-                const temBloqueio = alerta?.action_configurations?.some((a) => a.action_type === 'BLOCK_USAGE')
+              {genieBudgets.map((b) => {
+                const alertas = b.alert_configurations ?? []
+                const niveisOrdenados = [...alertas].sort((a, b) => Number(a.quantity_threshold) - Number(b.quantity_threshold))
+                const tetosPorEscopo = new Map<string, number>()
+                for (const alerta of alertas) {
+                  tetosPorEscopo.set(
+                    alerta.scope_type,
+                    Math.max(tetosPorEscopo.get(alerta.scope_type) ?? 0, Number(alerta.quantity_threshold) || 0),
+                  )
+                }
+                const wsIds = b.filter?.workspace_id?.values?.map(String) ?? []
+                const consumo = wsIds.length
+                  ? wsIds.reduce((total, id) => total + (consumoPorWorkspace.get(id) ?? 0), 0)
+                  : workspaces.reduce((total, ws) => total + ws.custo, 0)
+                const dbus = wsIds.length
+                  ? wsIds.reduce((total, id) => total + (dbusPorWorkspace.get(id) ?? 0), 0)
+                  : workspaces.reduce((total, ws) => total + ws.dbus, 0)
+                const bloqueioConfigurado = alertas.find((alerta) => alerta.action_configurations?.some((action) => action.action_type === 'BLOCK_USAGE'))
+                const estadosGasto = b._spend_status?.alert_spend_statuses ?? []
+                const estadoGasto = estadosGasto.find((estado) => !bloqueioConfigurado || estado.scope_type === bloqueioConfigurado.scope_type)
+                  ?? estadosGasto[0]
+                const escopoBarra = estadoGasto?.scope_type ?? bloqueioConfigurado?.scope_type ?? niveisOrdenados[0]?.scope_type
+                const niveisEscopoBarra = niveisOrdenados.filter((alerta) => alerta.scope_type === escopoBarra)
+                const pctDatabricks = estadoGasto?.percent_consumed == null ? null : Number(estadoGasto.percent_consumed)
+                const pctNativoValido = pctDatabricks != null && Number.isFinite(pctDatabricks)
+                const tetoNativo = Number(estadoGasto?.threshold) || 0
+                const teto = tetoNativo || (escopoBarra ? tetosPorEscopo.get(escopoBarra) ?? 0 : 0)
+                const temTetoConfigurado = estadoGasto?.threshold != null || alertas.some((alerta) => Number.isFinite(Number(alerta.quantity_threshold)))
+                const percentualLocal = teto > 0 ? consumo / teto * 100 : 0
+                const percentualConsumo = pctNativoValido ? pctDatabricks : percentualLocal
+                const gastoNativo = estadoGasto?.spend == null ? null : Number(estadoGasto.spend)
+                const gastoEstimado = pctNativoValido && gastoNativo == null && teto > 0
+                  ? teto * percentualConsumo / 100 : null
+                const consumoExibido = gastoNativo ?? gastoEstimado ?? consumo
+                const gastoEstimadoNativo = gastoNativo == null && gastoEstimado != null
+                const nivelAtingido = niveisEscopoBarra.filter((alerta) => {
+                  const limiteNivel = Number(alerta.quantity_threshold)
+                  return limiteNivel > 0 && percentualConsumo >= (teto > 0 ? limiteNivel / teto * 100 : 100)
+                }).at(-1)
+                const bloqueioZeroAtingido = niveisEscopoBarra.some((alerta) =>
+                  Number(alerta.quantity_threshold) === 0
+                  && alerta.action_configurations?.some((action) => action.action_type === 'BLOCK_USAGE'),
+                ) && pctNativoValido && percentualConsumo >= 100
+                const barraCor = bloqueioZeroAtingido || nivelAtingido?.action_configurations?.some((action) => action.action_type === 'BLOCK_USAGE')
+                  ? 'var(--red,#ff4d6a)'
+                  : nivelAtingido
+                    ? 'var(--orange,#ff8c42)'
+                    : 'var(--green,#22c55e)'
+                const progressoPct = Math.min(percentualConsumo, 100)
+                const temStatusUsuarios = alertas.some((alerta) => alerta.scope_type === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
+                  || alertas.some((alerta) => (alerta.principal_overrides?.length ?? 0) > 0)
+                const usuariosQuota = calcularUsuariosQuotaGenie(b, porUsuario, principalsQuery.data ?? [])
+                const defaultUsers = usuariosQuota.linhas.filter((user) => user.origem === 'padrao')
+                const overrideUsers = usuariosQuota.linhas.filter((user) => user.origem === 'override')
+                const defaultAtLimit = defaultUsers.filter((user) => user.status === 'Limite atingido').length
+                const overrideAtLimit = overrideUsers.filter((user) => user.status === 'Limite atingido').length
+                const alertasPorUsuario = alertas.filter((alerta) => alerta.scope_type === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER')
+                const limitePadraoUsuario = Math.max(0, ...alertasPorUsuario.map((alerta) => Number(alerta.quantity_threshold) || 0))
+                const overrideIds = new Set(alertasPorUsuario.flatMap((alerta) =>
+                  (alerta.principal_overrides || []).map((override) => String(override.principal_id)),
+                ))
+                const formatLimite = (limite: number) => limite.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                const statusUsuariosResumo = usuariosQuota.filtroPorTag
+                  ? 'consumo não atribuível por tags'
+                  : principalsQuery.isLoading
+                    ? 'consultando…'
+                    : principalsQuery.isError
+                      ? 'indisponível'
+                      : usuariosQuota.linhas.length === 0
+                        ? 'sem billing local'
+                        : `${usuariosQuota.naoResolvidos} override(s) não resolvido(s)`
+                const statusUsuariosIndisponivel = usuariosQuota.filtroPorTag || usuariosQuota.linhas.length === 0
+                  || principalsQuery.isLoading || principalsQuery.isError
+                const resumoPadrao = usuariosQuota.filtroPorTag
+                  ? `Padrão · limite-base US$ ${formatLimite(limitePadraoUsuario)}`
+                  : `Padrão · ${statusUsuariosIndisponivel ? statusUsuariosResumo : `${defaultAtLimit} no limite (billing) / ${defaultUsers.length}`}`
+                const resumoOverrides = usuariosQuota.filtroPorTag
+                  ? `Overrides · ${overrideIds.size} limites individuais`
+                  : `Overrides · ${statusUsuariosIndisponivel ? statusUsuariosResumo : `${overrideAtLimit} no limite (billing) / ${overrideUsers.length}`}`
                 return (
                   <tr key={b.budget_configuration_id}>
                     <td>{b.display_name}</td>
-                    <td>{genieEscopoLabel(b)}</td>
-                    <td>
-                      {alerta ? Number(alerta.quantity_threshold).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
-                      {alerta?.scope_type === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER' ? ' /usuário' : ''}
+                    <td>{wsIds.length ? wsIds.map((id) => <div key={id}>{nomePorWorkspace.get(id) || 'Nome indisponível'}</div>) : 'Toda a conta'}</td>
+                    <td style={{ minWidth: 220 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 6 }}>
+                        <strong style={{ color: barraCor, fontSize: 13 }}>
+                          {pctNativoValido && gastoEstimadoNativo ? '~' : ''}US$ {consumoExibido.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          {teto > 0 || pctNativoValido ? ` · ${Math.round(percentualConsumo)}%` : ''}
+                        </strong>
+                        <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{temTetoConfigurado ? `de US$ ${teto.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'sem limite'}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                        {pctNativoValido && percentualConsumo > 0 && dbus === 0
+                          ? 'DBU não apurado na coleta local'
+                          : `${dbus.toLocaleString('pt-BR', { maximumFractionDigits: 2 })} DBU utilizados`}
+                        {!pctNativoValido && consumo === 0 && dbus > 0 ? ' · uso sem custo registrado; barra financeira fica em 0%' : ''}
+                        {pctNativoValido ? ` · ${Math.round(percentualConsumo)}% reportados pelo Databricks` : ''}
+                      </div>
+                      {pctNativoValido && (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>Consumo informado pela Budgets API do Databricks.</div>
+                      )}
+                      {b._spend_status_error && <div style={{ fontSize: 10, color: 'var(--orange,#ff8c42)', marginBottom: 6 }}>{b._spend_status_error}; usando dados locais.</div>}
+                      {!pctNativoValido && consumo === 0 && dbus === 0 && (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>Sem consumo Genie registrado neste workspace no mês.</div>
+                      )}
+                      <div
+                        role="progressbar"
+                        aria-label={`Consumo de ${b.display_name}`}
+                        aria-valuemin={0}
+                        aria-valuemax={teto || 100}
+                        aria-valuenow={pctNativoValido ? percentualConsumo : consumo}
+                        aria-valuetext={`${Math.round(percentualConsumo)}% da quota consumida${teto > 0 ? `, limite US$ ${teto.toFixed(2)}` : ''}`}
+                        style={{ height: 24, position: 'relative', borderRadius: 5, background: 'var(--border)', overflow: 'visible' }}
+                      >
+                        <div style={{ width: `${progressoPct}%`, height: '100%', borderRadius: 5, background: barraCor, transition: 'width .25s ease, background .25s ease' }} />
+                        {teto > 0 && niveisEscopoBarra.map((alerta, index) => {
+                          const posicao = Math.min(Number(alerta.quantity_threshold) / teto * 100, 100)
+                          const bloqueia = alerta.action_configurations?.some((action) => action.action_type === 'BLOCK_USAGE')
+                          const cor = bloqueia ? 'var(--red,#ff4d6a)' : 'var(--orange,#ff8c42)'
+                          return <span key={`${alerta.quantity_threshold}-${index}`} title={`${Math.round(posicao)}%: US$ ${Number(alerta.quantity_threshold).toFixed(2)}${bloqueia ? ' · bloqueio' : ' · alerta'}`} style={{ position: 'absolute', left: `${posicao}%`, top: -4, width: 3, height: 32, borderRadius: 2, background: cor, boxShadow: '0 0 0 1px var(--bg-card)', transform: 'translateX(-1px)' }} />
+                        })}
+                      </div>
+                      {consumo > teto && teto > 0 && <span style={{ display: 'block', color: 'var(--red,#ff4d6a)', fontSize: 10, marginTop: 4 }}>Limite excedido</span>}
+                      {bloqueioZeroAtingido && <span style={{ display: 'block', color: 'var(--red,#ff4d6a)', fontSize: 10, marginTop: 4 }}>Bloqueio configurado em US$ 0</span>}
                     </td>
                     <td>
-                      {temBloqueio
-                        ? <span className="badge" style={{ background: 'var(--red,#ff4d6a)', color: '#fff' }}>🚫 Bloqueia</span>
-                        : <span className="badge">✉ Alerta</span>}
+                      {alertas.length === 0 ? '—' : niveisOrdenados.map((alerta, index) => {
+                        const tetoDoEscopo = tetosPorEscopo.get(alerta.scope_type) ?? 0
+                        const percent = tetoDoEscopo > 0 ? Math.round(Number(alerta.quantity_threshold) / tetoDoEscopo * 100) : 0
+                        const temBloqueio = alerta.action_configurations?.some((a) => a.action_type === 'BLOCK_USAGE')
+                        return (
+                          <div key={`${alerta.scope_type}-${alerta.quantity_threshold}-${index}`} style={{ display: 'grid', gridTemplateColumns: '160px 126px 92px', alignItems: 'center', gap: 8, marginBottom: 5, width: 'max-content' }}>
+                            <span style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{percent}% · US$ {Number(alerta.quantity_threshold).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                            <span className="badge" style={{ width: '100%', boxSizing: 'border-box', justifyContent: 'center', fontSize: 9, whiteSpace: 'nowrap' }}>{alerta.scope_type === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER' ? 'Padrão por usuário' : 'Compartilhado'}</span>
+                            {temBloqueio
+                              ? <span className="badge" style={{ width: '100%', boxSizing: 'border-box', justifyContent: 'center', background: 'var(--red,#ff4d6a)', color: '#fff', whiteSpace: 'nowrap' }}>🚫 Bloqueia</span>
+                              : <span className="badge" style={{ width: '100%', boxSizing: 'border-box', justifyContent: 'center', background: 'var(--orange,#ff8c42)', color: '#fff', whiteSpace: 'nowrap' }}>✉ Alerta</span>}
+                          </div>
+                        )
+                      })}
+                    </td>
+                    <td>
+                      {temStatusUsuarios ? (
+                        <div style={{ display: 'grid', gap: 5, minWidth: 170 }}>
+                          <button className="btn-ghost" style={{ padding: '4px 7px', textAlign: 'left', fontSize: 10 }} onClick={() => { setUsuariosBudgetEscopo('padrao'); setUsuariosBudget(b) }}>
+                            {resumoPadrao}
+                          </button>
+                          <button className="btn-ghost" style={{ padding: '4px 7px', textAlign: 'left', fontSize: 10 }} onClick={() => { setUsuariosBudgetEscopo('overrides'); setUsuariosBudget(b) }}>
+                            {resumoOverrides}
+                          </button>
+                          {usuariosQuota.naoResolvidos > 0 && <span style={{ fontSize: 9, color: 'var(--orange,#ff8c42)' }}>{statusUsuariosResumo}</span>}
+                        </div>
+                      ) : '—'}
                     </td>
                     <td>
                       <div className="table-actions">
@@ -819,14 +1093,45 @@ function GenieBudgetsCard() {
                   </tr>
                 )
               })}
-              {budgetsQuery.data.length === 0 && (
-                <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhuma quota Genie cadastrada.</td></tr>
+              {genieBudgets.length === 0 && (
+                <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhuma quota Genie cadastrada.</td></tr>
               )}
             </tbody>
           </table>
         </div>
       )}
-      {modalOpen && <GenieBudgetModal budget={editingBudget} onClose={handleClose} />}
+      {modalOpen && <GenieBudgetModal
+        budget={editingBudget}
+        workspaces={workspaceOptions}
+        workspacesLoading={nomesQuery.isPending || nomesQuery.isFetching}
+        workspacesError={nomesQuery.isError ? (nomesQuery.error as Error).message : null}
+        consumoLoading={consumoQuery.isPending || consumoQuery.isFetching}
+        consumoError={consumoQuery.isError ? (consumoQuery.error as Error).message : null}
+        onRetryWorkspaces={() => { void nomesQuery.refetch() }}
+        onClose={handleClose}
+      />}
+      {usuariosBudget && resultadoUsuariosModal && <GenieBudgetUsersModal
+        budget={usuariosBudget}
+        escopo={usuariosBudgetEscopo}
+        linhas={resultadoUsuariosModal.linhas}
+        naoResolvidos={resultadoUsuariosModal.naoResolvidos}
+        filtroPorTag={resultadoUsuariosModal.filtroPorTag}
+        tagsAplicadas={resultadoUsuariosModal.tagsAplicadas}
+        semBillingLocal={!resultadoUsuariosModal.linhas.length
+          && !(tagsBudgetSelecionado.length > 0 && consumoTagsQuery.isPending)}
+        carregandoPrincipals={principalsQuery.isLoading}
+        erroPrincipals={principalsQuery.isError ? (principalsQuery.error as Error).message : null}
+        carregandoConsumoTags={tagsBudgetSelecionado.length > 0 && consumoTagsQuery.isPending}
+        erroConsumoTags={erroConsumoTags}
+        salvandoOverride={updatePrincipalOverrideMutation.isPending}
+        onUpdateOverride={(principalId, monthlyLimit, confirmarBloqueio) => updatePrincipalOverrideMutation.mutate({
+          budgetId: usuariosBudget.budget_configuration_id,
+          principalId,
+          monthlyLimit,
+          confirmarBloqueio,
+        })}
+        onClose={() => setUsuariosBudget(null)}
+      />}
     </div>
   )
 }

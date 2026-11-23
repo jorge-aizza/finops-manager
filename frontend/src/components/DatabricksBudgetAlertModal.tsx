@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getDatabricksAlertas } from '../api/databricksColeta'
+import { listGenieWorkspaces } from '../api/genieBudgets'
 import type { DatabricksAlertaSeveridade, DatabricksBudget } from '../types/databricksResumo'
 
-function escopoLabel(b: DatabricksBudget): string {
-  if (b.escopo_tipo === 'workspace') return b.workspace_id || '—'
+function escopoLabel(b: DatabricksBudget, workspaceNames: Map<string, string>): string {
+  if (b.escopo_tipo === 'workspace') return b.workspace_id ? workspaceNames.get(b.workspace_id) || 'Nome indisponível' : '—'
   if (b.escopo_tipo === 'tag') return `${b.tag_key} = ${b.tag_valor}`
   return 'Todos os workspaces'
 }
@@ -30,6 +31,14 @@ function readDismissed(): Set<number> {
 
 export default function DatabricksBudgetAlertModal() {
   const alertasQuery = useQuery({ queryKey: ['databricks-alertas'], queryFn: getDatabricksAlertas })
+  const workspaceIds = [...new Set((alertasQuery.data || []).map((a) => a.budget.workspace_id).filter((id): id is string => !!id))].sort()
+  const workspaceNamesQuery = useQuery({
+    queryKey: ['genie-workspaces', workspaceIds.join(',')],
+    queryFn: () => listGenieWorkspaces(workspaceIds),
+    enabled: workspaceIds.length > 0,
+    staleTime: 5 * 60 * 1000,
+  })
+  const workspaceNames = new Map((workspaceNamesQuery.data || []).map((ws) => [ws.workspace_id, ws.nome]))
   const [dismissed, setDismissed] = useState<Set<number>>(readDismissed)
 
   // Derivado direto da query + do estado de dismissed — nada de useEffect
@@ -77,8 +86,8 @@ export default function DatabricksBudgetAlertModal() {
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {escopoLabel(a.budget)} — R$ {(a.custo_atual ?? 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
-                    {' de R$ '}{(a.budget.valor_mensal ?? 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}
+                    {escopoLabel(a.budget, workspaceNames)} — US$ {(a.custo_atual ?? 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                    {' de US$ '}{(a.budget.valor_mensal ?? 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}
                   </div>
                 </div>
               )

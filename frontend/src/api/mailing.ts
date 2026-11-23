@@ -102,7 +102,16 @@ export async function uploadImagemMailing(file: File): Promise<{ ok: boolean; ur
 
 // ── Campanhas ───────────────────────────────────────────────────────
 export const listCampanhas = () =>
-  apiFetch<MailingCampanha[]>('GET', '/mailing/campanhas')
+  apiFetch<unknown>('GET', '/mailing/campanhas').then((response) => {
+    if (Array.isArray(response)) return response as MailingCampanha[]
+    if (response && typeof response === 'object') {
+      const envelope = response as { data?: unknown; campaigns?: unknown; campanhas?: unknown; items?: unknown; results?: unknown }
+      const lista = [envelope.data, envelope.campaigns, envelope.campanhas, envelope.items, envelope.results]
+        .find(Array.isArray)
+      if (lista) return lista as MailingCampanha[]
+    }
+    throw new ApiError('Formato inesperado na resposta de comunicados.')
+  })
 
 export const getCampanha = (id: number) =>
   apiFetch<MailingCampanha>('GET', '/mailing/campanhas/' + id)

@@ -24,7 +24,7 @@
 | `azure_rg_cache` | Cached resource groups |
 | `azure_price_list` | Retail Prices API sync (optional, v4.0 not used in UI) |
 | `azure_recursos_inventario` | Resource inventory (CREATE/UPDATE/DELETE audit) |
-| `azure_recursos_auditoria_eventos` | Event log (Activity Log, 14-day retention) |
+| `azure_recursos_auditoria_eventos` | Resource event log (Change Analysis; configurable DB retention) |
 | `azure_recursos_sku_historico` | VM SKU changes (history of resizes) |
 | `azure_coleta_config` | Service Principals for coleta |
 | `azure_coleta_historico` | Coleta run log |

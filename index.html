@@ -373,13 +373,7 @@
     html[data-session-restoring="true"] #login-screen { display: none !important; }
     html[data-session-restoring="true"] .session-restore-screen { display: flex; }
     #login-screen {
-      background:
-        linear-gradient(rgba(16,7,31,.16), rgba(16,7,31,.24)),
-        url('/react-app/images/Finops_home.png') center / cover no-repeat;
-      background-color: #170d24;
-    }
-    #login-screen.login-background-fallback {
-      background-image: none;
+      background: url('/react-app/images/Finops_home.png') center / cover no-repeat;
       background-color: #170d24;
     }
     #login-screen::before,
@@ -466,8 +460,8 @@
        mesma cor roxa dos botões (#9333ea), só que sutil sobre fundo claro
        em vez de brilho forte sobre fundo quase-preto. ── */
     [data-theme="light"] .login-screen {
-      background: url('/react-app/images/login-background.png') center / cover no-repeat,
-                  #f0f2f5;
+      background: url('/react-app/images/Finops_home.png') center / cover no-repeat;
+      background-color: #170d24;
     }
     [data-theme="light"] .login-screen::before {
       background: radial-gradient(ellipse at center,
@@ -964,6 +958,8 @@
       .main-content { min-height: 0; overflow: hidden; }
       .view-content { padding: 10px 12px; }
       .top-bar      { padding: 8px 12px; gap: 8px; }
+      .top-bar      { position: relative; z-index: 260; }
+      .btn-menu     { position: relative; z-index: 261; }
       .page-title   { font-size: 14px; }
       .top-actions  { gap: 6px; }
       .btn-primary  { padding: 6px 12px; font-size: 12px; }
@@ -1475,7 +1471,7 @@
           <div class="nav-group-items">
             <a class="nav-item nav-sub active" id="nav-sub-dbx-dashboard" onclick="showDbxTab('dashboard')">
               <svg viewBox="0 0 20 20" fill="none" width="15" height="15"><rect x="2" y="2" width="7" height="7" rx="1" fill="currentColor"/><rect x="11" y="2" width="7" height="7" rx="1" fill="currentColor" opacity="0.5"/><rect x="2" y="11" width="7" height="7" rx="1" fill="currentColor" opacity="0.5"/><rect x="11" y="11" width="7" height="7" rx="1" fill="currentColor" opacity="0.3"/></svg>
-              <span class="nav-label">Dashboard</span>
+              <span class="nav-label">Consumo</span>
             </a>
             <a class="nav-item nav-sub" id="nav-sub-dbx-orcamentos" onclick="showDbxTab('orcamentos')">
               <svg viewBox="0 0 20 20" fill="none" width="15" height="15"><path d="M10 2a8 8 0 100 16 8 8 0 000-16z" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v4l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -2391,6 +2387,15 @@
             <label class="toggle-switch" style="margin:0"><input type="checkbox" id="sp-ativo" checked><span class="toggle-slider"></span></label>
           </div>
         </div>
+        <div style="border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">Serviços permitidos para esta SP</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <label style="display:flex;align-items:flex-start;gap:7px;font-size:11px;color:var(--text-muted)"><input id="sp-coletar-billing-api" type="checkbox" checked><span><strong style="color:var(--text)">Billing via API</strong><br>Permite coletas manuais e agendadas.</span></label>
+            <label style="display:flex;align-items:flex-start;gap:7px;font-size:11px;color:var(--text-muted)"><input id="sp-coletar-inventario" type="checkbox" checked><span><strong style="color:var(--text)">Inventário / Resource Graph</strong><br>Inclui consultas Azure por assinatura.</span></label>
+            <label style="display:flex;align-items:flex-start;gap:7px;font-size:11px;color:var(--text-muted)"><input id="sp-coletar-storage" type="checkbox" checked><span><strong style="color:var(--text)">Autenticação Storage</strong><br>Permite usar esta SP nas configs Storage.</span></label>
+            <label style="display:flex;align-items:flex-start;gap:7px;font-size:11px;color:var(--text-muted)"><input id="sp-coletar-reservas-api" type="checkbox" checked><span><strong style="color:var(--text)">Reservas via API</strong><br>Reservas e Savings Plans por ARM.</span></label>
+          </div>
+        </div>
         <div style="display:flex;gap:8px;margin-top:4px">
           <button class="btn-primary" style="flex:1;font-size:13px;padding:10px" onclick="saveSP()">Salvar</button>
           <button class="btn-ghost" style="font-size:13px;padding:10px 18px" onclick="closeSPModal()">Cancelar</button>
@@ -2776,7 +2781,8 @@
         <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end">
           <div>
             <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Prefixo / Caminho <span style="color:var(--text-dim)">(opcional)</span></label>
-            <input id="storage-prefix" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="exports/monthly/">
+            <input id="storage-prefix" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="reports/ReportTI-actual-cost/{periodo}/">
+            <span style="font-size:10px;color:var(--text-muted)">Use {periodo} para a pasta mensal YYYYMMDD-YYYYMMDD; o prefixo muda automaticamente na virada do mês.</span>
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
             <label style="font-size:11px;color:var(--text-muted)">Ativo</label>
@@ -2784,8 +2790,14 @@
           </div>
         </div>
         <div>
-          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Prefixo Price List <span style="color:var(--text-dim)">(opcional — caminho dos CSVs/ZIPs de tabela de preços)</span></label>
+          <label style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text-muted);margin-bottom:5px"><input id="storage-coletar-price-list" type="checkbox" checked>Importar Price List</label>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Prefixo Price List <span style="color:var(--text-dim)">(opcional — caminho dos arquivos de tabela de preços)</span></label>
           <input id="storage-pl-prefix" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="pricelist/">
+        </div>
+        <div>
+          <label style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text-muted);margin-bottom:5px"><input id="storage-coletar-reservas" type="checkbox" checked>Importar Reservas pelo Storage</label>
+          <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Prefixo do export Reservations <span style="color:var(--text-dim)">(não inclui Savings Plans)</span></label>
+          <input id="storage-reservas-prefix" type="text" class="filter-input" style="width:100%;box-sizing:border-box" placeholder="reservations/">
         </div>
         <div>
           <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Service Principal <span style="color:var(--text-dim)">(para autenticação)</span></label>
@@ -2836,6 +2848,29 @@
           <button class="btn-ghost" style="font-size:13px;padding:10px 18px" onclick="testarStorageModal()">Testar</button>
           <button class="btn-ghost" style="font-size:13px;padding:10px 18px" onclick="closeStorageModal()">Cancelar</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-storage-reprocess" class="modal-overlay" onclick="if(event.target===this)closeStorageReprocessModal()">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-header">
+        <h3 class="modal-title">Reprocessar mês do Storage</h3>
+        <button class="modal-close" onclick="closeStorageReprocessModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:20px 24px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:12px;color:var(--text-muted)">Escolha a competência de custos. Primeiro validamos os arquivos; o reprocessamento só é liberado se houver arquivos reconhecidos na pasta daquele mês.</div>
+        <div>
+          <label for="storage-reprocess-mes" style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Mês</label>
+          <input id="storage-reprocess-mes" type="month" class="filter-input" style="width:100%;box-sizing:border-box" onchange="document.getElementById('storage-reprocess-run').disabled=true;document.getElementById('storage-reprocess-result').style.display='none'">
+        </div>
+        <div id="storage-reprocess-result" style="display:none;font-size:11px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(0,0,0,.2);overflow-wrap:anywhere"></div>
+        <div style="font-size:11px;color:var(--text-muted)">A execução confirmada será validada antes de substituir o snapshot de custos desse mês. Price List, Reservas e outros meses não serão alterados.</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-ghost" onclick="closeStorageReprocessModal()">Cancelar</button>
+        <button class="btn-ghost" onclick="testarStorageMes()">Testar mês</button>
+        <button id="storage-reprocess-run" class="btn-primary" disabled onclick="reprocessarStorageMes()">Reprocessar</button>
       </div>
     </div>
   </div>

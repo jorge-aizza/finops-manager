@@ -17,6 +17,23 @@ sumiu da lista viva e virou economia).
 | "Dias como órfão na exclusão" — ponto ÚNICO de leitura | `diasOrfaoNaExclusao()` em `savingOrfaos.js` |
 | Exceção manual, com trilha (quem/quando/por quê) | colunas `ignorado_*` em `azure_desperdicio_saving` |
 
+A apuração também roda após a coleta horária completa dos estados órfãos. Uma coleta parcial de
+assinaturas nunca apura ausência, para não transformar falha de permissão em economia. O card
+privado “Saving comparável ao portal público” usa toda a allowlist pública e o mesmo recorte de
+assinaturas, categorias e Resource Groups do portal, independente do tenant selecionado na lista
+privada. O saving principal privado continua incluindo a base completa permitida pela tela.
+
+## Saving de discos e snapshots separados
+
+No portal autenticado, os números são apresentados sem subtrair o custo do snapshot do Saving do disco:
+
+- `saving_disco_mensal` e `saving_disco_acumulado`: economia bruta atribuída somente aos discos excluídos.
+- `saving_snapshots_mensal` e `saving_snapshots_acumulado`: run-rate estimado que deixa de ser cobrado após a exclusão confirmada de snapshots, vinculados ou não a discos já contabilizados. O acumulado projeta esse valor mensal desde a data da exclusão do snapshot.
+- `saving_outros_mensal` e `saving_outros_acumulado`: economia bruta de outras categorias, como IPs públicos, sem misturá-las com discos ou snapshots.
+- `desconto_mensal_snapshots` e `custo_acumulado_snapshots`: custo mensal dos snapshots ainda retidos e custo acumulado estimado durante a retenção, respectivamente. O acumulado projeta o custo mensal observado pelo tempo de retenção; não é a soma exata dos lançamentos da fatura.
+
+O custo pago enquanto o snapshot existiu não é Saving de snapshot. A tela mantém esses custos separados do Saving dos discos. `economia_mensal_bruta` continua sendo o total bruto legado de recursos; `economia_mensal` e `economia_acumulada` continuam líquidos para compatibilidade com consumidores existentes, inclusive o portal público.
+
 ## Armadilhas
 
 **Métrica nova tem que usar a MESMA base de recorte da métrica irmã.**
@@ -54,6 +71,17 @@ um recurso que na verdade já tinha cumprido. `desde_orfao_em` (`azure_desperdic
 detecção, mesmo raciocínio do parágrafo acima), com fallback pra `primeira_deteccao_em` quando
 essa data não existe. A leitura é por `diasOrfaoNaExclusao()` (`savingOrfaos.js`) — não reabrir a
 conta na mão em `_resumoSavingOrfaos` nem em tela nova, é a função que decide a precedência.
+
+**"Dias no estado atual" é outra métrica, persistida em `azure_desperdicio_estado_historico`.**
+O coletor grava episódios horários de NIC/IP sem associação, App Service Plan sem apps, LB/App
+Gateway sem backend e VM `PowerState/stopped`. O primeiro ponto é `estado_desde` (observado pelo
+FinOps, não necessariamente o começo real); observações seguintes atualizam `ultimo_visto_em` e
+preservam esse início. Uma observação completa que não encontre o recurso encerra o episódio.
+Falha de Resource Graph nunca encerra episódio: a coleta usa modo estrito e, se necessário,
+recua por assinatura. Depois de duas horas sem confirmação, a tela mostra `—` até nova coleta,
+em vez de afirmar que o estado continua. Disco e snapshot usam suas datas reais do Azure.
+`dias_orfao` permanece inalterado e continua sendo a métrica usada pelo saving e pelo piso do
+portal público. A allowlist pública é aplicada antes de anexar a nova duração.
 
 ---
 

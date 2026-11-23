@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -6,9 +6,14 @@ import DatabricksDashboardView from './DatabricksDashboardView'
 import * as databricksColetaApi from '../api/databricksColeta'
 import * as genieBudgetsApi from '../api/genieBudgets'
 import type { DatabricksResumo } from '../types/databricksResumo'
+import type { GenieBudget } from '../types/genieBudgets'
 
 vi.mock('../api/databricksColeta')
 vi.mock('../api/genieBudgets')
+
+const budgetsResponse = (budgets: GenieBudget[], account_total = budgets.length) => ({
+  budgets, account_total, genie_total: budgets.length,
+})
 
 function makeResumo(overrides: Partial<DatabricksResumo> = {}): DatabricksResumo {
   return {
@@ -55,7 +60,17 @@ beforeEach(() => {
   vi.mocked(databricksColetaApi.getDatabricksStorageOtimizacao).mockResolvedValue({
     periodo: { inicio: '2026-08-01', fim: '2026-08-25' }, tem_dados: false, total: 0, operacoes: [],
   })
-  vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([])
+  vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([]))
+  vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([
+    { workspace_id: 'ws-prod', nome: 'Produção' },
+    { workspace_id: 'ws-dev', nome: 'Desenvolvimento' },
+  ])
+  vi.mocked(genieBudgetsApi.resolveGenieUserPrincipals).mockResolvedValue([])
+  vi.mocked(databricksColetaApi.getDatabricksCotas).mockResolvedValue({
+    mes: '2026-11', meses_disponiveis: [], meses_considerados: 1,
+    por_workspace: [], por_usuario: [],
+    resumo: { custo_total: 0, cota_total: 0, workspaces_sem_cota: 0, usuarios_acima_do_limite: 0 },
+  })
   // `bridge.ts` mantém currentDatabricksTab como estado de módulo (singleton) — sem
   // resetar aqui, um teste que troca de aba (Orçamentos/Quotas) vaza pro próximo.
   window.__reactBridge?.setDatabricksTab('dashboard')
@@ -72,13 +87,18 @@ describe('DatabricksDashboardView', () => {
 
   it('renderiza total, free-tier vs. pago e os rankings quando há dados', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([
+      { workspace_id: 'ws-prod', nome: 'Produção' },
+      { workspace_id: 'ws-dev', nome: 'Desenvolvimento' },
+    ])
     renderWithClient()
 
     expect(await screen.findByText('Custo Total no Período')).toBeInTheDocument()
-    expect(screen.getByText('R$ 15.000,00')).toBeInTheDocument()
+    expect(screen.getByText('US$ 15,000.00')).toBeInTheDocument()
     // free_vs_pago: 3000/(3000+12000) = 20%
     expect(screen.getByText('20% do consumo')).toBeInTheDocument()
-    expect(screen.getByText('ws-prod')).toBeInTheDocument()
+    expect(screen.queryByText('ws-prod')).not.toBeInTheDocument()
+    expect(screen.getByText('Produção')).toBeInTheDocument()
     expect(screen.getByText('PREMIUM_ALL_PURPOSE_COMPUTE')).toBeInTheDocument()
     expect(screen.getByText('joao@empresa.com')).toBeInTheDocument()
 
@@ -98,12 +118,16 @@ describe('DatabricksDashboardView', () => {
         { workspace_id: 'ws-3', custo: 2000 }, { workspace_id: 'ws-4', custo: 1000 },
       ],
     }))
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([
+      { workspace_id: 'ws-1', nome: 'Produção' }, { workspace_id: 'ws-2', nome: 'Desenvolvimento' },
+      { workspace_id: 'ws-3', nome: 'Homologação' }, { workspace_id: 'ws-4', nome: 'Staging' },
+    ])
     renderWithClient()
     await screen.findByText('Custo Total no Período')
 
     // ws-4 é o 4º item — antes da correção, `{i < 3 && ...}` escondia o valor dele
-    expect(screen.getByText('ws-4')).toBeInTheDocument()
-    expect(screen.getByText('R$ 1.000,00')).toBeInTheDocument()
+    expect(screen.getByText('Staging')).toBeInTheDocument()
+    expect(screen.getByText('US$ 1,000.00')).toBeInTheDocument()
   })
 
   it('marca ⚠️ nos itens de Workspace/Usuário com anomalia detectada e leva pra aba Orçamentos ao clicar', async () => {
@@ -112,17 +136,20 @@ describe('DatabricksDashboardView', () => {
       custo_diario: [{ escopo_tipo: 'workspace', escopo_valor: 'ws-prod', usage_date: '2026-08-05', custo: 900, media: 300, desvio: 100, zscore: 3.2 }],
       usuarios: [{ usuario: 'joao@empresa.com', custo_recente: 500, media_diaria_recente: 71, custo_historico: 100, media_diaria_historica: 14, crescimento_pct: 4 }],
     })
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([
+      { workspace_id: 'ws-prod', nome: 'Produção' }, { workspace_id: 'ws-dev', nome: 'Desenvolvimento' },
+    ])
     const user = userEvent.setup()
     renderWithClient()
     await screen.findByText('Custo Total no Período')
 
-    const wsRow = screen.getByText('ws-prod').closest('div')!.parentElement!
+    const wsRow = screen.getByText('Produção').closest('div')!.parentElement!
     expect(wsRow.textContent).toContain('⚠️')
     const usuarioRow = screen.getByText('joao@empresa.com').closest('div')!.parentElement!
     expect(usuarioRow.textContent).toContain('⚠️')
 
     // "ws-dev" não tem anomalia — não deve ter o ícone
-    const wsDevRow = screen.getByText('ws-dev').closest('div')!.parentElement!
+    const wsDevRow = screen.getByText('Desenvolvimento').closest('div')!.parentElement!
     expect(wsDevRow.textContent).not.toContain('⚠️')
 
     await user.click(screen.getAllByTitle(/Anomalia de consumo detectada/)[0])
@@ -152,15 +179,15 @@ describe('DatabricksDashboardView', () => {
     renderWithClient()
     await screen.findByText('Custo Total no Período')
 
-    await user.click(screen.getByText('ws-prod'))
+    await user.click(screen.getByText('Produção'))
     await waitFor(() => expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledWith(
       expect.any(String), expect.any(String), { workspace_id: 'ws-prod' },
     ))
     expect(await screen.findByText('Detalhando por:')).toBeInTheDocument()
-    expect(screen.getByText('Workspace: ws-prod ✕')).toBeInTheDocument()
+    expect(screen.getByText('Workspace: Produção ✕')).toBeInTheDocument()
 
     // clicar de novo no mesmo item remove o filtro (toggle)
-    await user.click(screen.getByText('ws-prod'))
+    await user.click(screen.getByText('Produção'))
     await waitFor(() => expect(screen.queryByText('Detalhando por:')).not.toBeInTheDocument())
   })
 
@@ -180,19 +207,21 @@ describe('DatabricksDashboardView', () => {
     })
     const user = userEvent.setup()
     renderWithClient()
-    await screen.findByText('R$ 15.000,00')
+    await screen.findByText('US$ 15,000.00')
 
-    await user.click(screen.getByText('ws-prod'))
+    await user.click(screen.getByText('Produção'))
     // Enquanto a 2ª busca ainda não resolveu, o conteúdo anterior continua montado —
     // sem `placeholderData: keepPreviousData` o `data` vira `undefined` durante o
     // refetch, o bloco inteiro de KPIs/gráfico/rankings desaparece, o documento encolhe
     // e o browser é forçado a recuar o scroll (efeito relatado pelo usuário como "a
     // página volta pro início" ao clicar num mês/item pra detalhar).
-    expect(screen.getByText('R$ 15.000,00')).toBeInTheDocument()
+    expect(screen.getByText('US$ 15,000.00')).toBeInTheDocument()
     expect(screen.getByText('Custo Total no Período')).toBeInTheDocument()
+    expect(screen.getByText('Workspace: Produção ✕')).toBeInTheDocument()
+    expect(screen.getByText('Atualizando dados...')).toBeInTheDocument()
 
     resolveSegunda(makeResumo({ total_custo: 6000, por_workspace: [{ workspace_id: 'ws-prod', custo: 6000 }] }))
-    await screen.findByText('R$ 6.000,00')
+    await screen.findByText('US$ 6,000.00')
   })
 
   it('drill-down: clicar numa barra de mês na Tendência Mensal filtra por ele (clique de novo remove)', async () => {
@@ -262,10 +291,10 @@ describe('DatabricksDashboardView', () => {
     expect(await screen.findByText('Execuções de Job — Tempo e Custo')).toBeInTheDocument()
     expect(screen.getByText('45m 0s')).toBeInTheDocument() // 2700s
     expect(screen.getByText('50m 0s')).toBeInTheDocument() // 3000s
-    expect(screen.getByText('R$ 12,50')).toBeInTheDocument()
+    expect(screen.getByText('US$ 12.50')).toBeInTheDocument()
     expect(screen.getByText('✅ Sucesso')).toBeInTheDocument()
     expect(screen.getByText('❌ Falhou')).toBeInTheDocument()
-    // run-2 não tem custo correlacionado — "—", nunca "R$ 0,00" (confundiria com "grátis")
+    // run-2 não tem custo correlacionado — "—", nunca "US$ 0.00" (confundiria com "grátis")
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
 
     // "ETL Noturno" aparece 2x agora: no ranking "Por Job" E na tabela de execuções —
@@ -301,7 +330,7 @@ describe('DatabricksDashboardView', () => {
 
     // Por Model Serving — zero coleta nova, ranking simples
     expect(await screen.findByText('meu-endpoint-llm')).toBeInTheDocument()
-    expect(screen.getByText('R$ 320,50')).toBeInTheDocument()
+    expect(screen.getByText('US$ 320.50')).toBeInTheDocument()
 
     // Utilização de Cluster — ⚠️ no cluster ocioso
     expect(await screen.findByText('cluster-ocioso')).toBeInTheDocument()
@@ -310,7 +339,7 @@ describe('DatabricksDashboardView', () => {
     // Queries SQL Warehouse — custo estimado (alocação proporcional)
     expect(await screen.findByText('Queries em SQL Warehouse')).toBeInTheDocument()
     expect(screen.getByText('ana@empresa.com')).toBeInTheDocument()
-    expect(screen.getByText('R$ 1,23')).toBeInTheDocument()
+    expect(screen.getByText('US$ 1.23')).toBeInTheDocument()
 
     // AI Gateway — volume, sem custo
     expect(await screen.findByText('openai')).toBeInTheDocument()
@@ -338,32 +367,227 @@ describe('DatabricksDashboardView', () => {
   })
 
   it('lista quotas Genie e mostra o badge de bloqueio quando aplicável (aba Quotas)', async () => {
+    const user = userEvent.setup()
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
-    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+    vi.mocked(databricksColetaApi.getDatabricksCotas).mockResolvedValue({
+      mes: '2026-11', meses_disponiveis: ['2026-11'], meses_considerados: 1,
+      por_workspace: [{
+        workspace_id: '789', custo: 0, dbus: 0, dbus_free: 0, dbus_pago: 0,
+        cota: null, pct: null, budget_nome: null, status: 'sem_cota',
+      }],
+      por_usuario: [],
+      resumo: { custo_total: 0, cota_total: 0, workspaces_sem_cota: 1, usuarios_acima_do_limite: 0 },
+    })
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([{ workspace_id: '789', nome: 'Analytics Prod' }])
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([
       {
         budget_configuration_id: 'gb-1', display_name: 'Quota Genie Bloqueio', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
-        alert_configurations: [{
-          quantity_threshold: '500', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED',
-          action_configurations: [{ action_type: 'BLOCK_USAGE' }],
-        }],
+        filter: { workspace_id: { operator: 'IN', values: [789] } },
+        _spend_status: { alert_spend_statuses: [{
+          percent_consumed: '92.0', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', time_period: 'MONTH',
+        }] },
+        alert_configurations: [
+          { quantity_threshold: '500', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }, { action_type: 'BLOCK_USAGE' }] },
+          { quantity_threshold: '750', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] },
+          { quantity_threshold: '400', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] },
+          { quantity_threshold: '250', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] },
+        ],
       },
-    ])
+    ], 7))
     window.__reactBridge.setDatabricksTab('quotas')
     renderWithClient()
 
     expect(await screen.findByText('Quota Genie Bloqueio')).toBeInTheDocument()
+    expect(await screen.findByText('Analytics Prod')).toBeInTheDocument()
+    expect(screen.getByText(/DBU não apurado na coleta local · 92% reportados pelo Databricks/)).toBeInTheDocument()
+    expect(screen.getByText('Consumo informado pela Budgets API do Databricks.')).toBeInTheDocument()
+    expect(screen.queryByText(/Sem consumo Genie registrado/)).not.toBeInTheDocument()
+    expect(screen.getByText('~US$ 460.00 · 92%')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Consumo de Quota Genie Bloqueio' })).toHaveAttribute('aria-valuenow', '92')
+    expect(screen.getByText('50% · US$ 250.00')).toBeInTheDocument()
+    expect(screen.getByText('80% · US$ 400.00')).toBeInTheDocument()
+    expect(screen.getByText('100% · US$ 500.00')).toBeInTheDocument()
+    expect(screen.getByText('Padrão por usuário')).toBeInTheDocument()
+    const niveisText = within(screen.getByText('Padrão por usuário').closest('td')!).getAllByText(/US\$/).map((node) => node.textContent)
+    expect(niveisText).toEqual(['50% · US$ 250.00', '80% · US$ 400.00', '100% · US$ 500.00', '100% · US$ 750.00'])
+    const niveisCelula = screen.getByText('Padrão por usuário').closest('td')!
+    const colunasGrid = [...niveisCelula.querySelectorAll<HTMLDivElement>('div[style*="grid-template-columns"]')]
+      .map((linha) => linha.style.gridTemplateColumns)
+    expect(new Set(colunasGrid)).toEqual(new Set(['160px 126px 92px']))
+    expect(screen.getAllByText('✉ Alerta').every((badge) => badge.getAttribute('style')?.includes('var(--orange,#ff8c42)'))).toBe(true)
     expect(screen.getByText('🚫 Bloqueia')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Padrão · sem billing local/ }))
+    expect(await screen.findByText(/não há linhas de billing Genie por usuário neste mês/)).toBeInTheDocument()
+    expect(screen.getByText('Limite atingido (billing)').nextElementSibling).toHaveTextContent('—')
+  })
+
+  it('mostra o total da conta separado das quotas Genie filtradas', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    const genieBudgets: GenieBudget[] = Array.from({ length: 5 }, (_, index) => ({
+      budget_configuration_id: `genie-${index}`, display_name: `Quota Genie ${index + 1}`,
+      resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY', alert_configurations: [],
+    }))
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse(genieBudgets, 7))
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    expect(await screen.findByText('5 Genie')).toBeInTheDocument()
+    expect(screen.getByText('de 7 budgets na conta')).toBeInTheDocument()
+    expect(screen.getByText(/2 budget\(s\) da conta são de outros tipos/)).toBeInTheDocument()
+  })
+
+  it('mostra em vermelho uma quota nativa de bloqueio configurada em US$ 0', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([{
+      budget_configuration_id: 'gb-zero', display_name: 'Quota Zero', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+      alert_configurations: [{
+        quantity_threshold: '0', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED',
+        action_configurations: [{ action_type: 'BLOCK_USAGE' }],
+      }],
+      _spend_status: { alert_spend_statuses: [{
+        percent_consumed: '100.0', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', time_period: 'MONTH',
+      }] },
+    }]))
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    expect(await screen.findByText('Quota Zero')).toBeInTheDocument()
+    expect(screen.getByText('de US$ 0.00')).toBeInTheDocument()
+    expect(screen.getByText('Bloqueio configurado em US$ 0')).toBeInTheDocument()
+    expect(screen.getByText('US$ 0.00 · 100%').getAttribute('style')).toContain('var(--red,#ff4d6a)')
+    expect(screen.getByRole('progressbar', { name: 'Consumo de Quota Zero' }).firstElementChild?.getAttribute('style')).toContain('var(--red,#ff4d6a)')
+  })
+
+  it('resume bloqueios padrão e overrides e abre o detalhe por usuário', async () => {
+    const user = userEvent.setup()
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(databricksColetaApi.getDatabricksCotas).mockResolvedValue({
+      mes: '2026-11', meses_disponiveis: ['2026-11'], meses_considerados: 1,
+      por_workspace: [{
+        workspace_id: '789', custo: 0, dbus: 0, dbus_free: 0, dbus_pago: 0,
+        cota: null, pct: null, budget_nome: null, status: 'sem_cota',
+      }],
+      por_usuario: [
+        { workspace_id: '789', usuario: 'run_as_user_42', custo: 120, dbus: 5, dbus_free: 0, dbus_pago: 5, limite: null, pct: null, origem_limite: null, budget_nome: null, status: 'sem_cota' },
+        { workspace_id: '789', usuario: 'bruno@example.com', custo: 41.5, dbus: 2, dbus_free: 0, dbus_pago: 2, limite: null, pct: null, origem_limite: null, budget_nome: null, status: 'sem_cota' },
+      ],
+      resumo: { custo_total: 0, cota_total: 0, workspaces_sem_cota: 1, usuarios_acima_do_limite: 0 },
+    })
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([{ workspace_id: '789', nome: 'Analytics Prod' }])
+    vi.mocked(genieBudgetsApi.resolveGenieUserPrincipals).mockResolvedValue([
+      { id: '42', username: 'run_as_user_42', nome: 'Ana Example', grupos: [] },
+      { id: '43', username: 'bruno@example.com', nome: 'Bruno Example', grupos: [] },
+    ])
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([{
+      budget_configuration_id: 'gb-users', display_name: 'Quota por usuário', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+      filter: { workspace_id: { operator: 'IN', values: [789] } },
+      alert_configurations: [{
+        quantity_threshold: '50', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER',
+        action_configurations: [{ action_type: 'BLOCK_USAGE' }],
+        principal_overrides: [{ principal_id: 42, override_threshold: '100' }],
+      }],
+    }]))
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    await user.click(await screen.findByRole('button', { name: /Padrão ·/ }))
+    expect(genieBudgetsApi.resolveGenieUserPrincipals).toHaveBeenCalledWith(expect.arrayContaining(['run_as_user_42']))
+    expect(await screen.findByText('Usuários · Quota por usuário · Padrão por usuário')).toBeInTheDocument()
+    expect(screen.getByText('Padrão · 0 no limite (billing) / 1')).toBeInTheDocument()
+    expect(screen.getAllByText('Bruno Example')).toHaveLength(2)
+    expect(screen.queryByText('Ana Example')).not.toBeInTheDocument()
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Fechar' }))
+
+    await user.click(screen.getByRole('button', { name: /Overrides ·/ }))
+    expect(await screen.findByText('Usuários · Quota por usuário · Overrides individuais')).toBeInTheDocument()
+    expect(screen.getByText('Overrides · 1 no limite (billing) / 1')).toBeInTheDocument()
+    expect(screen.getAllByText('Ana Example')).toHaveLength(2)
+    expect(screen.queryByText('Bruno Example')).not.toBeInTheDocument()
+    expect(screen.getByText('Limites individuais')).toBeInTheDocument()
+    expect(screen.getByText('Limite atingido (billing)')).toBeInTheDocument()
+    expect(screen.getByText('Usuários com billing local')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Gasto estimado por usuário' })).toBeInTheDocument()
+    expect(screen.getAllByText('Ana Example')).toHaveLength(2)
+    expect(screen.getByText('Override individual')).toBeInTheDocument()
+    expect(screen.getAllByText('US$ 120.00')).toHaveLength(2)
+    const anaRow = screen.getAllByText('Ana Example').map((item) => item.closest('tr')).find((row) => row != null) as HTMLTableRowElement
+    expect(within(anaRow).getByText('Limite atingido · BLOCK configurado')).toBeInTheDocument()
+    expect(within(anaRow).getByText('120%')).toBeInTheDocument()
+
+    vi.mocked(genieBudgetsApi.updateGenieBudgetPrincipalOverride).mockResolvedValue({} as GenieBudget)
+    const confirmar = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await user.click(screen.getByRole('button', { name: 'Ajustar limite de Ana Example' }))
+    const limite = screen.getByRole('spinbutton', { name: 'Novo limite individual de Ana Example' })
+    expect(limite).toHaveValue(100)
+    await user.clear(limite)
+    await user.type(limite, '150')
+    await user.click(screen.getByRole('button', { name: 'Salvar limite' }))
+
+    expect(confirmar).toHaveBeenCalledOnce()
+    expect(genieBudgetsApi.updateGenieBudgetPrincipalOverride).toHaveBeenCalledWith('gb-users', 42, {
+      monthly_limit_usd: 150,
+      confirmar_bloqueio: true,
+    })
+    confirmar.mockRestore()
+  })
+
+  it('exibe progresso individual filtrando o billing pelas tags da quota', async () => {
+    const user = userEvent.setup()
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(databricksColetaApi.getDatabricksCotas).mockResolvedValue({
+      mes: '2026-11', meses_disponiveis: ['2026-11'], meses_considerados: 1,
+      tag_filters_applied: true,
+      por_workspace: [{ workspace_id: '789', custo: 0, dbus: 120, dbus_free: 120, dbus_pago: 0, cota: null, pct: null, budget_nome: null, status: 'sem_cota' }],
+      por_usuario: [{ workspace_id: '789', usuario: 'genie-user@example.com', custo: 41.5, dbus: 120, dbus_free: 120, dbus_pago: 0, limite: null, pct: null, origem_limite: null, budget_nome: null, status: 'sem_cota' }],
+      resumo: { custo_total: 0, cota_total: 0, workspaces_sem_cota: 1, usuarios_acima_do_limite: 0 },
+    })
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([{
+      budget_configuration_id: 'gb-tagged', display_name: 'Quota por tag', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+      filter: { workspace_id: { operator: 'IN', values: [789] }, tags: [{ key: 'team', value: { operator: 'IN', values: ['finops'] } }] },
+      alert_configurations: [{
+        quantity_threshold: '50', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER',
+        action_configurations: [{ action_type: 'BLOCK_USAGE' }],
+      }],
+    }]))
+    vi.mocked(genieBudgetsApi.resolveGenieUserPrincipals).mockResolvedValue([
+      { id: '7', username: 'genie-user@example.com', nome: 'Genie User', grupos: [] },
+    ])
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    expect(await screen.findByText('Quota por tag')).toBeInTheDocument()
+    const statusButton = await screen.findByRole('button', { name: /Padrão · limite-base US\$/ })
+    await user.click(statusButton)
+
+    expect(await screen.findByText('Usuários · Quota por tag · Padrão por usuário')).toBeInTheDocument()
+    expect(screen.getByText(/Gasto do billing local filtrado pelas mesmas tags da quota/)).toBeInTheDocument()
+    expect(screen.getByText('Billing filtrado pelas tags da quota')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Ajustar limite de Genie User' })).toBeInTheDocument()
+    expect(databricksColetaApi.getDatabricksCotas).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data_inicio: expect.any(String), data_fim: expect.any(String) }), true, false,
+      [{ key: 'team', value: { operator: 'IN', values: ['finops'] } }],
+    )
+    const linhaUsuario = screen.getAllByText('Genie User')
+      .map((item) => item.closest('tr')).find((linha) => linha != null) as HTMLTableRowElement
+    expect(within(linhaUsuario).getByText('Atenção')).toBeInTheDocument()
+    expect(within(linhaUsuario).getByText('83%')).toBeInTheDocument()
+    expect(within(linhaUsuario).getByRole('progressbar', { name: 'Consumo de Genie User' })).toHaveAttribute('aria-valuenow', '83')
+    expect(within(linhaUsuario).getByText('US$ 41.50')).toBeInTheDocument()
+    expect(within(linhaUsuario).getAllByText('US$ 50.00')).toHaveLength(2)
+    expect(within(linhaUsuario).queryByText(/DBU/)).not.toBeInTheDocument()
+    expect(screen.getByText('Limite efetivo')).toBeInTheDocument()
+    expect(screen.getByText('% do limite')).toBeInTheDocument()
   })
 
   it('mostra o banner de modo demonstração quando os budgets vêm com _demo:true', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
-    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([
       {
         budget_configuration_id: 'demo-001', display_name: 'Quota Fictícia', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
         alert_configurations: [{ quantity_threshold: '100', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] }],
         _demo: true,
       },
-    ])
+    ]))
     window.__reactBridge.setDatabricksTab('quotas')
     renderWithClient()
 
@@ -372,12 +596,12 @@ describe('DatabricksDashboardView', () => {
 
   it('não mostra o banner de demonstração quando os budgets são reais (sem _demo)', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
-    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([
       {
         budget_configuration_id: 'gb-real', display_name: 'Quota Real', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
         alert_configurations: [{ quantity_threshold: '100', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] }],
       },
-    ])
+    ]))
     window.__reactBridge.setDatabricksTab('quotas')
     renderWithClient()
 
@@ -387,7 +611,7 @@ describe('DatabricksDashboardView', () => {
 
   it('botão Editar abre o modal de Quota Genie pré-preenchido com os dados do budget', async () => {
     vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
-    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue([
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([
       {
         budget_configuration_id: 'gb-9', display_name: 'Quota pra Editar', resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
         alert_configurations: [{
@@ -395,7 +619,7 @@ describe('DatabricksDashboardView', () => {
           action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }],
         }],
       },
-    ])
+    ]))
     const user = userEvent.setup()
     window.__reactBridge.setDatabricksTab('quotas')
     renderWithClient()
@@ -405,7 +629,64 @@ describe('DatabricksDashboardView', () => {
 
     expect(await screen.findByText('🧞 Editar Quota Genie')).toBeInTheDocument()
     expect(screen.getByLabelText('Nome')).toHaveValue('Quota pra Editar')
-    expect(screen.getByLabelText('Limite mensal (US$)')).toHaveValue(300)
+    expect(screen.getByLabelText('Teto mensal (US$)')).toHaveValue(300)
+  })
+
+  it('oferece workspaces da Account API mesmo sem consumo Genie no mês', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([
+      { workspace_id: 'ws-sem-uso', nome: 'Workspace sem consumo' },
+    ])
+    const user = userEvent.setup()
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    await user.click(await screen.findByRole('button', { name: 'Nova Quota Genie' }))
+    await user.click(screen.getByLabelText('Workspaces específicos'))
+    expect(await screen.findByLabelText(/Workspace sem consumo/)).toBeInTheDocument()
+    expect(screen.getByText('Sem consumo no mês')).toBeInTheDocument()
+  })
+
+  it('não repete a leitura completa da Account API quando a consulta de consumo conclui', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(databricksColetaApi.getDatabricksCotas).mockResolvedValue({
+      mes: '2026-11', meses_disponiveis: [], meses_considerados: 1,
+      por_workspace: [{
+        workspace_id: 'ws-consumo', custo: 12, dbus: 2, dbus_free: 0, dbus_pago: 2,
+        cota: null, pct: null, budget_nome: null, status: 'sem_cota',
+      }],
+      por_usuario: [],
+      resumo: { custo_total: 12, cota_total: 0, workspaces_sem_cota: 1, usuarios_acima_do_limite: 0 },
+    })
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([
+      { workspace_id: 'ws-consumo', nome: 'Workspace com consumo' },
+    ])
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    await screen.findByText(/Quotas Genie \(Databricks nativo\)/)
+    await waitFor(() => expect(databricksColetaApi.getDatabricksCotas).toHaveBeenCalled())
+    await waitFor(() => expect(genieBudgetsApi.listGenieWorkspaces).toHaveBeenCalled())
+    const chamadasWorkspace = vi.mocked(genieBudgetsApi.listGenieWorkspaces).mock.calls.map(([ids]) => ids?.join(','))
+    expect(new Set(chamadasWorkspace).size).toBe(chamadasWorkspace.length)
+  })
+
+  it('preserva no modal o workspace já configurado mesmo sem nome retornado pela Account API', async () => {
+    vi.mocked(databricksColetaApi.getDatabricksResumo).mockResolvedValue(makeResumo())
+    vi.mocked(genieBudgetsApi.listGenieBudgets).mockResolvedValue(budgetsResponse([{
+      budget_configuration_id: 'gb-sem-nome', display_name: 'Quota com workspace antigo',
+      resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
+      filter: { workspace_id: { values: [987654] } },
+      alert_configurations: [{ quantity_threshold: '100', scope_type: 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', action_configurations: [{ action_type: 'EMAIL_NOTIFICATION' }] }],
+    }]))
+    vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([])
+    const user = userEvent.setup()
+    window.__reactBridge.setDatabricksTab('quotas')
+    renderWithClient()
+
+    await user.click(await screen.findByRole('button', { name: 'Editar' }))
+    const workspace = await screen.findByLabelText(/Nome indisponível/)
+    expect(workspace).toBeChecked()
   })
 
   it('mostra a mensagem de erro do servidor quando a conexão padrão não é OAuth M2M (aba Quotas)', async () => {

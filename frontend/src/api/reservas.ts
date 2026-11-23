@@ -35,6 +35,7 @@ export interface SincronizarAzureResult {
   inseridas: number
   atualizadas: number
   avisos: string[]
+  por_sp?: { sp: string; total: number; ok: boolean; avisos: string[] }[]
 }
 
 export const sincronizarReservasAzure = (spId?: number) =>

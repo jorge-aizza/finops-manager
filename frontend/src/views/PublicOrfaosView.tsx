@@ -30,25 +30,33 @@ export default function PublicOrfaosView() {
     retry: false,
   })
   const [tipo, setTipo] = useState<'' | OrfaoCategoria>('')
+  const [assinaturasSelecionadas, setAssinaturasSelecionadas] = useState<string[]>([])
   const [rgsSelecionados, setRgsSelecionados] = useState<string[]>([])
   const [busca, setBusca] = useState('')
   const [pdfHtml, setPdfHtml] = useState<string | null>(null)
 
   const itens = query.data?.itens ?? []
+  const assinaturas = Array.from(new Set(itens.map((i) => i.subscription_name).filter((nome): nome is string => !!nome))).sort((a, b) => a.localeCompare(b))
   const rgs = Array.from(new Set(itens.map((i) => i.resource_group).filter((r): r is string => !!r))).sort((a, b) => a.localeCompare(b))
   const termo = busca.trim().toLowerCase()
+  const assinaturaContagem = new Map(assinaturas.map((nome) => [nome, itens.filter((i) => i.subscription_name === nome).length]))
   const filtrados = itens.filter((i) =>
     (!tipo || i.categoria === tipo)
+    && (!assinaturasSelecionadas.length || assinaturasSelecionadas.some((nome) => (i.subscription_name || '').toLowerCase().includes(nome.trim().toLowerCase())))
     && (!rgsSelecionados.length || (!!i.resource_group && rgsSelecionados.includes(i.resource_group)))
     && (!termo || (i.nome || '').toLowerCase().includes(termo) || (i.subscription_name || '').toLowerCase().includes(termo)))
   const custo = filtrados.reduce((a, i) => a + (i.custo_mensal_estimado || 0), 0)
   const semCusto = filtrados.filter((i) => i.custo_mensal_estimado === null).length
-  const temFiltro = !!(tipo || rgsSelecionados.length || termo)
+  const temFiltro = !!(tipo || assinaturasSelecionadas.length || rgsSelecionados.length || termo)
+  const assinaturaLabel = assinaturasSelecionadas.length === 0 ? 'Todas as assinaturas'
+    : assinaturasSelecionadas.length === 1 ? assinaturasSelecionadas[0]
+    : `${assinaturasSelecionadas.length} assinaturas selecionadas`
   const rgLabel = rgsSelecionados.length === 0 ? 'Todos os Resource Groups'
     : rgsSelecionados.length === 1 ? rgsSelecionados[0]
     : `${rgsSelecionados.length} Resource Groups`
   const filtrosDescricao = [
     tipo ? `Tipo: ${CATEGORIA_LABEL[tipo]?.replace(/^\S+\s/, '') || tipo}` : '',
+    assinaturasSelecionadas.length ? `Assinaturas: ${assinaturasSelecionadas.join(', ')}` : '',
     rgsSelecionados.length ? `Resource Groups: ${rgsSelecionados.join(', ')}` : '',
     termo ? `Busca: "${busca.trim()}"` : '',
   ].filter(Boolean).join(' | ') || 'Sem filtros'
@@ -126,6 +134,16 @@ export default function PublicOrfaosView() {
               </select>
               <div style={{ minWidth: 220 }}>
                 <CmsMultiSelect
+                  values={assinaturasSelecionadas}
+                  options={assinaturas.map((nome) => ({ value: nome, label: nome, sublabel: String(assinaturaContagem.get(nome) ?? 0) }))}
+                  searchPlaceholder="Buscar assinatura..."
+                  triggerLabel={assinaturaLabel}
+                  allowCustomValues
+                  onChange={setAssinaturasSelecionadas}
+                />
+              </div>
+              <div style={{ minWidth: 220 }}>
+                <CmsMultiSelect
                   values={rgsSelecionados}
                   options={rgs.map((r) => ({ value: r, label: r }))}
                   searchPlaceholder="Buscar Resource Group..."
@@ -136,7 +154,7 @@ export default function PublicOrfaosView() {
               <input type="text" className="filter-input" style={{ minWidth: 220 }} placeholder="Buscar por recurso ou assinatura..."
                 value={busca} onChange={(e) => setBusca(e.target.value)} />
               {temFiltro && (
-                <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => { setTipo(''); setRgsSelecionados([]); setBusca('') }}>Limpar filtros</button>
+                <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => { setTipo(''); setAssinaturasSelecionadas([]); setRgsSelecionados([]); setBusca('') }}>Limpar filtros</button>
               )}
             </div>
 
@@ -189,12 +207,14 @@ export default function PublicOrfaosView() {
                       <th>Recurso</th><th>Assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th>
                       <th style={{ textAlign: 'right' }}>Tam.</th>
                       <th style={{ textAlign: 'right' }}>Custo/mês</th>
-                      <th style={{ textAlign: 'right' }}>Dias órfão</th>
+                      <th style={{ textAlign: 'right', minWidth: 110 }}>Dias ocioso</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filtrados.map((it, idx) => (
-                      <tr key={idx}>
+                    {filtrados.map((it, idx) => {
+                      const diasOcioso = it.dias_ocioso !== undefined ? it.dias_ocioso : (it.dias_estado_atual ?? it.dias_orfao)
+                      const tituloDiasOcioso = it.fonte_dias_ocioso === 'azure' ? 'Duração baseada na data informada pela Azure' : it.fonte_dias_ocioso === 'coleta' ? 'Duração baseada no histórico de coletas da ferramenta' : it.dias_ocioso === undefined ? 'Duração recebida do servidor anterior' : 'Sem histórico recente suficiente para calcular a duração'
+                      return <tr key={idx}>
                         <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.nome || ''}>{it.nome || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{it.subscription_name || '—'}</td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{CATEGORIA_LABEL[it.categoria] || it.categoria}</td>
@@ -204,11 +224,14 @@ export default function PublicOrfaosView() {
                         <td style={{ textAlign: 'right', fontWeight: 700, color: it.custo_mensal_estimado ? 'var(--orange,#ff8c42)' : 'var(--text-muted)' }}>
                           {it.custo_mensal_estimado === null ? '—' : fmtBRL(it.custo_mensal_estimado)}
                         </td>
-                        <td style={{ textAlign: 'right', fontSize: 12, color: it.dias_orfao !== null ? 'var(--red,#ff4d6a)' : 'var(--text-muted)' }}>
-                          {it.dias_orfao !== null ? `${it.dias_orfao}d` : '—'}
+                        <td
+                          style={{ textAlign: 'right', fontSize: 12, color: diasOcioso != null ? 'var(--text)' : 'var(--text-muted)' }}
+                          title={tituloDiasOcioso}
+                        >
+                          {diasOcioso == null ? 'Sem histórico' : `${diasOcioso}d`}
                         </td>
                       </tr>
-                    ))}
+                    })}
                   </tbody>
                 </table>
               </div>

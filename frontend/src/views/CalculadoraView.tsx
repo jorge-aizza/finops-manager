@@ -77,7 +77,6 @@ export default function CalculadoraView() {
 
   function handleOpenOverlay() {
     setOverlayOpen(true)
-    calc.carregarPico()
   }
 
   return (

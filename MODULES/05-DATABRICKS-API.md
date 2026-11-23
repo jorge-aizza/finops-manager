@@ -30,21 +30,51 @@ const resp = await fetch(tokenUrl, {
 **Causa mais comum de 401 neste modo**: o Service Principal foi criado na CONTA mas nunca
 foi adicionado ao WORKSPACE de destino (são dois passos distintos no Databricks — um SP de
 conta não tem acesso automático a nenhum workspace). Ver checklist completo no guia de setup.
+Na coleta longa, o access token OAuth é renovado 60 segundos antes da expiração e uma
+resposta 401/403 cujo corpo identifica token inválido força uma renovação e uma única nova
+tentativa. Se a renovação não resolver, confira a configuração/credenciais do Service
+Principal e o acesso dele ao workspace.
 
 ### `pat` (Personal Access Token)
 Alternativa mais simples — não exige acesso de Account Admin. Token gerado por um usuário
 (ou Service Principal de workspace) em *User Settings → Developer → Access tokens*, usado
 direto como Bearer, sem troca de token. `_resolveDbxToken` só decifra e retorna.
+PAT expirado, revogado ou inválido não pode ser renovado pela aplicação: atualize o token
+salvo na conexão e repita o intervalo que ficou incompleto.
 
 ## Statement Execution API (execução das queries)
 
 **Endpoint**: `{workspace_host}/api/2.0/sql/statements` (`_databricksRunQuery`)
 **Auth**: Bearer token (dos dois modos acima)
-**Request body**:
+**Request body** (billing por dia usa `INLINE`; consultas auxiliares que cobrem vários dias
+usam `EXTERNAL_LINKS` para não exceder o limite inline):
 ```json
-{ "warehouse_id": "...", "statement": "SELECT ...", "wait_timeout": "50s", "parameters": [] }
+{ "warehouse_id": "...", "statement": "SELECT ...", "wait_timeout": "50s", "parameters": [], "disposition": "INLINE", "format": "JSON_ARRAY" }
 ```
 `wait_timeout` fixo em `50s` (máximo permitido pela API; faixa válida é `0` ou `5s`-`50s`).
+
+**Carga de billing**: `_executarColetaDatabricks` consulta e grava um dia por vez. Quando o
+resultado inline de um dia ultrapassa 25 MiB, a query é subdividida por `workspace_id` e,
+se necessário, por `sku_name`. Cada resposta inline pagina todos os chunks indicados no
+manifest antes de gravar. Se uma partição workspace/SKU ainda exceder o limite, a coleta
+falha explicitamente nessa partição; não aplica `LIMIT` nem descarta linhas. Lotes já
+gravados são idempotentes e permanecem disponíveis para reexecução do período.
+
+As consultas auxiliares de Job Runs, Utilização de Cluster, Query History, AI Gateway e Storage
+Otimização cobrem o intervalo selecionado e usam `EXTERNAL_LINKS`; isso evita o limite de 25 MiB
+da resposta `INLINE`. A coleta de billing continua diária, em `INLINE`, com subdivisão por
+workspace/SKU quando necessário. Se o download externo falhar, somente a consulta auxiliar é
+marcada como indisponível; os dados de billing já persistidos não são revertidos.
+
+O período da coleta manual é informado independentemente de `granularidade_dias`, que
+continua controlando a recorrência. Para backfill, a interface inicia com os últimos 90 dias
+fechados (até ontem), mas permite escolher outras datas. Para coleta diária, habilite o
+agendamento e use granularidade de 1 dia.
+
+`EXTERNAL_LINKS` retorna URLs SAS temporárias de Storage. O cliente deve baixá-las sem o
+Bearer token. Se o endpoint retornar `AuthorizationFailure`, verifique as regras de rede do
+Storage/Private Endpoint que atende o workspace; não conceda permissões adicionais ao
+Service Principal Databricks como substituto de acesso de rede.
 
 **Polling** (quando o estado inicial vem `PENDING`/`RUNNING` — comum em SQL Warehouse "frio"
 ou scans grandes): `GET {workspace_host}/api/2.0/sql/statements/{statement_id}` a cada 3s,
@@ -64,6 +94,13 @@ Verificadas uma a uma pelo teste de conexão (`POST /api/databricks-coleta/confi
 - `system.billing.usage` — registros de consumo por recurso (job, cluster, SQL warehouse, etc.)
 - `system.billing.list_prices` — tabela de preço (SKU → preço por DBU)
 
+**Moeda exibida**: o dashboard Databricks apresenta os custos de `system.billing.usage ×
+system.billing.list_prices.pricing.effective_list.default` em USD (`US$`), sem conversão
+cambial. A tabela de preços também contém `currency_code`; se o sistema passar a coletar uma
+conta com preços em outra moeda, a moeda deverá ser persistida e tratada explicitamente.
+Limites dos orçamentos internos são valores configurados pelos usuários e não são convertidos
+automaticamente — revise os limites cadastrados antes de usá-los após a mudança de rótulo.
+
 **Opcionais** (cada uma habilitada separadamente por um Account Admin em *Catalog Explorer
 → system*; ausência não derruba "Conexão OK", só deixa vazio o card correspondente no
 Dashboard):
@@ -72,6 +109,44 @@ Dashboard):
 - `system.query.history` — custo por query
 - `system.ai_gateway.usage` — uso do AI Gateway (Genie)
 - `system.storage.predictive_optimization_operations_history` — otimização de storage
+
+**Transporte das consultas auxiliares**: as cinco coletas acima usam Statement Execution
+com resultado `INLINE`, consultando um dia por vez e persistindo cada partição antes de
+avançar. Isso evita depender dos links temporários para Storage (`EXTERNAL_LINKS`), que
+podem falhar por bloqueio de rede/firewall no servidor. Se uma partição diária exceder o
+limite inline, a coleta auxiliar é marcada como indisponível no histórico; o billing
+principal permanece salvo e não é desfeito.
+
+**Agendamento da coleta Databricks**: com `auto_coleta` ativo, a agenda configurada executa
+o billing, respeitando `hora_execucao`, `dias_semana` e `granularidade_dias`. As cinco consultas
+auxiliares têm frequência independente em `granularidade_auxiliar_dias` (1 a 30; padrão 1,
+preserva o comportamento anterior) e rodam somente quando vencidas. Em cargas manuais,
+`incluir_auxiliares=false` permite backfill de billing sem repetir auxiliares. Não há
+atualização incremental automática por hora. Os dados de `system.billing.usage` ainda podem
+ser publicados pelo Databricks com atraso de até cerca de 12 horas.
+
+**Múltiplas conexões**: o agendador enfileira todas as configurações ativas vencidas e as executa
+em série; uma falha não bloqueia as próximas. A coleta manual usa a mesma fila, rejeita duplicata
+da mesma configuração e informa quantas configurações aguardam. A importação manual não roda
+enquanto houver coleta em execução ou na fila. O dashboard agrega `databricks_consumo` por
+workspace, então workspaces visíveis por mais de uma conexão fazem upsert na mesma chave natural.
+
+**Limite de escopo Genie/Budgets**: os snapshots de consumo Genie consultam todas as conexões
+ativas, removem linhas idênticas repetidas e preservam avisos por conexão que falhou. As APIs de
+Budgets/SCIM são de conta e continuam usando a conexão Databricks padrão OAuth M2M; não misture
+budgets de contas Databricks distintas sem um identificador de account no contrato dos budgets.
+
+**Snapshot de consumo Genie oficial**: `GET /api/databricks-coleta/genie-cotas` persiste o
+resultado agregado em `databricks_genie_cotas_cache`, por período. O período mensal é
+coletado no startup (após 2 min) e a cada 6 horas. Os períodos `today` e `all` mantêm TTL de
+60 min. A API entrega o último snapshot sem esperar o SQL Warehouse quando já existe snapshot;
+se ele venceu, atualiza em segundo plano e mantém o último resultado válido em caso de falha.
+Na primeira consulta antes da coleta inicial, a requisição aguarda a geração do snapshot. A
+resposta informa `cache.atualizado_em`,
+`desatualizado` e `atualizando`.
+Na mesma coleta, `databricks_genie_cotas_public_cache` recebe snapshots separados por e-mail
+normalizado. O endpoint público seleciona somente o e-mail assinado no token Entra ID; a tela
+não recebe consumo agregado do workspace nem dados de outros usuários.
 
 **Campos em `system.billing.usage`**: `workspace_id, usage_date, sku_name` (ex.:
 `"STANDARD_ALL_PURPOSE_COMPUTE"`), `product_origin` (`"JOBS"|"INTERACTIVE"|"SQL"|"MODEL_SERVING"`),

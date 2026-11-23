@@ -5,6 +5,12 @@ import type { GenieActionType, GenieBudget, GenieBudgetTagInput, GeniePrincipal,
 
 interface Props {
   budget?: GenieBudget | null
+  workspaces: { workspace_id: string; nome: string; custo: number | null }[]
+  workspacesLoading?: boolean
+  workspacesError?: string | null
+  consumoLoading?: boolean
+  consumoError?: string | null
+  onRetryWorkspaces?: () => void
   onClose: () => void
 }
 
@@ -14,26 +20,60 @@ interface OverrideRow {
   override_threshold: string
 }
 
-// Cria (ou edita — PUT é substituição total, a Budgets API não tem PATCH parcial) uma
-// quota Genie via Databricks Account Budgets API (resource_type=
-// BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY) — a Databricks aplica isso de verdade,
-// inclusive podendo BLOQUEAR acesso ao Genie (action_type=BLOCK_USAGE). Múltiplos
-// thresholds compartilhados (a API suporta até 4) continuam fora do escopo — só o
-// primeiro threshold é editável por aqui, dado o risco de configurar algo tão sensível
-// sem poder validar contra uma conta real.
-export default function GenieBudgetModal({ budget, onClose }: Props) {
+interface LevelRow {
+  percentage: string
+  alert: boolean
+  block: boolean
+}
+
+const DEFAULT_LEVELS: LevelRow[] = [
+  { percentage: '50', alert: true, block: false },
+  { percentage: '80', alert: true, block: false },
+  { percentage: '100', alert: true, block: true },
+]
+
+function levelsFromBudget(budget?: GenieBudget | null): { base: string; levels: LevelRow[]; baseAlert?: GenieBudget['alert_configurations'][number] } {
+  const alerts = [...(budget?.alert_configurations || [])]
+    .sort((a, b) => Number(a.quantity_threshold) - Number(b.quantity_threshold))
+  const baseAlert = alerts[alerts.length - 1]
+  const base = Number(baseAlert?.quantity_threshold || 0)
+  if (!alerts.length) return { base: '', levels: DEFAULT_LEVELS.map(level => ({ ...level })) }
+  return {
+    base: String(baseAlert?.quantity_threshold || ''),
+    baseAlert,
+    levels: alerts.map(alert => {
+      const actions = alert.action_configurations?.map(action => action.action_type) || []
+      return {
+        percentage: base > 0 ? String(Number((Number(alert.quantity_threshold) / base * 100).toFixed(2))) : '100',
+        alert: actions.includes('EMAIL_NOTIFICATION'),
+        block: actions.includes('BLOCK_USAGE'),
+      }
+    }),
+  }
+}
+
+export default function GenieBudgetModal({
+  budget, workspaces = [], workspacesLoading = false, workspacesError = null,
+  consumoLoading = false, consumoError = null, onRetryWorkspaces, onClose,
+}: Props) {
   const isEdit = !!budget
+  const configuracaoInicial = levelsFromBudget(budget)
   const alertaExistente = budget?.alert_configurations?.[0]
   const queryClient = useQueryClient()
   const [nome, setNome] = useState(budget?.display_name || '')
-  const [workspaceIdsRaw, setWorkspaceIdsRaw] = useState(budget?.filter?.workspace_id?.values?.join(', ') || '')
+  const workspaceIdsIniciais = budget?.filter?.workspace_id?.values?.map(String) || []
+  const [workspaceIds, setWorkspaceIds] = useState<string[]>(workspaceIdsIniciais)
+  const [workspaceSearch, setWorkspaceSearch] = useState('')
+  const [workspaceScope, setWorkspaceScope] = useState<'account' | 'selected' | null>(
+    budget ? (workspaceIdsIniciais.length ? 'selected' : 'account') : null,
+  )
   const [tags, setTags] = useState<GenieBudgetTagInput[]>(
     budget?.filter?.tags?.map((t) => ({ key: t.key, value: t.value?.values?.[0] || '' })) || [],
   )
-  const [valor, setValor] = useState(alertaExistente?.quantity_threshold || '')
+  const [limiteMensal, setLimiteMensal] = useState(configuracaoInicial.base)
+  const [levels, setLevels] = useState<LevelRow[]>(configuracaoInicial.levels)
   const [scopeType, setScopeType] = useState<GenieScopeType>((alertaExistente?.scope_type as GenieScopeType) || 'ALERT_CONFIGURATION_SCOPE_TYPE_SHARED')
-  const [actionType, setActionType] = useState<GenieActionType>((alertaExistente?.action_configurations?.[0]?.action_type as GenieActionType) || 'EMAIL_NOTIFICATION')
-  const [emailTarget, setEmailTarget] = useState(alertaExistente?.action_configurations?.[0]?.target || '')
+  const [emailTarget, setEmailTarget] = useState(configuracaoInicial.baseAlert?.action_configurations?.find(a => a.action_type === 'EMAIL_NOTIFICATION')?.target || '')
   // Sempre começa desmarcado, mesmo editando uma quota que já bloqueia — exige uma
   // confirmação nova a cada alteração salva, não só na criação original.
   const [confirmarBloqueio, setConfirmarBloqueio] = useState(false)
@@ -54,12 +94,18 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
   const [overrideResultados, setOverrideResultados] = useState<GeniePrincipal[]>([])
   const [overrideBuscando, setOverrideBuscando] = useState(false)
   const [overrides, setOverrides] = useState<OverrideRow[]>(
-    alertaExistente?.principal_overrides?.map((o) => ({
+    configuracaoInicial.baseAlert?.principal_overrides?.map((o) => ({
       principal_id: o.principal_id, nome: `ID: ${o.principal_id}`, override_threshold: o.override_threshold,
     })) || [],
   )
 
-  const workspaceIds = workspaceIdsRaw.split(',').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => !isNaN(n))
+  function toggleWorkspace(id: string) {
+    setWorkspaceIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
+  }
+  const workspacesFiltrados = workspaces.filter((ws) =>
+    `${ws.nome} ${ws.workspace_id}`.toLocaleLowerCase().includes(workspaceSearch.trim().toLocaleLowerCase()),
+  )
+  const temTagsAtivas = tags.some((tag) => tag.key && tag.value)
   const isPerUser = scopeType === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER'
 
   function addTag() { setTags((t) => [...t, { key: '', value: '' }]) }
@@ -101,22 +147,60 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
     setOverrides((prev) => prev.map((o) => (o.principal_id === principalId ? { ...o, override_threshold: v } : o)))
   }
 
+  function updateLevel(index: number, field: keyof LevelRow, value: string | boolean) {
+    setLevels(prev => prev.map((level, i) => i === index ? { ...level, [field]: value } : level))
+  }
+
+  function addLevel() {
+    if (levels.length >= 4) return
+    const usados = new Set(levels.map(level => Number(level.percentage)))
+    const percentage = [50, 80, 90, 95, 99].find(value => !usados.has(value))
+    if (percentage == null) return
+    setLevels(prev => [...prev, { percentage: String(percentage), alert: true, block: false }]
+      .sort((a, b) => Number(a.percentage) - Number(b.percentage)))
+  }
+
+  function removeLevel(index: number) {
+    setLevels(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const niveisOrdenados = [...levels].sort((a, b) => Number(a.percentage) - Number(b.percentage))
+  const percentuais = niveisOrdenados.map(level => Number(level.percentage))
+  const limite = Number(limiteMensal)
+  const niveisValidos = niveisOrdenados.length > 0 && niveisOrdenados.length <= 4
+    && percentuais.every(value => Number.isFinite(value) && value > 0 && value <= 100)
+    && percentuais.every((value, i) => i === 0 || value > percentuais[i - 1])
+    && percentuais[percentuais.length - 1] === 100
+    && niveisOrdenados.every(level => level.alert || level.block)
+    && niveisOrdenados.every(level => !level.block || Number(level.percentage) === 100)
+    && niveisOrdenados.every((level, i) => {
+      const amount = Math.round(limite * Number(level.percentage))
+      const previous = i ? Math.round(limite * Number(niveisOrdenados[i - 1].percentage)) : 0
+      return amount > previous && amount > 0
+    })
   const overridesValidos = overrides.every((o) => o.override_threshold && parseFloat(o.override_threshold) > 0)
-  const isBloqueio = actionType === 'BLOCK_USAGE'
-  const podeConfirmar = !!nome && !!valor && parseFloat(valor) > 0 && (!isBloqueio || confirmarBloqueio) && overridesValidos
+  const isBloqueio = levels.some(level => level.block)
+  const temAlertas = levels.some(level => level.alert)
+  const podeConfirmar = !!nome && Number.isFinite(limite) && limite > 0 && niveisValidos
+    && (!isBloqueio || confirmarBloqueio) && overridesValidos
+    && (workspaceScope === 'account' || (workspaceScope === 'selected' && workspaceIds.length > 0 && !workspacesLoading && !workspacesError))
 
   const salvarMutation = useMutation({
     mutationFn: () => {
       const input = {
         display_name: nome,
-        workspace_ids: workspaceIds,
+        workspace_ids: workspaceScope === 'selected' ? workspaceIds.map(Number).filter(Number.isFinite) : [],
         tags: tags.filter((t) => t.key && t.value),
-        threshold: {
-          quantity_threshold: valor,
-          scope_type: scopeType,
-          action_type: actionType,
-          email_target: actionType === 'EMAIL_NOTIFICATION' ? (emailTarget || undefined) : undefined,
-        },
+        monthly_limit_usd: limiteMensal,
+        scope_type: scopeType,
+        levels: niveisOrdenados.map(level => ({
+          percentage: Number(level.percentage),
+          actions: [
+            ...(level.alert ? ['EMAIL_NOTIFICATION' as GenieActionType] : []),
+            ...(level.block ? ['BLOCK_USAGE' as GenieActionType] : []),
+          ],
+        })),
+        email_target: temAlertas ? (emailTarget || undefined) : undefined,
         confirmar_bloqueio: isBloqueio ? true : undefined,
         principal_overrides: isPerUser && overrides.length
           ? overrides.map((o) => ({ principal_id: o.principal_id, override_threshold: o.override_threshold }))
@@ -141,15 +225,77 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
         </div>
         <div className="modal-body">
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 14 }}>
-            {isEdit ? 'Atualiza' : 'Cria'} um orçamento nativo no Databricks (Unity AI Gateway) — o próprio Databricks aplica o limite, não o FinOps Manager. Valores em <strong>USD</strong> (moeda usada pela API de billing do Databricks).
+            {isEdit ? 'Atualiza' : 'Cria'} um orçamento nativo no Databricks (Unity AI Gateway). Os percentuais são calculados sobre o teto mensal em <strong>USD</strong>; cada nível vira um alerta nativo na API.
           </div>
           <div className="form-group">
             <label htmlFor="gb-nome">Nome</label>
             <input id="gb-nome" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Ex: Quota Genie — Time de Dados" />
           </div>
           <div className="form-group">
-            <label htmlFor="gb-ws">Workspace IDs (opcional, separados por vírgula)</label>
-            <input id="gb-ws" value={workspaceIdsRaw} onChange={(e) => setWorkspaceIdsRaw(e.target.value)} placeholder="Ex: 123456, 789012 — vazio = toda a conta" />
+            <label>Escopo dos workspaces</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 18px', margin: '4px 0 10px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12 }}>
+                <input type="radio" name="gb-workspace-scope" checked={workspaceScope === 'account'} onChange={() => setWorkspaceScope('account')} style={{ width: 'auto' }} />
+                Toda a conta
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12 }}>
+                <input type="radio" name="gb-workspace-scope" checked={workspaceScope === 'selected'} onChange={() => setWorkspaceScope('selected')} style={{ width: 'auto' }} />
+                Workspaces específicos
+              </label>
+            </div>
+            {workspaceScope === 'account' && (
+              <div role="status" style={{ padding: '8px 10px', color: 'var(--text-muted)', fontSize: 12, border: '1px solid var(--border,#d6dbe1)', borderRadius: 4 }}>
+                A quota não terá filtro por workspace. {temTagsAtivas
+                  ? 'As tags informadas abaixo ainda limitam os recursos incluídos.'
+                  : 'Sem tags, vale para todos os workspaces da conta, inclusive os adicionados futuramente.'}
+              </div>
+            )}
+            {workspaceScope === null && (
+              <div role="status" style={{ padding: '8px 10px', color: 'var(--orange,#ff8c42)', fontSize: 12 }}>
+                Escolha explicitamente se a quota vale para toda a conta ou para workspaces específicos.
+              </div>
+            )}
+            {workspaceScope === 'selected' && (
+              <>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                  Workspaces selecionados: {workspaceIds.length} · exibindo {workspacesFiltrados.length} de {workspaces.length}.
+                </div>
+                <input
+                  type="search"
+                  aria-label="Filtrar workspaces da conta"
+                  value={workspaceSearch}
+                  onChange={(e) => setWorkspaceSearch(e.target.value)}
+                  placeholder="Filtrar por nome ou ID"
+                  style={{ marginBottom: 8 }}
+                />
+                <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border,#d6dbe1)', borderRadius: 4 }}>
+                  {workspacesLoading && !workspaces.length && (
+                    <div role="status" style={{ padding: 10, color: 'var(--text-muted)', fontSize: 12 }}>Carregando workspaces da Account API...</div>
+                  )}
+                  {workspacesError && (
+                    <div role="alert" style={{ padding: 10, color: 'var(--orange,#ff8c42)', fontSize: 12 }}>
+                      Não foi possível carregar todos os workspaces da conta: {workspacesError}.
+                      {onRetryWorkspaces && <button type="button" className="btn-ghost" style={{ marginLeft: 8 }} onClick={onRetryWorkspaces}>Tentar novamente</button>}
+                    </div>
+                  )}
+                  {workspacesFiltrados.length ? workspacesFiltrados.map((ws) => (
+                    <label key={ws.workspace_id} style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr) minmax(90px, auto)', alignItems: 'center', gap: 8, padding: '8px 10px', borderBottom: '1px solid var(--border,#d6dbe1)', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={workspaceIds.includes(String(ws.workspace_id))} onChange={() => toggleWorkspace(String(ws.workspace_id))} />
+                      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }} title={ws.nome}>{ws.nome}</span>
+                      <span style={{ color: 'var(--text-muted)', fontSize: 11, textAlign: 'right', overflowWrap: 'anywhere' }}>
+                        {ws.custo == null
+                          ? consumoLoading ? 'Carregando consumo...' : consumoError ? 'Consumo indisponível' : 'Sem consumo no mês'
+                          : `US$ ${ws.custo.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} no mês`}
+                      </span>
+                    </label>
+                  )) : !workspacesLoading && !workspacesError && (
+                    <div role="status" style={{ padding: 10, color: 'var(--text-muted)', fontSize: 12 }}>
+                      {workspaces.length ? 'Nenhum workspace corresponde à busca.' : 'A Account API não retornou workspaces.'}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </div>
           <div className="form-group">
             <label>Tags (opcional)</label>
@@ -163,8 +309,8 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
             <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={addTag}>+ Adicionar tag</button>
           </div>
           <div className="form-group">
-            <label htmlFor="gb-valor">Limite mensal (US$)</label>
-            <input id="gb-valor" type="number" min={0} step="0.01" value={valor} onChange={(e) => setValor(e.target.value)} />
+            <label htmlFor="gb-valor">Teto mensal (US$)</label>
+            <input id="gb-valor" type="number" min={0.01} step="0.01" value={limiteMensal} onChange={(e) => setLimiteMensal(e.target.value)} />
           </div>
           <div className="form-group">
             <label htmlFor="gb-escopo">Escopo do limite</label>
@@ -229,18 +375,47 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
           )}
 
           <div className="form-group">
-            <label htmlFor="gb-acao">Ação ao atingir o limite</label>
-            <select id="gb-acao" value={actionType} onChange={(e) => { setActionType(e.target.value as GenieActionType); setConfirmarBloqueio(false) }}>
-              <option value="EMAIL_NOTIFICATION">Enviar alerta por e-mail (usuários mantêm acesso)</option>
-              <option value="BLOCK_USAGE">Bloquear acesso ao Genie</option>
-            </select>
+            <label>Níveis de alerta (máximo 4; o último deve ser 100%)</label>
+            <div style={{ display: 'grid', gridTemplateColumns: '80px minmax(0, 1fr) 32px', gap: 8, alignItems: 'center', marginBottom: 6, color: 'var(--text-muted)', fontSize: 11 }}>
+              <span>Percentual</span><span>Ações</span><span />
+            </div>
+            {levels.map((level, index) => (
+              <div key={index} style={{ display: 'grid', gridTemplateColumns: '80px minmax(0, 1fr) 32px', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <input aria-label={`Percentual do nível ${index + 1}`} type="number" min={1} max={100} step="1" value={level.percentage}
+                    onChange={(e) => updateLevel(index, 'percentage', e.target.value)} style={{ width: 58 }} />
+                  <span>%</span>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 12px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11 }}>
+                    <input type="checkbox" aria-label={`Enviar alerta no nível ${index + 1}`} checked={level.alert}
+                      onChange={(e) => updateLevel(index, 'alert', e.target.checked)} style={{ width: 'auto' }} />
+                    Alertar por e-mail
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11 }}>
+                    <input type="checkbox" aria-label={`Bloquear no nível ${index + 1}`} checked={level.block}
+                      onChange={(e) => updateLevel(index, 'block', e.target.checked)} style={{ width: 'auto' }} />
+                    Bloquear
+                  </label>
+                </div>
+                <button className="btn-icon delete" title="Remover nível" onClick={() => removeLevel(index)} disabled={levels.length <= 1}>✕</button>
+              </div>
+            ))}
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 10px' }} onClick={addLevel} disabled={levels.length >= 4}>+ Adicionar nível</button>
+            {!niveisValidos && (
+              <div style={{ fontSize: 11, color: 'var(--danger)', marginTop: 6 }}>
+                Use percentuais crescentes e distintos, termine em 100%, mantenha pelo menos uma ação por nível e deixe o bloqueio somente em 100%.
+              </div>
+            )}
           </div>
-          {actionType === 'EMAIL_NOTIFICATION' && (
+
+          {temAlertas && (
             <div className="form-group">
-              <label htmlFor="gb-email">E-mail de destino (opcional)</label>
+              <label htmlFor="gb-email">E-mail de destino dos alertas (opcional)</label>
               <input id="gb-email" type="email" value={emailTarget} onChange={(e) => setEmailTarget(e.target.value)} placeholder="ex: finops@vivo.com.br" />
             </div>
           )}
+
           {isBloqueio && (
             <div style={{
               border: '1px solid color-mix(in srgb, var(--red,#ff4d6a) 40%, transparent)',
@@ -251,7 +426,7 @@ export default function GenieBudgetModal({ budget, onClose }: Props) {
                 ⚠ Esta ação bloqueia acesso real ao Genie
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
-                Assim que o consumo atingir o limite configurado, o próprio Databricks impede novas requisições
+                Ao atingir o nível marcado para bloqueio, o próprio Databricks impede novas requisições
                 ao Genie pros usuários no escopo definido — sem nenhuma checagem adicional do FinOps Manager
                 depois de criado. Confirme que é essa a intenção antes de salvar.
               </div>

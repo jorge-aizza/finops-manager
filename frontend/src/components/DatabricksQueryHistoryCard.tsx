@@ -6,8 +6,8 @@ import { getDatabricksQueryHistory } from '../api/databricksColeta'
 // Fonte: system.query.history — sem coluna de custo própria; custo_estimado é uma
 // ALOCAÇÃO PROPORCIONAL calculada em server.js (não um valor de billing exato).
 
-function fmtBRL(v: number): string {
-  return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+function fmtUSD(v: number): string {
+  return 'US$ ' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 function fmtDuracao(ms: number | null): string {
@@ -76,7 +76,7 @@ export default function DatabricksQueryHistoryCard({ periodo }: { periodo: { ini
                   <td style={{ fontSize: 12, color: (qi.execution_status && STATUS_COLOR[qi.execution_status]) || 'var(--text-muted)' }}>{qi.execution_status || '—'}</td>
                   <td style={{ textAlign: 'right', fontSize: 12, color: qi.custo_estimado == null ? 'var(--text-muted)' : undefined }}
                       title={qi.custo_estimado == null ? 'Sem custo de warehouse pra correlacionar nesse dia' : 'Alocação proporcional pela duração — não é um valor de billing exato'}>
-                    {qi.custo_estimado == null ? '—' : fmtBRL(qi.custo_estimado)}
+                    {qi.custo_estimado == null ? '—' : fmtUSD(qi.custo_estimado)}
                   </td>
                 </tr>
               ))}

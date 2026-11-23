@@ -147,7 +147,7 @@ describe('CalculadoraView', () => {
     expect(within(card).getByText('OnDemand')).toBeInTheDocument() // metadado Modelo
     const cobradoLabel = within(card).getByText('Cobrado') // coluna nova
     expect(cobradoLabel.nextElementSibling).toHaveTextContent('R$ 1.440,00') // custo_hora_billing×720
-    expect(within(card).getByText('Custo/h')).toBeInTheDocument() // label col1
+    expect(within(card).getByText('Parcela RG/h')).toBeInTheDocument() // label col1
     expect(within(card).getByText('R$ 2,00')).toBeInTheDocument() // valor col1 (custo_hora_billing)
   });
 

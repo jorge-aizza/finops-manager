@@ -12,10 +12,15 @@ interface FormState {
   reservas_prefix: string
   sp_id: string
   ativo: boolean
+  coletar_price_list: boolean
+  coletar_reservas: boolean
 }
 
 function emptyForm(): FormState {
-  return { nome: '', storage_account: '', storage_container: '', storage_prefix: '', price_list_prefix: '', reservas_prefix: '', sp_id: '', ativo: true }
+  return {
+    nome: '', storage_account: '', storage_container: '', storage_prefix: '', price_list_prefix: '', reservas_prefix: '',
+    sp_id: '', ativo: true, coletar_price_list: true, coletar_reservas: true,
+  }
 }
 
 function fromStorage(s: StorageConfig): FormState {
@@ -28,6 +33,8 @@ function fromStorage(s: StorageConfig): FormState {
     reservas_prefix: s.reservas_prefix || '',
     sp_id: s.sp_id != null ? String(s.sp_id) : '',
     ativo: s.ativo,
+    coletar_price_list: s.coletar_price_list !== false,
+    coletar_reservas: s.coletar_reservas !== false,
   }
 }
 
@@ -42,6 +49,8 @@ export default function StorageModal({ storage, onClose }: StorageModalProps) {
   const queryClient = useQueryClient()
   const [form, setForm] = useState<FormState>(() => (storage ? fromStorage(storage) : emptyForm()))
   const spsQuery = useQuery({ queryKey: ['coleta-sps'], queryFn: listSPs })
+  const storageCapableSPs = (spsQuery.data || []).filter((sp) => sp.ativo && sp.coletar_storage !== false)
+  const exigeSPExplicita = storageCapableSPs.length > 1
 
   const saveMutation = useMutation({
     mutationFn: (input: StorageConfigInput) => (storage ? updateStorage(storage.id, input) : createStorage(input)),
@@ -59,6 +68,10 @@ export default function StorageModal({ storage, onClose }: StorageModalProps) {
       window.showToast?.('Preencha Storage Account e Container.', 'error')
       return
     }
+    if (exigeSPExplicita && !form.sp_id) {
+      window.showToast?.('Selecione a Service Principal deste Storage.', 'error')
+      return
+    }
     saveMutation.mutate({
       nome: form.nome || 'Storage 1',
       storage_account: form.storage_account,
@@ -68,6 +81,8 @@ export default function StorageModal({ storage, onClose }: StorageModalProps) {
       reservas_prefix: form.reservas_prefix,
       sp_id: form.sp_id ? parseInt(form.sp_id, 10) : null,
       ativo: form.ativo,
+      coletar_price_list: form.coletar_price_list,
+      coletar_reservas: form.coletar_reservas,
     })
   }
 
@@ -110,14 +125,40 @@ export default function StorageModal({ storage, onClose }: StorageModalProps) {
               </div>
             </div>
             <div className="form-group">
-              <label htmlFor="storage-sp-id">Service Principal</label>
+              <label htmlFor="storage-sp-id">Service Principal{exigeSPExplicita ? ' *' : ''}</label>
               <select id="storage-sp-id" value={form.sp_id} onChange={(e) => setForm({ ...form, sp_id: e.target.value })}>
-                <option value="">— usar o primeiro SP ativo —</option>
-                {(spsQuery.data || []).map((sp) => (
+                <option value="">{exigeSPExplicita ? '— selecione a SP deste Storage —' : '— usar a única SP ativa habilitada —'}</option>
+                {storageCapableSPs.map((sp) => (
                   <option key={sp.id} value={sp.id}>{sp.nome} ({sp.client_id})</option>
                 ))}
               </select>
+              {!!(spsQuery.data || []).length && storageCapableSPs.length === 0 && (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Nenhuma SP com permissão de autenticação Storage. Habilite &ldquo;Autenticação Storage&rdquo; na SP.
+                </div>
+              )}
             </div>
+
+            <div className="form-group" style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Datasets deste Storage</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input type="checkbox" checked={form.coletar_price_list} onChange={(e) => setForm({ ...form, coletar_price_list: e.target.checked })} style={{ width: 'auto', marginTop: 2 }} />
+                  <span>
+                    <strong>Price List</strong><br />
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Importa arquivos de catálogo/price list desse prefixo.</span>
+                  </span>
+                </label>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <input type="checkbox" checked={form.coletar_reservas} onChange={(e) => setForm({ ...form, coletar_reservas: e.target.checked })} style={{ width: 'auto', marginTop: 2 }} />
+                  <span>
+                    <strong>Reservas via Storage</strong><br />
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Importa export de Reservations desse Storage.</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
             <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input id="storage-ativo" type="checkbox" checked={form.ativo} onChange={(e) => setForm({ ...form, ativo: e.target.checked })} style={{ width: 'auto' }} />
               <label htmlFor="storage-ativo" style={{ margin: 0 }}>Ativo</label>

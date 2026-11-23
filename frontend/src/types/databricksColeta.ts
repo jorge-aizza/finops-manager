@@ -21,11 +21,13 @@ export interface DatabricksConfig {
   ativo: boolean
   is_padrao: boolean
   granularidade_dias: number
+  granularidade_auxiliar_dias?: number
   dia_execucao: number
   hora_execucao: number | null
   dias_semana: string | null
   auto_coleta: boolean
   proxima_coleta: string | null
+  proxima_coleta_auxiliar?: string | null
   atualizado_em: string
 }
 
@@ -70,6 +72,7 @@ export interface AgendamentoDatabricksInput {
   dias_semana: string | null
   auto_coleta: boolean
   granularidade_dias?: number
+  granularidade_auxiliar_dias?: number
 }
 
 export interface DatabricksLogEntry {
@@ -89,4 +92,5 @@ export interface DatabricksColetaStatus {
   em_execucao: boolean
   iniciada_em: string | null
   progresso: DatabricksColetaProgresso
+  fila_pendente?: number
 }

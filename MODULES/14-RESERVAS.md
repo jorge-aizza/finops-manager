@@ -34,6 +34,8 @@ de auditar de onde saiu uma linha. A tela mostra isso na coluna Origem, com rót
 | Dicionário de tipo de recurso — os DOIS lados precisam casar | `TIPO_RECURSO` (backend) + `TIPOS_RECURSO.Azure` (`frontend/src/config/reservaScopes.ts`) |
 | Permissões exigidas da SP | **Reservations Reader** (`/providers/Microsoft.Capacity`) e **Savings plan Reader** |
 
+**Sincronização multi-SP**: sem `sp_id`, a rota percorre todas as SPs Azure ativas com `coletar_reservas_api` habilitado. Cada SP é consultada isoladamente; falha de credencial/permissão em uma não descarta dados obtidos pelas outras. A resposta inclui `por_sp` com resultado e avisos individuais. Reservas repetidas entre SPs são consolidadas pelo `azure_id`, e a linha mantém o `sp_id` da primeira SP que a retornou. Enviando `sp_id`, a rota sincroniza apenas aquela SP.
+
 **Sem Savings Plans pelo Storage**: o export "Reservations" é só a grade de Reservas. Quem usa
 apenas esse caminho não vê Savings Plans até sincronizar também por SP.
 

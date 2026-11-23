@@ -84,6 +84,7 @@ cada uma ficam no módulo indicado, não aqui.
 - **Métrica nova tem que usar a MESMA base de recorte da métrica irmã.** Divergência proposital se expõe na tela, não se omite.
 - **`custo_mensal_estimado === null` é "não achamos o billing", NUNCA "é grátis".** O recorte é por TIPO que não fatura (`_DESP_CATEGORIAS_SEM_CUSTO`), não por custo nulo.
 - **Economia só conta exclusão após 30 dias como órfão** (`_SAVING_DIAS_MIN_ORFAO`). Quem não cumpre o piso continua visível no detalhe, marcado.
+- **`dias_orfao` não mede tempo parado/sem backend.** A duração de estado usa `azure_desperdicio_estado_historico`, começa na primeira observação horária e fica indisponível após 2h sem confirmação.
 - **Dado que só existe no Resource Graph precisa ser gravado na DETECÇÃO** — depois de excluído, o recurso some do ARG.
 - **"Dias como órfão" usa `desde_orfao_em`, nunca `primeira_deteccao_em` direto.** A leitura é por `diasOrfaoNaExclusao()` (`savingOrfaos.js`) — não reabra a conta na mão.
 

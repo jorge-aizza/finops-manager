@@ -4,9 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import DatabricksBudgetAlertModal from './DatabricksBudgetAlertModal'
 import * as databricksColetaApi from '../api/databricksColeta'
+import * as genieBudgetsApi from '../api/genieBudgets'
 import type { DatabricksAlerta, DatabricksBudget } from '../types/databricksResumo'
 
 vi.mock('../api/databricksColeta')
+vi.mock('../api/genieBudgets')
 
 function budget(overrides: Partial<DatabricksBudget> = {}): DatabricksBudget {
   return {
@@ -30,6 +32,7 @@ function renderWithClient() {
 beforeEach(() => {
   vi.clearAllMocks()
   sessionStorage.clear()
+  vi.mocked(genieBudgetsApi.listGenieWorkspaces).mockResolvedValue([{ workspace_id: 'ws-1', nome: 'Produção' }])
 })
 
 describe('DatabricksBudgetAlertModal', () => {
@@ -51,7 +54,8 @@ describe('DatabricksBudgetAlertModal', () => {
     expect(await screen.findByText('⚠ Orçamentos Databricks')).toBeInTheDocument()
     expect(screen.getByText('Estourado')).toBeInTheDocument()
     expect(screen.getByText('No limite')).toBeInTheDocument()
-    expect(screen.getByText((_, el) => el?.textContent?.startsWith('ws-1') ?? false)).toBeInTheDocument()
+    await waitFor(() => expect(genieBudgetsApi.listGenieWorkspaces).toHaveBeenCalledWith(['ws-1']))
+    expect(screen.getByText((_, el) => el?.textContent?.startsWith('Produção') ?? false)).toBeInTheDocument()
   })
 
   it('fecha e persiste o dismiss em sessionStorage — não reaparece num remount seguinte', async () => {

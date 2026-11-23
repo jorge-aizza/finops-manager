@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query'
+import { createPortal } from 'react-dom'
 import { getPortalConfig, identificar } from './api/portal'
 import PublicCalculadoraView from './views/PublicCalculadoraView'
 import PublicOrfaosView from './views/PublicOrfaosView'
@@ -77,6 +78,7 @@ function isLightTheme(): boolean {
 export default function PortalApp() {
   const queryClient = useQueryClient()
   const isFetching = useIsFetching()
+  const hasPendingQuery = useIsFetching({ predicate: (query) => query.state.data === undefined }) > 0
   const configQuery = useQuery({ queryKey: ['portal-config'], queryFn: getPortalConfig, retry: false })
 
   const [ident, setIdent] = useState<PortalIdentSessao | null>(() => getIdentSessao())
@@ -84,7 +86,17 @@ export default function PortalApp() {
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null)
   const [refreshMinutes, setRefreshMinutes] = useState(10)
   const [refreshCountdown, setRefreshCountdown] = useState(10 * 60)
+  const [queryNoticeVisible, setQueryNoticeVisible] = useState(false)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  useEffect(() => {
+    if (!hasPendingQuery) {
+      setQueryNoticeVisible(false)
+      return
+    }
+    const timer = window.setTimeout(() => setQueryNoticeVisible(true), 2000)
+    return () => window.clearTimeout(timer)
+  }, [hasPendingQuery])
 
   const atualizarDados = () => queryClient.invalidateQueries({ refetchType: 'active' })
 
@@ -259,9 +271,12 @@ export default function PortalApp() {
       )}
 
       {configQuery.isLoading && (
-        <div id="portal-loading">
-          <div className="portal-spinner" />
-          <span>Carregando portal...</span>
+        <div id="portal-loading" role="status" aria-live="polite" aria-atomic="true">
+          <div className="portal-loading-content">
+            <div className="portal-loading-logo" aria-hidden="true"><FinopsLogo height={72} /></div>
+            <div className="portal-spinner" aria-hidden="true" />
+            <span>Carregando portal...</span>
+          </div>
         </div>
       )}
 
@@ -319,6 +334,14 @@ export default function PortalApp() {
         </select>
         <span className="portal-refresh-status" aria-live="polite">{isFetching > 0 ? '…' : refreshLabel}</span>
       </div>
+
+      {queryNoticeVisible && createPortal(
+        <span className="finops-query-status" role="status" aria-live="polite" aria-atomic="true">
+          <span className="finops-query-spinner" aria-hidden="true" />
+          Consultando...
+        </span>,
+        document.body,
+      )}
 
       {toast && <div id="toast" className={'toast show ' + toast.type}>{toast.msg}</div>}
     </>

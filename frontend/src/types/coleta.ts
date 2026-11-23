@@ -25,6 +25,10 @@ export interface ServicePrincipal {
   auto_coleta: boolean
   proxima_coleta: string | null
   atualizado_em: string
+  coletar_billing_api?: boolean
+  coletar_inventario?: boolean
+  coletar_storage?: boolean
+  coletar_reservas_api?: boolean
 }
 
 // client_secret nunca volta do GET — só é enviado (opcional) no save.
@@ -41,6 +45,10 @@ export interface ServicePrincipalInput {
   ativo: boolean
   dia_execucao: number
   granularidade_dias: number
+  coletar_billing_api?: boolean
+  coletar_inventario?: boolean
+  coletar_storage?: boolean
+  coletar_reservas_api?: boolean
 }
 
 export interface StorageConfig {
@@ -53,8 +61,14 @@ export interface StorageConfig {
   reservas_prefix: string | null
   ativo: boolean
   sp_id: number | null
+  hora_execucao?: number | null
+  dias_semana?: string | null
+  auto_coleta_horas?: number | null
+  proxima_coleta?: string | null
   criado_em: string
   atualizado_em: string
+  coletar_price_list?: boolean
+  coletar_reservas?: boolean
 }
 
 export interface StorageConfigInput {
@@ -66,6 +80,8 @@ export interface StorageConfigInput {
   reservas_prefix: string
   sp_id: number | null
   ativo: boolean
+  coletar_price_list?: boolean
+  coletar_reservas?: boolean
 }
 
 export interface CoberturaMes {
@@ -157,6 +173,10 @@ export interface TestarSPResponse {
 
 export interface TestarStorageResponse {
   ok: boolean
+  prefix?: string
+  periodoConfiguravel?: boolean
+  runId?: string
+  manifestRows?: number
   total: number
   totalSizeMB: string
   preview: { name: string; sizeMB: string; lastModified: string }[]

@@ -2,7 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import './index.css'
+import { installViteChunkRecovery } from './lib/viteChunkRecovery'
 import PortalApp from './PortalApp.tsx'
+
+installViteChunkRecovery()
 
 // Bundle separado do app autenticado (react-app.js) — usuários anônimos do
 // Portal Público não devem baixar o código das 7 telas internas. Monta em

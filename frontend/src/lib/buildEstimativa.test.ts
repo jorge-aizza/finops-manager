@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildEstimativa } from './buildEstimativa'
+import { computeRgTaxas } from './calcEstimado'
 import { recursoKey } from '../hooks/useCalculadora'
 import type { RecursoBilling } from '../types/calculadora'
 
@@ -20,6 +21,46 @@ function makeRecurso(overrides: Partial<RecursoBilling>): RecursoBilling {
 }
 
 describe('buildEstimativa', () => {
+  it('não usa volume horário de PaaS como referência de uptime sem driver ou VM', () => {
+    const eventHub = makeRecurso({ resource_id: 'event-hub', resource_group_name: 'RG-PAAS', categoria: 'Event Hubs', consumed_service: 'Microsoft.EventHub', total_billing: 10000, horas_reais: 33480 })
+    const rgOptions = [{ resource_group_name: 'RG-PAAS', moeda: 'BRL', managed_type: null, managed_label: null, parent_rg: null }]
+    const rgTaxaMap = computeRgTaxas([eventHub], rgOptions)
+
+    expect(rgTaxaMap.get('RG-PAAS')?.valida).toBe(false)
+    expect(rgTaxaMap.get('RG-PAAS')?.hDriver).toBe(0)
+  })
+
+  it('rateia custos variáveis do RG pai e gerenciado pela hora operacional e mantém fixos separados na invoice', () => {
+    const pai = makeRecurso({ resource_id: 'dbx-software', resource_group_name: 'RG-PROD', total_billing: 20000, horas_reais: 100 })
+    const gerenciado = makeRecurso({ resource_id: 'dbx-vm', resource_group_name: 'MANAGED-RG-ADBX-PROD', total_billing: 2000, horas_reais: 100, soma_h_driver: 100 })
+    const eventHub = makeRecurso({ resource_id: 'event-hub', resource_group_name: 'RG-PROD', categoria: 'Event Hubs', consumed_service: 'Microsoft.EventHub', total_billing: 10000, horas_reais: 33480 })
+    const storage = makeRecurso({ resource_id: 'storage', resource_group_name: 'RG-PROD', tipo_custo: 'periodo', unidade: '1 GB/Month', total_billing: 10000 })
+    const fixo = makeRecurso({ resource_id: 'fixed', resource_group_name: 'RG-PROD', tipo_custo: 'mes', unidade: '1/Month', total_billing: 300, custo_mes_billing: 300 })
+    const recursos = [pai, gerenciado, eventHub, storage, fixo]
+    const rgOptions = [
+      { resource_group_name: 'RG-PROD', moeda: 'BRL', managed_type: null, managed_label: null, parent_rg: null },
+      { resource_group_name: 'MANAGED-RG-ADBX-PROD', moeda: 'BRL', managed_type: 'databricks' as const, managed_label: 'PROD', parent_rg: 'RG-PROD' },
+    ]
+    const rgTaxaMap = computeRgTaxas(recursos, rgOptions)
+    const est = buildEstimativa(
+      recursos,
+      Object.fromEntries(recursos.map((r) => [recursoKey(r), 2])),
+      rgTaxaMap,
+      { pctImposto: 10, pctCond: 5, pctGordura: 10 },
+      5.7,
+      2,
+    )
+
+    expect(rgTaxaMap.get('RG-PROD')?.totalBrl).toBeCloseTo(42000, 6)
+    expect(rgTaxaMap.get('MANAGED-RG-ADBX-PROD')?.hDriver).toBe(100)
+    expect(rgTaxaMap.get('RG-PROD')?.taxa).toBeCloseTo(420, 6)
+    expect(est.total_brl).toBeCloseTo(1016.4, 6)
+    expect(est.total_fixo_mes).toBeCloseTo(330, 6)
+    expect(est.total_final).toBeCloseTo(1062.6, 6)
+    expect(est.resultados.filter((item) => !item.fixo_mensal).reduce((sum, item) => sum + item.estimado_brl, 0)).toBeCloseTo(est.total_brl, 6)
+    expect(est.resultados.filter((item) => item.fixo_mensal).reduce((sum, item) => sum + item.estimado_brl, 0)).toBeCloseTo(est.total_fixo_mes, 6)
+  })
+
   it('soma estimado de cada recurso selecionado em total_brl, aplicando gordura', () => {
     const r1 = makeRecurso({ resource_id: 'a' })
     const r2 = makeRecurso({ resource_id: 'b', custo_hora_billing: 4 })

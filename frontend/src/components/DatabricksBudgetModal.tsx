@@ -5,7 +5,7 @@ import type { DatabricksBudget, DatabricksBudgetEscopoTipo } from '../types/data
 
 interface Props {
   budget: DatabricksBudget | null
-  workspaces: string[]
+  workspaces: { workspace_id: string; nome: string }[]
   onClose: () => void
 }
 
@@ -112,7 +112,7 @@ export default function DatabricksBudgetModal({ budget, workspaces, onClose }: P
               <label htmlFor="dbxb-ws">Workspace{escopoTipo === 'usuario' ? ' (opcional)' : ''}</label>
               <select id="dbxb-ws" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
                 <option value="">Selecione...</option>
-                {workspaces.map((w) => <option key={w} value={w}>{w}</option>)}
+                {workspaces.map((w) => <option key={w.workspace_id} value={w.workspace_id}>{w.nome}</option>)}
               </select>
             </div>
           )}
@@ -153,7 +153,7 @@ export default function DatabricksBudgetModal({ budget, workspaces, onClose }: P
             </>
           )}
           <div className="form-group">
-            <label htmlFor="dbxb-valor">Valor mensal (R$)</label>
+            <label htmlFor="dbxb-valor">Valor mensal (US$)</label>
             <input id="dbxb-valor" type="number" min={0} step="0.01" value={valorMensal} onChange={(e) => setValorMensal(e.target.value)} />
           </div>
           <div style={{ display: 'flex', gap: 12 }}>

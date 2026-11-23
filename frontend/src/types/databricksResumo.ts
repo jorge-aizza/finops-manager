@@ -88,6 +88,14 @@ export interface DatabricksAlerta {
   severidade: DatabricksAlertaSeveridade
 }
 
+export interface DatabricksGenieCotaDia {
+  dia: string
+  custo: number
+  dbus: number
+  dbus_free: number
+  dbus_pago?: number
+}
+
 // Anomaly Detection — GET /api/databricks-coleta/anomalias (ver _computeAnomaliasDatabricks,
 // server.js). custo_diario = Z-score sobre a série de custo/dia (global ou por workspace);
 // usuarios = % de crescimento da janela recente (7d) vs. histórica (4 semanas anteriores),
@@ -134,6 +142,7 @@ export interface DatabricksCotaWorkspace {
   cota: number | null       // null = nenhum orçamento de escopo 'workspace'
   pct: number | null
   budget_nome: string | null
+  budget_acao?: string | null
   status: DatabricksCotaStatus
 }
 
@@ -150,11 +159,57 @@ export interface DatabricksCotaUsuario {
   // o teto de 'workspace_por_usuario' do ws dele.
   origem_limite: 'individual' | 'workspace' | null
   budget_nome: string | null
+  budget_acao?: string | null
   status: DatabricksCotaStatus
+}
+
+export interface DatabricksGenieCotaWorkspaceNativa {
+  workspace_id: string
+  workspace_nome: string
+  custo: number
+  custo_workspace: number
+  dbus: number
+  dbus_free: number
+  dbus_pago: number
+  cota: number | null
+  pct: number | null
+  budget_nome: string | null
+  budget_acao: string | null
+  status: DatabricksCotaStatus
+  dias?: DatabricksGenieCotaDia[]
+}
+
+export interface DatabricksGenieCotaUsuarioNativa {
+  workspace_id: string
+  usuario: string
+  custo: number
+  dbus: number
+  dbus_free: number
+  dbus_pago: number
+  limite: number | null
+  pct: number | null
+  origem_limite: 'individual' | 'workspace' | null
+  budget_nome: string | null
+  budget_acao: string | null
+  status: DatabricksCotaStatus
+  dias?: DatabricksGenieCotaDia[]
+}
+
+export interface DatabricksGenieCotasInternas {
+  periodo: 'today' | 'month' | 'all'
+  workspaces: DatabricksGenieCotaWorkspaceNativa[]
+  usuarios: DatabricksGenieCotaUsuarioNativa[]
+  avisos?: string[]
+  cache?: {
+    atualizado_em: string
+    desatualizado: boolean
+    atualizando: boolean
+  }
 }
 
 export interface DatabricksCotas {
   mes: string
+  tag_filters_applied?: boolean
   /** meses que tem consumo gravado, mais recente primeiro — alimenta o seletor de Periodo */
   meses_disponiveis: string[]
   /** quantos meses a cota cobre: 1 num mes especifico, N no modo "todos" */

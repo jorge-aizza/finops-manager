@@ -14,7 +14,10 @@ const existingBudget: DatabricksBudget = {
   ativo: true, criado_em: '2026-01-01T00:00:00.000Z', atualizado_em: '2026-01-01T00:00:00.000Z',
 }
 
-function renderWithClient(budget: DatabricksBudget | null, workspaces: string[] = ['ws-123', 'ws-456']) {
+function renderWithClient(budget: DatabricksBudget | null, workspaces = [
+  { workspace_id: 'ws-123', nome: 'Produção' },
+  { workspace_id: 'ws-456', nome: 'Desenvolvimento' },
+]) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
@@ -38,7 +41,7 @@ describe('DatabricksBudgetModal', () => {
 
     await user.type(screen.getByLabelText('Nome'), 'Orçamento Mensal')
     await user.selectOptions(screen.getByLabelText('Tipo de escopo'), 'global')
-    await user.type(screen.getByLabelText('Valor mensal (R$)'), '3000')
+    await user.type(screen.getByLabelText('Valor mensal (US$)'), '3000')
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
 
     expect(databricksColetaApi.createDatabricksBudget).toHaveBeenCalledWith({
@@ -56,7 +59,8 @@ describe('DatabricksBudgetModal', () => {
     await user.type(screen.getByLabelText('Nome'), 'Orçamento ws-456')
     await user.selectOptions(screen.getByLabelText('Tipo de escopo'), 'workspace')
     await user.selectOptions(screen.getByLabelText('Workspace'), 'ws-456')
-    await user.type(screen.getByLabelText('Valor mensal (R$)'), '1200')
+    expect(screen.getByRole('option', { name: 'Desenvolvimento' })).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Valor mensal (US$)'), '1200')
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
 
     expect(databricksColetaApi.createDatabricksBudget).toHaveBeenCalledWith(
@@ -73,7 +77,7 @@ describe('DatabricksBudgetModal', () => {
     await user.selectOptions(screen.getByLabelText('Tipo de escopo'), 'tag')
     await user.type(screen.getByLabelText('Chave da tag'), 'projeto')
     await user.type(screen.getByLabelText('Valor da tag'), 'finops-core')
-    await user.type(screen.getByLabelText('Valor mensal (R$)'), '800')
+    await user.type(screen.getByLabelText('Valor mensal (US$)'), '800')
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
 
     expect(databricksColetaApi.createDatabricksBudget).toHaveBeenCalledWith(
@@ -87,7 +91,7 @@ describe('DatabricksBudgetModal', () => {
 
     await user.type(screen.getByLabelText('Nome'), 'Orçamento Mensal')
     await user.selectOptions(screen.getByLabelText('Tipo de escopo'), 'global')
-    await user.type(screen.getByLabelText('Valor mensal (R$)'), '3000')
+    await user.type(screen.getByLabelText('Valor mensal (US$)'), '3000')
     await user.clear(screen.getByLabelText('Crítico em (%)'))
     await user.type(screen.getByLabelText('Crítico em (%)'), '60') // menor que o "Alertar em" padrão (75)
 
@@ -103,7 +107,7 @@ describe('DatabricksBudgetModal', () => {
     expect(screen.getByLabelText('Nome')).toHaveValue('Orçamento Time Dados')
     expect(screen.getByLabelText('Tipo de escopo')).toHaveValue('workspace')
     expect(screen.getByLabelText('Workspace')).toHaveValue('ws-123')
-    expect(screen.getByLabelText('Valor mensal (R$)')).toHaveValue(5000)
+    expect(screen.getByLabelText('Valor mensal (US$)')).toHaveValue(5000)
     await user.click(screen.getByRole('button', { name: 'Salvar' }))
 
     expect(databricksColetaApi.updateDatabricksBudget).toHaveBeenCalledWith(5, {

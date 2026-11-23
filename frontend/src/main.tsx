@@ -2,7 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import './bridge'
+import { installViteChunkRecovery } from './lib/viteChunkRecovery'
 import App from './App.tsx'
+
+installViteChunkRecovery()
 
 // Monta uma única vez em #react-root (existe sempre no index.html do shell
 // legado). App.tsx decide o que renderizar via a ponte (bridge.ts) —

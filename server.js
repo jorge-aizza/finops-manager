@@ -60,10 +60,25 @@ const crypto   = require('crypto');
 const fs       = require('fs');
 const jwksRsa  = require('jwks-rsa');
 const nodemailer = require('nodemailer');
-const { diasOrfaoNaExclusao } = require('./savingOrfaos');
+const { diasOrfaoNaExclusao, filtrarOrfaosPublicos } = require('./savingOrfaos');
 const { createPublicWikiRouter, createWikiRouter } = require('./wiki');
 const { createAzureImportJobStore } = require('./azureImportJobStore');
 const { inserirLinhasEmLote } = require('./azureCostsInsert');
+const { createGenieCotasCache } = require('./genieCotasCache');
+const { auxiliaresVencidas, normalizarIntervaloAuxiliar, proximaColetaAuxiliar, createSerialColetaQueue } = require('./databricksColetaAgenda');
+const { resolveStoragePrefix } = require('./azureStoragePrefix');
+const { findStorageExportRuns, validateStorageExportRun, selectLatestStorageRun } = require('./azureStorageRuns');
+const { azureSpServiceEnabled } = require('./azureSpCapabilities');
+const { resolveInventorySubscriptionOwners } = require('./azureInventoryScope');
+const { prioritizeGraphSpCandidates } = require('./azureAuthorScopes');
+const { updateGenieBudgetPrincipalOverride } = require('./genieBudgetOverride');
+const { addSyntheticParentOptions, extractManagedRgParentLink } = require('./azureManagedRgParent');
+const {
+  buildGenieCotasInternaQuery,
+  aggregateGenieCotasPublicasPorUsuario,
+  aggregateGenieCotasInternasRows,
+  dedupeGenieCotasRows,
+} = require('./genieCotasPublicaQuery');
 const {
   registrarMesCustoImportado,
   reconstruirMesCustoDiario,
@@ -2444,6 +2459,15 @@ async function _refreshAzureCache() {
         ws_name   TEXT PRIMARY KEY,
         parent_rg TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS azure_rg_parent_cache (
+        subscription_id   VARCHAR(200) NOT NULL,
+        managed_rg_upper  VARCHAR(500) NOT NULL,
+        parent_rg         VARCHAR(500) NOT NULL,
+        managed_type      VARCHAR(20) NOT NULL,
+        source             VARCHAR(30) NOT NULL DEFAULT 'resource_graph',
+        atualizado_em      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (subscription_id, managed_rg_upper)
+      );
     `);
     // Split Microsoft/Marketplace (2026-09-29) em azure_cobertura_cache — tabela já existente
     // ganha as colunas zeradas; o próximo _refreshAzureCache() preenche de verdade.
@@ -2617,6 +2641,13 @@ async function _refreshAzureCache() {
       _dbWsCacheTs = Date.now();
     }
     console.log(`[Azure] Cache atualizado em ${Date.now()-t0}ms ✅ — ${subRows.length} subs · ${rgRows.length} RGs · ${cobRows.length} meses · ${wsRows.length} ws Databricks`);
+    if (!_rgParentBackfillStarted) {
+      _rgParentBackfillStarted = true;
+      setTimeout(() => _backfillManagedRgParentCache().catch((e) => {
+        _rgParentBackfillStarted = false;
+        console.warn(`[RG Pai] Backfill inicial falhou: ${e.message}`);
+      }), 1000);
+    }
   } catch (err) {
     console.error(`[Azure] Erro ao atualizar cache: ${err.message} | pool: ${pool?.totalCount}/${pool?.idleCount}/${pool?.waitingCount} (total/idle/waiting)`);
   } finally {
@@ -3817,6 +3848,8 @@ try:
     for col in df.columns:
         if hasattr(df[col], 'dt'):
             df[col] = df[col].dt.strftime('%Y-%m-%d').where(df[col].notna(), '')
+        else:
+            df[col] = df[col].astype(str).replace('NaT','').replace('nan','').replace('<NA>','')
         else:
             df[col] = df[col].astype(str).replace('NaT','').replace('nan','').replace('<NA>','')
     df.to_csv(sys.argv[2], index=False)
@@ -5122,17 +5155,11 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
     await ensureAzureColetaTable();
     const { escopos } = await _getInventarioEscopos();
     const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 90);
-    const filtrados = cache.filter((x) =>
-      subsPermitidas.has(String(x.subscription_id).toLowerCase())
-      && categorias.has(x.categoria)
-      && (!rgs.size || (x.resource_group && rgs.has(String(x.resource_group).toUpperCase())))
-      // Discos de PVC do AKS e de ASR precisam de validação manual (podem estar em uso
-      // por outro sistema) — nunca expostos no portal público, só na tela interna.
-      && !x.motivo_validacao
-      // Categoria que não gera custo por estar órfã fica fora da visão de FinOps (hoje só
-      // NIC — ver _DESP_CATEGORIAS_SEM_CUSTO). Redundante com a allowlist atual, que só
-      // libera disco e snapshot, mas a allowlist é editável pelo admin e esta regra não.
-      && !_DESP_CATEGORIAS_SEM_CUSTO.has(x.categoria));
+    const filtrados = filtrarOrfaosPublicos(cache, {
+      subscriptionIds: subsPermitidas,
+      categories: categorias,
+      resourceGroups: rgs,
+    }, _DESP_CATEGORIAS_SEM_CUSTO);
 
     const det = filtrados.length
       ? await pool.query(
@@ -5141,11 +5168,10 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       : { rows: [] };
     const primeira = new Map(det.rows.map((r) => [r.resource_id_upper, r.primeira_deteccao_em]));
 
-    // Disco só entra no portal público com 30+ dias desanexados confirmados — mesmo piso da
-    // janela de custo observado (ver `desde` em `_coletarDesperdicio`), pedido do usuário para
-    // alinhar os dois números. `dias_orfao: null` (sem data conhecida) também é excluído aqui —
-    // "não sabemos há quanto tempo" não é o mesmo que "sabemos que é 30+".
-    const _DIAS_MIN_DISCO_PUBLICO = 30;
+    // O portal público só expõe recursos com 30+ dias no estado ocioso atual, usando a duração
+    // unificada (Azure quando disponível, senão histórico horário). Sem duração conhecida não
+    // significa 30+ dias: não incluir um recurso sem evidência suficiente.
+    const _DIAS_MIN_OCIOSO_PUBLICO = 30;
 
     // Imposto (Microsoft/Marketplace) já aplicado em _coletarDesperdicio, na origem — não
     // reaplicar aqui (dobraria o multiplicador).
@@ -5159,8 +5185,12 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
       : { rows: [] };
     const subsNomeMap = new Map(subsNomeRow.rows.map((s) => [s.subscription_id, s.subscription_name]));
 
+    const estadosAtuais = await _mapearDiasEstadoDesperdicio(filtrados);
     const itens = filtrados.map((x) => {
+      const dataAzure = Boolean(x.marcado_orfao_em);
       const desde = x.marcado_orfao_em || primeira.get(String(x.resource_id).toUpperCase());
+      const diasOrfao = desde ? Math.max(0, Math.floor((Date.now() - new Date(desde).getTime()) / 86400000)) : null;
+      const estadoAtual = estadosAtuais.get(String(x.resource_id).toUpperCase()) || { dias_estado_atual: null, estado_desde: null };
       return {
         nome: x.nome || null,
         categoria: x.categoria,
@@ -5169,9 +5199,11 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
         sku: x.sku || null,
         tamanho_gb: x.tamanho_gb ?? null,
         custo_mensal_estimado: x.custo_mensal_estimado ?? null,
-        dias_orfao: desde ? Math.max(0, Math.floor((Date.now() - new Date(desde).getTime()) / 86400000)) : null,
+        dias_orfao: diasOrfao,
+        ...estadoAtual,
+        ..._duracaoOciosaDesperdicio(dataAzure, diasOrfao, estadoAtual.dias_estado_atual),
       };
-    }).filter((it) => it.categoria !== 'disco_orfao' || (it.dias_orfao !== null && it.dias_orfao >= _DIAS_MIN_DISCO_PUBLICO))
+    }).filter((it) => _cumprePisoOrfaosPublico(it, _DIAS_MIN_OCIOSO_PUBLICO))
       .sort((a, b) => (b.custo_mensal_estimado || 0) - (a.custo_mensal_estimado || 0));
 
     const porCat = {};
@@ -5182,7 +5214,7 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
     }
     // Economia realizada — só os TOTAIS. A lista de itens fica de fora de propósito: ela traz
     // resource_id e subscription_id, que esta rota pública nunca expõe (mesma regra do resto do
-    // endpoint). Apuração não roda aqui, só leitura: quem apura é a tela interna, autenticada.
+    // endpoint). Esta rota só lê; a apuração roda na tela interna e na coleta horária completa.
     let saving = null;
     try {
       // Mesmos filtros do que este portal publica — `categorias` e `rgs` já foram montados
@@ -5464,54 +5496,28 @@ app.get('/api/public/genie-cotas', _portalEntraMiddleware, dbMiddleware, async (
     const pcfg = await _getPortalConfig();
     if (!pcfg.ativo || !pcfg.genie_cotas_ativo) return res.status(403).json({ error: 'Minha Cota Genie desativada' });
 
-    const usuario = req.portalUser.email;
-    const bs = (await pool.query(`SELECT * FROM databricks_budgets WHERE ativo = true`)).rows;
-    const consUser = await pool.query(
-      `SELECT workspace_id, COALESCE(SUM(custo_estimado),0) AS custo
-         FROM databricks_consumo
-        WHERE COALESCE(usuario,'') = $1 AND sku_name ILIKE '%GENIE%'
-        GROUP BY workspace_id`,
-      [usuario]
+    const period = ['today', 'month', 'all'].includes(req.query.period) ? req.query.period : 'month';
+    const snapshot = await _genieCotasCache.get(period);
+    const email = String(req.portalUser.email || '').trim().toLowerCase();
+    const usuarioResult = await pool.query(
+      `SELECT payload FROM databricks_genie_cotas_public_cache WHERE periodo=$1 AND usuario_email=$2`,
+      [period, email]
     );
-
-    const workspaces = await Promise.all(consUser.rows.map(async (r) => {
-      const wsId = r.workspace_id;
-      const custo = parseFloat(r.custo);
-      const b = bs.find(x => (x.escopo_tipo === 'usuario' && x.usuario === usuario && x.workspace_id === wsId)
-        || (x.escopo_tipo === 'usuario' && x.usuario === usuario && !x.workspace_id)
-        || (x.escopo_tipo === 'workspace_por_usuario' && x.workspace_id === wsId));
-      const limiteLocal = b ? parseFloat(b.valor_mensal) : null;
-
-      const serieRows = await pool.query(
-        `SELECT to_char(usage_date,'YYYY-MM-DD') AS dia,
-                COALESCE(SUM(custo_estimado),0) AS custo,
-                COALESCE(SUM(usage_quantity),0) AS dbus,
-                COALESCE(SUM(CASE WHEN sku_name ILIKE '%FREE%' OR custo_estimado = 0 THEN usage_quantity ELSE 0 END),0) AS dbus_free
-           FROM databricks_consumo
-          WHERE COALESCE(usuario,'') = $1 AND workspace_id = $2 AND sku_name ILIKE '%GENIE%'
-          GROUP BY 1 ORDER BY 1`,
-        [usuario, wsId]
-      );
-
-      const quotaNativa = await _resolverGenieQuotaUsuario(usuario, wsId);
-
-      return {
-        workspace_id: wsId,
-        custo,
-        limite_local: limiteLocal,
-        quota_nativa: quotaNativa.limite,
-        acao_nativa: quotaNativa.acao,
-        dias: serieRows.rows.map(x => ({
-          dia: x.dia, custo: parseFloat(x.custo),
-          dbus: parseFloat(x.dbus), dbus_free: parseFloat(x.dbus_free),
-        })),
-      };
-    }));
-
-    res.json({ ativo: true, nome: req.portalUser.nome, workspaces });
+    res.json({
+      ativo: true,
+      nome: req.portalUser.nome,
+      periodo: period,
+      workspaces: usuarioResult.rows[0]?.payload || [],
+      cache: {
+        atualizado_em: snapshot.atualizado_em,
+        desatualizado: snapshot.desatualizado,
+        atualizando: snapshot.atualizando,
+      },
+    });
   } catch (e) {
     console.error('[Portal Genie Cotas] erro:', e.message);
-    res.status(500).json({ error: 'Não foi possível carregar sua cota Genie no momento.' });
+    const status = e.statusCode || 500;
+    res.status(status).json({ error: status === 503 ? e.message : 'Não foi possível carregar sua cota Genie no momento.' });
   }
 });
 
@@ -5646,12 +5652,12 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, _calculado
     } catch (_) {}
     if (!rows.length) {
       const r = await pool.query(`
-        SELECT DISTINCT UPPER(resource_group_name) AS resource_group_name_upper,
+         SELECT UPPER(resource_group_name) AS resource_group_name_upper,
                MAX(resource_group_name) AS resource_group_name,
-               MAX(subscription_id) AS subscription_id
+           subscription_id
         FROM azure_costs
         WHERE ${cond.join(' AND ')} AND resource_group_name IS NOT NULL
-        GROUP BY UPPER(resource_group_name)
+         GROUP BY subscription_id, UPPER(resource_group_name)
         ORDER BY resource_group_name
         LIMIT 500
       `, params);
@@ -5659,7 +5665,7 @@ app.get('/api/public/calculadora/resource-groups', _portalMiddleware, _calculado
     }
     const withManaged = rows.map(row => ({ ...row, ..._detectManagedRg(row.resource_group_name) }));
     const effSubs = subscription_ids.length ? subscription_ids : [];
-    res.json(await _resolveParentRgs(withManaged, effSubs));
+    res.json(await _resolveParentRgs(withManaged, effSubs, resource_groups.length ? resource_groups : null));
   } catch (e) { _dbErr(res, e); }
 });
 
@@ -5847,14 +5853,119 @@ async function _getRgsGerenciados() {
 let _dbWsCache = null;
 let _dbWsCacheTs = 0;
 const _DB_WS_TTL = 30 * 60 * 1000; // 30 min — workspaces mudam raramente
+let _rgParentBackfillStarted = false;
 
-async function _resolveParentRgs(rows, subs) {
+async function _persistManagedRgParentLinks(links) {
+  if (!links.length) return 0;
+  const rows = links.filter((link) => link?.subscription_id && link.managed_rg && link.parent_rg);
+  if (!rows.length) return 0;
+  const result = await pool.query(`
+    INSERT INTO azure_rg_parent_cache
+      (subscription_id, managed_rg_upper, parent_rg, managed_type, source, atualizado_em)
+    SELECT sub_id, UPPER(managed_rg), UPPER(parent_rg), managed_type, source, NOW()
+    FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[]) AS x(sub_id, managed_rg, parent_rg, managed_type, source)
+    ON CONFLICT (subscription_id, managed_rg_upper) DO UPDATE SET
+      parent_rg = EXCLUDED.parent_rg,
+      managed_type = EXCLUDED.managed_type,
+      source = EXCLUDED.source,
+      atualizado_em = NOW()
+    WHERE azure_rg_parent_cache.parent_rg IS DISTINCT FROM EXCLUDED.parent_rg
+       OR azure_rg_parent_cache.managed_type IS DISTINCT FROM EXCLUDED.managed_type
+       OR azure_rg_parent_cache.source IS DISTINCT FROM EXCLUDED.source
+  `, [
+    rows.map((link) => link.subscription_id),
+    rows.map((link) => link.managed_rg),
+    rows.map((link) => link.parent_rg),
+    rows.map((link) => link.managed_type),
+    rows.map((link) => link.source || 'resource_graph'),
+  ]);
+  return result.rowCount;
+}
+
+async function _backfillManagedRgParentCache() {
+  if (!pool) return;
+  try {
+    const { escopos } = await _getInventarioEscopos();
+    let mapeados = 0, falhas = 0;
+    const concorrencia = 5;
+    for (let i = 0; i < escopos.length; i += concorrencia) {
+      const lote = escopos.slice(i, i + concorrencia);
+      const resultados = await Promise.all(lote.map(async (escopo) => {
+        try {
+          const recursos = await _resourceGraphFetchRecursos(await escopo.getToken(), escopo.subscriptionId, true);
+          const links = recursos.map((item) => extractManagedRgParentLink(item, escopo.subscriptionId)).filter(Boolean);
+          return await _persistManagedRgParentLinks(links);
+        } catch (e) {
+          falhas++;
+          console.warn(`[RG Pai] Backfill falhou para ${escopo.subscriptionId}: ${e.message}`);
+          return 0;
+        }
+      }));
+      mapeados += resultados.reduce((total, count) => total + count, 0);
+    }
+    const rgsConhecidos = await pool.query(`
+      SELECT subscription_id, resource_group_name
+      FROM azure_rg_cache
+      UNION
+      SELECT subscription_id, resource_group AS resource_group_name
+      FROM azure_recursos_inventario
+      WHERE ativo = true AND resource_group IS NOT NULL AND resource_group <> ''
+    `);
+    const subs = [...new Set(rgsConhecidos.rows.map((r) => r.subscription_id).filter(Boolean))];
+    const resolvidos = await _resolveParentRgs(
+      rgsConhecidos.rows.map((r) => ({ ...r, ..._detectManagedRg(r.resource_group_name) })),
+      subs,
+    );
+    const gerenciados = resolvidos.filter((r) => r.managed_type);
+    const semPai = gerenciados.filter((r) => !r.parent_rg);
+    const porTipo = (tipo) => gerenciados.filter((r) => r.managed_type === tipo);
+    console.log(`[RG Pai] Backfill Resource Graph concluído — ${mapeados} vínculo(s) autoritativo(s) atualizado(s), ${falhas} assinatura(s) com falha; cobertura ${gerenciados.length - semPai.length}/${gerenciados.length} (${porTipo('databricks').filter((r) => r.parent_rg).length}/${porTipo('databricks').length} Databricks, ${porTipo('aks').filter((r) => r.parent_rg).length}/${porTipo('aks').length} AKS); sem pai: ${semPai.map((r) => `${r.subscription_id}/${r.resource_group_name}`).slice(0, 20).join(', ') || 'nenhum'}`);
+  } catch (e) {
+    _rgParentBackfillStarted = false;
+    console.warn(`[RG Pai] Backfill Resource Graph falhou: ${e.message}`);
+  }
+}
+
+async function _resolveParentRgs(rows, subs, allowedParentRgs = null) {
   if (!rows.length) return rows;
 
-  // Conjunto de RGs não-gerenciados (uppercase) — base para matching AKS
-  const normalRgs = new Set(
-    rows.filter(r => !r.managed_type).map(r => (r.resource_group_name || '').toUpperCase())
-  );
+  const subscriptionIds = [...new Set([...(subs || []), ...rows.map(r => r.subscription_id).filter(Boolean)])];
+  const normalRgsBySub = new Map();
+  const addNormalRg = (subscriptionId, resourceGroup) => {
+    if (!subscriptionId || !resourceGroup) return;
+    if (!normalRgsBySub.has(subscriptionId)) normalRgsBySub.set(subscriptionId, new Set());
+    normalRgsBySub.get(subscriptionId).add(resourceGroup.toUpperCase());
+  };
+  for (const r of rows) if (!r.managed_type) addNormalRg(r.subscription_id || (subs?.length === 1 ? subs[0] : null), r.resource_group_name);
+  if (subscriptionIds.length) {
+    try {
+      const inventoryRgs = await pool.query(`
+        SELECT DISTINCT subscription_id, resource_group
+        FROM azure_recursos_inventario
+        WHERE ativo = true AND subscription_id = ANY($1::text[])
+          AND resource_group IS NOT NULL AND resource_group <> ''
+      `, [subscriptionIds]);
+      for (const r of inventoryRgs.rows) addNormalRg(r.subscription_id, r.resource_group);
+    } catch (e) {
+      console.warn(`[RG Pai] Não foi possível consultar RGs do Inventário: ${e.message}`);
+    }
+  }
+  const normalRgsFor = (r) => normalRgsBySub.get(r.subscription_id || (subs?.length === 1 ? subs[0] : null)) || new Set();
+
+  const explicitParentByRg = new Map();
+  const managedRgNames = [...new Set(rows.filter(r => r.managed_type).map(r => (r.resource_group_name || '').toUpperCase()).filter(Boolean))];
+  if (subscriptionIds.length && managedRgNames.length) {
+    try {
+      const links = await pool.query(`
+        SELECT subscription_id, managed_rg_upper, parent_rg, source
+        FROM azure_rg_parent_cache
+        WHERE subscription_id = ANY($1::text[]) AND managed_rg_upper = ANY($2::text[])
+      `, [subscriptionIds, managedRgNames]);
+      for (const link of links.rows) explicitParentByRg.set(`${link.subscription_id}::${link.managed_rg_upper}`, link);
+    } catch (e) {
+      console.warn(`[RG Pai] Cache autoritativo indisponível: ${e.message}`);
+    }
+  }
 
   // Mapa workspace_lower → parent_rg_upper para Databricks (via resource_id no billing)
   // Cache carregado em startup e atualizado pelo _refreshAzureCache (90s delay).
@@ -5868,44 +5979,54 @@ async function _resolveParentRgs(rows, subs) {
     // Cache não disponível: retorna sem parent mapping — _refreshAzureCache popula em 90s
   }
 
-  return rows.map(r => {
+  const resolved = rows.map(r => {
     if (!r.managed_type) return r;
     const upper = (r.resource_group_name || '').toUpperCase();
-    let parent_rg = null;
+    const subscriptionId = r.subscription_id || (subs?.length === 1 ? subs[0] : null);
+    const cachedLink = subscriptionId ? explicitParentByRg.get(`${subscriptionId}::${upper}`) || null : null;
+    const resourceGraphParent = cachedLink?.source === 'resource_graph';
+    let parent_rg = cachedLink?.parent_rg || null;
+    const normalRgs = normalRgsFor(r);
 
     if (r.managed_type === 'aks') {
       // MC_{parent_rg}_{cluster}_{location} — encontra o maior RG conhecido que é prefixo do interior
       const inner = upper.startsWith('MC_') ? upper.slice(3) : upper;
-      for (const rg of normalRgs) {
-        if (inner.startsWith(rg + '_') && (!parent_rg || rg.length > parent_rg.length)) {
-          parent_rg = rg;
+      if (!parent_rg || !resourceGraphParent) {
+        for (const rg of normalRgs) {
+          if (inner.startsWith(rg + '_') && (!parent_rg || rg.length > parent_rg.length)) {
+            parent_rg = rg;
+          }
         }
       }
     } else if (r.managed_type === 'databricks') {
       // Método 1: compara nome do managed RG contra padrão databricks-rg-{ws} / managed-rg-adbx-{ws}
       // usando workspace names vindos da query no billing (resource_id com /workspaces/)
       const rgLower = (r.resource_group_name || '').toLowerCase();
-      for (const [wsLower, parentRgUpper] of workspaceToParent) {
-        if (!wsLower) continue;
-        if (rgLower === 'databricks-rg-' + wsLower ||
-            rgLower.startsWith('databricks-rg-' + wsLower + '-') ||
-            rgLower === 'managed-rg-adbx-' + wsLower ||
-            rgLower.startsWith('managed-rg-adbx-' + wsLower + '-') ||
-            rgLower === 'managed-rg-' + wsLower ||
-            rgLower.startsWith('managed-rg-' + wsLower + '-')) {
-          parent_rg = parentRgUpper;
-          break;
+      if (!parent_rg || !resourceGraphParent) {
+        const candidatos = new Set();
+        for (const [wsLower, parentRgUpper] of workspaceToParent) {
+          if (!wsLower) continue;
+          if (rgLower === 'databricks-rg-' + wsLower ||
+              rgLower.startsWith('databricks-rg-' + wsLower + '-') ||
+              rgLower === 'managed-rg-adbx-' + wsLower ||
+              rgLower.startsWith('managed-rg-adbx-' + wsLower + '-') ||
+              rgLower === 'managed-rg-' + wsLower ||
+              rgLower.startsWith('managed-rg-' + wsLower + '-')) {
+            const candidato = String(parentRgUpper || '').toUpperCase();
+            if (normalRgs.has(candidato)) candidatos.add(candidato);
+          }
         }
+        if (candidatos.size === 1) parent_rg = [...candidatos][0];
       }
       // Método 2 (exact): managed_label bate exatamente com um RG não-gerenciado
-      if (!parent_rg) {
+      if (!parent_rg || !resourceGraphParent) {
         const labelUpper = (r.managed_label || '').toUpperCase();
         if (labelUpper && normalRgs.has(labelUpper)) parent_rg = labelUpper;
       }
       // Método 3 (suffix): RG pai TERMINA COM o managed_label
       // Ex: MANAGED-RG-DBW-X → label=DBW-X → pai RG-DBW-X (termina com -DBW-X)
       // Mais confiável que substring — sem risco de falso-positivo em nomes parecidos
-      if (!parent_rg) {
+      if (!parent_rg || !resourceGraphParent) {
         const labelUpper = (r.managed_label || '').toUpperCase();
         if (labelUpper && labelUpper.length >= 6) {
           let best = null, bestLen = Infinity;
@@ -5919,7 +6040,7 @@ async function _resolveParentRgs(rows, subs) {
         }
       }
       // Método 4 (prefix): managed_label é prefixo do nome do RG pai
-      if (!parent_rg) {
+      if (!parent_rg || !resourceGraphParent) {
         const labelUpper = (r.managed_label || '').toUpperCase();
         if (labelUpper) {
           let best = null;
@@ -5933,7 +6054,7 @@ async function _resolveParentRgs(rows, subs) {
         }
       }
       // Método 5 (substring): managed_label está contido em algum RG normal — menor wins
-      if (!parent_rg) {
+      if (!parent_rg || !resourceGraphParent) {
         const labelUpper = (r.managed_label || '').toUpperCase();
         if (labelUpper && labelUpper.length >= 6) {
           let best = null, bestLen = Infinity;
@@ -5966,19 +6087,15 @@ async function _resolveParentRgs(rows, subs) {
           }
         }
       }
-      // Persiste mapeamento encontrado em azure_ws_cache para acelerar requisições futuras
-      if (parent_rg && pool) {
-        const wsKey = (r.resource_group_name || '').toUpperCase();
-        pool.query(
-          `INSERT INTO azure_ws_cache (ws_name, parent_rg) VALUES ($1, $2)
-           ON CONFLICT (ws_name) DO UPDATE SET parent_rg = EXCLUDED.parent_rg`,
-          [wsKey, parent_rg]
-        ).catch(() => {});
-      }
     }
 
-    return { ...r, parent_rg };
+    return { ...r, parent_rg, _parentSource: resourceGraphParent ? 'resource_graph' : (parent_rg ? 'heuristic' : null) };
   });
+  const heuristicLinks = resolved
+    .filter((r) => r.managed_type && r.parent_rg && r.subscription_id && r._parentSource === 'heuristic')
+    .map((r) => ({ subscription_id: r.subscription_id, managed_rg: r.resource_group_name, parent_rg: r.parent_rg, managed_type: r.managed_type, source: 'heuristic' }));
+  if (heuristicLinks.length) await _persistManagedRgParentLinks(heuristicLinks).catch((e) => console.warn(`[RG Pai] Não foi possível persistir heurísticas: ${e.message}`));
+  return addSyntheticParentOptions(resolved.map(({ _parentSource, ...row }) => row), allowedParentRgs);
 }
 
 // ── GET /api/calculadora/resource-groups ─────────────────────────────────────
@@ -5998,7 +6115,7 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
     const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
     let rows = [];
     try {
-      const rc = await pool.query(`SELECT COALESCE(resource_group_name, resource_group_name_upper) AS resource_group_name, moeda FROM azure_rg_cache ${where} ORDER BY resource_group_name_upper LIMIT 1000`, params);
+      const rc = await pool.query(`SELECT subscription_id, COALESCE(resource_group_name, resource_group_name_upper) AS resource_group_name, moeda FROM azure_rg_cache ${where} ORDER BY resource_group_name_upper LIMIT 1000`, params);
       rows = rc.rows;
     } catch (_) {}
     // Fallback: cache vazio — lê direto
@@ -6006,10 +6123,10 @@ app.get('/api/calculadora/resource-groups', authMiddleware, dbMiddleware, async 
       console.warn('[ResourceGroups] cache vazio — fallback para query direta em azure_costs');
       const fallbackCond = [...cond].map(c => c.replace('subscription_id', 'subscription_id'));
       const fd = await pool.query(`
-        SELECT UPPER(resource_group_name) AS resource_group_name, MIN(billing_currency) AS moeda
+        SELECT subscription_id, UPPER(resource_group_name) AS resource_group_name, MIN(billing_currency) AS moeda
         FROM azure_costs
         ${fallbackCond.length ? 'WHERE ' + fallbackCond.join(' AND ') + ' AND resource_group_name IS NOT NULL AND resource_group_name <> \'\'' : 'WHERE resource_group_name IS NOT NULL AND resource_group_name <> \'\''}
-        GROUP BY UPPER(resource_group_name)
+        GROUP BY subscription_id, UPPER(resource_group_name)
         ORDER BY UPPER(resource_group_name)
         LIMIT 1000
       `, params).catch(() => ({ rows: [] }));
@@ -7038,55 +7155,69 @@ app.post('/api/reservas/sincronizar-azure', authMiddleware, dbMiddleware, async 
     const spId = req.body && req.body.sp_id ? parseInt(req.body.sp_id, 10) : null;
     const r = spId
       ? await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [spId])
-      : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo = true ORDER BY is_padrao DESC, id ASC LIMIT 1`);
-    if (!r.rows.length) return res.status(404).json({ error: 'Nenhuma Service Principal ativa configurada. Cadastre uma na Coleta Azure.' });
-    const cfg = r.rows[0];
-    if (!cfg.ativo) return res.status(400).json({ error: `A Service Principal "${cfg.nome}" está inativa.` });
-
-    const { token } = await _managementGetToken(
-      _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
-    );
-
-    const { mapReservation, mapSavingsPlan } = require('./azureReservas');
-    const avisos = [];
-    const itens = [];
-
-    // 1) Reservas: lista as ordens e, para cada uma, as reservas.
-    let ordens;
-    try {
-      ordens = await _armListAll(token, 'https://management.azure.com/providers/Microsoft.Capacity/reservationOrders?api-version=2022-11-01');
-    } catch (e) {
-      if (e.status === 403 || e.status === 401) {
-        return res.status(403).json({ error: `A Service Principal "${cfg.nome}" não tem permissão para ler reservas. ${_RSV_ROLE_HINT}` });
-      }
-      throw e;
+      : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo = true AND coletar_reservas_api = true ORDER BY is_padrao DESC, id ASC`);
+    if (!r.rows.length) return res.status(404).json({ error: 'Nenhuma Service Principal ativa habilitada para sincronizar Reservas via API.' });
+    const configs = r.rows;
+    if (spId && !configs[0].ativo) return res.status(400).json({ error: `A Service Principal "${configs[0].nome}" está inativa.` });
+    if (spId && !azureSpServiceEnabled(configs[0], 'reservationsApi')) {
+      return res.status(403).json({ error: `A coleta de Reservas via API está desabilitada para a SP "${configs[0].nome}".` });
     }
-    for (let i = 0; i < ordens.length; i += 5) {
-      await Promise.all(ordens.slice(i, i + 5).map(async (ordem) => {
+    const { mapReservation, mapSavingsPlan } = require('./azureReservas');
+    const { sincronizarReservasMultiSp } = require('./azureReservasMultiSp');
+    const sincronizado = await sincronizarReservasMultiSp(configs, async (cfg) => {
+      if (!cfg.ativo) throw new Error(`A Service Principal "${cfg.nome}" está inativa.`);
+      if (!azureSpServiceEnabled(cfg, 'reservationsApi')) throw new Error(`A coleta de Reservas via API está desabilitada para a SP "${cfg.nome}".`);
+      const { token } = await _managementGetToken(
+        _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
+      );
+      const avisosSp = [];
+      const itensSp = [];
+      let algumaFonteConsultada = false;
+
+      let ordens = null;
+      try {
+        ordens = await _armListAll(token, 'https://management.azure.com/providers/Microsoft.Capacity/reservationOrders?api-version=2022-11-01');
+        algumaFonteConsultada = true;
+      } catch (e) {
+        avisosSp.push(e.status === 403 || e.status === 401
+          ? `Reservas não lidas: sem permissão. ${_RSV_ROLE_HINT}`
+          : `Reservas não lidas: ${e.message}`);
+      }
+      if (ordens) {
+        for (let i = 0; i < ordens.length; i += 5) {
+          await Promise.all(ordens.slice(i, i + 5).map(async (ordem) => {
         try {
           const rs = await _armListAll(token,
             `https://management.azure.com${ordem.id}/reservations?api-version=2022-11-01`);
-          for (const rv of rs) { const m = mapReservation(rv, ordem); if (m) itens.push(m); }
+              for (const rv of rs) { const m = mapReservation(rv, ordem); if (m) itensSp.push(m); }
         } catch (e) {
-          avisos.push(`Ordem ${ordem.name}: ${e.message}`);
+              avisosSp.push(`Ordem ${ordem.name}: ${e.message}`);
         }
-      }));
-    }
+          }));
+        }
+      }
 
-    // 2) Savings Plans (falha aqui não invalida as reservas já lidas).
-    try {
-      const sps = await _armListAll(token, 'https://management.azure.com/providers/Microsoft.BillingBenefits/savingsPlans?api-version=2022-11-01');
-      for (const sp of sps) { const m = mapSavingsPlan(sp); if (m) itens.push(m); }
-    } catch (e) {
-      avisos.push(e.status === 403 || e.status === 401
-        ? `Savings Plans não lidos: sem permissão. ${_RSV_ROLE_HINT}`
-        : `Savings Plans não lidos: ${e.message}`);
+      try {
+        const plans = await _armListAll(token, 'https://management.azure.com/providers/Microsoft.BillingBenefits/savingsPlans?api-version=2022-11-01');
+        algumaFonteConsultada = true;
+        for (const plan of plans) { const m = mapSavingsPlan(plan); if (m) itensSp.push(m); }
+      } catch (e) {
+        avisosSp.push(e.status === 403 || e.status === 401
+          ? `Savings Plans não lidos: sem permissão. ${_RSV_ROLE_HINT}`
+          : `Savings Plans não lidos: ${e.message}`);
+      }
+      return { ok: algumaFonteConsultada, itens: itensSp, avisos: avisosSp };
+    });
+    if (!sincronizado.por_sp.some((item) => item.ok)) {
+      const erro = sincronizado.por_sp.map((item) => `${item.sp}: ${item.avisos.join(' ')}`).join(' | ');
+      const status = spId && sincronizado.por_sp[0]?.avisos.some((aviso) => aviso.includes('sem permissão')) ? 403 : 502;
+      return res.status(status).json({ error: erro || 'Nenhuma SP conseguiu consultar Reservas ou Savings Plans.', por_sp: sincronizado.por_sp });
     }
 
     // 3) Upsert por azure_id. Custos e observações preenchidos manualmente são preservados
     //    quando a Azure não os informa (a API de reservas não retorna preço).
     let inseridas = 0, atualizadas = 0;
-    for (const m of itens) {
+    for (const m of sincronizado.itens) {
       const up = await pool.query(
         `INSERT INTO reservas_cloud
            (cloud, nome_reserva, tipo_escopo, subscription_id, resource_group_name, tipo_recurso,
@@ -7105,12 +7236,21 @@ app.post('/api/reservas/sincronizar-azure', authMiddleware, dbMiddleware, async 
          RETURNING (xmax = 0) AS inserida`,
         [m.cloud, m.nome_reserva, m.tipo_escopo, m.subscription_id, m.resource_group_name, m.tipo_recurso,
          m.instancia, m.quantidade, m.prazo, m.opcao_pagamento, m.custo_total, m.custo_mensal,
-         m.data_inicio, m.data_vencimento, m.status, m.azure_id, cfg.id, req.user.id]
+         m.data_inicio, m.data_vencimento, m.status, m.azure_id, m._sync_sp_id || null, req.user.id]
       );
       if (up.rows[0].inserida) inseridas++; else atualizadas++;
     }
 
-    res.json({ ok: true, sp: cfg.nome, total: itens.length, inseridas, atualizadas, avisos });
+    const avisos = sincronizado.por_sp.flatMap((item) => item.avisos.map((aviso) => `${item.sp}: ${aviso}`));
+    res.json({
+      ok: true,
+      sp: configs.map((cfg) => cfg.nome).join(', '),
+      total: sincronizado.itens.length,
+      inseridas,
+      atualizadas,
+      avisos,
+      por_sp: sincronizado.por_sp,
+    });
   } catch (err) {
     console.error('[reservas] sincronizar-azure:', err);
     res.status(502).json({ error: 'Falha ao sincronizar com a Azure: ' + err.message });
@@ -7270,6 +7410,8 @@ Object.defineProperty(globalThis, '_coletaIniciadaEm', {
 let _dbxColetaEmExecucao = false;
 let _dbxColetaIniciadaEm = null;
 let _dbxColetaProgresso  = { fase: '', ins: 0, upd: 0, err: 0, log: [] };
+const _dbxColetaQueue = createSerialColetaQueue();
+let _dbxImportEmExecucao = false;
 function _logColetaDbx(msg) {
   _dbxColetaProgresso.log.push({ ts: new Date().toISOString().slice(11, 19), msg });
   if (_dbxColetaProgresso.log.length > 200) _dbxColetaProgresso.log.shift();
@@ -7352,6 +7494,10 @@ async function ensureAzureColetaTable() {
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS is_padrao           BOOLEAN DEFAULT false`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS modo_coleta         VARCHAR(30) DEFAULT 'billing_profile'`);
   await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS subscription_ids    TEXT`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS coletar_billing_api BOOLEAN NOT NULL DEFAULT true`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS coletar_inventario  BOOLEAN NOT NULL DEFAULT true`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS coletar_storage    BOOLEAN NOT NULL DEFAULT true`);
+  await run(`ALTER TABLE azure_coleta_config ADD COLUMN IF NOT EXISTS coletar_reservas_api BOOLEAN NOT NULL DEFAULT true`);
 
   // ── azure_storage_config ──────────────────────────────────────────────────
   await pool.query(`
@@ -7376,6 +7522,8 @@ async function ensureAzureColetaTable() {
   // mesmo padrão do price_list_prefix acima: prefixo opcional, dataset próprio, falha
   // isolada (não derruba a coleta de Custo nem a de Price List do mesmo Storage).
   await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS reservas_prefix    VARCHAR(500)`);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS coletar_price_list BOOLEAN NOT NULL DEFAULT true`);
+  await run(`ALTER TABLE azure_storage_config ADD COLUMN IF NOT EXISTS coletar_reservas   BOOLEAN NOT NULL DEFAULT true`);
 
   // ── azure_coleta_historico ────────────────────────────────────────────────
   await pool.query(`
@@ -7461,16 +7609,36 @@ async function ensureAzureColetaTable() {
       dias_semana         TEXT,
       auto_coleta         BOOLEAN DEFAULT false,
       proxima_coleta      TIMESTAMP,
+      granularidade_auxiliar_dias INTEGER NOT NULL DEFAULT 1,
+      proxima_coleta_auxiliar TIMESTAMP,
       criado_em           TIMESTAMP DEFAULT NOW(),
       atualizado_em       TIMESTAMP DEFAULT NOW()
     )
   `);
+  await run(`ALTER TABLE databricks_coleta_config ADD COLUMN IF NOT EXISTS granularidade_auxiliar_dias INTEGER NOT NULL DEFAULT 1`);
+  await run(`ALTER TABLE databricks_coleta_config ADD COLUMN IF NOT EXISTS proxima_coleta_auxiliar TIMESTAMP`);
   // Migração pra quem já tinha a tabela sem esses campos (PAT — pedido do usuário,
   // 2026-08-26: alternativa mais simples ao OAuth M2M quando não há acesso de account
   // admin pra criar Service Principal na conta Databricks — mesmo token que o usuário já
   // usaria manualmente num SQL editor).
   await run(`ALTER TABLE databricks_coleta_config ADD COLUMN IF NOT EXISTS modo_auth VARCHAR(20) NOT NULL DEFAULT 'oauth_m2m'`);
   await run(`ALTER TABLE databricks_coleta_config ADD COLUMN IF NOT EXISTS token TEXT`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_genie_cotas_cache (
+      periodo       VARCHAR(10) PRIMARY KEY,
+      payload       JSONB NOT NULL,
+      coletado_em   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS databricks_genie_cotas_public_cache (
+      periodo       VARCHAR(10) NOT NULL,
+      usuario_email VARCHAR(320) NOT NULL,
+      payload       JSONB NOT NULL,
+      coletado_em   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (periodo, usuario_email)
+    )
+  `);
 
   // ── databricks_consumo — Fase 2: linhas coletadas de system.billing.usage JOIN
   // system.billing.list_prices. Granularidade por RECURSO (cluster/job/warehouse
@@ -7528,6 +7696,8 @@ async function ensureAzureColetaTable() {
       END IF;
     END $$;
   `).catch(e => console.warn('[ColetaTable] Migração databricks_consumo:', e.message.slice(0, 150)));
+  await pool.query(`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_databricks_consumo_workspace_date ON databricks_consumo (workspace_id, usage_date)`)
+    .catch(e => console.warn('[ColetaTable] Índice Databricks workspace/data:', e.message.slice(0, 150)));
 
   // ── databricks_coleta_historico — mesmo formato de azure_coleta_historico ──────
   await pool.query(`
@@ -7913,6 +8083,22 @@ async function ensureAzureColetaTable() {
     )
   `);
   await pool.query(`ALTER TABLE azure_desperdicio_deteccao ADD COLUMN IF NOT EXISTS desde_orfao_em TIMESTAMPTZ`).catch(() => {});
+  // Episódios observados de estados sem data confiável no Resource Graph. Uma linha ativa
+  // representa o estado atual; episódios encerrados preservam o histórico sem alterar dias_orfao.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS azure_desperdicio_estado_historico (
+      id                 BIGSERIAL PRIMARY KEY,
+      subscription_id    VARCHAR(200) NOT NULL,
+      resource_id_upper  TEXT NOT NULL,
+      resource_id        TEXT NOT NULL,
+      categoria          VARCHAR(30) NOT NULL,
+      estado_desde       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ultimo_visto_em    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      encerrado_em       TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_desp_estado_ativo ON azure_desperdicio_estado_historico (subscription_id, resource_id_upper, categoria) WHERE encerrado_em IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_desp_estado_resource ON azure_desperdicio_estado_historico (resource_id_upper, categoria, encerrado_em)`);
   // Origem do snapshot (sourceResourceId do ARG) — guardada na DETECÇÃO porque depois que o
   // snapshot é excluído ele some do Resource Graph e o vínculo com o disco que o gerou seria
   // perdido. É esse vínculo que evita contar economia duas vezes na apuração de saving
@@ -8016,20 +8202,9 @@ async function ensureAzureColetaTable() {
       await pool.query(`ALTER TABLE azure_recursos_inventario ALTER COLUMN ${_col} TYPE TIMESTAMPTZ USING ${_col} AT TIME ZONE 'UTC'`).catch(() => {});
     }
   }
-  // Backfill idempotente (2026-08-31): linhas cuja primeira detecção foi um evento de EXCLUSÃO
-  // nunca tiveram `nome` preenchido (bug corrigido no handler de delete abaixo) — recalcula pra
-  // quem já ficou NULL antes da correção. split_part com '/' reverso não existe em SQL puro, então
-  // usa regexp pra pegar o último segmento do resource_id (mesma lógica de resourceId.split('/').pop()).
-  await pool.query(`UPDATE azure_recursos_inventario SET nome = regexp_replace(resource_id, '^.*/', '') WHERE nome IS NULL`);
-
-  // Inventário 2.0 (2026-09-03) — troca a fonte de eventos de Activity Log pra Azure Resource
   // Graph Change Analysis (tabela `resourcechanges`, ver `_resourceGraphFetchChanges` e
-  // `_coletarInventarioAzure`) — pesquisa contra documentação oficial encontrou que ela grava o
-  // antes/depois de QUALQUER propriedade nativamente, então o diff manual de SKU de VM
-  // (`_detectarMudancasSku`, que lia o valor atual via Resource Graph e comparava contra a
   // última leitura conhecida em `sku_atual`) deixa de ser necessário — o mesmo dado já vem
   // pronto no próprio evento de mudança. Pedido explícito do usuário: zerar o histórico já
-  // coletado (eventos, SKU, autores resolvidos) e recomeçar limpo com a nova fonte, em vez de
   // tentar migrar dado antigo pro formato novo. Guardado pela existência da coluna `sku_atual`
   // (só existia no schema antigo) — roda uma vez só, nunca de novo depois que ela for removida.
   const _temSkuAtual = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_name='azure_recursos_inventario' AND column_name='sku_atual'`);
@@ -9510,6 +9685,7 @@ function _computeProximaColeta(horaExecucao, diasSemanaStr) {
 
 function _iniciarAgendador() {
   if (_agendadorTimer) return;
+  _iniciarGenieCotasCache();
   const _tickAgendador = async () => {
     // Multi-SP (v4.2): não existe mais `_coletaEmExecucao` global, só a compatibilidade
     // somente-leitura (ver Object.defineProperty acima, sem setter). Até 2026-10-11 este tick
@@ -9536,17 +9712,21 @@ function _iniciarAgendador() {
       // Exige storage_account + storage_container preenchidos (credenciais reais)
       // v4.2: Buscar TODAS as due, não só 1 — dispara em paralelo
       const rStg = await pool.query(`
-        SELECT id, nome, hora_execucao, dias_semana, auto_coleta_horas
-        FROM azure_storage_config
-        WHERE ativo = true
-          AND storage_account IS NOT NULL AND storage_account <> ''
-          AND storage_container IS NOT NULL AND storage_container <> ''
-          AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
+        SELECT s.id, s.nome, s.hora_execucao, s.dias_semana, s.auto_coleta_horas
+        FROM azure_storage_config s
+        WHERE s.ativo = true
           AND (
-            (hora_execucao IS NOT NULL AND dias_semana IS NOT NULL)
-            OR (auto_coleta_horas IS NOT NULL AND auto_coleta_horas > 0)
+            (s.sp_id IS NOT NULL AND EXISTS (SELECT 1 FROM azure_coleta_config sp WHERE sp.id=s.sp_id AND sp.ativo=true AND sp.coletar_storage=true))
+            OR (s.sp_id IS NULL AND EXISTS (SELECT 1 FROM azure_coleta_config sp WHERE sp.ativo=true AND sp.coletar_storage=true))
           )
-        ORDER BY proxima_coleta ASC NULLS FIRST
+          AND s.storage_account IS NOT NULL AND s.storage_account <> ''
+          AND s.storage_container IS NOT NULL AND s.storage_container <> ''
+          AND (s.proxima_coleta IS NULL OR s.proxima_coleta <= NOW())
+          AND (
+            (s.hora_execucao IS NOT NULL AND s.dias_semana IS NOT NULL)
+            OR (s.auto_coleta_horas IS NOT NULL AND s.auto_coleta_horas > 0)
+          )
+        ORDER BY s.proxima_coleta ASC NULLS FIRST
       `);
       for (const stg of rStg.rows) {
         // Só dispara se não estiver já rodando
@@ -9580,6 +9760,7 @@ function _iniciarAgendador() {
         FROM azure_coleta_config
         WHERE ativo = true
           AND auto_coleta = true
+          AND coletar_billing_api = true
           AND hora_execucao IS NOT NULL
           AND dias_semana IS NOT NULL
           AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
@@ -9682,13 +9863,14 @@ function _iniciarAgendador() {
         }
       }
 
-      // ── Databricks: agendamento por hora+dia — independente do Azure, usa
+      // ── Databricks: agendamento configurado por hora+dia — independente do Azure, usa
       // _dbxColetaEmExecucao (não _coletaEmExecucao) pra não bloquear nem ser
       // bloqueado pela coleta Azure, já que escrevem em tabelas separadas.
-      if (!_dbxColetaEmExecucao) {
+      if (!_dbxImportEmExecucao) {
         try {
           const rDbx = await pool.query(`
-            SELECT id, nome, granularidade_dias, hora_execucao, dias_semana
+                 SELECT id, nome, granularidade_dias, granularidade_auxiliar_dias,
+                   hora_execucao, dias_semana, proxima_coleta_auxiliar
             FROM databricks_coleta_config
             WHERE ativo = true
               AND auto_coleta = true
@@ -9696,19 +9878,26 @@ function _iniciarAgendador() {
               AND dias_semana IS NOT NULL
               AND (proxima_coleta IS NULL OR proxima_coleta <= NOW())
             ORDER BY is_padrao DESC, proxima_coleta ASC NULLS FIRST
-            LIMIT 1
           `);
-          if (rDbx.rows.length) {
-            const dbxCfg = rDbx.rows[0];
-            console.log(`[Agendador] Disparando coleta Databricks #${dbxCfg.id} (${dbxCfg.nome})`);
-            const proxima = _computeProximaColeta(dbxCfg.hora_execucao, dbxCfg.dias_semana);
-            await pool.query(`UPDATE databricks_coleta_config SET proxima_coleta=$1 WHERE id=$2`, [proxima, dbxCfg.id]);
-            const granDias = dbxCfg.granularidade_dias || 7;
-            const fim    = new Date(); fim.setDate(fim.getDate() - 1);
-            const inicio = new Date(fim); inicio.setDate(inicio.getDate() - (granDias - 1));
-            const fmt = d => d.toISOString().slice(0, 10);
-            _executarColetaDatabricks(dbxCfg.id, fmt(inicio), fmt(fim), 'agendado')
-              .catch(e => console.error(`[Agendador] Erro coleta Databricks #${dbxCfg.id}:`, e.message));
+          for (const dbxCfg of rDbx.rows) {
+            if (_dbxColetaQueue.has(dbxCfg.id)) continue;
+            const queued = _dbxColetaQueue.enqueue(dbxCfg.id, async () => {
+              const proxima = _computeProximaColeta(dbxCfg.hora_execucao, dbxCfg.dias_semana);
+              await pool.query(`UPDATE databricks_coleta_config SET proxima_coleta=$1 WHERE id=$2`, [proxima, dbxCfg.id]);
+              const granDias = dbxCfg.granularidade_dias || 7;
+              const incluirAuxiliares = auxiliaresVencidas(dbxCfg.proxima_coleta_auxiliar);
+              const fim = new Date(); fim.setDate(fim.getDate() - 1);
+              const inicio = new Date(fim); inicio.setDate(inicio.getDate() - (granDias - 1));
+              const fmt = d => d.toISOString().slice(0, 10);
+              await _executarColetaDatabricks(dbxCfg.id, fmt(inicio), fmt(fim), 'agendado', {
+                incluirAuxiliares,
+                granularidadeAuxiliarDias: dbxCfg.granularidade_auxiliar_dias,
+              });
+            });
+            if (queued.accepted) {
+              console.log(`[Agendador] Coleta Databricks #${dbxCfg.id} (${dbxCfg.nome}) adicionada à fila`);
+              queued.promise.catch(e => console.error(`[Agendador] Erro coleta Databricks #${dbxCfg.id}:`, e.message));
+            }
           }
         } catch (eDbxSched) {
           if (!eDbxSched.message.includes('does not exist')) {
@@ -12963,6 +13152,13 @@ app.post('/api/azure-costs/alocacao-tags/rebuild', authMiddleware, dbMiddleware,
 const _DESPERDICIO_TTL = 20 * 60 * 1000;
 const _desperdicioCache = new Map();     // subscription_id -> { itens, ts }
 const _desperdicioPromises = new Map();
+const _DESP_ESTADO_CATEGORIAS = new Set([
+  'disco_orfao', 'snapshot_antigo', 'nic_orfa', 'ip_solto', 'app_service_plan_vazio', 'lb_sem_backend', 'appgw_sem_backend', 'vm_parada',
+]);
+const _DESP_ESTADO_INTERVALO_MS = 60 * 60 * 1000;
+const _DESP_ESTADO_FRESCO_MS = 2 * 60 * 60 * 1000;
+let _desperdicioEstadoTimer = null;
+let _desperdicioEstadoEmExecucao = false;
 
 const _KQL_DISCOS_ORFAOS = `
   Resources | where type =~ 'microsoft.compute/disks'
@@ -13095,18 +13291,18 @@ async function _custoObservadoPorResourceId(ids, desdeISO) {
 
 // Recebe a LISTA de assinaturas: 9 chamadas ao Resource Graph no total (uma por tipo de consulta)
 // em vez de 9 por assinatura — com 51 assinaturas eram 459 chamadas, ~45s+ e várias pausas por 429.
-async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
+async function _coletarDesperdicio(subscriptionIds, diasSnapshot, { strict = false, incluirCusto = true } = {}) {
 
   const [discos, nics, ipsBrutos, ipsRefs, snapshots, asps, lbs, appgws, vms] = await Promise.all([
-    _resourceGraphQueryTodasSps(_KQL_DISCOS_ORFAOS, subscriptionIds),
-    _resourceGraphQueryTodasSps(_KQL_NICS_ORFAS, subscriptionIds),
-    _resourceGraphQueryTodasSps(_KQL_IPS_SOLTOS, subscriptionIds),
-    _resourceGraphQueryTodasSps(_KQL_IPS_REFERENCIADOS, subscriptionIds),
-    _resourceGraphQueryTodasSps(_kqlSnapshotsAntigos(diasSnapshot), subscriptionIds),
-    _resourceGraphQueryTodasSps(_KQL_ASP_VAZIOS, subscriptionIds),
-    _resourceGraphQueryTodasSps(_KQL_LBS_SEM_BACKEND, subscriptionIds),
-    _resourceGraphQueryTodasSps(_KQL_APPGWS_SEM_BACKEND, subscriptionIds),
-    _resourceGraphQueryTodasSps(_KQL_VMS_PARADAS, subscriptionIds),
+    _resourceGraphQueryTodasSps(_KQL_DISCOS_ORFAOS, subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_KQL_NICS_ORFAS, subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_KQL_IPS_SOLTOS, subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_KQL_IPS_REFERENCIADOS, subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_kqlSnapshotsAntigos(diasSnapshot), subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_KQL_ASP_VAZIOS, subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_KQL_LBS_SEM_BACKEND, subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_KQL_APPGWS_SEM_BACKEND, subscriptionIds, { strict }),
+    _resourceGraphQueryTodasSps(_KQL_VMS_PARADAS, subscriptionIds, { strict }),
   ]);
 
   const referenciados = new Set(ipsRefs.map((x) => String(x.id || '').toUpperCase()).filter(Boolean));
@@ -13135,8 +13331,10 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
 
   const desde = new Date();
   desde.setDate(desde.getDate() - 30);
-  const custos = await _custoObservadoPorResourceId(itens.map((x) => x.id), desde.toISOString().slice(0, 10));
-  const impostoCfg = await _getImpostoConfig();
+  const custos = incluirCusto
+    ? await _custoObservadoPorResourceId(itens.map((x) => x.id), desde.toISOString().slice(0, 10))
+    : new Map();
+  const impostoCfg = incluirCusto ? await _getImpostoConfig() : null;
 
   return itens.map((x) => {
     const c = custos.get(String(x.id || '').toUpperCase());
@@ -13173,6 +13371,135 @@ async function _coletarDesperdicio(subscriptionIds, diasSnapshot) {
       dias_orfao: null,
     };
   });
+}
+
+async function _registrarEstadosDesperdicio(subscriptionIds, itens) {
+  for (const subscriptionId of subscriptionIds) {
+    const sid = String(subscriptionId);
+    const ativos = itens.filter((x) => _DESP_ESTADO_CATEGORIAS.has(x.categoria)
+      && String(x.subscription_id || '').toLowerCase() === sid.toLowerCase());
+    const idsAtivos = ativos.map((x) => String(x.resource_id || '').toUpperCase()).filter(Boolean);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE azure_desperdicio_estado_historico
+         SET encerrado_em = NOW()
+         WHERE subscription_id = $1 AND categoria = ANY($2::text[])
+           AND encerrado_em IS NULL AND resource_id_upper <> ALL($3::text[])`,
+        [sid, [..._DESP_ESTADO_CATEGORIAS], idsAtivos]
+      );
+      for (const item of ativos) {
+        const resourceId = String(item.resource_id || '');
+        if (!resourceId) continue;
+        await client.query(
+          `INSERT INTO azure_desperdicio_estado_historico
+             (subscription_id, resource_id_upper, resource_id, categoria, estado_desde, ultimo_visto_em)
+           VALUES ($1, UPPER($2), $2, $3, NOW(), NOW())
+           ON CONFLICT (subscription_id, resource_id_upper, categoria) WHERE encerrado_em IS NULL
+           DO UPDATE SET resource_id = EXCLUDED.resource_id, ultimo_visto_em = NOW()`,
+          [sid, resourceId, item.categoria]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+async function _mapearDiasEstadoDesperdicio(itens) {
+  const ids = itens.map((x) => String(x.resource_id || '').toUpperCase()).filter(Boolean);
+  if (!ids.length) return new Map();
+  try {
+    const r = await pool.query(
+      `SELECT resource_id_upper, categoria, estado_desde, ultimo_visto_em
+       FROM azure_desperdicio_estado_historico
+       WHERE resource_id_upper = ANY($1::text[]) AND encerrado_em IS NULL`,
+      [ids]
+    );
+    const estados = new Map(r.rows.map((x) => [`${x.categoria}:${x.resource_id_upper}`, x]));
+    const now = Date.now();
+    return new Map(itens.map((item) => {
+      const key = String(item.resource_id || '').toUpperCase();
+      const historico = estados.get(`${item.categoria}:${key}`);
+      const dataReal = ['disco_orfao', 'snapshot_antigo'].includes(item.categoria) ? item.marcado_orfao_em : null;
+      const dataRealMs = dataReal ? new Date(dataReal).getTime() : NaN;
+      const dataRealValida = Number.isFinite(dataRealMs);
+      const desde = dataRealValida ? dataReal : historico?.estado_desde || null;
+      const desdeMs = desde ? new Date(desde).getTime() : NaN;
+      const ultimaObservacao = dataRealValida ? now : (historico?.ultimo_visto_em ? new Date(historico.ultimo_visto_em).getTime() : 0);
+      const fresco = Number.isFinite(desdeMs) && Number.isFinite(ultimaObservacao) && now - ultimaObservacao <= _DESP_ESTADO_FRESCO_MS;
+      const dias = fresco ? Math.max(0, Math.floor((now - desdeMs) / 86400000)) : null;
+      return [key, { dias_estado_atual: dias, estado_desde: fresco ? new Date(desde).toISOString() : null }];
+    }));
+  } catch (e) {
+    console.warn('[Desperdicio] Não foi possível consultar histórico de estados:', e.message);
+    return new Map();
+  }
+}
+
+function _duracaoOciosaDesperdicio(dataAzure, diasAzure, diasColeta) {
+  if (dataAzure && Number.isFinite(diasAzure)) return { dias_ocioso: diasAzure, fonte_dias_ocioso: 'azure' };
+  if (Number.isFinite(diasColeta)) return { dias_ocioso: diasColeta, fonte_dias_ocioso: 'coleta' };
+  return { dias_ocioso: null, fonte_dias_ocioso: null };
+}
+
+function _cumprePisoOrfaosPublico(item, diasMinimos) {
+  return Number.isFinite(item.dias_ocioso) && item.dias_ocioso >= diasMinimos;
+}
+
+async function _coletarEstadosDesperdicio() {
+  if (_desperdicioEstadoEmExecucao || !pool) return;
+  _desperdicioEstadoEmExecucao = true;
+  try {
+    await ensureAzureColetaTable();
+    const { escopos } = await _getInventarioEscopos();
+    const porSp = new Map();
+    const idsVivos = new Set();
+    let coletaCompleta = escopos.length > 0;
+    for (const escopo of escopos) {
+      if (!porSp.has(escopo.spId)) porSp.set(escopo.spId, { nome: escopo.spNome, subs: [] });
+      porSp.get(escopo.spId).subs.push(escopo.subscriptionId);
+    }
+    for (const { nome, subs } of porSp.values()) {
+      try {
+        const itens = await _coletarDesperdicio(subs, 90, { strict: true, incluirCusto: false });
+        for (const item of itens) if (item.resource_id) idsVivos.add(String(item.resource_id));
+        await _registrarEstadosDesperdicio(subs, itens);
+        console.log(`[Desperdicio] Estados observados para ${subs.length} assinatura(s) (${nome})`);
+      } catch (e) {
+        console.warn(`[Desperdicio] Coleta de estados incompleta para ${nome}; nenhuma ausência será registrada: ${e.message}`);
+        for (const sid of subs) {
+          try {
+            const itens = await _coletarDesperdicio([sid], 90, { strict: true, incluirCusto: false });
+            for (const item of itens) if (item.resource_id) idsVivos.add(String(item.resource_id));
+            await _registrarEstadosDesperdicio([sid], itens);
+          } catch (eSub) {
+            coletaCompleta = false;
+            console.warn(`[Desperdicio] Estado não atualizado para ${sid}: ${eSub.message}`);
+          }
+        }
+      }
+    }
+    if (coletaCompleta) {
+      const apurados = await _apurarSavingOrfaos([...idsVivos]);
+      if (apurados) console.log(`[Saving Órfãos] ${apurados} exclusão(ões) apurada(s) pela coleta horária`);
+    }
+  } catch (e) {
+    console.warn('[Desperdicio] Coleta horária de estados falhou:', e.message);
+  } finally {
+    _desperdicioEstadoEmExecucao = false;
+  }
+}
+
+function _iniciarDesperdicioEstadosAgendador() {
+  if (_desperdicioEstadoTimer || !pool) return;
+  setTimeout(() => _coletarEstadosDesperdicio(), 3 * 60 * 1000);
+  _desperdicioEstadoTimer = setInterval(() => _coletarEstadosDesperdicio(), _DESP_ESTADO_INTERVALO_MS);
 }
 
 async function _getDesperdicioCached(subscriptionIds, diasSnapshot) {
@@ -13262,6 +13589,7 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
     // Primeira detecção (1 query para todos). Se ficou >3 dias sem ser visto como órfão, o
     // recurso foi reaproveitado e depois abandonado de novo — reinicia a contagem.
     if (itens.length) {
+      const datasAzure = new Map(itens.map((x) => [String(x.resource_id).toUpperCase(), Boolean(x.marcado_orfao_em)]));
       const up = await pool.query(
         `INSERT INTO azure_desperdicio_deteccao (resource_id_upper, categoria, origem_resource_id, desde_orfao_em)
          SELECT DISTINCT ON (UPPER(u.id)) UPPER(u.id), u.cat, u.origem, u.desde FROM unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[]) AS u(id, cat, origem, desde)
@@ -13278,6 +13606,12 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
         const desde = it.marcado_orfao_em || primeira.get(String(it.resource_id).toUpperCase());
         it.marcado_orfao_em = desde ? new Date(desde).toISOString() : null;
         it.dias_orfao = desde ? Math.max(0, Math.floor((Date.now() - new Date(desde).getTime()) / 86400000)) : null;
+      }
+      const estadosAtuais = await _mapearDiasEstadoDesperdicio(itens);
+      for (const it of itens) {
+        const key = String(it.resource_id).toUpperCase();
+        Object.assign(it, estadosAtuais.get(key) || { dias_estado_atual: null, estado_desde: null });
+        Object.assign(it, _duracaoOciosaDesperdicio(datasAzure.get(key), it.dias_orfao, it.dias_estado_atual));
       }
     }
 
@@ -13323,12 +13657,43 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       console.error('[Saving Órfãos] falha ao apurar:', e.message);
     }
 
+    let savingPortalPublico = null;
+    try {
+      const portalCfg = await _getPortalConfig();
+      const subsPermitidas = new Set((portalCfg.orfaos_subscription_ids || []).map((s) => String(s).toLowerCase()));
+      const categoriasPublicas = new Set(portalCfg.orfaos_categorias || []);
+      const rgsPermitidos = new Set((portalCfg.orfaos_resource_groups || []).map((rg) => String(rg).toUpperCase()));
+      if (portalCfg.orfaos_ativo && subsPermitidas.size && categoriasPublicas.size) {
+        // O comparativo deve usar a seleção pública completa, independente do tenant que o
+        // usuário escolheu para a lista privada. A API pública usa a mesma janela de 90 dias.
+        const dadosPublicos = await _getDesperdicioCached([...subsPermitidas], 90);
+        const snapshotsPublicos = filtrarOrfaosPublicos(dadosPublicos, {
+          subscriptionIds: subsPermitidas,
+          categories: categoriasPublicas,
+          resourceGroups: rgsPermitidos,
+        }, _DESP_CATEGORIAS_SEM_CUSTO);
+        const resumoPublico = await _resumoSavingOrfaos(
+          [...subsPermitidas],
+          await _snapshotsDeRetencaoVivos(snapshotsPublicos),
+          { publico: true, categorias: categoriasPublicas, resourceGroups: rgsPermitidos }
+        );
+        savingPortalPublico = {
+          economia_mensal: resumoPublico.economia_mensal,
+          economia_acumulada: resumoPublico.economia_acumulada,
+          recursos_eliminados: resumoPublico.recursos_eliminados,
+        };
+      }
+    } catch (e) {
+      console.error('[Saving Órfãos] falha no resumo comparável ao portal público:', e.message);
+    }
+
     console.log(`[Desperdicio] ${itensFinops.length} itens (${itens.length} coletados) de ${alvos.length} assinatura(s) em ${Date.now() - t0Desp} ms`);
     res.json({
       gerado_em: new Date().toISOString(),
       dias_snapshot: dias,
       total_itens: itensFinops.length,
       saving,
+      saving_portal_publico: savingPortalPublico,
       custo_mensal_estimado_total: itensFinops.reduce((a, x) => a + (x.custo_mensal_estimado || 0), 0),
       sem_custo_conhecido: itensFinops.filter((x) => x.custo_mensal_estimado === null).length,
       // Quantos ficaram fora por não gerarem custo — continuam coletados e detectados,
@@ -13502,8 +13867,8 @@ async function _apurarSavingOrfaos(idsVivos) {
 const _MS_MES = 30 * 86400000;
 
 // Monta o resumo. `snapshotsVivos`: snapshots que AINDA existem no Resource Graph e cuja
-// origem é um disco já contabilizado — abatem a economia enquanto não forem excluídos
-// (depois disso viram linha 'desconto' pela apuração, com período fechado).
+// origem é um disco já contabilizado. Os campos líquidos legados descontam seu custo; os
+// campos novos mantêm Saving de discos, Saving de snapshots excluídos e custo de retenção separados.
 async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes = {}) {
   const subs = (subscriptionIds || []).map((s) => String(s).toLowerCase());
   const r = await pool.query(
@@ -13560,6 +13925,9 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
   const meses = (desde, ate) => Math.max(0, (new Date(ate).getTime() - new Date(desde).getTime()) / _MS_MES);
 
   let mensalBruta = 0, acumuladaBruta = 0, semCusto = 0, barradosPeloPiso = 0, ignorados = 0;
+  let savingDiscoMensal = 0, savingDiscoAcumulado = 0;
+  let savingSnapshotsMensal = 0, savingSnapshotsAcumulado = 0;
+  let savingOutrosMensal = 0, savingOutrosAcumulado = 0;
   const itens = [];
   for (const x of linhas.filter((l) => l.tipo === 'economia')) {
     const c = x.custo_mensal === null ? null : Number(x.custo_mensal);
@@ -13572,8 +13940,19 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
     else if (motivoFora === 'piso') barradosPeloPiso++;
     else if (c === null) semCusto++;
     else {
+      const acumuladoRecurso = c * meses(x.excluido_em, agora);
       mensalBruta += c;
-      acumuladaBruta += c * meses(x.excluido_em, agora);
+      acumuladaBruta += acumuladoRecurso;
+      if (x.categoria === 'disco_orfao') {
+        savingDiscoMensal += c;
+        savingDiscoAcumulado += acumuladoRecurso;
+      } else if (x.categoria === 'snapshot_antigo') {
+        savingSnapshotsMensal += c;
+        savingSnapshotsAcumulado += acumuladoRecurso;
+      } else {
+        savingOutrosMensal += c;
+        savingOutrosAcumulado += acumuladoRecurso;
+      }
     }
     // O detalhe lista TAMBÉM o que não contabilizou, com o motivo — some da soma, não da
     // tela. "Não contabilizamos" é diferente de "não economizamos", e sem ver o item
@@ -13598,6 +13977,8 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
   for (const x of linhas.filter((l) => l.tipo === 'desconto')) {
     if (x.custo_mensal === null) continue;
     acumuladaDesconto += Number(x.custo_mensal) * meses(x.criado_em || x.excluido_em, x.excluido_em);
+    savingSnapshotsMensal += Number(x.custo_mensal);
+    savingSnapshotsAcumulado += Number(x.custo_mensal) * meses(x.excluido_em, agora);
   }
   // Descontos em aberto (snapshot vivo): abatem a economia mensal corrente e acumulam desde
   // que o snapshot foi criado.
@@ -13612,7 +13993,14 @@ async function _resumoSavingOrfaos(subscriptionIds, snapshotsVivos = [], opcoes 
   return {
     economia_mensal: Math.max(0, mensalBruta - descontoMensal),
     economia_mensal_bruta: mensalBruta,
+    saving_disco_mensal: savingDiscoMensal,
+    saving_disco_acumulado: savingDiscoAcumulado,
+    saving_snapshots_mensal: savingSnapshotsMensal,
+    saving_snapshots_acumulado: savingSnapshotsAcumulado,
+    saving_outros_mensal: savingOutrosMensal,
+    saving_outros_acumulado: savingOutrosAcumulado,
     desconto_mensal_snapshots: descontoMensal,
+    custo_acumulado_snapshots: acumuladaDesconto,
     economia_acumulada: Math.max(0, acumuladaBruta - acumuladaDesconto),
     // Só o que de fato entrou na conta. `itens` traz mais que isso — inclui os barrados,
     // para o detalhe poder mostrar por que ficaram de fora.
@@ -13781,23 +14169,25 @@ async function _gerarWorkbookDesperdicio(itens, filtrosTxt, { sanitizado = false
     // entra nos dois desde 2026-10-15: é rótulo legível, não o GUID — ver comentário do endpoint)
     const ws2 = wb.addWorksheet('Recursos Detalhados');
     const hdrs2 = sanitizado
-      ? ['Assinatura', 'Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Custo/mês (R$)', 'Dias órfão']
-      : ['Assinatura', 'Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Localização', 'Custo/mês (R$)', 'Dias órfão', 'Órfão desde', 'Resource ID'];
+      ? ['Assinatura', 'Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Custo/mês (R$)', 'Dias ocioso']
+      : ['Assinatura', 'ID da assinatura', 'Resource Group', 'Recurso', 'Tipo', 'SKU', 'Tamanho (GB)', 'Localização', 'Custo/mês (R$)', 'Dias ocioso', 'Órfão desde', 'Resource ID'];
     const N2 = hdrs2.length;
-    const colCusto = sanitizado ? 7 : 8;
+    const colTamanho = sanitizado ? 6 : 7;
+    const colCusto = sanitizado ? 7 : 9;
     let r2 = writeHeaderBlock(ws2, `Recursos Ociosos — ${periodo}`, `Gerado em: ${hojeStr}`, N2);
     headerRow(ws2, r2, hdrs2); r2++;
     itens.forEach((it, idx) => {
       dataStyle(ws2, r2, N2, idx % 2 === 1);
       const row = ws2.getRow(r2);
+      const diasOcioso = it.dias_ocioso !== undefined ? it.dias_ocioso : (it.dias_estado_atual ?? it.dias_orfao);
       const valores = sanitizado
         ? [it.subscription_name || '—', it.resource_group || '—', it.nome || '—', _DESP_LABEL_XLSX[it.categoria] || it.categoria,
-           it.sku || '—', it.tamanho_gb, it.custo_mensal_estimado, it.dias_orfao]
-        : [subsMap.get(it.subscription_id) || it.subscription_id, it.resource_group || '—', it.nome || it.resource_id,
+          it.sku || '—', it.tamanho_gb, it.custo_mensal_estimado, diasOcioso]
+        : [subsMap.get(it.subscription_id) || it.subscription_id, it.subscription_id, it.resource_group || '—', it.nome || it.resource_id,
            _DESP_LABEL_XLSX[it.categoria] || it.categoria, it.sku || '—', it.tamanho_gb, it.location || '—',
-           it.custo_mensal_estimado, it.dias_orfao, it.marcado_orfao_em, it.resource_id];
+          it.custo_mensal_estimado, diasOcioso, it.marcado_orfao_em, it.resource_id];
       valores.forEach((v, i) => { row.getCell(i + 1).value = v === null ? '—' : v; });
-      styleCell(row.getCell(6), { alignment: hAlign('right') });
+      styleCell(row.getCell(colTamanho), { alignment: hAlign('right') });
       styleCell(row.getCell(colCusto), { alignment: hAlign('right'), numFmt: BRL_FMT });
       styleCell(row.getCell(colCusto + 1), { alignment: hAlign('center') });
       if (!sanitizado) styleCell(row.getCell(colCusto + 2), { alignment: hAlign('center'), numFmt: 'dd/mm/yyyy' });
@@ -13805,7 +14195,7 @@ async function _gerarWorkbookDesperdicio(itens, filtrosTxt, { sanitizado = false
     });
     ws2.autoFilter = { from: { row: 6, column: 1 }, to: { row: Math.max(r2 - 1, 6), column: N2 } };
     ws2.views = [{ showGridLines: false, state: 'frozen', ySplit: 6, xSplit: 0, activeCell: 'A7' }];
-    const larguras2 = sanitizado ? [26, 34, 38, 28, 16, 13, 18, 11] : [26, 34, 38, 28, 16, 13, 16, 18, 11, 13, 60];
+    const larguras2 = sanitizado ? [26, 34, 38, 28, 16, 13, 18, 14] : [26, 38, 34, 38, 28, 16, 13, 16, 18, 14, 13, 60];
     larguras2.forEach((w, i) => { ws2.getColumn(i + 1).width = w; });
 
     return wb;
@@ -13821,7 +14211,8 @@ app.post('/api/azure-inventario/desperdicio/export/excel', authMiddleware, dbMid
       categoria: txt(x.categoria), subscription_id: txt(x.subscription_id), resource_id: txt(x.resource_id),
       nome: txt(x.nome), resource_group: txt(x.resource_group), location: txt(x.location), sku: txt(x.sku),
       tamanho_gb: num(x.tamanho_gb), custo_mensal_estimado: x.custo_mensal_estimado === null ? null : num(x.custo_mensal_estimado),
-      dias_orfao: num(x.dias_orfao), marcado_orfao_em: x.marcado_orfao_em ? new Date(x.marcado_orfao_em) : null,
+      dias_ocioso: x.dias_ocioso !== undefined ? num(x.dias_ocioso) : (num(x.dias_estado_atual) ?? num(x.dias_orfao)),
+      dias_orfao: num(x.dias_orfao), dias_estado_atual: num(x.dias_estado_atual), marcado_orfao_em: x.marcado_orfao_em ? new Date(x.marcado_orfao_em) : null,
     }));
     const filtrosTxt = txt(body.filtros_descricao) || 'Sem filtros';
     const wb = await _gerarWorkbookDesperdicio(itens, filtrosTxt);
@@ -13849,7 +14240,8 @@ app.post('/api/public/orfaos/export/excel', _orfaosPublicoLimiter, _portalMiddle
       categoria: txt(x.categoria), nome: txt(x.nome), subscription_name: txt(x.subscription_name),
       resource_group: txt(x.resource_group), sku: txt(x.sku),
       tamanho_gb: num(x.tamanho_gb), custo_mensal_estimado: x.custo_mensal_estimado === null ? null : num(x.custo_mensal_estimado),
-      dias_orfao: num(x.dias_orfao),
+      dias_ocioso: x.dias_ocioso !== undefined ? num(x.dias_ocioso) : (num(x.dias_estado_atual) ?? num(x.dias_orfao)),
+      dias_orfao: num(x.dias_orfao), dias_estado_atual: num(x.dias_estado_atual),
     }));
     const filtrosTxt = txt(body.filtros_descricao) || 'Sem filtros';
     const wb = await _gerarWorkbookDesperdicio(itens, filtrosTxt, { sanitizado: true });
@@ -13870,7 +14262,7 @@ app.post('/api/public/orfaos/export/excel', _orfaosPublicoLimiter, _portalMiddle
 app.get('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`SELECT id,nome,tenant_id,client_id,ativo,is_padrao,expiracao_secret,billing_account_id,billing_profile_id,modo_coleta,subscription_ids,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM azure_coleta_config ORDER BY is_padrao DESC, id ASC`);
+    const r = await pool.query(`SELECT id,nome,tenant_id,client_id,ativo,is_padrao,expiracao_secret,billing_account_id,billing_profile_id,modo_coleta,subscription_ids,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,coletar_billing_api,coletar_inventario,coletar_storage,coletar_reservas_api,atualizado_em FROM azure_coleta_config ORDER BY is_padrao DESC, id ASC`);
     res.json(r.rows.map(row => ({
       ...row,
       tenant_id:          _safeDecrypt(row.tenant_id),
@@ -13883,7 +14275,7 @@ app.get('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (_req, res)
 
 app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, dia_execucao, granularidade_dias } = req.body;
+    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, dia_execucao, granularidade_dias, coletar_billing_api, coletar_inventario, coletar_storage, coletar_reservas_api } = req.body;
     await ensureAzureColetaTable();
     const tE   = tenant_id?.trim()         ? _encryptSecret(tenant_id.trim())         : '';
     const cE   = client_id?.trim()          ? _encryptSecret(client_id.trim())          : '';
@@ -13895,8 +14287,9 @@ app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res)
     const modoE = ['billing_profile','subscription'].includes(modo_coleta) ? modo_coleta : 'billing_profile';
     const subsE = subscription_ids?.trim() || null;
     await pool.query(
-      `INSERT INTO azure_coleta_config(nome,tenant_id,client_id,client_secret,ativo,expiracao_secret,billing_account_id,billing_profile_id,modo_coleta,subscription_ids,dia_execucao,granularidade_dias) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [nome || 'Nova SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE]
+      `INSERT INTO azure_coleta_config(nome,tenant_id,client_id,client_secret,ativo,expiracao_secret,billing_account_id,billing_profile_id,modo_coleta,subscription_ids,dia_execucao,granularidade_dias,coletar_billing_api,coletar_inventario,coletar_storage,coletar_reservas_api) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+      [nome || 'Nova SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE,
+        coletar_billing_api !== false, coletar_inventario !== false, coletar_storage !== false, coletar_reservas_api !== false]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
@@ -13904,8 +14297,8 @@ app.post('/api/azure-coleta/sps', authMiddleware, dbMiddleware, async (req, res)
 
 app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, dia_execucao, granularidade_dias } = req.body;
-    const ex = await pool.query(`SELECT client_secret FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
+    const { nome, tenant_id, client_id, client_secret, ativo, expiracao_secret, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, dia_execucao, granularidade_dias, coletar_billing_api, coletar_inventario, coletar_storage, coletar_reservas_api } = req.body;
+    const ex = await pool.query(`SELECT client_secret,coletar_billing_api,coletar_inventario,coletar_storage,coletar_reservas_api FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
     if (!ex.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
     let sE = ex.rows[0].client_secret || '';
     if (client_secret?.trim()) sE = _encryptSecret(client_secret.trim());
@@ -13918,8 +14311,12 @@ app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, r
     const modoE = ['billing_profile','subscription'].includes(modo_coleta) ? modo_coleta : 'billing_profile';
     const subsE = subscription_ids?.trim() || null;
     await pool.query(
-      `UPDATE azure_coleta_config SET nome=$1,tenant_id=$2,client_id=$3,client_secret=$4,ativo=$5,expiracao_secret=$6,billing_account_id=$7,billing_profile_id=$8,modo_coleta=$9,subscription_ids=$10,dia_execucao=$11,granularidade_dias=$12,atualizado_em=NOW() WHERE id=$13`,
-      [nome || 'SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE, req.params.id]
+      `UPDATE azure_coleta_config SET nome=$1,tenant_id=$2,client_id=$3,client_secret=$4,ativo=$5,expiracao_secret=$6,billing_account_id=$7,billing_profile_id=$8,modo_coleta=$9,subscription_ids=$10,dia_execucao=$11,granularidade_dias=$12,coletar_billing_api=$13,coletar_inventario=$14,coletar_storage=$15,coletar_reservas_api=$16,atualizado_em=NOW() WHERE id=$17`,
+      [nome || 'SP', tE, cE, sE, ativo ?? true, expiracao_secret || null, baE, bpE, modoE, subsE, diaE, granE,
+        coletar_billing_api ?? ex.rows[0].coletar_billing_api,
+        coletar_inventario ?? ex.rows[0].coletar_inventario,
+        coletar_storage ?? ex.rows[0].coletar_storage,
+        coletar_reservas_api ?? ex.rows[0].coletar_reservas_api, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
@@ -13928,7 +14325,15 @@ app.put('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, r
 // Atualização parcial segura — só altera os campos explicitamente enviados
 app.patch('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const allowed = { subscription_ids: v => v?.trim() || null, granularidade_dias: v => v != null ? Math.max(1, parseInt(v) || 7) : null, modo_coleta: v => ['billing_profile','subscription'].includes(v) ? v : null };
+    const allowed = {
+      subscription_ids: v => v?.trim() || null,
+      granularidade_dias: v => v != null ? Math.max(1, parseInt(v) || 7) : null,
+      modo_coleta: v => ['billing_profile','subscription'].includes(v) ? v : null,
+      coletar_billing_api: v => v == null ? null : Boolean(v),
+      coletar_inventario: v => v == null ? null : Boolean(v),
+      coletar_storage: v => v == null ? null : Boolean(v),
+      coletar_reservas_api: v => v == null ? null : Boolean(v),
+    };
     const sets = []; const vals = [];
     for (const [k, fn] of Object.entries(allowed)) {
       if (k in req.body) { const v = fn(req.body[k]); if (v !== null || k === 'subscription_ids') { sets.push(`${k}=$${vals.length+1}`); vals.push(v); } }
@@ -13943,6 +14348,8 @@ app.patch('/api/azure-coleta/sps/:id', authMiddleware, dbMiddleware, async (req,
 app.post('/api/azure-coleta/sps/:id/coletar-api', authMiddleware, dbMiddleware, async (req, res) => {
   const spId = parseInt(req.params.id);
   if (_coletaAtiva('api', spId)) return res.status(409).json({ error: `Coleta API para SP #${spId} já em execução` });
+  try { await _assertAzureSpServiceEnabled(spId, 'billingApi'); }
+  catch (e) { return res.status(403).json({ error: e.message }); }
   const { billing_account_id, billing_profile_id, data_inicio, data_fim, modo, subscription_ids, resource_groups, metric } = req.body;
   if (!data_inicio || !data_fim) return res.status(400).json({ error: 'data_inicio e data_fim são obrigatórios' });
   const modoEfetivo   = modo || 'billing_profile';
@@ -13991,13 +14398,18 @@ function _planoColetaForcada(sp, override) {
 // por vez; o resto das SPs roda em paralelo normalmente, que é o ponto da v4.2).
 async function _planoColetaTodas(override) {
   const r = await pool.query(`
-    SELECT id, nome, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, granularidade_dias
+        SELECT id, nome, billing_account_id, billing_profile_id, modo_coleta, subscription_ids, granularidade_dias,
+          coletar_billing_api
     FROM azure_coleta_config
     WHERE ativo = true
     ORDER BY is_padrao DESC, id ASC
   `);
   const aptas = [], inaptas = [];
   for (const row of r.rows) {
+    if (!azureSpServiceEnabled(row, 'billingApi')) {
+      inaptas.push({ id: row.id, nome: row.nome, motivo: 'Billing via API desabilitado nesta SP' });
+      continue;
+    }
     const sp = {
       ...row,
       billing_account_id: row.billing_account_id ? _safeDecrypt(row.billing_account_id) : '',
@@ -14228,6 +14640,80 @@ app.post('/api/azure-coleta/sps/:id/testar', authMiddleware, dbMiddleware, async
   } catch (e) { _dbErr(res, e); }
 });
 
+app.post('/api/azure-coleta/sps/:id/validar-rbac', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const configResult = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [req.params.id]);
+    if (!configResult.rows.length) return res.status(404).json({ error: 'SP não encontrada' });
+    const cfg = configResult.rows[0];
+    const configuradas = [...new Set((cfg.subscription_ids || '').split(/[\n,]+/).map((id) => id.trim()).filter(Boolean))];
+    const solicitadas = Array.isArray(req.body?.subscription_ids) && req.body.subscription_ids.length
+      ? [...new Set(req.body.subscription_ids.map((id) => String(id).trim()).filter(Boolean))]
+      : configuradas;
+    if (solicitadas.length > 20) return res.status(400).json({ error: 'Máximo de 20 assinaturas por diagnóstico; divida em lotes.' });
+    const configuradasLower = new Set(configuradas.map((id) => id.toLowerCase()));
+    const foraDoEscopo = solicitadas.filter((id) => !configuradasLower.has(id.toLowerCase()));
+    if (foraDoEscopo.length) return res.status(400).json({ error: 'O diagnóstico aceita somente assinaturas salvas nesta SP.' });
+
+    const { token } = await _managementGetToken(
+      _safeDecrypt(cfg.tenant_id), _safeDecrypt(cfg.client_id), _safeDecrypt(cfg.client_secret)
+    );
+    const { escopos: escoposInventario } = await _getInventarioEscopos();
+    const escopoInventarioPorSub = new Map(escoposInventario.map((escopo) => [escopo.subscriptionId.toLowerCase(), escopo]));
+    const activeSps = (await pool.query(`SELECT id, nome, is_padrao, subscription_ids FROM azure_coleta_config WHERE ativo=true ORDER BY is_padrao DESC, id ASC`)).rows;
+    const accessSets = new Map(await Promise.all(activeSps.map(async (sp) => [sp.id, await _getSubscriptionsAcessiveisInventario(sp)])));
+    const resultados = await _mapLimitSettled(solicitadas, 2, async (subscriptionId) => {
+      const owner = escopoInventarioPorSub.get(subscriptionId.toLowerCase());
+      const ownerCandidates = activeSps.filter((sp) => (sp.subscription_ids || '').split(/[\n,]+/).some((id) => id.trim().toLowerCase() === subscriptionId.toLowerCase()));
+      const resultado = {
+        subscription_id: subscriptionId,
+        inventario_sp: owner ? { id: owner.spId, nome: owner.spNome } : null,
+        candidatos: ownerCandidates.map((sp) => ({
+          id: sp.id,
+          nome: sp.nome,
+          padrao: sp.is_padrao,
+          arm_lista: accessSets.get(sp.id) instanceof Set ? accessSets.get(sp.id).has(subscriptionId.toLowerCase()) : null,
+        })),
+        arm: null, resource_graph: null, change_analysis: null,
+      };
+      const armResp = await _cbFetch(
+        `https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resourcegroups?api-version=2021-04-01&$top=1`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        { timeoutMs: 30_000 }
+      );
+      if (armResp.ok) {
+        const data = await _safeRespJson(armResp);
+        resultado.arm = { ok: true, status: armResp.status, tem_resource_group: (data.value || []).length > 0 };
+      } else {
+        const text = await armResp.text();
+        resultado.arm = { ok: false, status: armResp.status, erro: text.slice(0, 300) };
+      }
+
+      try {
+        const raw = await _resourceGraphQuery(token, subscriptionId, 'Resources | project id | take 1', { strict: true });
+        resultado.resource_graph = { ok: true, linhas: raw.length };
+      } catch (e) {
+        resultado.resource_graph = { ok: false, erro: e.message.slice(0, 300) };
+      }
+
+      try {
+        const raw = await _resourceGraphQuery(token, subscriptionId, 'resourcechanges | take 1', { strict: true });
+        resultado.change_analysis = { ok: true, linhas: raw.length };
+      } catch (e) {
+        resultado.change_analysis = { ok: false, erro: e.message.slice(0, 300) };
+      }
+      return resultado;
+    });
+
+    res.json({
+      sp: cfg.nome,
+      total: resultados.length,
+      verificacoes: resultados.map((resultado, i) => resultado.status === 'fulfilled'
+        ? resultado.value
+        : { subscription_id: solicitadas[i], arm: null, resource_graph: null, change_analysis: null, erro: resultado.reason?.message || String(resultado.reason) }),
+    });
+  } catch (e) { _dbErr(res, e); }
+});
+
 // Lista subscriptions de uma SP (para wizard de coleta)
 // Endpoint de preview — aceita credenciais no body (nova SP ainda não salva)
 app.post('/api/azure-coleta/listar-subs-preview', authMiddleware, dbMiddleware, async (req, res) => {
@@ -14237,19 +14723,12 @@ app.post('/api/azure-coleta/listar-subs-preview', authMiddleware, dbMiddleware, 
       return res.status(400).json({ error: 'tenant_id, client_id e client_secret são obrigatórios' });
     const { token } = await _managementGetToken(tenant_id.trim(), client_id.trim(), client_secret.trim());
     try {
-      const resp = await _cbFetch(
-        'https://management.azure.com/subscriptions?api-version=2022-12-01',
-        { headers: { Authorization: `Bearer ${token}` } },
-        { timeoutMs: 30_000 }
-      );
-      if (resp.ok) {
-        const data = await _safeRespJson(resp);
-        const subs = (data.value || [])
-          .filter(s => s.state === 'Enabled')
-          .map(s => ({ subscriptionId: s.subscriptionId, nome: s.displayName || s.subscriptionId }))
-          .sort((a, b) => a.nome.localeCompare(b.nome));
-        return res.json({ subs, fonte: 'tenant' });
-      }
+      const values = await _armListAll(token, 'https://management.azure.com/subscriptions?api-version=2022-12-01&$top=1000');
+      const subs = values
+        .filter(s => s.state === 'Enabled')
+        .map(s => ({ subscriptionId: s.subscriptionId, nome: s.displayName || s.subscriptionId }))
+        .sort((a, b) => a.nome.localeCompare(b.nome));
+      if (subs.length) return res.json({ subs, fonte: 'tenant' });
     } catch (_) {}
     // Fallback: cache local
     const cached = await pool.query(
@@ -14271,19 +14750,12 @@ app.post('/api/azure-coleta/sps/:id/listar-subs', authMiddleware, dbMiddleware, 
 
     // 1ª tentativa: ARM /subscriptions — lista TODAS as subs do tenant acessíveis pela SP
     try {
-      const resp = await _cbFetch(
-        'https://management.azure.com/subscriptions?api-version=2022-12-01',
-        { headers: { Authorization: `Bearer ${token}` } },
-        { timeoutMs: 30_000 }
-      );
-      if (resp.ok) {
-        const data = await _safeRespJson(resp);
-        const subs = (data.value || [])
-          .filter(s => s.state === 'Enabled')
-          .map(s => ({ subscriptionId: s.subscriptionId, nome: s.displayName || s.subscriptionId }))
-          .sort((a, b) => a.nome.localeCompare(b.nome));
-        if (subs.length) return res.json({ subs, fonte: 'tenant' });
-      }
+      const values = await _armListAll(token, 'https://management.azure.com/subscriptions?api-version=2022-12-01&$top=1000');
+      const subs = values
+        .filter(s => s.state === 'Enabled')
+        .map(s => ({ subscriptionId: s.subscriptionId, nome: s.displayName || s.subscriptionId }))
+        .sort((a, b) => a.nome.localeCompare(b.nome));
+      if (subs.length) return res.json({ subs, fonte: 'tenant' });
     } catch (_) {}
 
     // 2ª tentativa: Billing Profile (se configurado)
@@ -14389,6 +14861,22 @@ async function _databricksGetToken(accountId, clientId, clientSecret) {
   return { token: tkData.access_token, expiresIn: tkData.expires_in || 3600 };
 }
 
+function _createDbxTokenProvider(cfg) {
+  const accountId = _safeDecrypt(cfg.account_id);
+  const clientId = _safeDecrypt(cfg.client_id);
+  const clientSecret = _safeDecrypt(cfg.client_secret);
+  let token = null;
+  let expiresAt = 0;
+  return async function getToken(forceRefresh = false) {
+    if (!token || forceRefresh || Date.now() >= expiresAt - 60_000) {
+      const minted = await _databricksGetToken(accountId, clientId, clientSecret);
+      token = minted.token;
+      expiresAt = Date.now() + minted.expiresIn * 1000;
+    }
+    return token;
+  };
+}
+
 // Executa uma query SQL via Statement Execution API contra o warehouse configurado —
 // usado pelo teste de conexão (SELECT 1) e, na Fase 2, pelas queries reais de billing e
 // execuções de Job. `parameters` — array de {name, value, type} — usa placeholders `:nome`
@@ -14415,13 +14903,27 @@ async function _databricksGetToken(accountId, clientId, clientSecret) {
 const _DBX_POLL_INTERVAL_MS = 3000;
 const _DBX_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
-async function _databricksRunQuery(workspaceHost, warehouseId, token, sql, parameters = []) {
+async function _databricksRunQuery(workspaceHost, warehouseId, token, sql, parameters = [], disposition = 'INLINE') {
   const host = (workspaceHost || '').replace(/\/+$/, '');
-  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
-  const resp = await _dbxFetch(`${host}/api/2.0/sql/statements`, {
+  const headers = { 'Content-Type': 'application/json' };
+  const fetchWithToken = async (url, options, timeoutMs) => {
+    const resolveToken = typeof token === 'function' ? token : async () => token;
+    const send = async (bearer) => _dbxFetch(url, {
+      ...options,
+      headers: { ...options.headers, Authorization: `Bearer ${bearer}` },
+    }, timeoutMs);
+    let response = await send(await resolveToken());
+    if (typeof token === 'function' && [401, 403].includes(response.status)) {
+      const body = response.clone ? await response.clone().text().catch(() => '') : '';
+      if (/(?:invalid|expired)[ _-]*token|token[ _-]*expired/i.test(body))
+        response = await send(await token(true));
+    }
+    return response;
+  };
+  const resp = await fetchWithToken(`${host}/api/2.0/sql/statements`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ warehouse_id: warehouseId, statement: sql, wait_timeout: '50s', parameters }),
+    body: JSON.stringify({ warehouse_id: warehouseId, statement: sql, wait_timeout: '50s', parameters, disposition, format: 'JSON_ARRAY' }),
   }, 55000);
   if (!resp.ok) { const e = await resp.text(); throw new Error(`Query Databricks falhou (${resp.status}): ${e}`); }
   let result = await _safeRespJson(resp);
@@ -14429,9 +14931,49 @@ async function _databricksRunQuery(workspaceHost, warehouseId, token, sql, param
   const inicio = Date.now();
   while (['PENDING', 'RUNNING'].includes(result?.status?.state) && Date.now() - inicio < _DBX_POLL_TIMEOUT_MS) {
     await new Promise((r) => setTimeout(r, _DBX_POLL_INTERVAL_MS));
-    const pollResp = await _dbxFetch(`${host}/api/2.0/sql/statements/${result.statement_id}`, { headers }, 15000);
+    const pollResp = await fetchWithToken(`${host}/api/2.0/sql/statements/${result.statement_id}`, { headers }, 15000);
     if (!pollResp.ok) { const e = await pollResp.text(); throw new Error(`Consulta de status da query Databricks falhou (${pollResp.status}): ${e}`); }
     result = await _safeRespJson(pollResp);
+  }
+  if (result?.status?.state === 'SUCCEEDED' && disposition === 'INLINE') {
+    if (result.manifest?.truncated) throw new Error('Resultado Databricks truncado pelo limite inline; nenhum resultado foi importado.');
+    const totalChunks = Number(result.manifest?.total_chunk_count || 0);
+    const rows = [...(result.result?.data_array || [])];
+    for (let chunkIndex = 1; chunkIndex < totalChunks; chunkIndex++) {
+      const chunkResp = await fetchWithToken(`${host}/api/2.0/sql/statements/${result.statement_id}/result/chunks/${chunkIndex}`, { headers }, 30000);
+      if (!chunkResp.ok) throw new Error(`Falha ao consultar chunk ${chunkIndex} Databricks (${chunkResp.status}).`);
+      const chunk = await _safeRespJson(chunkResp);
+      if (!Array.isArray(chunk.data_array)) throw new Error(`Databricks não retornou os dados inline do chunk ${chunkIndex}.`);
+      for (const row of chunk.data_array) rows.push(row);
+    }
+    result.result = { data_array: rows };
+  }
+  if (disposition === 'EXTERNAL_LINKS' && result?.status?.state === 'SUCCEEDED') {
+    if (result.manifest?.truncated) throw new Error('Resultado Databricks truncado pelo limite de bytes; nenhuma linha foi importada.');
+    const totalChunks = Number(result.manifest?.total_chunk_count || 0);
+    const rows = [];
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+      let chunk = result.result;
+      if (chunkIndex > 0) {
+        const chunkResp = await fetchWithToken(`${host}/api/2.0/sql/statements/${result.statement_id}/result/chunks/${chunkIndex}`, { headers }, 30000);
+        if (!chunkResp.ok) throw new Error(`Falha ao consultar chunk ${chunkIndex} Databricks (${chunkResp.status}).`);
+        chunk = await _safeRespJson(chunkResp);
+      }
+      const link = chunk?.external_links?.find((item) => item.chunk_index === chunkIndex)?.external_link;
+      if (!link) throw new Error(`Databricks não retornou o link do chunk ${chunkIndex}.`);
+      const dataResp = await _dbxFetch(link, {}, 60000);
+      if (!dataResp.ok) {
+        const detalhe = (await dataResp.text())
+          .replace(/https?:\/\/[^\s"'<>]+/gi, '[URL ocultada]')
+          .replace(/\b(sig|se|sp|sv|st|spr|sr|sip|ske|skt|sks|skv)=([^&\s"'<>]+)/gi, '$1=[ocultado]')
+          .slice(0, 500);
+        throw new Error(`Falha ao baixar chunk ${chunkIndex} Databricks (${dataResp.status})${detalhe ? ` — ${detalhe}` : ''}`);
+      }
+      const chunkRows = await dataResp.json();
+      if (!Array.isArray(chunkRows)) throw new Error(`Formato inválido no chunk ${chunkIndex} Databricks.`);
+      for (const row of chunkRows) rows.push(row);
+    }
+    result.result = { data_array: rows };
   }
   return result;
 }
@@ -14476,7 +15018,7 @@ async function _resolveDbxToken(cfg) {
 app.get('/api/databricks-coleta/config', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     await ensureAzureColetaTable();
-    const r = await pool.query(`SELECT id,nome,modo_auth,account_id,client_id,workspace_host,warehouse_id,ativo,is_padrao,granularidade_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,atualizado_em FROM databricks_coleta_config ORDER BY is_padrao DESC, id ASC`);
+    const r = await pool.query(`SELECT id,nome,modo_auth,account_id,client_id,workspace_host,warehouse_id,ativo,is_padrao,granularidade_dias,granularidade_auxiliar_dias,dia_execucao,hora_execucao,dias_semana,auto_coleta,proxima_coleta,proxima_coleta_auxiliar,atualizado_em FROM databricks_coleta_config ORDER BY is_padrao DESC, id ASC`);
     res.json(r.rows.map(row => ({
       ...row,
       account_id: _safeDecrypt(row.account_id),
@@ -14657,8 +15199,9 @@ app.post('/api/databricks-coleta/config/:id/testar', authMiddleware, dbMiddlewar
 // custom_tags_json) em databricks_consumo e finaliza o registro de histórico —
 // extraído (2026-08-27) pra ser compartilhado entre a coleta ao vivo (via API) e a
 // importação manual (via CSV), sem duplicar upsert/hash/validação/notificação.
-async function _processarLinhasDatabricks(histId, configId, origem, periodoInicio, periodoFim, linhas, msgFinal) {
-  let totalIns = 0, totalUpd = 0, totalErr = 0;
+async function _processarLinhasDatabricks(histId, configId, origem, periodoInicio, periodoFim, linhas, msgFinal, options = {}) {
+  const acumulado = options.acumulado || { ins: 0, upd: 0, err: 0 };
+  let totalIns = acumulado.ins, totalUpd = acumulado.upd, totalErr = acumulado.err;
   for (const l of linhas) {
     try {
       // recurso_hash — identifica um recurso individual (cluster/job/warehouse) sem
@@ -14682,15 +15225,16 @@ async function _processarLinhasDatabricks(histId, configId, origem, periodoInici
          RETURNING (xmax = 0) AS inserted`,
         [l.workspace_id, l.sku_name, l.produto_origem || '', l.usage_date, l.usage_unit || null, l.usage_quantity || 0, l.usuario || '', l.preco_unitario || null, l.custo_estimado || 0, l.usage_metadata_json || null, l.custom_tags_json || null, recursoHash, configId]
       );
-      if (ins.rows[0]?.inserted) totalIns++; else totalUpd++;
+      if (ins.rows[0]?.inserted) { totalIns++; acumulado.ins++; } else { totalUpd++; acumulado.upd++; }
       _dbxColetaProgresso.ins = totalIns; _dbxColetaProgresso.upd = totalUpd;
     } catch (eLinha) {
-      totalErr++;
+      totalErr++; acumulado.err++;
       _dbxColetaProgresso.err = totalErr;
       _logColetaDbx(`Erro na linha (${l.workspace_id}/${l.sku_name}/${l.usage_date}): ${eLinha.message}`);
     }
   }
 
+  if (options.finalizar === false) return acumulado;
   _logColetaDbx(`Concluído: ${totalIns} ins, ${totalUpd} upd, ${totalErr} err`);
   const detFinal = JSON.stringify({ log: [..._dbxColetaProgresso.log] });
   await pool.query(
@@ -14698,12 +15242,16 @@ async function _processarLinhasDatabricks(histId, configId, origem, periodoInici
     [totalIns, totalUpd, totalErr, msgFinal, detFinal, histId]
   );
   _dbxColetaProgresso.fase = 'Concluído';
-  _validarColetaDatabricks(histId, configId, periodoInicio, periodoFim).catch(() => {});
-  _registrarNotificacaoColeta(
-    origem === 'import' ? 'Importação Databricks concluída' : 'Coleta Databricks concluída',
-    origem === 'import' ? msgFinal : `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
-    'coleta_concluida'
-  ).catch(() => {});
+  if (options.validar !== false) {
+    _validarColetaDatabricks(histId, configId, periodoInicio, periodoFim).catch(() => {});
+  }
+  if (options.notificar !== false) {
+    _registrarNotificacaoColeta(
+      origem === 'import' ? 'Importação Databricks concluída' : 'Coleta Databricks concluída',
+      origem === 'import' ? msgFinal : `${origem === 'agendado' ? '⏰ Agendada' : '👤 Manual'} · ${msgFinal}`,
+      'coleta_concluida'
+    ).catch(() => {});
+  }
 }
 
 // Execuções de Job (duração + status) — system.lakeflow.job_run_timeline (imutável;
@@ -14717,6 +15265,28 @@ async function _processarLinhasDatabricks(histId, configId, origem, periodoInici
 // contra uma conta Databricks real — sintaxe/nomes de coluna conforme documentação
 // oficial pesquisada em 2026-08-29 (WebSearch/WebFetch contra docs.databricks.com/aws/en/
 // admin/system-tables/jobs); ajustar se a primeira execução real reportar erro de coluna.
+async function _coletarDatabricksPorDia(cfg, token, sql, startDate, endDate, persistirLinhas) {
+  const inicio = new Date(`${startDate}T00:00:00.000Z`);
+  const fim = new Date(`${endDate}T00:00:00.000Z`);
+  if (!Number.isFinite(inicio.getTime()) || !Number.isFinite(fim.getTime()) || inicio > fim)
+    throw new Error('Período Databricks inválido para coleta auxiliar.');
+
+  const acumulado = { total: 0, ins: 0, upd: 0 };
+  for (const cursor = new Date(inicio); cursor <= fim; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+    const dia = cursor.toISOString().slice(0, 10);
+    const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
+      { name: 'data_inicio', value: dia, type: 'DATE' },
+      { name: 'data_fim', value: dia, type: 'DATE' },
+    ], 'INLINE');
+    const linhas = _parseDatabricksResult(raw);
+    const parcial = await persistirLinhas(linhas);
+    acumulado.total += parcial.total;
+    acumulado.ins += parcial.ins;
+    acumulado.upd += parcial.upd;
+  }
+  return acumulado;
+}
+
 async function _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configId) {
   const sql = `
     WITH runs AS (
@@ -14745,14 +15315,9 @@ async function _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configI
     FROM runs r
     LEFT JOIN jobs_latest j ON j.job_id = r.job_id AND j.rn = 1
   `;
-  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
-    { name: 'data_inicio', value: startDate, type: 'DATE' },
-    { name: 'data_fim', value: endDate, type: 'DATE' },
-  ]);
-  const linhas = _parseDatabricksResult(raw);
-
-  let ins = 0, upd = 0;
-  for (const l of linhas) {
+  return _coletarDatabricksPorDia(cfg, token, sql, startDate, endDate, async (linhas) => {
+    let ins = 0, upd = 0;
+    for (const l of linhas) {
     const r = await pool.query(
       `INSERT INTO databricks_job_runs (workspace_id,job_id,run_id,job_name,run_name,run_type,trigger_type,iniciado_em,concluido_em,duracao_segundos,result_state,termination_code,config_id,atualizado_em)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
@@ -14766,9 +15331,10 @@ async function _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configI
        l.trigger_type || null, l.iniciado_em || null, l.concluido_em || null, l.duracao_segundos || null,
        l.result_state || null, l.termination_code || null, configId]
     );
-    if (r.rows[0]?.inserted) ins++; else upd++;
-  }
-  return { total: linhas.length, ins, upd };
+      if (r.rows[0]?.inserted) ins++; else upd++;
+    }
+    return { total: linhas.length, ins, upd };
+  });
 }
 
 // Utilização de Cluster (2026-08-29, auditoria pedida pelo usuário — lacuna de
@@ -14803,13 +15369,9 @@ async function _coletarUtilizacaoDatabricks(cfg, token, startDate, endDate, conf
     FROM util u
     LEFT JOIN clusters_latest c ON c.cluster_id = u.cluster_id AND c.rn = 1
   `;
-  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
-    { name: 'data_inicio', value: startDate, type: 'DATE' },
-    { name: 'data_fim', value: endDate, type: 'DATE' },
-  ]);
-  const linhas = _parseDatabricksResult(raw);
-  let ins = 0, upd = 0;
-  for (const l of linhas) {
+  return _coletarDatabricksPorDia(cfg, token, sql, startDate, endDate, async (linhas) => {
+    let ins = 0, upd = 0;
+    for (const l of linhas) {
     const r = await pool.query(
       `INSERT INTO databricks_cluster_utilizacao (workspace_id,cluster_id,cluster_name,owned_by,dia,avg_cpu_percent,avg_mem_percent,amostras,config_id,atualizado_em)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
@@ -14820,9 +15382,10 @@ async function _coletarUtilizacaoDatabricks(cfg, token, startDate, endDate, conf
       [l.workspace_id, l.cluster_id, l.cluster_name || null, l.owned_by || null, l.dia,
        l.avg_cpu_percent || null, l.avg_mem_percent || null, l.amostras || 0, configId]
     );
-    if (r.rows[0]?.inserted) ins++; else upd++;
-  }
-  return { total: linhas.length, ins, upd };
+      if (r.rows[0]?.inserted) ins++; else upd++;
+    }
+    return { total: linhas.length, ins, upd };
+  });
 }
 
 // Custo/performance por Query em SQL Warehouse (2026-08-29, auditoria pedida pelo
@@ -14841,13 +15404,9 @@ async function _coletarQueryHistoryDatabricks(cfg, token, startDate, endDate, co
     WHERE CAST(start_time AS DATE) >= :data_inicio AND CAST(start_time AS DATE) <= :data_fim
       AND compute.warehouse_id IS NOT NULL
   `;
-  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
-    { name: 'data_inicio', value: startDate, type: 'DATE' },
-    { name: 'data_fim', value: endDate, type: 'DATE' },
-  ]);
-  const linhas = _parseDatabricksResult(raw);
-  let ins = 0, upd = 0;
-  for (const l of linhas) {
+  return _coletarDatabricksPorDia(cfg, token, sql, startDate, endDate, async (linhas) => {
+    let ins = 0, upd = 0;
+    for (const l of linhas) {
     const r = await pool.query(
       `INSERT INTO databricks_query_history (workspace_id,statement_id,warehouse_id,statement_type,executed_by,iniciado_em,concluido_em,duracao_total_ms,execution_status,config_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
@@ -14859,9 +15418,10 @@ async function _coletarQueryHistoryDatabricks(cfg, token, startDate, endDate, co
       [l.workspace_id, l.statement_id, l.warehouse_id || null, l.statement_type || null, l.executed_by || null,
        l.start_time || null, l.end_time || null, l.total_duration_ms || null, l.execution_status || null, configId]
     );
-    if (r.rows[0]?.inserted) ins++; else upd++;
-  }
-  return { total: linhas.length, ins, upd };
+      if (r.rows[0]?.inserted) ins++; else upd++;
+    }
+    return { total: linhas.length, ins, upd };
+  });
 }
 
 // AI Gateway — volume de uso de modelos externos (2026-08-29, auditoria pedida pelo
@@ -14885,13 +15445,9 @@ async function _coletarAiGatewayDatabricks(cfg, token, startDate, endDate, confi
     WHERE CAST(event_time AS DATE) >= :data_inicio AND CAST(event_time AS DATE) <= :data_fim
     GROUP BY workspace_id, destination_name, destination_model, CAST(event_time AS DATE)
   `;
-  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
-    { name: 'data_inicio', value: startDate, type: 'DATE' },
-    { name: 'data_fim', value: endDate, type: 'DATE' },
-  ]);
-  const linhas = _parseDatabricksResult(raw);
-  let ins = 0, upd = 0;
-  for (const l of linhas) {
+  return _coletarDatabricksPorDia(cfg, token, sql, startDate, endDate, async (linhas) => {
+    let ins = 0, upd = 0;
+    for (const l of linhas) {
     const r = await pool.query(
       `INSERT INTO databricks_ai_gateway_usage (workspace_id,destination_name,destination_model,dia,requisicoes,input_tokens,output_tokens,config_id,atualizado_em)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
@@ -14902,9 +15458,10 @@ async function _coletarAiGatewayDatabricks(cfg, token, startDate, endDate, confi
       [l.workspace_id, l.destination_name || 'desconhecido', l.destination_model || null, l.dia,
        l.requisicoes || 0, l.input_tokens || 0, l.output_tokens || 0, configId]
     );
-    if (r.rows[0]?.inserted) ins++; else upd++;
-  }
-  return { total: linhas.length, ins, upd };
+      if (r.rows[0]?.inserted) ins++; else upd++;
+    }
+    return { total: linhas.length, ins, upd };
+  });
 }
 
 // Otimização de Storage (2026-08-29, auditoria pedida pelo usuário — TCO geral, fora do
@@ -14917,13 +15474,9 @@ async function _coletarStorageOtimizacaoDatabricks(cfg, token, startDate, endDat
     FROM system.storage.predictive_optimization_operations_history
     WHERE CAST(start_time AS DATE) >= :data_inicio AND CAST(start_time AS DATE) <= :data_fim
   `;
-  const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
-    { name: 'data_inicio', value: startDate, type: 'DATE' },
-    { name: 'data_fim', value: endDate, type: 'DATE' },
-  ]);
-  const linhas = _parseDatabricksResult(raw);
-  let ins = 0, upd = 0;
-  for (const l of linhas) {
+  return _coletarDatabricksPorDia(cfg, token, sql, startDate, endDate, async (linhas) => {
+    let ins = 0, upd = 0;
+    for (const l of linhas) {
     const r = await pool.query(
       `INSERT INTO databricks_storage_otimizacao (workspace_id,operation_id,catalog_name,schema_name,table_name,operation_type,operation_status,iniciado_em,concluido_em,usage_quantity,config_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -14935,9 +15488,10 @@ async function _coletarStorageOtimizacaoDatabricks(cfg, token, startDate, endDat
        l.operation_type || null, l.operation_status || null, l.start_time || null, l.end_time || null,
        l.usage_quantity || 0, configId]
     );
-    if (r.rows[0]?.inserted) ins++; else upd++;
-  }
-  return { total: linhas.length, ins, upd };
+      if (r.rows[0]?.inserted) ins++; else upd++;
+    }
+    return { total: linhas.length, ins, upd };
+  });
 }
 
 // Extraído (2026-08-29) pra evitar repetir o mesmo try/catch+log+anotação de histórico 5x
@@ -14952,14 +15506,16 @@ async function _bestEffortColetaExtra(histId, label, faseMsg, fn) {
     _logColetaDbx(`${label}: ${info.total} linha(s) — ${info.ins} novo(s), ${info.upd} atualizado(s)`);
     await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
       [` | ${label}: ${info.total} (${info.ins} novo(s))`, histId]).catch(() => {});
+    return true;
   } catch (e) {
     _logColetaDbx(`${label}: não coletado — ${e.message}`);
     await pool.query(`UPDATE databricks_coleta_historico SET mensagem = mensagem || $1 WHERE id=$2`,
       [` | ${label}: indisponível (${e.message.slice(0, 120)})`, histId]).catch(() => {});
+    return false;
   }
 }
 
-async function _executarColetaDatabricks(configId, startDate, endDate, origem = 'manual') {
+async function _executarColetaDatabricks(configId, startDate, endDate, origem = 'manual', options = {}) {
   if (_dbxColetaEmExecucao) throw new Error('Coleta Databricks já em execução');
   if (!pool) throw new Error('Banco não conectado');
   _dbxColetaEmExecucao = true;
@@ -14967,6 +15523,7 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
   _dbxColetaProgresso  = { fase: 'Iniciando...', ins: 0, upd: 0, err: 0, log: [] };
   _logColetaDbx(`Coleta Databricks — ${startDate} → ${endDate}`);
   let histId;
+  const acumulado = { ins: 0, upd: 0, err: 0 };
 
   try {
     await ensureAzureColetaTable();
@@ -14982,7 +15539,9 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
 
     _dbxColetaProgresso.fase = 'Autenticando...';
     _logColetaDbx(cfg.modo_auth === 'pat' ? 'Usando Personal Access Token...' : 'Autenticando via OAuth M2M...');
-    const token = await _resolveDbxToken(cfg);
+    const tokenProvider = cfg.modo_auth === 'pat' ? null : _createDbxTokenProvider(cfg);
+    const token = tokenProvider ? await tokenProvider() : await _resolveDbxToken(cfg);
+    const tokenForQueries = tokenProvider || token;
 
     _dbxColetaProgresso.fase = 'Consultando System Tables...';
     _logColetaDbx('Consultando system.billing.usage + system.billing.list_prices...');
@@ -15028,41 +15587,109 @@ async function _executarColetaDatabricks(configId, startDate, endDate, origem = 
         AND u.usage_end_time >= p.price_start_time
         AND (p.price_end_time IS NULL OR u.usage_end_time < p.price_end_time)
       WHERE u.usage_date >= :data_inicio AND u.usage_date <= :data_fim
+        AND (:workspace_id IS NULL OR CAST(u.workspace_id AS STRING) = :workspace_id)
+        AND (:sku_name IS NULL OR u.sku_name = :sku_name)
       GROUP BY u.workspace_id, u.sku_name, u.billing_origin_product, u.usage_date, u.usage_unit,
                u.identity_metadata.run_as, to_json(u.usage_metadata), to_json(u.custom_tags)
     `;
-    const raw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token, sql, [
-      { name: 'data_inicio', value: startDate, type: 'DATE' },
-      { name: 'data_fim', value: endDate, type: 'DATE' },
-    ]);
-    const linhas = _parseDatabricksResult(raw);
-    _dbxColetaProgresso.fase = `Gravando ${linhas.length} linha(s)...`;
-    _logColetaDbx(`${linhas.length} linha(s) retornada(s) — gravando em databricks_consumo...`);
+    const inicioUtc = new Date(`${startDate}T00:00:00.000Z`);
+    const fimUtc = new Date(`${endDate}T00:00:00.000Z`);
+    if (!Number.isFinite(inicioUtc.getTime()) || !Number.isFinite(fimUtc.getTime()) || inicioUtc > fimUtc)
+      throw new Error('Período Databricks inválido: data de início/fim inválida ou invertida.');
+    const dias = [];
+    for (const cursor = new Date(inicioUtc); cursor <= fimUtc; cursor.setUTCDate(cursor.getUTCDate() + 1))
+      dias.push(cursor.toISOString().slice(0, 10));
 
-    const msgFinal = `Databricks — ${linhas.length} linha(s) | ${startDate}→${endDate}`;
-    await _processarLinhasDatabricks(histId, configId, origem, startDate, endDate, linhas, msgFinal);
+    for (let i = 0; i < dias.length; i++) {
+      const dia = dias[i];
+      _dbxColetaProgresso.fase = `Consultando ${dia} (${i + 1}/${dias.length})...`;
+      _logColetaDbx(`Consultando billing do dia ${dia} (${i + 1}/${dias.length})...`);
+      const consultarParticao = (workspaceId = null, skuName = null) => _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, tokenForQueries, sql, [
+          { name: 'data_inicio', value: dia, type: 'DATE' },
+          { name: 'data_fim', value: dia, type: 'DATE' },
+          { name: 'workspace_id', value: workspaceId, type: 'STRING' },
+          { name: 'sku_name', value: skuName, type: 'STRING' },
+        ]);
+      const gravarParticao = async (raw) => {
+        const linhas = _parseDatabricksResult(raw);
+        _dbxColetaProgresso.fase = `Gravando ${dia}: ${linhas.length} linha(s)...`;
+        _logColetaDbx(`${linhas.length} linha(s) em ${dia}; gravando no PostgreSQL...`);
+        await _processarLinhasDatabricks(histId, configId, origem, startDate, endDate, linhas, '', {
+          finalizar: false,
+          acumulado,
+        });
+      };
+      try {
+        await gravarParticao(await consultarParticao());
+      } catch (queryError) {
+        if (!/Inline byte limit exceeded/i.test(queryError.message)) throw queryError;
+        _logColetaDbx(`${dia} excedeu 25 MiB; subdividindo por workspace...`);
+        const workspacesRaw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, tokenForQueries,
+          `SELECT DISTINCT CAST(workspace_id AS STRING) AS workspace_id FROM system.billing.usage WHERE usage_date = :data_inicio`, [
+            { name: 'data_inicio', value: dia, type: 'DATE' },
+          ]);
+        const workspaces = _parseDatabricksResult(workspacesRaw).map((row) => row.workspace_id).filter(Boolean);
+        if (!workspaces.length) throw queryError;
+        for (const workspaceId of workspaces) {
+          try {
+            await gravarParticao(await consultarParticao(workspaceId));
+          } catch (workspaceError) {
+            if (!/Inline byte limit exceeded/i.test(workspaceError.message)) throw workspaceError;
+            const skusRaw = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, tokenForQueries,
+              `SELECT DISTINCT sku_name FROM system.billing.usage WHERE usage_date = :data_inicio AND CAST(workspace_id AS STRING) = :workspace_id`, [
+                { name: 'data_inicio', value: dia, type: 'DATE' },
+                { name: 'workspace_id', value: workspaceId, type: 'STRING' },
+              ]);
+            const skus = _parseDatabricksResult(skusRaw).map((row) => row.sku_name).filter(Boolean);
+            if (!skus.length) throw workspaceError;
+            for (const skuName of skus) {
+              try {
+                await gravarParticao(await consultarParticao(workspaceId, skuName));
+              } catch (skuError) {
+                if (/Inline byte limit exceeded/i.test(skuError.message))
+                  throw new Error(`O resultado de ${dia}, workspace ${workspaceId}, SKU ${skuName} excedeu 25 MiB mesmo subdividido. O restante não foi coletado; use acesso de rede aos links externos.`);
+                throw skuError;
+              }
+            }
+          }
+        }
+      }
+    }
+    const msgFinal = `${options.billingOnly ? 'Atualização de billing' : 'Databricks'} — ${acumulado.ins + acumulado.upd} linha(s) | ${startDate}→${endDate}`;
+    await _processarLinhasDatabricks(histId, configId, origem, startDate, endDate, [], msgFinal, {
+      acumulado,
+      validar: !options.billingOnly,
+      notificar: !options.billingOnly,
+    });
 
-    // Coletas adicionais best-effort (2026-08-29) — cada uma um schema de System Tables
-    // SEPARADO de system.billing, habilitado independentemente por um account admin; uma
-    // falha aqui só anota "indisponível" na mensagem do histórico, nunca derruba a coleta
-    // de billing acima (já concluída e persistida antes deste ponto).
-    await _bestEffortColetaExtra(histId, 'Job Runs', 'Consultando execuções de Job (system.lakeflow)...',
-      () => _coletarJobRunsDatabricks(cfg, token, startDate, endDate, configId));
-    await _bestEffortColetaExtra(histId, 'Utilização de Cluster', 'Consultando utilização de cluster (system.compute)...',
-      () => _coletarUtilizacaoDatabricks(cfg, token, startDate, endDate, configId));
-    await _bestEffortColetaExtra(histId, 'Query History', 'Consultando histórico de queries (system.query)...',
-      () => _coletarQueryHistoryDatabricks(cfg, token, startDate, endDate, configId));
-    await _bestEffortColetaExtra(histId, 'AI Gateway', 'Consultando uso de AI Gateway (system.ai_gateway)...',
-      () => _coletarAiGatewayDatabricks(cfg, token, startDate, endDate, configId));
-    await _bestEffortColetaExtra(histId, 'Storage Otimização', 'Consultando otimização de storage (system.storage)...',
-      () => _coletarStorageOtimizacaoDatabricks(cfg, token, startDate, endDate, configId));
+    const incluirAuxiliares = !options.billingOnly && options.incluirAuxiliares !== false;
+    if (incluirAuxiliares) {
+      const resultadosAuxiliares = [];
+      resultadosAuxiliares.push(await _bestEffortColetaExtra(histId, 'Job Runs', 'Consultando execuções de Job (system.lakeflow)...',
+        () => _coletarJobRunsDatabricks(cfg, tokenForQueries, startDate, endDate, configId)));
+      resultadosAuxiliares.push(await _bestEffortColetaExtra(histId, 'Utilização de Cluster', 'Consultando utilização de cluster (system.compute)...',
+        () => _coletarUtilizacaoDatabricks(cfg, tokenForQueries, startDate, endDate, configId)));
+      resultadosAuxiliares.push(await _bestEffortColetaExtra(histId, 'Query History', 'Consultando histórico de queries (system.query)...',
+        () => _coletarQueryHistoryDatabricks(cfg, tokenForQueries, startDate, endDate, configId)));
+      resultadosAuxiliares.push(await _bestEffortColetaExtra(histId, 'AI Gateway', 'Consultando uso de AI Gateway (system.ai_gateway)...',
+        () => _coletarAiGatewayDatabricks(cfg, tokenForQueries, startDate, endDate, configId)));
+      resultadosAuxiliares.push(await _bestEffortColetaExtra(histId, 'Storage Otimização', 'Consultando otimização de storage (system.storage)...',
+        () => _coletarStorageOtimizacaoDatabricks(cfg, tokenForQueries, startDate, endDate, configId)));
+      if (resultadosAuxiliares.every(Boolean)) {
+        const intervalo = normalizarIntervaloAuxiliar(options.granularidadeAuxiliarDias ?? cfg.granularidade_auxiliar_dias);
+        await pool.query(`UPDATE databricks_coleta_config SET proxima_coleta_auxiliar=$1 WHERE id=$2`,
+          [proximaColetaAuxiliar(new Date(), intervalo), configId]);
+      }
+    } else if (!options.billingOnly) {
+      _logColetaDbx('Consultas auxiliares omitidas nesta execução; billing concluído normalmente.');
+    }
 
   } catch (err) {
     _logColetaDbx(`ERRO: ${err.message}`);
     const detErr = JSON.stringify({ log: [..._dbxColetaProgresso.log] });
     if (histId) await pool.query(
-      `UPDATE databricks_coleta_historico SET status='erro',concluido_em=NOW(),mensagem=$1,detalhes=$2 WHERE id=$3`,
-      [err.message, detErr, histId]
+      `UPDATE databricks_coleta_historico SET status='erro',concluido_em=NOW(),linhas_inseridas=$3,linhas_atualizadas=$4,linhas_erro=$5,mensagem=$1,detalhes=$2 WHERE id=$6`,
+      [err.message, detErr, acumulado.ins, acumulado.upd, acumulado.err, histId]
     ).catch(() => {});
     _registrarNotificacaoColeta('Coleta Databricks com erro', err.message, 'coleta_erro').catch(() => {});
     _alertarColetaComErro('Coleta Databricks com erro', err.message).catch(() => {});
@@ -15121,8 +15748,9 @@ function _mapRowDatabricksImport(row) {
 // pra continuar funcionando corretamente com config_id NULL (SQL `NULL = NULL` nunca é
 // verdadeiro; precisa do operador null-safe).
 async function _processarImportDatabricks(tmpPath, originalname) {
-  if (_dbxColetaEmExecucao) throw new Error('Coleta Databricks já em execução');
+  if (_dbxColetaEmExecucao || _dbxColetaQueue.size > 0 || _dbxImportEmExecucao) throw new Error('Uma coleta ou importação Databricks já está em andamento ou na fila');
   if (!pool) throw new Error('Banco não conectado');
+  _dbxImportEmExecucao = true;
   _dbxColetaEmExecucao = true;
   _dbxColetaIniciadaEm = new Date();
   _dbxColetaProgresso  = { fase: 'Lendo arquivo...', ins: 0, upd: 0, err: 0, log: [] };
@@ -15175,6 +15803,7 @@ async function _processarImportDatabricks(tmpPath, originalname) {
   } finally {
     _dbxColetaEmExecucao = false;
     _dbxColetaIniciadaEm = null;
+    _dbxImportEmExecucao = false;
     const fs = require('fs');
     try { fs.unlinkSync(tmpPath); } catch (_) {}
   }
@@ -15183,13 +15812,19 @@ async function _processarImportDatabricks(tmpPath, originalname) {
 const _DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 app.post('/api/databricks-coleta/config/:id/coletar', authMiddleware, dbMiddleware, async (req, res) => {
-  if (_dbxColetaEmExecucao) return res.status(409).json({ error: 'Coleta Databricks já em execução' });
+  if (_dbxImportEmExecucao) return res.status(409).json({ error: 'Uma importação Databricks está em andamento; tente novamente após ela concluir.' });
+  const configId = parseInt(req.params.id, 10);
+  if (_dbxColetaQueue.has(configId)) return res.status(409).json({ error: `A configuração Databricks #${configId} já está executando ou na fila.` });
   const { data_inicio, data_fim } = req.body;
   if (!_DATE_RE.test(data_inicio || '') || !_DATE_RE.test(data_fim || ''))
     return res.status(400).json({ error: 'data_inicio e data_fim são obrigatórios (formato YYYY-MM-DD)' });
-  res.json({ ok: true, message: 'Coleta Databricks iniciada' });
-  _executarColetaDatabricks(parseInt(req.params.id), data_inicio, data_fim, 'manual')
-    .catch(e => console.error('[ColetaDbx] Erro:', e.message));
+  const queued = _dbxColetaQueue.enqueue(configId, () => _executarColetaDatabricks(configId, data_inicio, data_fim, 'manual', {
+    incluirAuxiliares: req.body.incluir_auxiliares !== false,
+  }));
+  if (!queued.accepted) return res.status(409).json({ error: `A configuração Databricks #${configId} já está executando ou na fila.` });
+  const naFila = _dbxColetaEmExecucao || _dbxColetaQueue.size > 1;
+  res.status(202).json({ ok: true, queued: naFila, message: naFila ? 'Coleta Databricks adicionada à fila' : 'Coleta Databricks iniciada' });
+  queued.promise.catch(e => console.error(`[ColetaDbx] Erro #${configId}:`, e.message));
 });
 
 app.get('/api/databricks-coleta/status', authMiddleware, dbMiddleware, async (_req, res) => {
@@ -15197,6 +15832,7 @@ app.get('/api/databricks-coleta/status', authMiddleware, dbMiddleware, async (_r
     em_execucao: _dbxColetaEmExecucao,
     iniciada_em: _dbxColetaIniciadaEm,
     progresso: _dbxColetaProgresso,
+    fila_pendente: Math.max(0, _dbxColetaQueue.size - (_dbxColetaEmExecucao ? 1 : 0)),
   });
 });
 
@@ -15232,7 +15868,7 @@ if (_multer) {
       require('fs').unlink(req.file.path, () => {});
       return res.status(400).json({ error: 'Apenas arquivos .csv, .parquet e .zip são aceitos.' });
     }
-    if (_dbxColetaEmExecucao) {
+    if (_dbxColetaEmExecucao || _dbxColetaQueue.size > 0 || _dbxImportEmExecucao) {
       require('fs').unlink(req.file.path, () => {});
       return res.status(409).json({ error: 'Uma coleta ou importação Databricks já está em andamento. Aguarde a conclusão.' });
     }
@@ -15338,20 +15974,24 @@ app.delete('/api/databricks-coleta/purge', authMiddleware, dbMiddleware, async (
 // separado do CRUD principal de credenciais.
 app.put('/api/databricks-coleta/config/:id/agendamento', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { hora_execucao, dias_semana, auto_coleta, granularidade_dias } = req.body;
+    const { hora_execucao, dias_semana, auto_coleta, granularidade_dias, granularidade_auxiliar_dias } = req.body;
     const hora  = hora_execucao != null ? Math.max(0, Math.min(23, parseInt(hora_execucao))) : null;
     const dias  = dias_semana || null;
     const ativo = auto_coleta ? true : false;
     const gran  = granularidade_dias != null ? Math.max(1, parseInt(granularidade_dias) || 7) : 7;
+    const granAux = granularidade_auxiliar_dias != null ? normalizarIntervaloAuxiliar(granularidade_auxiliar_dias) : null;
     const proxima = ativo ? _computeProximaColeta(hora, dias) : null;
     await pool.query(
       `UPDATE databricks_coleta_config
-       SET hora_execucao=$1, dias_semana=$2, auto_coleta=$3, granularidade_dias=$4, proxima_coleta=$5, atualizado_em=NOW()
-       WHERE id=$6`,
-      [hora, dias, ativo, gran, proxima, req.params.id]
+       SET hora_execucao=$1, dias_semana=$2, auto_coleta=$3, granularidade_dias=$4,
+           granularidade_auxiliar_dias=COALESCE($6, granularidade_auxiliar_dias),
+           proxima_coleta_auxiliar=CASE WHEN $6 IS NOT NULL THEN NULL ELSE proxima_coleta_auxiliar END,
+           proxima_coleta=$5, atualizado_em=NOW()
+       WHERE id=$7`,
+      [hora, dias, ativo, gran, proxima, granAux, req.params.id]
     );
     const r = await pool.query(
-      `SELECT id, nome, hora_execucao, dias_semana, auto_coleta, granularidade_dias, proxima_coleta FROM databricks_coleta_config WHERE id=$1`,
+      `SELECT id, nome, hora_execucao, dias_semana, auto_coleta, granularidade_dias, granularidade_auxiliar_dias, proxima_coleta, proxima_coleta_auxiliar FROM databricks_coleta_config WHERE id=$1`,
       [req.params.id]
     );
     res.json({ ok: true, config: r.rows[0] });
@@ -15578,14 +16218,145 @@ function _cotasPeriodo(q) {
   return { where: '', params: [] };
 }
 
+async function _listarWorkspacesCotasDatabricks() {
+  const configs = (await pool.query(
+    `SELECT * FROM databricks_coleta_config WHERE ativo = true ORDER BY is_padrao DESC, id ASC`
+  )).rows;
+  if (!configs.length) throw new Error('Nenhuma conexão Databricks ativa para listar workspaces.');
+  const workspaceIds = new Set();
+  const erros = [];
+  let consultasOk = 0;
+  for (const cfg of configs) {
+    try {
+      const token = await _resolveDbxToken(cfg);
+      const result = await _databricksRunQuery(cfg.workspace_host, cfg.warehouse_id, token,
+        'SELECT DISTINCT CAST(workspace_id AS STRING) AS workspace_id FROM system.access.workspaces_latest', [], 'INLINE');
+      consultasOk++;
+      for (const row of _parseDatabricksResult(result)) {
+        if (row.workspace_id) workspaceIds.add(String(row.workspace_id));
+      }
+    } catch (e) {
+      erros.push(`${cfg.nome}: ${e.message}`);
+      console.warn(`[Databricks Cotas] Workspaces indisponíveis em ${cfg.nome}: ${e.message}`);
+    }
+  }
+  if (!consultasOk) throw new Error(erros.join(' | ') || 'Nenhuma conexão Databricks conseguiu listar workspaces.');
+  return [...workspaceIds];
+}
+
+function _mapearCotasWorkspaces(workspaceIds, consumoRows, budgets, mesesConsid) {
+  const consumoPorWorkspace = new Map(consumoRows.map(row => [String(row.workspace_id), row]));
+  return [...new Set(workspaceIds.map(String))].map(workspace_id => {
+    const r = consumoPorWorkspace.get(workspace_id) || { custo: 0, dbus: 0, dbus_free: 0, dbus_pago: 0 };
+    const b = budgets.find(x => x.escopo_tipo === 'workspace' && String(x.workspace_id) === workspace_id);
+    const custo = parseFloat(r.custo);
+    const cota = b ? parseFloat(b.valor_mensal) * mesesConsid : null;
+    const pct = cota > 0 ? (custo / cota) * 100 : null;
+    return {
+      workspace_id,
+      custo, dbus: parseFloat(r.dbus),
+      dbus_free: parseFloat(r.dbus_free), dbus_pago: parseFloat(r.dbus_pago),
+      cota, pct,
+      budget_nome: b ? b.nome : null,
+      status: _cotaStatus(pct,
+        b && b.threshold_atencao != null ? parseFloat(b.threshold_atencao) : 75,
+        b && b.threshold_critico != null ? parseFloat(b.threshold_critico) : 90),
+    };
+  }).sort((a, b) => b.custo - a.custo);
+}
+
+function _mapearCotasUsuarios(consumoRows, budgets, mesesConsid, workspaceIds, incluirSemConsumo) {
+  const porUsuario = consumoRows.map(r => {
+    const usuarioIdentificado = !!r.usuario;
+    const indivWs = usuarioIdentificado && budgets.find(x => x.escopo_tipo === 'usuario'
+      && x.usuario === r.usuario && String(x.workspace_id) === String(r.workspace_id));
+    const indiv = indivWs || (usuarioIdentificado && budgets.find(x => x.escopo_tipo === 'usuario'
+      && x.usuario === r.usuario && !x.workspace_id));
+    const doWs = usuarioIdentificado && budgets.find(x => x.escopo_tipo === 'workspace_por_usuario'
+      && String(x.workspace_id) === String(r.workspace_id));
+    const b = indiv || doWs;
+    const custo = parseFloat(r.custo);
+    const limite = b ? parseFloat(b.valor_mensal) * mesesConsid : null;
+    const pct = limite > 0 ? (custo / limite) * 100 : null;
+    return {
+      workspace_id: String(r.workspace_id),
+      usuario: r.usuario || '(não identificado)',
+      custo, limite, pct,
+      dbus: parseFloat(r.dbus),
+      dbus_free: parseFloat(r.dbus_free), dbus_pago: parseFloat(r.dbus_pago),
+      origem_limite: b ? (indiv ? 'individual' : 'workspace') : null,
+      budget_nome: b ? b.nome : null,
+      status: _cotaStatus(pct,
+        b && b.threshold_atencao != null ? parseFloat(b.threshold_atencao) : 75,
+        b && b.threshold_critico != null ? parseFloat(b.threshold_critico) : 90),
+    };
+  });
+
+  if (incluirSemConsumo) {
+    const workspacesComConsumo = new Set(consumoRows.map(r => String(r.workspace_id)));
+    for (const workspace_id of workspaceIds) {
+      if (workspacesComConsumo.has(String(workspace_id))) continue;
+      const b = budgets.find(x => x.escopo_tipo === 'workspace_por_usuario'
+        && String(x.workspace_id) === String(workspace_id));
+      if (!b) continue;
+      const limite = parseFloat(b.valor_mensal) * mesesConsid;
+      porUsuario.push({
+        workspace_id: String(workspace_id), usuario: 'Sem consumo', custo: 0, limite, pct: 0,
+        dbus: 0, dbus_free: 0, dbus_pago: 0,
+        origem_limite: 'workspace', budget_nome: b.nome,
+        status: _cotaStatus(0,
+          b.threshold_atencao != null ? parseFloat(b.threshold_atencao) : 75,
+          b.threshold_critico != null ? parseFloat(b.threshold_critico) : 90),
+      });
+    }
+  }
+  return porUsuario.sort((a, b) => b.custo - a.custo);
+}
+
 app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const _janela = _cotasPeriodo(req.query);
+    let tagFilters = [];
+    if (req.query.tag_filters != null) {
+      try {
+        tagFilters = JSON.parse(String(req.query.tag_filters));
+      } catch {
+        return res.status(400).json({ error: 'tag_filters deve ser JSON válido.' });
+      }
+      if (!Array.isArray(tagFilters) || tagFilters.length > 20 || tagFilters.some(filter =>
+        !filter || typeof filter.key !== 'string' || !filter.key.trim() || filter.key.length > 128
+        || !['IN', 'NOT_IN'].includes(filter.value?.operator || 'IN')
+        || !Array.isArray(filter.value?.values) || !filter.value.values.length
+        || filter.value.values.some(value => typeof value !== 'string' || value.length > 256)
+      )) return res.status(400).json({ error: 'tag_filters contém um filtro inválido.' });
+    }
+    if (tagFilters.length) {
+      const tagParam = _janela.params.length + 1;
+      const correspondeTags = `NOT EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements($${tagParam}::jsonb) AS filtro
+        WHERE CASE
+          WHEN filtro->'value'->>'operator' = 'NOT_IN'
+            THEN COALESCE(custom_tags->>(filtro->>'key'), '') = ANY (
+              ARRAY(SELECT jsonb_array_elements_text(filtro->'value'->'values'))
+            )
+          ELSE NOT COALESCE(custom_tags->>(filtro->>'key'), '') = ANY (
+            ARRAY(SELECT jsonb_array_elements_text(filtro->'value'->'values'))
+          )
+        END
+      )`;
+      _janela.where = _janela.where
+        ? `${_janela.where} AND ${correspondeTags}`
+        : `WHERE ${correspondeTags}`;
+      _janela.params.push(JSON.stringify(tagFilters));
+    }
 
     // mesma restricao das series: a tela e dedicada ao Genie. `produto_origem`
-    // nao tem um valor "GENIE" -- quem identifica e o sku_name.
+    // tambem pode identificar o uso faturado do AI Gateway, que nao tem GENIE
+    // no sku_name mas entra no spend do budget Unity AI Gateway.
     if (String(req.query.genie || '') === '1') {
-      _janela.where = (_janela.where ? _janela.where + ' AND ' : 'WHERE ') + `sku_name ILIKE '%GENIE%'`;
+      _janela.where = (_janela.where ? _janela.where + ' AND ' : 'WHERE ')
+        + `(sku_name ILIKE '%GENIE%' OR produto_origem ILIKE '%GENIE%' OR produto_origem ILIKE '%AI_GATEWAY%')`;
     }
 
     const [budgets, consWs, consUser, meses] = await Promise.all([
@@ -15624,7 +16395,13 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
     ]);
 
     const bs = budgets.rows;
-    const num = (v, d) => (v != null ? parseFloat(v) : d);
+    const incluirCatalogo = String(req.query.completo || '') === '1';
+    const workspacesCatalogo = incluirCatalogo ? await _listarWorkspacesCotasDatabricks() : [];
+    const workspaceIds = [...new Set([
+      ...(incluirCatalogo ? workspacesCatalogo : consWs.rows.map(r => String(r.workspace_id))),
+      ...consWs.rows.map(r => String(r.workspace_id)),
+      ...(incluirCatalogo ? bs.map(b => b.workspace_id).filter(Boolean).map(String) : []),
+    ])];
     // A cota cadastrada e MENSAL. Num recorte que atravessa varios meses, medir
     // o acumulado contra o teto de UM mes inflaria o percentual na proporcao do
     // periodo -- entao a cota e escalada pelo numero de meses com dado dentro
@@ -15633,50 +16410,14 @@ app.get('/api/databricks-coleta/cotas', authMiddleware, dbMiddleware, async (req
     // leitura util. A tela diz qual dos dois casos esta valendo.
     const mesesConsid = Math.max(1, meses.rows.length);
 
-    // --- workspaces ---
-    const porWs = consWs.rows.map(r => {
-      const b = bs.find(x => x.escopo_tipo === 'workspace' && x.workspace_id === r.workspace_id);
-      const custo = parseFloat(r.custo);
-      const cota = b ? parseFloat(b.valor_mensal) * mesesConsid : null;
-      const pct = cota > 0 ? (custo / cota) * 100 : null;
-      return {
-        workspace_id: r.workspace_id,
-        custo, dbus: parseFloat(r.dbus),
-        dbus_free: parseFloat(r.dbus_free), dbus_pago: parseFloat(r.dbus_pago),
-        cota, pct,
-        budget_nome: b ? b.nome : null,
-        status: _cotaStatus(pct, num(b && b.threshold_atencao, 75), num(b && b.threshold_critico, 90)),
-      };
-    }).sort((a, b2) => b2.custo - a.custo);
-
-    // --- usuarios ---
-    // Teto aplicavel = o mais especifico: um orcamento 'usuario' vence o
-    // 'workspace_por_usuario' do workspace dele. Entre dois de escopo
-    // 'usuario', o que amarra workspace vence o global daquele usuario.
-    const porUser = consUser.rows.map(r => {
-      const indivWs = bs.find(x => x.escopo_tipo === 'usuario' && x.usuario === r.usuario && x.workspace_id === r.workspace_id);
-      const indiv   = indivWs || bs.find(x => x.escopo_tipo === 'usuario' && x.usuario === r.usuario && !x.workspace_id);
-      const doWs    = bs.find(x => x.escopo_tipo === 'workspace_por_usuario' && x.workspace_id === r.workspace_id);
-      const b = indiv || doWs;
-      const custo = parseFloat(r.custo);
-      const limite = b ? parseFloat(b.valor_mensal) * mesesConsid : null;
-      const pct = limite > 0 ? (custo / limite) * 100 : null;
-      return {
-        workspace_id: r.workspace_id,
-        usuario: r.usuario || '(não identificado)',
-        custo, limite, pct,
-        dbus: parseFloat(r.dbus),
-        dbus_free: parseFloat(r.dbus_free), dbus_pago: parseFloat(r.dbus_pago),
-        origem_limite: b ? (indiv ? 'individual' : 'workspace') : null,
-        budget_nome: b ? b.nome : null,
-        status: _cotaStatus(pct, num(b && b.threshold_atencao, 75), num(b && b.threshold_critico, 90)),
-      };
-    }).sort((a, b2) => b2.custo - a.custo);
+    const porWs = _mapearCotasWorkspaces(workspaceIds, consWs.rows, bs, mesesConsid);
+    const porUser = _mapearCotasUsuarios(consUser.rows, bs, mesesConsid, workspaceIds, incluirCatalogo);
 
     const comCota = porWs.filter(w => w.cota != null);
     res.json({
       // meses realmente cobertos pelo recorte -- a tela usa pra dizer se o
       // percentual esta medido contra uma cota mensal ou contra N meses
+      tag_filters_applied: tagFilters.length > 0,
       meses_disponiveis: meses.rows.map(r => r.mes),
       meses_considerados: mesesConsid,
       por_workspace: porWs,
@@ -15702,14 +16443,14 @@ app.get('/api/databricks-coleta/cotas-serie', authMiddleware, dbMiddleware, asyn
     const _janela = _cotasPeriodo(req.query);
     const ws = req.query.workspace_id ? String(req.query.workspace_id) : null;
     const usuario = req.query.usuario != null ? String(req.query.usuario) : null;
-    // A tela de Cotas e dedicada ao Genie. `produto_origem` NAO tem um valor
-    // "GENIE" (so INTERACTIVE/SQL/JOBS/MODEL_SERVING) -- o que identifica Genie
-    // e o sku_name (GENIE_FREE_USAGE). Nome fixo aqui, nunca vindo do request.
+    // a tela de Cotas e dedicada a Genie e AI Gateway. Algumas linhas com gasto
+    // de budget Unity AI Gateway usam billing_origin_product=AI_GATEWAY sem
+    // GENIE no sku_name. Nome fixo aqui, nunca vindo do request.
     const soGenie = String(req.query.genie || '') === '1';
 
     const params = [..._janela.params];
     const cond = _janela.where ? [_janela.where.replace(/^WHERE /, '')] : [];
-    if (soGenie) cond.push(`sku_name ILIKE '%GENIE%'`);
+    if (soGenie) cond.push(`(sku_name ILIKE '%GENIE%' OR produto_origem ILIKE '%GENIE%' OR produto_origem ILIKE '%AI_GATEWAY%')`);
 
     const serie = async (extraCond, extraParams) => {
       const p = params.concat(extraParams);
@@ -16301,17 +17042,119 @@ app.get('/api/databricks-coleta/genie-principals', authMiddleware, dbMiddleware,
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+async function _resolverGenieUserPrincipals(usernamesInput) {
+  const usernames = [...new Set((Array.isArray(usernamesInput) ? usernamesInput : [usernamesInput])
+    .map(value => String(value || '').trim()).filter(Boolean))].slice(0, 1000);
+  if (!usernames.length) return [];
+  const cfg = await _getDbxAccountConfigRow();
+  if (_dbxDemoModeNeeded(cfg)) {
+    return _GENIE_DEMO_PRINCIPALS.user
+      .filter(principal => usernames.some(username => username.toLowerCase() === principal.nome.toLowerCase()))
+      .map(principal => ({ id: principal.id, username: principal.nome.toLowerCase(), nome: principal.nome, grupos: [] }));
+  }
+  const { accountId, token } = await _getDbxAccountCredentials();
+  const resultados = [];
+  for (let i = 0; i < usernames.length; i += 8) {
+    const lote = await Promise.all(usernames.slice(i, i + 8).map(async username => {
+      const escaped = username.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      try {
+        let data = await _dbxScimFetch(accountId, token, `/scim/v2/Users?filter=${encodeURIComponent(`userName eq "${escaped}"`)}&count=1`);
+        let user = (data.Resources || [])[0];
+        if (!user) {
+          data = await _dbxScimFetch(accountId, token, `/scim/v2/Users?filter=${encodeURIComponent(`displayName eq "${escaped}"`)}&count=1`);
+          user = (data.Resources || [])[0];
+        }
+        if (!user) return null;
+        return {
+          id: String(user.id), username: String(user.userName || username).toLowerCase(),
+          nome: user.displayName || user.userName || username,
+          grupos: (user.groups || []).map(group => ({ id: String(group.value || group.id || ''), nome: group.display || group.displayName || '' })).filter(group => group.id),
+        };
+      } catch (_) { return null; }
+    }));
+    resultados.push(...lote.filter(Boolean));
+  }
+  return resultados;
+}
+
+app.get('/api/databricks-coleta/genie-user-principals', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const usernames = String(req.query.usernames || '').split(',');
+    res.json(await _resolverGenieUserPrincipals(usernames));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post('/api/databricks-coleta/genie-user-principals', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const usernames = req.body?.usernames;
+    if (!Array.isArray(usernames)) return res.status(400).json({ error: 'usernames deve ser um array' });
+    res.json(await _resolverGenieUserPrincipals(usernames));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.get('/api/databricks-coleta/genie-workspaces', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const cfg = await _getDbxAccountConfigRow();
+    if (_dbxDemoModeNeeded(cfg)) return res.json([]);
+    const { accountId, token } = await _getDbxAccountCredentials();
+    const resp = await _dbxFetch(`${_DBX_ACCOUNTS_BASE}/api/2.0/accounts/${accountId}/workspaces`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }, 30000);
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`Listagem de workspaces Databricks falhou (${resp.status}): ${body}`);
+    }
+    const data = await _safeRespJson(resp);
+    const lista = Array.isArray(data) ? data : (data.workspaces || data.items || []);
+    const porId = new Map(lista.map(ws => {
+      const workspaceId = ws.workspace_id ?? ws.workspaceId ?? ws.id;
+      const nome = ws.workspace_name ?? ws.workspaceName ?? ws.name ?? ws.display_name;
+      return [String(workspaceId), { workspace_id: String(workspaceId), nome: nome || `Workspace ${workspaceId}` }];
+    }).filter(([id]) => id && id !== 'undefined'));
+    const idsSolicitados = [...new Set(String(req.query.ids || '').split(',').filter(id => /^\d+$/.test(id)))].slice(0, 50);
+    await Promise.all(idsSolicitados.filter(id => !porId.has(id)).map(async id => {
+      const detalhe = await _dbxFetch(`${_DBX_ACCOUNTS_BASE}/api/2.0/accounts/${accountId}/workspaces/${encodeURIComponent(id)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }, 30000);
+      if (!detalhe.ok) return;
+      const body = await _safeRespJson(detalhe);
+      const ws = body.workspace || body;
+      const nome = ws.workspace_name ?? ws.workspaceName ?? ws.name ?? ws.display_name;
+      if (nome) porId.set(id, { workspace_id: id, nome });
+    }));
+    res.json([...porId.values()]);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/databricks-coleta/genie-budgets', authMiddleware, dbMiddleware, async (_req, res) => {
   try {
     const cfg = await _getDbxAccountConfigRow();
     if (_dbxDemoModeNeeded(cfg)) {
       const demo = await pool.query(`SELECT payload FROM databricks_genie_budgets_demo ORDER BY criado_em`);
-      return res.json(demo.rows.map(r => ({ ...r.payload, _demo: true })));
+      const budgets = demo.rows.map(r => ({ ...r.payload, _demo: true }));
+      return res.json({ budgets, account_total: budgets.length, genie_total: budgets.length });
     }
     const { accountId, token } = await _getDbxAccountCredentials();
-    const data = await _dbxBudgetsFetch(accountId, token, '/budgets?include_spend_status=true');
-    const genieBudgets = (data.budgets || []).filter(b => b.resource_type === 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY');
-    res.json(genieBudgets);
+    const todosBudgets = [];
+    let pageToken = null;
+    for (let page = 0; page < 100; page++) {
+      const query = pageToken ? `?page_token=${encodeURIComponent(pageToken)}` : '';
+      const data = await _dbxBudgetsFetch(accountId, token, `/budgets${query}`);
+      todosBudgets.push(...(data.budgets || []));
+      pageToken = data.next_page_token || null;
+      if (!pageToken) break;
+    }
+    const genieBudgets = todosBudgets.filter(b => b.resource_type === 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY');
+    const budgetsComGasto = await Promise.all(genieBudgets.map(async budget => {
+      const resourceName = `accounts/${accountId}/budget-spend-statuses/${budget.budget_configuration_id}`;
+      const resp = await _dbxFetch(`${_DBX_ACCOUNTS_BASE}/api/2.1/${resourceName}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }, 30000);
+      if (resp.status === 404) return budget;
+      if (!resp.ok) return { ...budget, _spend_status_error: `Spend status indisponível (${resp.status})` };
+      return { ...budget, _spend_status: await _safeRespJson(resp) };
+    }));
+    res.json({ budgets: budgetsComGasto, account_total: todosBudgets.length, genie_total: genieBudgets.length });
   } catch (e) {
     // Erro cru é o propósito da rota (mesmo padrão de POST .../config/:id/testar) — as
     // mensagens de _getDbxAccountCredentials/_dbxBudgetsFetch explicam exatamente o que
@@ -16365,10 +17208,12 @@ async function _resolverGenieQuotaUsuario(usuario, workspaceId) {
     const wsFiltro = b.filter?.workspace_id?.values;
     if (wsNum != null && Array.isArray(wsFiltro) && wsFiltro.length && !wsFiltro.includes(wsNum)) continue;
     for (const alerta of b.alert_configurations || []) {
+      const acaoBloqueio = alerta.action_configurations?.some(a => a.action_type === 'BLOCK_USAGE');
+      if (!acaoBloqueio) continue;
       for (const ov of alerta.principal_overrides || []) {
         if (String(ov.principal_id) === String(principalId)) {
           const valor = parseFloat(ov.override_threshold ?? alerta.quantity_threshold);
-          if (Number.isFinite(valor)) aplicaveis.push({ valor, acao: alerta.action_configurations?.[0]?.action_type || null });
+          if (Number.isFinite(valor)) aplicaveis.push({ valor, acao: 'BLOCK_USAGE' });
         }
       }
     }
@@ -16383,6 +17228,98 @@ async function _resolverGenieQuotaUsuario(usuario, workspaceId) {
 // 2026-09-28, pedido do usuário: trazer pro gráfico "Genie · Cota e uso do usuário"
 // (DatabricksCotasPanel.tsx) a quota que REALMENTE pode bloquear o Genie, distinta do
 // orçamento local (databricks_budgets, só alerta).
+const _GENIE_COTAS_CACHE_REFRESH_MS = 6 * 60 * 60 * 1000;
+const _GENIE_COTAS_CACHE_DEFAULT_TTL_MS = 60 * 60 * 1000;
+
+const _genieCotasCache = createGenieCotasCache({
+  getPool: () => pool,
+  ttlMs: (period) => period === 'month' ? _GENIE_COTAS_CACHE_REFRESH_MS : _GENIE_COTAS_CACHE_DEFAULT_TTL_MS,
+  collect: async (period) => {
+    const configs = (await pool.query(
+      `SELECT * FROM databricks_coleta_config WHERE ativo = true ORDER BY is_padrao DESC, id ASC`
+    )).rows;
+    if (!configs.length) {
+      const error = new Error('A conexão Databricks não está disponível.');
+      error.statusCode = 503;
+      throw error;
+    }
+
+    const grupos = [];
+    const avisos = [];
+    for (const cfg of configs) {
+      try {
+        const token = await _resolveDbxToken(cfg);
+        const raw = await _databricksRunQuery(
+          cfg.workspace_host,
+          cfg.warehouse_id,
+          token,
+          buildGenieCotasInternaQuery(period),
+          [],
+          'INLINE'
+        );
+        grupos.push(_parseDatabricksResult(raw));
+      } catch (e) {
+        avisos.push(`${cfg.nome}: ${e.message}`);
+        console.warn(`[Databricks Genie Cotas] ${cfg.nome} indisponível: ${e.message}`);
+      }
+    }
+    if (!grupos.length) {
+      const error = new Error(avisos.join(' | ') || 'Nenhuma conexão Databricks conseguiu consultar as cotas Genie.');
+      error.statusCode = 503;
+      throw error;
+    }
+    const rows = dedupeGenieCotasRows(grupos);
+    const publicSnapshots = aggregateGenieCotasPublicasPorUsuario(rows);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM databricks_genie_cotas_public_cache WHERE periodo=$1', [period]);
+      await client.query(`
+        INSERT INTO databricks_genie_cotas_public_cache (periodo, usuario_email, payload, coletado_em)
+        SELECT $1, usuario_email, payload, NOW()
+        FROM jsonb_each($2::jsonb) AS snapshots(usuario_email, payload)
+      `, [period, JSON.stringify(publicSnapshots)]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+    return { periodo: period, ...aggregateGenieCotasInternasRows(rows), avisos };
+  },
+  onRefreshError: (e) => console.warn('[Databricks Genie Cotas] atualização do cache falhou:', e.message),
+});
+
+let _genieCotasCacheTimer = null;
+function _iniciarGenieCotasCache() {
+  if (_genieCotasCacheTimer) return;
+  const coletar = () => _genieCotasCache.refresh('month').catch((e) => {
+    console.warn('[Databricks Genie Cotas] coleta agendada falhou:', e.message);
+  });
+  setTimeout(coletar, 2 * 60 * 1000);
+  _genieCotasCacheTimer = setInterval(coletar, _GENIE_COTAS_CACHE_REFRESH_MS);
+}
+
+app.get('/api/databricks-coleta/genie-cotas', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const period = ['today', 'month', 'all'].includes(req.query.period) ? req.query.period : 'month';
+    const snapshot = await _genieCotasCache.get(period);
+    res.json({
+      ...snapshot.payload,
+      cache: {
+        atualizado_em: snapshot.atualizado_em,
+        desatualizado: snapshot.desatualizado,
+        atualizando: snapshot.atualizando,
+      },
+    });
+  } catch (e) {
+    console.error('[Databricks Genie Cotas] erro:', e.message);
+    const status = e.statusCode || 500;
+    res.status(status).json({ error: status === 503 ? e.message : 'Não foi possível carregar as cotas Genie do Databricks.' });
+  }
+});
+
 app.get('/api/databricks-coleta/genie-quota-usuario', authMiddleware, dbMiddleware, async (req, res) => {
   try {
     const { usuario, workspace_id } = req.query;
@@ -16397,24 +17334,57 @@ app.get('/api/databricks-coleta/genie-quota-usuario', authMiddleware, dbMiddlewa
 // pra não duplicar as duas validações (BLOCK_USAGE/confirmar_bloqueio e overrides só com
 // escopo per-user) entre as duas rotas.
 function _validarGenieBudgetPayload(body, accountId) {
-  const { display_name, workspace_ids, tags, threshold, confirmar_bloqueio, principal_overrides } = body;
-  if (!display_name || !threshold?.quantity_threshold || !threshold?.scope_type || !threshold?.action_type) {
-    return { error: 'display_name e threshold (quantity_threshold, scope_type, action_type) são obrigatórios' };
+  const {
+    display_name, workspace_ids, tags, monthly_limit_usd, scope_type, levels,
+    email_target, threshold, confirmar_bloqueio, principal_overrides,
+  } = body;
+  const legado = !Array.isArray(levels) && threshold;
+  const limiteMensal = Number(legado ? threshold.quantity_threshold : monthly_limit_usd);
+  const escopo = legado ? threshold.scope_type : scope_type;
+  const niveisRecebidos = legado
+    ? [{ percentage: 100, actions: [threshold.action_type] }]
+    : levels;
+  if (!display_name || !Number.isFinite(limiteMensal) || limiteMensal <= 0 || !escopo || !Array.isArray(niveisRecebidos)) {
+    return { error: 'display_name, monthly_limit_usd, scope_type e levels válidos são obrigatórios' };
   }
-  // Guard-rail: BLOCK_USAGE bloqueia acesso real ao Genie assim que o threshold é
-  // cruzado — aplicado pelo próprio Databricks, sem nenhuma checagem nossa depois de
-  // criado/atualizado. Exige confirmação explícita no BODY da requisição (não só um
-  // confirm() no frontend) — quem chamar essa rota direto (curl/script) também precisa
-  // declarar ciência, mesmo padrão já usado pro segundo gate do Expurgo de dados.
-  if (threshold.action_type === 'BLOCK_USAGE' && !confirmar_bloqueio) {
-    return { error: 'Threshold com ação BLOCK_USAGE requer confirmar_bloqueio:true no payload — essa ação bloqueia acesso real ao Genie assim que o limite é cruzado.' };
+  if (!['ALERT_CONFIGURATION_SCOPE_TYPE_SHARED', 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER'].includes(escopo)) {
+    return { error: 'scope_type inválido' };
+  }
+  if (niveisRecebidos.length < 1 || niveisRecebidos.length > 4) {
+    return { error: 'Configure entre 1 e 4 níveis de alerta por budget' };
+  }
+  const niveis = niveisRecebidos.map(nivel => ({
+    percentage: Number(nivel.percentage),
+    actions: Array.isArray(nivel.actions) ? [...new Set(nivel.actions)] : [],
+  })).sort((a, b) => a.percentage - b.percentage);
+  if (niveis.some(n => !Number.isFinite(n.percentage) || n.percentage <= 0 || n.percentage > 100
+      || n.actions.length === 0 || n.actions.some(a => !['EMAIL_NOTIFICATION', 'BLOCK_USAGE'].includes(a)))) {
+    return { error: 'Cada nível precisa ter percentual entre 0 e 100 e ao menos uma ação válida' };
+  }
+  if (niveis.some((n, i) => i > 0 && n.percentage <= niveis[i - 1].percentage)
+      || niveis[niveis.length - 1].percentage !== 100) {
+    return { error: 'Os níveis devem ser crescentes e incluir um nível final em 100%' };
+  }
+  if (niveis.some(n => n.actions.includes('BLOCK_USAGE') && n.percentage !== 100)) {
+    return { error: 'BLOCK_USAGE só pode ser configurado no nível de 100%' };
+  }
+  const temBloqueio = niveis.some(n => n.actions.includes('BLOCK_USAGE'));
+  // BLOCK_USAGE bloqueia acesso real ao Genie assim que o limite é cruzado. Exige
+  // confirmação também no backend para impedir bypass pela chamada direta à API.
+  if (temBloqueio && !confirmar_bloqueio) {
+    return { error: 'Níveis com BLOCK_USAGE requerem confirmar_bloqueio:true no payload.' };
+  }
+  const dinheiroNoNivel = percentual => (Math.round(limiteMensal * percentual) / 100).toFixed(2);
+  if (niveis.some((n, i) => Number(dinheiroNoNivel(n.percentage)) <= 0
+      || (i > 0 && Number(dinheiroNoNivel(n.percentage)) <= Number(dinheiroNoNivel(niveis[i - 1].percentage))))) {
+    return { error: 'O teto mensal é pequeno demais para gerar níveis monetários distintos em USD' };
   }
   // Overrides (limite individual por usuário/grupo) só fazem sentido com escopo "por
   // usuário" — a documentação do Databricks é explícita: overrides são ignorados
   // silenciosamente em budgets de escopo compartilhado. Bloqueado aqui com uma mensagem
   // clara em vez de deixar o admin descobrir isso só depois de salvar.
   const temOverrides = Array.isArray(principal_overrides) && principal_overrides.length > 0;
-  if (temOverrides && threshold.scope_type !== 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER') {
+  if (temOverrides && escopo !== 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER') {
     return { error: 'Overrides por usuário/grupo só valem com escopo "Por usuário" — o Databricks os ignora silenciosamente em budgets de escopo compartilhado.' };
   }
 
@@ -16422,23 +17392,27 @@ function _validarGenieBudgetPayload(body, accountId) {
   if (Array.isArray(workspace_ids) && workspace_ids.length) filter.workspace_id = { operator: 'IN', values: workspace_ids };
   if (Array.isArray(tags) && tags.length) filter.tags = tags.map(t => ({ key: t.key, value: { operator: 'IN', values: [t.value] } }));
 
-  const actionConfig = { action_type: threshold.action_type };
-  if (threshold.action_type === 'EMAIL_NOTIFICATION' && threshold.email_target) actionConfig.target = threshold.email_target;
-
-  const alertConfig = {
-    time_period: 'MONTH',
-    trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
-    quantity_type: 'LIST_PRICE_DOLLARS_USD',
-    quantity_threshold: String(threshold.quantity_threshold),
-    scope_type: threshold.scope_type,
-    action_configurations: [actionConfig],
-  };
-  if (temOverrides) {
-    alertConfig.principal_overrides = principal_overrides.map(p => ({
-      principal_id: Number(p.principal_id),
-      override_threshold: String(p.override_threshold),
+  const alertConfigurations = niveis.map(nivel => {
+    const actionConfigurations = nivel.actions.map(actionType => ({
+      action_type: actionType,
+      ...(actionType === 'EMAIL_NOTIFICATION' && email_target ? { target: email_target } : {}),
     }));
-  }
+    const alertConfig = {
+      time_period: 'MONTH',
+      trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
+      quantity_type: 'LIST_PRICE_DOLLARS_USD',
+      quantity_threshold: dinheiroNoNivel(nivel.percentage),
+      scope_type: escopo,
+      action_configurations: actionConfigurations,
+    };
+    if (temOverrides) {
+      alertConfig.principal_overrides = principal_overrides.map(p => ({
+        principal_id: Number(p.principal_id),
+        override_threshold: (Math.round(Number(p.override_threshold) * nivel.percentage) / 100).toFixed(2),
+      }));
+    }
+    return alertConfig;
+  });
 
   return {
     value: {
@@ -16446,7 +17420,7 @@ function _validarGenieBudgetPayload(body, accountId) {
       account_id: accountId,
       resource_type: 'BUDGET_RESOURCE_TYPE_UNITY_AI_GATEWAY',
       filter,
-      alert_configurations: [alertConfig],
+      alert_configurations: alertConfigurations,
     },
   };
 }
@@ -16499,6 +17473,62 @@ app.delete('/api/databricks-coleta/genie-budgets/:id', authMiddleware, dbMiddlew
     const { accountId, token } = await _getDbxAccountCredentials();
     await _dbxBudgetsFetch(accountId, token, `/budgets/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' });
     res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.put('/api/databricks-coleta/genie-budgets/:id/principal-overrides/:principalId', authMiddleware, dbMiddleware, async (req, res) => {
+  try {
+    const principalId = Number(req.params.principalId);
+    const monthlyLimit = Number(req.body?.monthly_limit_usd);
+    if (!Number.isInteger(principalId) || principalId <= 0 || !Number.isFinite(monthlyLimit) || monthlyLimit <= 0) {
+      return res.status(400).json({ error: 'principalId e monthly_limit_usd positivos são obrigatórios.' });
+    }
+
+    const cfg = await _getDbxAccountConfigRow();
+    let budget;
+    let accountId;
+    let token;
+    const demoMode = _dbxDemoModeNeeded(cfg);
+    if (demoMode) {
+      const result = await pool.query(`SELECT payload FROM databricks_genie_budgets_demo WHERE id=$1`, [req.params.id]);
+      budget = result.rows[0]?.payload;
+      if (!budget) return res.status(404).json({ error: 'Quota Genie não encontrada.' });
+    } else {
+      ({ accountId, token } = await _getDbxAccountCredentials());
+      let pageToken = null;
+      for (let page = 0; page < 100; page++) {
+        const query = pageToken ? `?page_token=${encodeURIComponent(pageToken)}` : '';
+        const data = await _dbxBudgetsFetch(accountId, token, `/budgets${query}`);
+        budget = (data.budgets || []).find((item) => item.budget_configuration_id === req.params.id);
+        if (budget) break;
+        pageToken = data.next_page_token || null;
+        if (!pageToken) break;
+      }
+      if (!budget) return res.status(404).json({ error: 'Quota Genie não encontrada na conta Databricks.' });
+    }
+
+    const perUserAlerts = (budget.alert_configurations || []).filter(
+      (alert) => alert.scope_type === 'ALERT_CONFIGURATION_SCOPE_TYPE_PER_USER',
+    );
+    if (perUserAlerts.some((alert) => alert.action_configurations?.some((action) => action.action_type === 'BLOCK_USAGE'))
+        && req.body?.confirmar_bloqueio !== true) {
+      return res.status(400).json({ error: 'Esta quota pode bloquear o uso. Confirme a alteração do limite individual.' });
+    }
+
+    const updatedBudget = updateGenieBudgetPrincipalOverride(budget, principalId, monthlyLimit);
+    if (demoMode) {
+      const result = await pool.query(
+        `UPDATE databricks_genie_budgets_demo SET payload=$1, atualizado_em=NOW() WHERE id=$2 RETURNING id`,
+        [JSON.stringify(updatedBudget), req.params.id],
+      );
+      if (!result.rows.length) return res.status(404).json({ error: 'Quota Genie não encontrada.' });
+      return res.json({ ...updatedBudget, _demo: true });
+    }
+
+    const data = await _dbxBudgetsFetch(accountId, token, `/budgets/${encodeURIComponent(req.params.id)}`, {
+      method: 'PUT', body: JSON.stringify({ budget: updatedBudget }),
+    });
+    res.json(data.budget || data);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -16731,23 +17761,31 @@ async function _purgarRecursosEfemeros(ativa, dias) {
 async function _graphResolveAutores() {
   const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
   const cfg = cfgRow.rows[0];
-  if (!cfg || !cfg.sp_id) throw new Error('Inventário sem Service Principal configurado');
-  const spRow = await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [cfg.sp_id]);
-  if (!spRow.rows.length) throw new Error('Service Principal do Inventário não encontrado');
-  const spCfg = spRow.rows[0];
-  const { token, roles } = await _graphGetToken(_safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret));
-
-  // Directory.Read.All é o que permite resolver GUID→nome. Sem ela o Graph devolve 200 com
-  // lista vazia (não 403), então sem esta checagem a função reportaria "0 resolvidos" pra
-  // sempre sem dizer por quê. Checa antes de gastar chamadas.
   const PERM = 'Directory.Read.All';
-  const temPermissao = roles.includes(PERM) || roles.includes('Directory.ReadWrite.All');
-  if (!temPermissao) {
+  const candidatos = prioritizeGraphSpCandidates(
+    (await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo=true AND coletar_inventario=true ORDER BY is_padrao DESC, id ASC`)).rows,
+    cfg?.sp_id,
+  );
+  if (!candidatos.length) throw new Error('Nenhuma Service Principal ativa está disponível para resolver nomes.');
+
+  let spCfg = null, token = null, roles = [], ultimoErro = null;
+  for (const candidato of candidatos) {
+    try {
+      const resultado = await _graphGetToken(
+        _safeDecrypt(candidato.tenant_id), _safeDecrypt(candidato.client_id), _safeDecrypt(candidato.client_secret)
+      );
+      const temPermissao = resultado.roles.includes(PERM) || resultado.roles.includes('Directory.ReadWrite.All');
+      if (temPermissao) { spCfg = candidato; token = resultado.token; roles = resultado.roles; break; }
+      ultimoErro = `SP "${candidato.nome}" sem ${PERM}`;
+    } catch (e) {
+      ultimoErro = `SP "${candidato.nome}": ${e.message}`;
+    }
+  }
+  if (!spCfg) {
     throw new Error(
-      `Service Principal "${spCfg.nome}" não tem a permissão de aplicativo ${PERM} no Entra ID ` +
-      `(claim roles do token: ${roles.length ? roles.join(', ') : 'vazia'}). ` +
-      `Sem ela o Microsoft Graph aceita a chamada e devolve lista vazia, então nenhum autor é resolvido. ` +
-      `Conceda ${PERM} ao app registrado e dê o consentimento de administrador.`
+      `${candidatos.length} Service Principal(is) ativa(s) verificada(s), mas nenhuma possui ` +
+      `a permissão de aplicativo ${PERM} no Entra ID${ultimoErro ? ` (${ultimoErro})` : ''}. ` +
+      `Conceda ${PERM} a uma SP e dê consentimento de administrador.`
     );
   }
 
@@ -17030,40 +18068,63 @@ async function _coletarInventarioAzure(origem = 'manual') {
 // A credencial viaja junto com o escopo (em vez de ser resolvida uma vez no topo da coleta)
 // porque uma assinatura só pode ser consultada com o token da SP que a tem cadastrada — o
 // token de uma SP devolve 403 nas assinaturas da outra.
+const _INV_SP_SUBS_TTL_MS = 15 * 60 * 1000;
+const _invSubscriptionsAccessCache = new Map();
+
+async function _getSubscriptionsAcessiveisInventario(spCfg) {
+  const cached = _invSubscriptionsAccessCache.get(spCfg.id);
+  if (cached && Date.now() < cached.expiraEm) return cached.ids;
+  try {
+    const { token } = await _managementGetToken(
+      _safeDecrypt(spCfg.tenant_id), _safeDecrypt(spCfg.client_id), _safeDecrypt(spCfg.client_secret)
+    );
+    const values = await _armListAll(token, 'https://management.azure.com/subscriptions?api-version=2022-12-01');
+    const ids = new Set(values
+      .filter((item) => item.state === 'Enabled')
+      .map((item) => String(item.subscriptionId || '').toLowerCase())
+      .filter(Boolean));
+    _invSubscriptionsAccessCache.set(spCfg.id, { ids, expiraEm: Date.now() + _INV_SP_SUBS_TTL_MS });
+    return ids;
+  } catch (e) {
+    console.warn(`[Inventario] Não foi possível enumerar subscriptions da SP ${spCfg.nome}: ${e.message}`);
+    _invSubscriptionsAccessCache.set(spCfg.id, { ids: null, expiraEm: Date.now() + 60 * 1000 });
+    return null;
+  }
+}
+
 async function _getInventarioEscopos() {
   const cfgRow = await pool.query(`SELECT * FROM azure_inventario_config ORDER BY id LIMIT 1`);
   const cfg = cfgRow.rows[0] || null;
   const sps = (await pool.query(
-    `SELECT * FROM azure_coleta_config WHERE ativo = true ORDER BY is_padrao DESC, id ASC`
+    `SELECT * FROM azure_coleta_config WHERE ativo = true AND coletar_inventario = true ORDER BY is_padrao DESC, id ASC`
   )).rows;
   if (!sps.length) throw new Error('Nenhum Service Principal ativo cadastrado');
 
-  const escopos = [];
-  // Assinatura repetida entre SPs é coletada uma vez só (a primeira SP que a declara vence) —
-  // do contrário os mesmos recursos seriam processados duas vezes por execução. Hoje as SPs
-  // não se sobrepõem, mas nada no cadastro impede que passem a se sobrepor.
-  const vistas = new Set();
+  const acessos = await Promise.all(sps.map(async (spCfg) => [spCfg.id, await _getSubscriptionsAcessiveisInventario(spCfg)]));
+  const { scopes, unowned } = resolveInventorySubscriptionOwners(sps, new Map(acessos));
+  if (unowned.length) {
+    console.warn(`[Inventario] ${unowned.length} subscription(s) configurada(s) sem SP com RBAC confirmado: ${unowned.slice(0, 20).join(', ')}`);
+  }
+
+  const tokenPorSp = new Map();
   for (const spCfg of sps) {
     const tenantId = _safeDecrypt(spCfg.tenant_id);
     const clientId = _safeDecrypt(spCfg.client_id);
     const clientSecret = _safeDecrypt(spCfg.client_secret);
-    const getToken = _makeTokenGetter(tenantId, clientId, clientSecret);
-    const getLogAnalyticsToken = _makeLogAnalyticsTokenGetter(tenantId, clientId, clientSecret);
-    for (const bruto of (spCfg.subscription_ids || '').split(/[\n,]+/)) {
-      const subscriptionId = bruto.trim();
-      if (!subscriptionId) continue;
-      const chave = subscriptionId.toLowerCase();
-      if (vistas.has(chave)) continue;
-      vistas.add(chave);
-      escopos.push({
-        subscriptionId,
-        spId: spCfg.id,
-        spNome: (spCfg.nome || '').trim(),
-        getToken,
-        getLogAnalyticsToken,
-      });
-    }
+    tokenPorSp.set(spCfg.id, {
+      getToken: _makeTokenGetter(tenantId, clientId, clientSecret),
+      getLogAnalyticsToken: _makeLogAnalyticsTokenGetter(tenantId, clientId, clientSecret),
+      spNome: (spCfg.nome || '').trim(),
+    });
   }
+
+  const escopos = scopes.map(({ subscriptionId, sp }) => ({
+    subscriptionId,
+    spId: sp.id,
+    spNome: (sp.nome || '').trim(),
+    getToken: tokenPorSp.get(sp.id).getToken,
+    getLogAnalyticsToken: tokenPorSp.get(sp.id).getLogAnalyticsToken,
+  }));
   if (!escopos.length) throw new Error('Nenhuma subscription configurada em nenhum Service Principal ativo');
   return { cfg, escopos };
 }
@@ -17100,7 +18161,7 @@ async function _getEscopoDoWorkspace(workspaceGuid) {
   return _getEscopoDaSubscription(r.rows[0].subscription_id);
 }
 
-async function _resourceGraphQueryTodasSps(kql, filtroSubs = null) {
+async function _resourceGraphQueryTodasSps(kql, filtroSubs = null, { strict = false } = {}) {
   const { escopos } = await _getInventarioEscopos();
   const permitidas = filtroSubs ? new Set(filtroSubs.map((x) => String(x).toLowerCase())) : null;
   const porSp = new Map();
@@ -17114,8 +18175,9 @@ async function _resourceGraphQueryTodasSps(kql, filtroSubs = null) {
     // Falha de uma SP não zera o resultado das outras — devolver parcial é melhor que devolver
     // vazio e fazer a tela parecer que não há nada.
     try {
-      itens.push(...(await _resourceGraphQuery(await getToken(), subs, kql)));
+      itens.push(...(await _resourceGraphQuery(await getToken(), subs, kql, { strict })));
     } catch (e) {
+      if (strict) throw e;
       console.warn(`[ResourceGraph] Falha na SP ${spNome} (${subs.length} assinatura(s)):`, e.message);
     }
   }
@@ -17126,7 +18188,7 @@ async function _resourceGraphQueryTodasSps(kql, filtroSubs = null) {
 // generalizar `_resourceGraphFetchRecursos` (logo abaixo): aquela tem query FIXA e é usada pela
 // reconciliação, que já está em produção.
 // `subscriptionId` aceita 1 id ou uma lista (o Resource Graph aceita até 1000 assinaturas por chamada).
-async function _resourceGraphQuery(token, subscriptionId, kql) {
+async function _resourceGraphQuery(token, subscriptionId, kql, { strict = false } = {}) {
   const itens = [];
   let skipToken = null;
   let paginas = 0;
@@ -17147,17 +18209,24 @@ async function _resourceGraphQuery(token, subscriptionId, kql) {
     skipToken = data.$skipToken || null;
     paginas++;
   } while (skipToken && paginas < 200);
+  if (strict && skipToken) throw new Error('Resource Graph excedeu o limite de páginas; estado não atualizado');
   return itens;
 }
 
-async function _resourceGraphFetchRecursos(token, subscriptionId) {
+async function _resourceGraphFetchRecursos(token, subscriptionId, managedOnly = false) {
   const recursos = [];
   let skipToken = null;
   let paginas = 0;
   do {
     const body = {
       subscriptions: [subscriptionId],
-      query: 'Resources | project id, name, type, resourceGroup',
+      query: `Resources
+| where ${managedOnly
+    ? "type =~ 'microsoft.containerservice/managedclusters' or type =~ 'microsoft.databricks/workspaces'"
+    : 'true'}
+| extend nodeResourceGroup = tostring(properties.nodeResourceGroup),
+         managedResourceGroupId = tostring(properties.managedResourceGroupId)
+| project id, name, type, resourceGroup, nodeResourceGroup, managedResourceGroupId`,
       options: { $top: 1000, ...(skipToken ? { $skipToken: skipToken } : {}) },
     };
     const resp = await _cbFetch(
@@ -17420,6 +18489,14 @@ async function _reconciliarInventarioResourceGraph(origem = 'manual') {
       }
       _logColetaInv(`  ${subId} (${spNome}): ${recursos.length} recurso(s) encontrado(s)`);
       totalEncontrados += recursos.length;
+
+      try {
+        const links = recursos.map((item) => extractManagedRgParentLink(item, subId)).filter(Boolean);
+        const atualizados = await _persistManagedRgParentLinks(links);
+        if (atualizados) _logColetaInv(`  ${subId}: ${atualizados} vínculo(s) pai/gerenciado sincronizado(s)`);
+      } catch (eLinks) {
+        _logColetaInv(`  ⚠ ${subId}: falha ao sincronizar vínculos pai/gerenciado — ${eLinks.message}`);
+      }
 
       for (const item of recursos) {
         if (!item.id) continue;
@@ -17833,11 +18910,33 @@ async function _comRetentativa(fn, label, tentativas, progresso, isCancelada) {
   }
 }
 
+const _AZURE_SP_SERVICE_LABELS = {
+  billingApi: 'Billing via Cost Management API',
+  inventory: 'Inventário/Resource Graph',
+  storage: 'coleta via Storage',
+  reservationsApi: 'Reservas via API',
+};
+
+async function _assertAzureSpServiceEnabled(spId, service) {
+  const result = await pool.query(
+    `SELECT id,nome,coletar_billing_api,coletar_inventario,coletar_storage,coletar_reservas_api
+       FROM azure_coleta_config WHERE id=$1`,
+    [spId]
+  );
+  if (!result.rows.length) throw new Error(`Service Principal #${spId} não encontrada`);
+  const sp = result.rows[0];
+  if (!azureSpServiceEnabled(sp, service)) {
+    throw new Error(`${_AZURE_SP_SERVICE_LABELS[service] || service} está desabilitado para a SP "${sp.nome}".`);
+  }
+  return sp;
+}
+
 async function _executarColetaAPI(spId, billingAccountId, billingProfileId, startDate, endDate, modo = 'billing_profile', subscriptionIds = [], resourceGroups = [], metric = 'ActualCost', origem = 'manual') {
   // v4.2: Multi-tenant — checar só a própria chave de SP, não bloqueio global
   const coletaChave = `api:${spId}`;
   if (_coletaAtiva('api', spId)) throw new Error(`Coleta API para SP #${spId} já em execução`);
   if (!pool) throw new Error('Banco não conectado');
+  await _assertAzureSpServiceEnabled(spId, 'billingApi');
 
   let histId;
   try {
@@ -18215,7 +19314,7 @@ async function _storageDownloadBlob(token, storageAccount, container, blobName) 
   const crypto = require('crypto');
   const os     = require('os');
   const _bn    = blobName.toLowerCase();
-  const ext    = _bn.endsWith('.parquet') ? '.parquet' : _bn.endsWith('.zip') ? '.zip' : '.csv';
+  const ext    = _bn.endsWith('.json') ? '.json' : _bn.endsWith('.parquet') ? '.parquet' : _bn.endsWith('.zip') ? '.zip' : '.csv';
   const dest   = path.join(os.tmpdir(), `az_stg_${crypto.randomBytes(6).toString('hex')}${ext}`);
   const url    = `https://${storageAccount}.blob.core.windows.net/${container}/${blobName}`;
   const resp   = await fetch(url, { headers: { Authorization: `Bearer ${token}`, 'x-ms-version': '2020-04-08' } });
@@ -18224,14 +19323,72 @@ async function _storageDownloadBlob(token, storageAccount, container, blobName) 
   return dest;
 }
 
-async function _executarColetaStorage(modo = 'manual', storageId = null) {
+async function _storageSelectLatestExportRun(getToken, storageAccount, container, prefix) {
+  const allBlobs = await _storageListBlobs(await getToken(), storageAccount, container, prefix);
+  const runs = findStorageExportRuns(allBlobs, prefix);
+  const candidates = [];
+
+  for (const run of runs) {
+    if (!run.manifestBlob) {
+      candidates.push({
+        ...run,
+        submittedAt: Date.parse(run.lastModified || '') || 0,
+        complete: false,
+        error: 'Manifesto ainda não foi publicado para esta execução.',
+      });
+      continue;
+    }
+    let manifestPath;
+    try {
+      let token = await getToken();
+      try {
+        manifestPath = await _storageDownloadBlob(token, storageAccount, container, run.manifestBlob.name);
+      } catch (downloadError) {
+        if (!downloadError.message.includes('(401)')) throw downloadError;
+        token = await getToken(true);
+        manifestPath = await _storageDownloadBlob(token, storageAccount, container, run.manifestBlob.name);
+      }
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      candidates.push(validateStorageExportRun(run, manifest, allBlobs));
+    } catch (error) {
+      candidates.push({
+        ...run,
+        submittedAt: Date.parse(run.manifestBlob?.lastModified || run.lastModified || '') || 0,
+        complete: false,
+        error: `Não foi possível validar o manifesto: ${error.message.slice(0, 100)}`,
+      });
+    } finally {
+      if (manifestPath) try { fs.unlinkSync(manifestPath); } catch (_) {}
+    }
+  }
+
+  return { ...selectLatestStorageRun(candidates), runCount: runs.length };
+}
+
+async function _resolveStorageServicePrincipal(stg) {
+  const result = stg.sp_id
+    ? await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [stg.sp_id])
+    : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo=true AND coletar_storage=true ORDER BY is_padrao DESC, id ASC`);
+  if (!result.rows.length) throw new Error(stg.sp_id ? `SP #${stg.sp_id} não encontrada` : 'Nenhuma SP ativa habilitada para Storage');
+  if (!stg.sp_id && result.rows.length > 1) {
+    console.warn(`[Storage] Configuração #${stg.id} (${stg.nome}) sem sp_id; usando SP padrão como compatibilidade legada. Vincule a SP correta na configuração.`);
+  }
+  const sp = stg.sp_id ? result.rows[0] : result.rows.find((candidate) => candidate.is_padrao) || result.rows[0];
+  if (!sp.ativo) throw new Error(`A Service Principal "${sp.nome}" está inativa.`);
+  if (!azureSpServiceEnabled(sp, 'storage')) {
+    throw new Error(`A coleta via Storage está desabilitada para a SP "${sp.nome}".`);
+  }
+  return sp;
+}
+
+async function _executarColetaStorage(modo = 'manual', storageId = null, mesReprocessamento = null, options = {}) {
   // v4.2: Multi-tenant — Storage agora também tem sua própria chave no Map
   if (!pool) throw new Error('Banco não conectado');
 
+  const origemDb = modo === 'auto' ? 'agendado' : 'manual';
   let histId;
   try {
     await ensureAzureColetaTable();
-    const origemDb = modo === 'auto' ? 'agendado' : 'manual';
     const r = await pool.query(`INSERT INTO azure_coleta_historico (status,tipo,origem) VALUES ('executando','storage',$1) RETURNING id`, [origemDb]);
     histId = r.rows[0].id;
   } catch (e) {
@@ -18257,6 +19414,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
   _logColeta(`Coleta Storage iniciada (${modo}${storageId ? ' STG#'+storageId : ''})`, _coletaProgresso);
 
   let totalIns = 0, totalUpd = 0, totalErr = 0;
+  let storageStageClient = null;
   const mesesCustosAlterados = new Set();
 
   try {
@@ -18269,15 +19427,15 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     const stg = stgRow.rows[0];
     const storageAccount = stg.storage_account?.trim();
     const container      = stg.storage_container?.trim();
-    const prefix         = stg.storage_prefix?.trim() || '';
+    const prefixTemplate = stg.storage_prefix?.trim() || '';
+    if (!prefixTemplate.includes('{periodo}')) throw new Error('O prefixo do Storage precisa conter {periodo} para substituir somente o snapshot mensal correspondente.');
+    const resolvedPrefix = resolveStoragePrefix(prefixTemplate, new Date(), mesReprocessamento);
+    const prefix         = resolvedPrefix.endsWith('/') ? resolvedPrefix : `${resolvedPrefix}/`;
+    const monthRootPrefix = prefix;
     if (!storageAccount || !container) throw new Error('Storage Account e Container não configurados');
 
     // SP para autenticar — usa sp_id vinculado ao storage, ou cai para a primeira SP ativa
-    const spQuery = stg.sp_id
-      ? await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [stg.sp_id])
-      : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo=true ORDER BY is_padrao DESC, id ASC LIMIT 1`);
-    if (!spQuery.rows.length) throw new Error(stg.sp_id ? `SP #${stg.sp_id} não encontrada` : 'Nenhuma SP ativa configurada');
-    const sp = spQuery.rows[0];
+    const sp = await _resolveStorageServicePrincipal(stg);
     const tenantId = _safeDecrypt(sp.tenant_id);
     const clientId = _safeDecrypt(sp.client_id);
     const secret   = _safeDecrypt(sp.client_secret);
@@ -18294,18 +19452,23 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
 
     _coletaProgresso.fase = 'Listando arquivos no container...';
     _logColeta(`Listando em ${storageAccount}/${container}/${prefix || '*'}`, _coletaProgresso);
-    let blobs = await _storageListBlobs(await getStorageToken(), storageAccount, container, prefix);
-    blobs = blobs.filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
-    _logColeta(`${blobs.length} arquivo(s) CSV/Parquet/ZIP encontrado(s)`, _coletaProgresso);
+    const selectedExport = await _storageSelectLatestExportRun(getStorageToken, storageAccount, container, prefix);
+    if (options.expectedRunId && selectedExport.runId !== options.expectedRunId) {
+      throw new Error(`O export mais recente mudou desde o teste (${options.expectedRunId} → ${selectedExport.runId}); teste o mês novamente.`);
+    }
+    const blobs = selectedExport.dataBlobs;
+    _logColeta(`${selectedExport.runCount} execução(ões) encontrada(s); selecionada ${selectedExport.runId} com ${blobs.length} partição(ões) e ${selectedExport.expectedRows} linha(s) no manifesto`, _coletaProgresso);
     if (!blobs.length) throw new Error('Nenhum arquivo CSV/Parquet/ZIP encontrado no caminho configurado');
+    if (selectedExport.expectedRows < 1) throw new Error('O manifesto da execução mais recente não contém linhas; snapshot anterior preservado.');
     _coletaProgresso.sub_total = blobs.length;
 
     await ensureAzureCostsTable();
     const COLS    = Object.keys(_mapRowCSV({}, ''));
     const ph      = COLS.map((_, i) => `$${i + 1}`).join(', ');
-    // INSERT puro — mesma razão da coleta API: a dedup é pelo DELETE do blob logo abaixo, e o
-    // ON CONFLICT engolia linha legítima do relatório em silêncio.
-    const sql = `INSERT INTO azure_costs (${COLS.join(', ')}) VALUES (${ph})`;
+    const sql = `INSERT INTO storage_import_stage (${COLS.join(', ')}) VALUES (${ph})`;
+    storageStageClient = await pool.connect();
+    await storageStageClient.query('DROP TABLE IF EXISTS pg_temp.storage_import_stage');
+    await storageStageClient.query(`CREATE TEMP TABLE storage_import_stage ON COMMIT PRESERVE ROWS AS SELECT ${COLS.join(', ')} FROM azure_costs WITH NO DATA`);
 
     for (let bi = 0; bi < blobs.length; bi++) {
       if (isCancelada()) { _logColeta('Cancelado', _coletaProgresso); break; }
@@ -18330,53 +19493,35 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
         const rows = await _lerArquivoRows(tmpFile, blob.name);
         _logColeta(`  ${rows.length} linhas`, _coletaProgresso);
 
-        // Substituição de snapshot no Storage: a coleta relista e reimporta TODOS os blobs do
-        // prefixo a cada execução, então sem apagar a importação anterior deste mesmo blob as
-        // linhas se acumulam a cada rodada. Aqui o escopo não é (assinatura, período) — o
-        // Storage não conhece período — e sim o próprio blob, que é o único discriminador real
-        // (arquivo_origem = caminho completo, com o diretório de execução do export da Azure).
-        // Só apaga se o arquivo trouxe linha: arquivo vazio ou ilegível não pode zerar o que já
-        // estava bom.
-        if (rows.length > 0) {
-          const rDel = await pool.query(`DELETE FROM azure_costs WHERE arquivo_origem = $1`, [blob.name]);
-          if (rDel.rowCount > 0) _logColeta(`  ↺ ${rDel.rowCount} linha(s) da importação anterior deste arquivo removida(s)`, _coletaProgresso);
-        }
-
-        const client = await pool.connect();
-        let ins = 0, upd = 0, err = 0;
-        // Total que o blob TRAZ, para conferir contra o que ficou gravado.
+        let ins = 0, err = 0;
         let custoBlob = 0;
         try {
-          await client.query('BEGIN');
+          await storageStageClient.query('BEGIN');
           let sp = 0;
           for (let i = 0; i < rows.length; i += 200) {
             for (const raw of rows.slice(i, i + 200)) {
               const spn = `sp_${sp++}`;
               try {
-                await client.query(`SAVEPOINT ${spn}`);
+                await storageStageClient.query(`SAVEPOINT ${spn}`);
                 const m = _mapRowCSV(raw, blob.name, histId);
                 registrarMesCustoImportado(mesesCustosAlterados, m.cost_date);
                 custoBlob += Number(m.cost_in_billing_currency) || 0;
-                const r2 = await client.query(sql, COLS.map(col => m[col] ?? null));
-                await client.query(`RELEASE SAVEPOINT ${spn}`);
-                if (r2.rowCount > 0) ins++; else upd++;
+                await storageStageClient.query(sql, COLS.map(col => m[col] ?? null));
+                await storageStageClient.query(`RELEASE SAVEPOINT ${spn}`);
+                ins++;
               } catch (e) {
-                await client.query(`ROLLBACK TO SAVEPOINT ${spn}`);
-                await client.query(`RELEASE SAVEPOINT ${spn}`);
+                await storageStageClient.query(`ROLLBACK TO SAVEPOINT ${spn}`);
+                await storageStageClient.query(`RELEASE SAVEPOINT ${spn}`);
                 err++;
               }
             }
           }
-          await client.query('COMMIT');
-        } catch (e) { await client.query('ROLLBACK'); throw e; }
-        finally { client.release(); }
-        // Conferência de integridade do blob: o snapshot anterior dele foi apagado acima, então
-        // o que está gravado sob este arquivo_origem é só esta importação. Diferença = linha
-        // descartada na gravação, que nenhum contador acusa.
+          await storageStageClient.query('COMMIT');
+        } catch (e) { await storageStageClient.query('ROLLBACK'); throw e; }
         if (rows.length > 0) {
           try {
-            const rConf = await pool.query(
-              `SELECT COUNT(*)::int AS n, COALESCE(SUM(cost_in_billing_currency), 0) AS brl FROM azure_costs WHERE arquivo_origem = $1`,
+            const rConf = await storageStageClient.query(
+              `SELECT COUNT(*)::int AS n, COALESCE(SUM(cost_in_billing_currency), 0) AS brl FROM storage_import_stage WHERE arquivo_origem = $1`,
               [blob.name]
             );
             const gravado = Number(rConf.rows[0].brl) || 0;
@@ -18386,10 +19531,9 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
             }
           } catch (e) { _logColeta(`  Aviso: não foi possível conferir ${blob.name.split('/').pop()}: ${e.message.slice(0, 80)}`, _coletaProgresso); }
         }
-        totalIns += ins; totalUpd += upd; totalErr += err;
-        _logColeta(`  ins:${ins} upd:${upd} err:${err}`, _coletaProgresso);
+        totalErr += err;
+        _logColeta(`  staging:${ins} err:${err}`, _coletaProgresso);
         _coletaProgresso.ins = totalIns;
-        _coletaProgresso.upd = totalUpd;
         _coletaProgresso.err = totalErr;
       } catch (blobErr) {
         _logColeta(`ERRO ${blob.name.split('/').pop()}: ${blobErr.message.slice(0, 60)}`, _coletaProgresso);
@@ -18401,6 +19545,30 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
       }
     }
 
+    if (isCancelada()) throw new Error('Coleta Storage cancelada; snapshot anterior preservado.');
+    if (totalErr > 0) throw new Error(`Execução incompleta: ${totalErr} erro(s) ao importar partições; snapshot anterior preservado.`);
+    const stageCount = await storageStageClient.query('SELECT COUNT(*)::int AS n FROM storage_import_stage');
+    const stagedRows = Number(stageCount.rows[0]?.n) || 0;
+    if (stagedRows !== selectedExport.expectedRows) {
+      throw new Error(`Contagem divergente: manifesto=${selectedExport.expectedRows}, importado=${stagedRows}; snapshot anterior preservado.`);
+    }
+
+    try {
+      await storageStageClient.query('BEGIN');
+      const removed = await storageStageClient.query(
+        `DELETE FROM azure_costs WHERE LEFT(COALESCE(arquivo_origem, ''), LENGTH($1)) = $1`,
+        [monthRootPrefix]
+      );
+      const inserted = await storageStageClient.query(
+        `INSERT INTO azure_costs (${COLS.join(', ')}) SELECT ${COLS.join(', ')} FROM storage_import_stage`
+      );
+      await storageStageClient.query('COMMIT');
+      totalIns = inserted.rowCount;
+      _logColeta(`Snapshot ${selectedExport.runId} aplicado: ${totalIns} linha(s); ${removed.rowCount} linha(s) anterior(es) do mês substituída(s).`, _coletaProgresso);
+    } catch (e) { await storageStageClient.query('ROLLBACK'); throw e; }
+    storageStageClient.release();
+    storageStageClient = null;
+
     await _sincronizarCustoDiarioMeses('coleta Storage', [...mesesCustosAlterados]);
     // Marca registros desta coleta como fonte='storage' para não aparecerem no histórico de import manual
     pool.query(`UPDATE azure_costs SET fonte='storage' WHERE importado_em >= $1 AND (fonte IS NULL OR fonte='manual')`, [_coletaStartEm]).catch(() => {});
@@ -18410,7 +19578,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
 
     // ── Price List via Storage (opcional) ──────────────────────────────────────
     let plMsg = '';
-    if (stg.price_list_prefix?.trim()) {
+    if (!options.billingOnly && stg.coletar_price_list !== false && stg.price_list_prefix?.trim()) {
       const plPrefix = stg.price_list_prefix.trim();
       let plHistId, plLog = [];
       const _logPl = msg => { _logColeta(`[PL] ${msg}`, _coletaProgresso); plLog.push(msg); };
@@ -18478,7 +19646,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     // nem Price List do mesmo Storage. Export esperado: Cost Management → Exports →
     // dataset "Reservations" (ou o botão Export da tela Reservations do portal).
     let rsvMsg = '';
-    if (stg.reservas_prefix?.trim()) {
+    if (!options.billingOnly && stg.coletar_reservas !== false && stg.reservas_prefix?.trim()) {
       const rsvPrefix = stg.reservas_prefix.trim();
       let rsvHistId, rsvLog = [];
       const _logRsv = msg => { _logColeta(`[RSV] ${msg}`, _coletaProgresso); rsvLog.push(msg); };
@@ -18571,6 +19739,7 @@ async function _executarColetaStorage(modo = 'manual', storageId = null) {
     _alertarColetaComErro('Coleta Storage com erro', err.message).catch(() => {});
     throw err;
   } finally {
+    if (storageStageClient) storageStageClient.release();
     // v4.2: Remover entrada do Map
     _coletasEmExecucao.delete(coletaChave);
   }
@@ -18787,12 +19956,13 @@ app.get('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (_req,
 
 app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, coletar_price_list, coletar_reservas, ativo, sp_id } = req.body;
     await ensureAzureColetaTable();
     if (!storage_account?.trim() || !storage_container?.trim()) return res.status(400).json({ error: 'Storage Account e Container são obrigatórios' });
     const r = await pool.query(
-      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,price_list_prefix,reservas_prefix,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null, ativo ?? true, sp_id || null]
+      `INSERT INTO azure_storage_config(nome,storage_account,storage_container,storage_prefix,price_list_prefix,reservas_prefix,coletar_price_list,coletar_reservas,ativo,sp_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+      [nome || 'Storage 1', storage_account.trim(), storage_container.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null,
+        coletar_price_list !== false, coletar_reservas !== false, ativo ?? true, sp_id || null]
     );
     res.json({ ok: true, id: r.rows[0].id });
   } catch (e) { _dbErr(res, e); }
@@ -18800,10 +19970,11 @@ app.post('/api/azure-coleta/storages', authMiddleware, dbMiddleware, async (req,
 
 app.put('/api/azure-coleta/storages/:id', authMiddleware, dbMiddleware, async (req, res) => {
   try {
-    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, ativo, sp_id } = req.body;
+    const { nome, storage_account, storage_container, storage_prefix, price_list_prefix, reservas_prefix, coletar_price_list, coletar_reservas, ativo, sp_id } = req.body;
     await pool.query(
-      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,price_list_prefix=$5,reservas_prefix=$6,ativo=$7,sp_id=$8,atualizado_em=NOW() WHERE id=$9`,
-      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null, ativo ?? true, sp_id || null, req.params.id]
+      `UPDATE azure_storage_config SET nome=$1,storage_account=$2,storage_container=$3,storage_prefix=$4,price_list_prefix=$5,reservas_prefix=$6,coletar_price_list=COALESCE($7,coletar_price_list),coletar_reservas=COALESCE($8,coletar_reservas),ativo=$9,sp_id=$10,atualizado_em=NOW() WHERE id=$11`,
+      [nome, storage_account?.trim(), storage_container?.trim(), storage_prefix?.trim() || null, price_list_prefix?.trim() || null, reservas_prefix?.trim() || null,
+        coletar_price_list == null ? null : Boolean(coletar_price_list), coletar_reservas == null ? null : Boolean(coletar_reservas), ativo ?? true, sp_id || null, req.params.id]
     );
     res.json({ ok: true });
   } catch (e) { _dbErr(res, e); }
@@ -18821,16 +19992,28 @@ app.post('/api/azure-coleta/storages/:id/testar', authMiddleware, dbMiddleware, 
     const stgRow = await pool.query(`SELECT * FROM azure_storage_config WHERE id=$1`, [req.params.id]);
     if (!stgRow.rows.length) return res.status(404).json({ error: 'Storage não encontrado' });
     const stg = stgRow.rows[0];
-    const spQuery = stg.sp_id
-      ? await pool.query(`SELECT * FROM azure_coleta_config WHERE id=$1`, [stg.sp_id])
-      : await pool.query(`SELECT * FROM azure_coleta_config WHERE ativo=true ORDER BY is_padrao DESC, id ASC LIMIT 1`);
-    if (!spQuery.rows.length) return res.status(400).json({ error: 'Nenhuma SP configurada para autenticar' });
-    const sp  = spQuery.rows[0];
-    const tok = await _storageGetToken(_safeDecrypt(sp.tenant_id), _safeDecrypt(sp.client_id), _safeDecrypt(sp.client_secret));
-    let blobs = await _storageListBlobs(tok, stg.storage_account, stg.storage_container, stg.storage_prefix || '');
-    blobs = blobs.filter(b => /\.(csv|parquet)$/i.test(b.name));
+    let sp;
+    try { sp = await _resolveStorageServicePrincipal(stg); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    const getStorageToken = _makeStorageTokenGetter(_safeDecrypt(sp.tenant_id), _safeDecrypt(sp.client_id), _safeDecrypt(sp.client_secret));
+    const token = await getStorageToken();
+    const mes = req.body?.mes || null;
+    if (mes && !/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) return res.status(400).json({ error: 'mes deve estar no formato YYYY-MM' });
+    const resolvedPrefix = resolveStoragePrefix(stg.storage_prefix?.trim() || '', new Date(), mes);
+    const prefix = resolvedPrefix.endsWith('/') ? resolvedPrefix : `${resolvedPrefix}/`;
+    const periodoConfiguravel = String(stg.storage_prefix || '').includes('{periodo}');
+    if (!periodoConfiguravel) {
+      const blobs = (await _storageListBlobs(token, stg.storage_account, stg.storage_container, prefix))
+        .filter(b => /\.(csv|parquet|zip)$/i.test(b.name));
+      const totalSize = blobs.reduce((s, b) => s + b.size, 0);
+      return res.json({ ok: true, prefix, periodoConfiguravel, total: blobs.length, totalSizeMB: (totalSize/1048576).toFixed(1),
+        preview: blobs.slice(0,10).map(b => ({ name: b.name, sizeMB: (b.size/1048576).toFixed(2), lastModified: b.lastModified })) });
+    }
+    const selectedExport = await _storageSelectLatestExportRun(getStorageToken, stg.storage_account, stg.storage_container, prefix);
+    const blobs = selectedExport.dataBlobs;
     const totalSize = blobs.reduce((s, b) => s + b.size, 0);
-    res.json({ ok: true, total: blobs.length, totalSizeMB: (totalSize/1048576).toFixed(1),
+    res.json({ ok: true, prefix, periodoConfiguravel, runId: selectedExport.runId, manifestRows: selectedExport.expectedRows,
+      total: blobs.length, totalSizeMB: (totalSize/1048576).toFixed(1),
       preview: blobs.slice(0,10).map(b => ({ name: b.name, sizeMB: (b.size/1048576).toFixed(2), lastModified: b.lastModified })) });
   } catch (e) { _dbErr(res, e); }
 });
@@ -18838,8 +20021,37 @@ app.post('/api/azure-coleta/storages/:id/testar', authMiddleware, dbMiddleware, 
 app.post('/api/azure-coleta/storages/:id/executar', authMiddleware, dbMiddleware, (req, res) => {
   const storageId = parseInt(req.params.id);
   if (_coletaAtiva('storage', storageId)) return res.status(409).json({ error: `Coleta Storage #${storageId} já em execução` });
-  res.json({ ok: true, message: 'Coleta Storage iniciada' });
-  _executarColetaStorage('manual', parseInt(req.params.id)).catch(e => console.error('[ColetaStorage] Erro:', e.message));
+  pool.query(`SELECT * FROM azure_storage_config WHERE id=$1`, [storageId])
+    .then(async result => {
+      if (!result.rows.length) return res.status(404).json({ error: 'Storage não encontrado' });
+      try { await _resolveStorageServicePrincipal(result.rows[0]); }
+      catch (e) { return res.status(403).json({ error: e.message }); }
+      res.json({ ok: true, message: 'Coleta Storage iniciada' });
+      _executarColetaStorage('manual', storageId).catch(e => console.error('[ColetaStorage] Erro:', e.message));
+    })
+    .catch(e => _dbErr(res, e));
+});
+
+app.post('/api/azure-coleta/storages/:id/reprocessar-mes', authMiddleware, dbMiddleware, async (req, res) => {
+  const storageId = parseInt(req.params.id, 10);
+  const mes = String(req.body?.mes || '');
+  const expectedRunId = String(req.body?.runId || '').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) return res.status(400).json({ error: 'mes é obrigatório (formato YYYY-MM)' });
+  if (expectedRunId.length > 100) return res.status(400).json({ error: 'runId inválido' });
+  if (_coletaAtiva('storage', storageId)) return res.status(409).json({ error: `Coleta Storage #${storageId} já em execução` });
+  try {
+    const result = await pool.query(`SELECT * FROM azure_storage_config WHERE id=$1`, [storageId]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Storage não encontrado' });
+    const stg = result.rows[0];
+    if (!String(stg.storage_prefix || '').includes('{periodo}')) {
+      return res.status(400).json({ error: 'O prefixo do Storage precisa conter {periodo} para reprocessar um mês com segurança.' });
+    }
+    try { await _resolveStorageServicePrincipal(stg); }
+    catch (e) { return res.status(403).json({ error: e.message }); }
+    res.json({ ok: true, message: `Reprocessamento do mês ${mes} iniciado` });
+    _executarColetaStorage('manual', storageId, mes, { billingOnly: true, expectedRunId: expectedRunId || null })
+      .catch(e => console.error(`[ColetaStorage] Erro ao reprocessar ${mes}:`, e.message));
+  } catch (e) { _dbErr(res, e); }
 });
 
 app.put('/api/azure-coleta/storages/:id/agendamento', authMiddleware, dbMiddleware, async (req, res) => {
@@ -18896,7 +20108,7 @@ app.get('/api/azure-coleta/agendamentos', authMiddleware, dbMiddleware, async (_
       pool.query(`
         SELECT id, nome, hora_execucao, dias_semana, proxima_coleta, granularidade_dias, 'api' AS tipo
         FROM azure_coleta_config
-        WHERE ativo = true AND auto_coleta = true AND hora_execucao IS NOT NULL
+        WHERE ativo = true AND auto_coleta = true AND coletar_billing_api = true AND hora_execucao IS NOT NULL
         ORDER BY proxima_coleta ASC NULLS LAST
       `)
     ]);
@@ -22382,6 +23594,7 @@ app.get('/health', (_req, res) => {
       try { await ensurePriceListTable(); } catch (e) { console.warn('[PriceList] Tabela será criada no primeiro sync:', e.message); }
       _iniciarAgendador();
       _iniciarAlertasEmail();
+      _iniciarDesperdicioEstadosAgendador();
       _iniciarInventarioAgendador();
       _iniciarReconciliacaoAgendador();
       _iniciarRecursoTagsCache();

@@ -8,8 +8,8 @@ interface Props {
   onClose: () => void
 }
 
-function brl(v: number): string {
-  return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+function usd(v: number): string {
+  return 'US$ ' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 // Porta de ExpurgoModal.tsx (Azure) — mesma UX (3 modos, preview antes de habilitar
@@ -98,7 +98,7 @@ export default function DatabricksExpurgoModal({ onClose }: Props) {
               <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
                 <div>
                   <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Custo total registrado</div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent)' }}>{brl(resumoQuery.data.total_custo)}</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent)' }}>{usd(resumoQuery.data.total_custo)}</div>
                 </div>
                 <div>
                   <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Workspaces</div>

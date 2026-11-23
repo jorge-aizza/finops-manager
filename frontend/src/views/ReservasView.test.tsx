@@ -134,6 +134,41 @@ describe('ReservasView', () => {
     await waitFor(() => expect(reservasApi.listReservas).toHaveBeenCalledTimes(chamadasAntes + 1))
   });
 
+  it('sincroniza todas as SPs habilitadas e identifica a falha parcial por SP', async () => {
+    const user = userEvent.setup()
+    vi.mocked(coletaApi.listSPs).mockResolvedValue([
+      { id: 7, nome: 'SP A', ativo: true, is_padrao: true, coletar_reservas_api: true },
+      { id: 8, nome: 'SP B', ativo: true, is_padrao: false, coletar_reservas_api: true },
+      { id: 9, nome: 'SP desabilitada', ativo: true, is_padrao: false, coletar_reservas_api: false },
+    ] as never)
+    vi.mocked(reservasApi.sincronizarReservasAzure).mockResolvedValue({
+      ok: true,
+      sp: 'SP A, SP B',
+      total: 2,
+      inseridas: 2,
+      atualizadas: 0,
+      avisos: ['SP B: Reservations Reader ausente'],
+      por_sp: [
+        { sp: 'SP A', total: 2, ok: true, avisos: [] },
+        { sp: 'SP B', total: 0, ok: false, avisos: ['Reservations Reader ausente'] },
+      ],
+    })
+
+    renderWithClient()
+    await screen.findByText('EC2-Prod-Reserva')
+    await user.click(screen.getByText('Filtros'))
+    const seletorSp = screen.getByRole('combobox', { name: 'Service Principal' })
+    expect(seletorSp).toHaveValue('')
+    expect(screen.getByRole('option', { name: 'Todas as SPs aptas' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'SP desabilitada' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Sincronizar com Azure' }))
+    await waitFor(() => expect(reservasApi.sincronizarReservasAzure).toHaveBeenCalledWith(undefined))
+    expect(await screen.findByText('SP A:')).toBeInTheDocument()
+    expect(screen.getByText('SP B:')).toBeInTheDocument()
+    expect(screen.getByText(/Reservations Reader ausente/)).toBeInTheDocument()
+  });
+
   it('desabilita a sincronização quando não há SP ativa', async () => {
     vi.mocked(coletaApi.listSPs).mockResolvedValue([])
     renderWithClient()

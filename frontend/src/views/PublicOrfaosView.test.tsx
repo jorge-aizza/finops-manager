@@ -18,9 +18,9 @@ const resposta: OrfaosPublicaResposta = {
     { categoria: 'ip_solto', itens: 1, custo_mensal_estimado: 0 },
   ],
   itens: [
-    { nome: 'disco-a', categoria: 'disco_orfao', subscription_name: 'Assinatura Produção', resource_group: 'RG-A', sku: 'Premium_LRS', tamanho_gb: 128, custo_mensal_estimado: 100, dias_orfao: 40 },
-    { nome: 'disco-b', categoria: 'disco_orfao', subscription_name: 'Assinatura Homolog', resource_group: 'RG-B', sku: 'Standard_LRS', tamanho_gb: 64, custo_mensal_estimado: 50, dias_orfao: 5 },
-    { nome: 'ip-x', categoria: 'ip_solto', subscription_name: 'Assinatura Produção', resource_group: 'RG-A', sku: 'Standard', tamanho_gb: null, custo_mensal_estimado: null, dias_orfao: null },
+    { nome: 'disco-a', categoria: 'disco_orfao', subscription_name: 'Assinatura Produção', resource_group: 'RG-A', sku: 'Premium_LRS', tamanho_gb: 128, custo_mensal_estimado: 100, dias_orfao: 40, dias_estado_atual: 40 },
+    { nome: 'disco-b', categoria: 'disco_orfao', subscription_name: 'Assinatura Homolog', resource_group: 'RG-B', sku: 'Standard_LRS', tamanho_gb: 64, custo_mensal_estimado: 50, dias_orfao: 5, dias_ocioso: 5, fonte_dias_ocioso: 'azure' },
+    { nome: 'ip-x', categoria: 'ip_solto', subscription_name: 'Assinatura Produção', resource_group: 'RG-A', sku: 'Standard', tamanho_gb: null, custo_mensal_estimado: null, dias_orfao: null, dias_estado_atual: 12, estado_desde: '2026-11-01T00:00:00Z' },
   ],
 }
 
@@ -44,6 +44,9 @@ describe('PublicOrfaosView', () => {
     expect(await screen.findByText('disco-a')).toBeInTheDocument()
     expect(screen.getByText('ip-x')).toBeInTheDocument()
     expect(screen.getAllByText(/R\$\s150,00/).length).toBeGreaterThan(0)
+    const itemIp = screen.getByText('ip-x').closest('tr') as HTMLElement
+    expect(within(itemIp).getByText('12d')).toBeInTheDocument()
+    expect(within(screen.getByText('disco-a').closest('tr') as HTMLElement).getByText('40d')).toBeInTheDocument()
     expect(screen.getByText(/1 recurso\(s\) sem billing conhecido/)).toBeInTheDocument()
   })
 
@@ -59,6 +62,23 @@ describe('PublicOrfaosView', () => {
     expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
     expect(screen.getByText('disco-b')).toBeInTheDocument()
 
+    await user.click(screen.getByRole('button', { name: 'Limpar filtros' }))
+    await user.click(screen.getByText('Todas as assinaturas'))
+    const dropdownAssinatura = within(document.querySelector('.cms-dropdown') as HTMLElement)
+    await user.type(dropdownAssinatura.getByPlaceholderText('Buscar assinatura...'), 'Homolog')
+    await user.click(dropdownAssinatura.getByText('Assinatura Homolog'))
+    await user.click(dropdownAssinatura.getByRole('button', { name: 'OK ✓' }))
+    expect(screen.getByText('disco-b')).toBeInTheDocument()
+    expect(screen.queryByText('disco-a')).not.toBeInTheDocument()
+    const triggerAssinatura = [...document.querySelectorAll('.cms-trigger')]
+      .find((el) => el.textContent?.trim() === 'Assinatura Homolog') as HTMLElement
+    await user.click(triggerAssinatura)
+    const dropdownCustom = within(document.querySelector('.cms-dropdown') as HTMLElement)
+    await user.click(dropdownCustom.getByRole('button', { name: 'Limpar' }))
+    await user.type(dropdownCustom.getByPlaceholderText('Buscar assinatura...'), 'assinatura não listada')
+    await user.click(dropdownCustom.getByLabelText('Usar texto "assinatura não listada"'))
+    await user.click(dropdownCustom.getByRole('button', { name: 'OK ✓' }))
+    expect(screen.queryByText('disco-b')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Limpar filtros' }))
     await user.type(screen.getByPlaceholderText('Buscar por recurso ou assinatura...'), 'ip-')
     expect(screen.getByText('ip-x')).toBeInTheDocument()

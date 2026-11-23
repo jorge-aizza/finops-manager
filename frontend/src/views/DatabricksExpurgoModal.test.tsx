@@ -42,7 +42,7 @@ beforeEach(() => {
 describe('DatabricksExpurgoModal', () => {
   it('carrega o resumo do banco com um range bem largo (não os últimos 6 meses padrão)', async () => {
     renderWithClient()
-    await screen.findByText('R$ 602,85')
+    await screen.findByText('US$ 602.85')
     expect(databricksColetaApi.getDatabricksResumo).toHaveBeenCalledWith('2015-01-01', expect.any(String))
   });
 
@@ -50,7 +50,7 @@ describe('DatabricksExpurgoModal', () => {
     const user = userEvent.setup()
     vi.mocked(databricksColetaApi.getDatabricksPurgePreview).mockResolvedValue({ total: 42 })
     renderWithClient()
-    await screen.findByText('R$ 602,85')
+    await screen.findByText('US$ 602.85')
 
     expect(screen.getByRole('button', { name: /Confirmar Expurgo/ })).toBeDisabled()
 
@@ -68,7 +68,7 @@ describe('DatabricksExpurgoModal', () => {
     vi.mocked(databricksColetaApi.getDatabricksPurgePreview).mockResolvedValue({ total: 2 })
     vi.mocked(databricksColetaApi.executarDatabricksPurge).mockResolvedValue({ message: '2 registro(s) removidos.', removidos: 2 })
     renderWithClient()
-    await screen.findByText('R$ 602,85')
+    await screen.findByText('US$ 602.85')
 
     await user.click(screen.getByLabelText('Por workspace'))
     await user.selectOptions(screen.getByRole('combobox'), 'ws-teste-verificacao')
@@ -85,7 +85,7 @@ describe('DatabricksExpurgoModal', () => {
   it('modo "tudo": confirmar fica habilitado sem precisar verificar antes', async () => {
     const user = userEvent.setup()
     renderWithClient()
-    await screen.findByText('R$ 602,85')
+    await screen.findByText('US$ 602.85')
 
     await user.click(screen.getByLabelText('Todos os dados'))
     expect(screen.getByRole('button', { name: /Confirmar Expurgo/ })).not.toBeDisabled()

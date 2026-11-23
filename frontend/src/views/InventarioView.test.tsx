@@ -99,21 +99,26 @@ describe('InventarioView', () => {
   })
 
   it('aba Desperdício mostra dias órfão e filtra por tempo mínimo', async () => {
-    const base = { subscription_id: 's', subscription_name: 'Assinatura Principal', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
+    const base = { subscription_id: 'sub-12345678', subscription_name: 'Assinatura Principal', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, motivo_validacao: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
-      gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [], ocultos_sem_custo: 0, saving: null,
+      gerado_em: '', dias_snapshot: 90, total_itens: 4, custo_mensal_estimado_total: 0, sem_custo_conhecido: 4, erros: [], ocultos_sem_custo: 0, saving: null,
       por_categoria: [],
       itens: [
-        { ...base, categoria: 'disco_orfao', resource_id: '/d1', nome: 'disco-velho', marcado_orfao_em: '2026-06-01T00:00:00Z', dias_orfao: 120 },
-        { ...base, categoria: 'nic_orfa', resource_id: '/n1', nome: 'nic-media', marcado_orfao_em: '2026-08-20T00:00:00Z', dias_orfao: 35 },
-        { ...base, categoria: 'ip_solto', resource_id: '/i1', nome: 'ip-novo', marcado_orfao_em: '2026-09-22T00:00:00Z', dias_orfao: 2 },
+        { ...base, categoria: 'disco_orfao', resource_id: '/d1', nome: 'disco-velho', marcado_orfao_em: '2026-06-01T00:00:00Z', dias_orfao: 120, dias_estado_atual: 120 },
+        { ...base, categoria: 'disco_orfao', resource_id: '/d2', nome: 'disco-validar', motivo_validacao: 'aks_pvc', marcado_orfao_em: '2026-10-01T00:00:00Z', dias_orfao: 45, dias_ocioso: 45, fonte_dias_ocioso: 'azure' },
+        { ...base, categoria: 'nic_orfa', resource_id: '/n1', nome: 'nic-media', marcado_orfao_em: '2026-08-20T00:00:00Z', dias_orfao: 35, dias_ocioso: null, fonte_dias_ocioso: null },
+        { ...base, categoria: 'ip_solto', resource_id: '/i1', nome: 'ip-novo', marcado_orfao_em: '2026-09-22T00:00:00Z', dias_orfao: 2, dias_estado_atual: 4, estado_desde: '2026-11-12T00:00:00Z', dias_ocioso: 4, fonte_dias_ocioso: 'coleta' },
       ],
     })
     renderWithClient()
     await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
     expect(await screen.findByText('120d')).toBeInTheDocument()
-    expect(screen.getByText('35d')).toBeInTheDocument()
-    expect(screen.getByText('2d')).toBeInTheDocument()
+    const itemOcioso = screen.getByText('disco-velho').closest('tr') as HTMLElement
+    expect(within(itemOcioso).getByText('sub-12345678')).toBeInTheDocument()
+    expect(within(screen.getByText('ip-novo').closest('tr') as HTMLElement).getByText('4d')).toBeInTheDocument()
+    expect(within(screen.getByText('disco-velho').closest('tr') as HTMLElement).getByText('120d')).toBeInTheDocument()
+    expect(within(screen.getByText('disco-validar').closest('tr') as HTMLElement).getByText('45d')).toBeInTheDocument()
+    expect(within(screen.getByText('nic-media').closest('tr') as HTMLElement).getByText('Sem histórico')).toBeInTheDocument()
 
     await userEvent.selectOptions(screen.getByLabelText('Órfão há'), '30')
     expect(screen.getByText('disco-velho')).toBeInTheDocument()
@@ -212,7 +217,7 @@ describe('InventarioView', () => {
   }, 30000) // muitos cliques simulados: passa de 5s com a máquina ocupada
 
   it('aba Desperdício separa discos de PVC do AKS e de ASR numa seção própria de validação', async () => {
-    const base = { subscription_id: 's', subscription_name: 'Assinatura Principal', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, marcado_orfao_em: null, dias_orfao: 1 }
+    const base = { subscription_id: 'sub-validation-1234', subscription_name: 'Assinatura Principal', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, marcado_orfao_em: null, dias_orfao: 1 }
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0, saving: null,
       por_categoria: [{ categoria: 'disco_orfao', itens: 3, custo_mensal_estimado: 180, sem_custo_conhecido: 0 }],
@@ -239,6 +244,8 @@ describe('InventarioView', () => {
     const secaoValidacao = screen.getByText('⚠️ Discos para validação').closest('.card') as HTMLElement
     const dentro = within(secaoValidacao)
     expect(dentro.getByText('pvc-abc123')).toBeInTheDocument()
+    const itemValidacao = dentro.getByText('pvc-abc123').closest('tr') as HTMLElement
+    expect(within(itemValidacao).getByText('sub-validation-1234')).toBeInTheDocument()
     expect(dentro.getByText('AKS/PVC')).toBeInTheDocument()
     expect(dentro.getByText('disco-ASR-backup')).toBeInTheDocument()
     expect(dentro.getByText('ASR')).toBeInTheDocument()
@@ -247,33 +254,97 @@ describe('InventarioView', () => {
     expect(document.querySelector('.stat-card.accent .stat-value')).toHaveTextContent('1')
   })
 
-  // Economia realizada (2026-10-17, pedido do usuário: card que contabiliza como Saving o
-  // que foi excluído). O valor exibido é o LÍQUIDO — já descontado o snapshot de retenção
-  // dos 90 dias, que ainda custa. Mostrar o bruto aqui superestimaria a economia, que foi
-  // justamente a decisão tomada com o usuário ao desenhar isso.
-  it('aba Desperdício mostra economia realizada já descontados os snapshots de retenção', async () => {
+  it('exporta Excel e PDF de cada seção usando os filtros selecionados', async () => {
+    const base = { subscription_id: 'sub-export', subscription_name: 'Assinatura', resource_group: 'rg', location: 'x', sku: null, tamanho_gb: null, criado_em: null, custo_periodo: null, dias_observados: 0, custo_mensal_estimado: null, marcado_orfao_em: null, dias_orfao: 20, motivo_validacao: null }
+    vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
+      gerado_em: '', dias_snapshot: 90, total_itens: 3, custo_mensal_estimado_total: 0, sem_custo_conhecido: 3, erros: [], ocultos_sem_custo: 0, saving: null,
+      por_categoria: [
+        { categoria: 'disco_orfao', itens: 2, custo_mensal_estimado: 0, sem_custo_conhecido: 2 },
+        { categoria: 'nic_orfa', itens: 1, custo_mensal_estimado: 0, sem_custo_conhecido: 1 },
+      ],
+      itens: [
+        { ...base, categoria: 'disco_orfao', resource_id: '/d1', nome: 'disco-normal' },
+        { ...base, categoria: 'disco_orfao', resource_id: '/d2', nome: 'disco-validacao', motivo_validacao: 'aks_pvc' },
+        { ...base, categoria: 'nic_orfa', resource_id: '/n1', nome: 'nic-ociosa' },
+      ],
+    })
+    vi.mocked(azureInventarioApi.baixarAzureDesperdicioExcel).mockResolvedValue(undefined)
+    const user = userEvent.setup()
+    renderWithClient()
+    await user.click(await screen.findByRole('tab', { name: 'Desperdício' }))
+    await user.type(screen.getByPlaceholderText('Buscar por recurso ou assinatura...'), 'disco')
+
+    const secaoPrincipal = screen.getAllByText('Recursos ociosos', { selector: '.card-title' })[0].closest('.card') as HTMLElement
+    const principal = within(secaoPrincipal)
+    await user.click(principal.getByRole('button', { name: 'Exportar Excel - Recursos ociosos' }))
+    await waitFor(() => expect(azureInventarioApi.baixarAzureDesperdicioExcel).toHaveBeenCalledTimes(1))
+    const [itensPrincipais, filtrosPrincipais] = vi.mocked(azureInventarioApi.baixarAzureDesperdicioExcel).mock.calls[0]
+    expect(itensPrincipais.map((item) => item.resource_id)).toEqual(['/d1'])
+    expect(itensPrincipais[0].subscription_id).toBe('sub-export')
+    expect(filtrosPrincipais).toContain('Busca: "disco"')
+    expect(filtrosPrincipais).toContain('Seção: Recursos ociosos')
+
+    await user.click(principal.getByRole('button', { name: 'Exportar PDF - Recursos ociosos' }))
+    expect((screen.getByTitle('Desperdício de Recursos') as HTMLIFrameElement).srcdoc).toContain('disco-normal')
+    expect((screen.getByTitle('Desperdício de Recursos') as HTMLIFrameElement).srcdoc).toContain('sub-export')
+    expect((screen.getByTitle('Desperdício de Recursos') as HTMLIFrameElement).srcdoc).not.toContain('disco-validacao')
+    await user.click(screen.getByTitle('Fechar'))
+
+    const secaoValidacao = screen.getByText('⚠️ Discos para validação').closest('.card') as HTMLElement
+    const validacao = within(secaoValidacao)
+    await user.click(validacao.getByRole('button', { name: 'Exportar Excel - Discos para validação' }))
+    await waitFor(() => expect(azureInventarioApi.baixarAzureDesperdicioExcel).toHaveBeenCalledTimes(2))
+    const [itensValidacao, filtrosValidacao] = vi.mocked(azureInventarioApi.baixarAzureDesperdicioExcel).mock.calls[1]
+    expect(itensValidacao.map((item) => item.resource_id)).toEqual(['/d2'])
+    expect(itensValidacao[0].subscription_id).toBe('sub-export')
+    expect(filtrosValidacao).toContain('Busca: "disco"')
+    expect(filtrosValidacao).toContain('Seção: Discos para validação')
+
+    await user.click(validacao.getByRole('button', { name: 'Exportar PDF - Discos para validação' }))
+    expect((screen.getByTitle('Desperdício de Recursos') as HTMLIFrameElement).srcdoc).toContain('disco-validacao')
+    expect((screen.getByTitle('Desperdício de Recursos') as HTMLIFrameElement).srcdoc).toContain('sub-export')
+    expect((screen.getByTitle('Desperdício de Recursos') as HTMLIFrameElement).srcdoc).not.toContain('disco-normal')
+  })
+
+  // O card de economia realizada usa o mesmo valor líquido do portal público, sem duplicar cards.
+  it('mostra o saving do portal público no card existente e mantém o detalhamento por categoria', async () => {
     vi.mocked(azureInventarioApi.getAzureDesperdicio).mockResolvedValue({
       gerado_em: '', dias_snapshot: 90, total_itens: 0, custo_mensal_estimado_total: 0, sem_custo_conhecido: 0, erros: [], ocultos_sem_custo: 0,
       por_categoria: [], itens: [],
+      saving_portal_publico: { economia_mensal: 800, economia_acumulada: 2100, recursos_eliminados: 5 },
       saving: {
-        economia_mensal: 800, economia_mensal_bruta: 1000, desconto_mensal_snapshots: 200,
-        economia_acumulada: 2400, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, nao_contabilizados_manual: 0, itens: [],
+        economia_mensal: 800, economia_mensal_bruta: 1000,
+        saving_disco_mensal: 1000, saving_disco_acumulado: 3000,
+        saving_snapshots_mensal: 80, saving_snapshots_acumulado: 160,
+        saving_outros_mensal: 50, saving_outros_acumulado: 100,
+        desconto_mensal_snapshots: 200, custo_acumulado_snapshots: 300,
+        economia_acumulada: 2100, recursos_eliminados: 7, sem_custo_conhecido: 1, para_validacao: 0, para_validacao_custo_mensal: 0, nao_contabilizados_piso: 0, dias_min_orfao: 30, nao_contabilizados_manual: 0, itens: [],
       },
     })
     renderWithClient()
     await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
 
-    const card = (await screen.findByText('💰 Economia realizada por mês')).closest('.stat-card') as HTMLElement
-    // O VALOR em destaque é o líquido (800), não o bruto (1000) — o desconto do snapshot
-    // tem que estar aplicado. Escopado ao .stat-value de propósito: o bruto aparece sim no
-    // card, mas só na linha de composição abaixo, que é justamente o que o torna auditável.
-    expect(card.querySelector('.stat-value')).toHaveTextContent(/800/)
-    expect(card.querySelector('.stat-value')).not.toHaveTextContent(/1\.000/)
-    expect(within(card).getByText(/em snapshots/)).toBeInTheDocument()
+    const economiaRealizada = screen.getByText('💰 Economia já realizada').closest('.stat-card') as HTMLElement
+    expect(economiaRealizada.querySelector('.stat-value')).toHaveTextContent(/800/)
+    expect(within(economiaRealizada).getByText(/2\.100/)).toBeInTheDocument()
+    expect(within(economiaRealizada).getByText(/5 recurso\(s\) eliminado\(s\)/)).toBeInTheDocument()
+    expect(within(economiaRealizada).getByText(/Saving bruto de discos:/)).toBeInTheDocument()
+    expect(screen.queryByText('Saving comparável ao portal público')).not.toBeInTheDocument()
 
-    const acumulado = screen.getByText('Economia acumulada').closest('.stat-card') as HTMLElement
-    expect(within(acumulado).getByText(/7 recurso\(s\) eliminado\(s\)/)).toBeInTheDocument()
-    expect(within(acumulado).getByText(/1 sem custo conhecido/)).toBeInTheDocument()
+    const outros = screen.getByText('Saving de outros recursos').closest('.stat-card') as HTMLElement
+    expect(outros.querySelector('.stat-value')).toHaveTextContent(/50/)
+    expect(within(outros).getByText(/Acumulado estimado:.*100/)).toBeInTheDocument()
+
+    const snapshots = screen.getByText('Saving de snapshots').closest('.stat-card') as HTMLElement
+    expect(snapshots.querySelector('.stat-value')).toHaveTextContent(/80/)
+    expect(within(snapshots).getByText('Acumulado estimado')).toBeInTheDocument()
+    expect(within(snapshots).getByText(/160/)).toBeInTheDocument()
+
+    const snapshotsRetidos = screen.getByText('Snapshots retidos').closest('.stat-card') as HTMLElement
+    expect(snapshotsRetidos.querySelector('.stat-value')).toHaveTextContent(/200/)
+    expect(within(snapshotsRetidos).getByText('Custo acumulado estimado')).toBeInTheDocument()
+    expect(within(snapshotsRetidos).getByText(/300/)).toBeInTheDocument()
+    expect(within(snapshotsRetidos).getByText(/Abatido do Saving líquido comparável ao portal público/)).toBeInTheDocument()
   })
 
   // Recorte de FinOps (2026-10-18, pedido do usuário: "preciso olhar somente para os que
@@ -326,13 +397,13 @@ describe('InventarioView', () => {
     await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
 
     // O disco de AKS/ASR está DENTRO do valor em destaque.
-    const card = (await screen.findByText('💰 Economia realizada por mês')).closest('.stat-card') as HTMLElement
-    expect(card.querySelector('.stat-value')).toHaveTextContent(/1\.667/)
+    const discos = (await screen.findByText('💰 Economia já realizada')).closest('.stat-card') as HTMLElement
+    expect(discos.querySelector('.stat-value')).toHaveTextContent(/1\.667/)
+    expect(within(discos).getByText(/Saving bruto de discos:/)).toBeInTheDocument()
 
     // E as duas ressalvas aparecem, para o número não ser lido como resultado limpo.
-    const acumulado = screen.getByText('Economia acumulada').closest('.stat-card') as HTMLElement
-    expect(within(acumulado).getByText(/1 em validação \(AKS\/ASR\) dentro do total/)).toBeInTheDocument()
-    expect(within(acumulado).getByText(/3 não contabilizado\(s\): menos de 30 dias como órfão/)).toBeInTheDocument()
+    expect(within(discos).getByText(/1 em validação \(AKS\/ASR\)/)).toBeInTheDocument()
+    expect(within(discos).getByText(/3 abaixo do piso de 30 dias/)).toBeInTheDocument()
   })
 
   // O piso de dias como órfão (30, o prazo do fluxo real) tira do total quem foi excluído
@@ -343,7 +414,7 @@ describe('InventarioView', () => {
   // número que vai para a diretoria, o motivo é obrigatório e fica visível na linha.
   it('permite marcar um item como não contabilizado, exigindo motivo', async () => {
     const itemBase = {
-      resource_id: '/D9', categoria: 'disco_orfao' as const, nome: 'disco-antigo', subscription_id: 's',
+      resource_id: '/D9', categoria: 'disco_orfao' as const, nome: 'disco-antigo', subscription_id: 'sub-saved-5678',
       resource_group: 'rg-a', excluido_em: '2026-09-01T00:00:00Z', excluido_por: 'alguem@telefonica.com',
       custo_mensal: 500, dias_orfao: 45, motivo_validacao: null,
       contabilizado: true, motivo_fora: null, ignorado_por: null, ignorado_em: null, ignorado_motivo: null,
@@ -364,6 +435,8 @@ describe('InventarioView', () => {
     renderWithClient()
     await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
     await userEvent.click(await screen.findByRole('button', { name: 'Ver detalhes' }))
+    const itemEconomia = screen.getByText('disco-antigo').closest('tr') as HTMLElement
+    expect(within(itemEconomia).getByText('sub-saved-5678')).toBeInTheDocument()
 
     // Cancelar o prompt não chama a API — marcar é decisão, não acidente.
     const prompt = vi.spyOn(window, 'prompt').mockReturnValue(null)
@@ -443,9 +516,9 @@ describe('InventarioView', () => {
     await userEvent.click(await screen.findByRole('tab', { name: 'Desperdício' }))
 
     // O card aparece mesmo com total zero, porque há algo apurado a explicar.
-    const acumulado = await screen.findByText('Economia acumulada')
-    expect(within(acumulado.closest('.stat-card') as HTMLElement)
-      .getByText(/1 não contabilizado\(s\): menos de 30 dias como órfão/)).toBeInTheDocument()
+    const savingDiscos = (await screen.findByText('💰 Economia já realizada')).closest('.stat-card') as HTMLElement
+    expect(within(savingDiscos).getByText(/Saving bruto de discos:/)).toBeInTheDocument()
+    expect(within(savingDiscos).getByText(/1 abaixo do piso de 30 dias/)).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: 'Ver detalhes' }))
     const painel = screen.getByText('Economia realizada — detalhe').closest('.card') as HTMLElement
@@ -528,6 +601,25 @@ describe('InventarioView', () => {
 
     expect(screen.getAllByText('SP Produção', { selector: 'td' }).length).toBeGreaterThan(0)
     expect(screen.getAllByText('SP BigData', { selector: 'td' }).length).toBeGreaterThan(0)
+
+    await userEvent.click(screen.getByText('Todas as assinaturas'))
+    const dropdownAssinatura = within(document.querySelector('.cms-dropdown') as HTMLElement)
+    await userEvent.type(dropdownAssinatura.getByPlaceholderText('Buscar assinatura...'), 'SP Big')
+    await userEvent.click(dropdownAssinatura.getByText('SP BigData'))
+    await userEvent.click(dropdownAssinatura.getByRole('button', { name: 'OK ✓' }))
+    expect(screen.getByText('disco-bigdata')).toBeInTheDocument()
+    expect(screen.queryByText('disco-prod')).not.toBeInTheDocument()
+    const triggerAssinatura = [...document.querySelectorAll('.cms-trigger')]
+      .find((el) => el.textContent?.trim() === 'SP BigData') as HTMLElement
+    await userEvent.click(triggerAssinatura)
+    const dropdownCustom = within(document.querySelector('.cms-dropdown') as HTMLElement)
+    await userEvent.click(dropdownCustom.getByRole('button', { name: 'Limpar' }))
+    await userEvent.type(dropdownCustom.getByPlaceholderText('Buscar assinatura...'), 'assinatura sem recursos')
+    await userEvent.click(dropdownCustom.getByLabelText('Usar texto "assinatura sem recursos"'))
+    await userEvent.click(dropdownCustom.getByRole('button', { name: 'OK ✓' }))
+    expect(screen.queryByText('disco-bigdata')).not.toBeInTheDocument()
+    expect(screen.queryByText('disco-prod')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Limpar filtros' }))
 
     await userEvent.type(screen.getByPlaceholderText('Buscar por recurso ou assinatura...'), 'bigdata')
     expect(screen.getByText('disco-bigdata')).toBeInTheDocument()

@@ -558,17 +558,36 @@ export interface AzureDesperdicioItem {
   marcado_orfao_em: string | null
   /** Quantos dias desde que foi marcado como órfão — null se não marcado. */
   dias_orfao: number | null
+  /** Dias no estado atual; começa na primeira observação horária quando o Azure não fornece a data. */
+  dias_estado_atual?: number | null
+  estado_desde?: string | null
+  dias_ocioso?: number | null
+  fonte_dias_ocioso?: 'azure' | 'coleta' | null
 }
 /** Economia já realizada: órfãos que foram identificados aqui e depois excluídos de fato.
  *  Custo apurado no faturamento real dos 30 dias ANTES da exclusão (depois disso o recurso
  *  não fatura mais, uma janela corrente devolveria zero). */
 export interface AzureSavingOrfaos {
-  /** Já descontado o snapshot de retenção ainda vivo — é o número que vale como run-rate. */
+  /** Total legado líquido, preservado para compatibilidade com consumidores existentes. */
   economia_mensal: number
-  /** Antes do desconto dos snapshots — útil pra explicar a diferença na tela. */
+  /** Saving mensal bruto dos recursos excluídos, antes dos custos de snapshots. */
   economia_mensal_bruta: number
-  /** Quanto os snapshots dos 90 dias ainda estão custando. */
+  /** Saving mensal dos discos, sem abater snapshots. */
+  saving_disco_mensal?: number
+  /** Saving acumulado dos discos, sem abater snapshots. */
+  saving_disco_acumulado?: number
+  /** Saving mensal estimado após a exclusão de snapshots. */
+  saving_snapshots_mensal?: number
+  /** Saving acumulado estimado desde a exclusão dos snapshots. */
+  saving_snapshots_acumulado?: number
+  /** Saving mensal de outras categorias, separado de discos e snapshots. */
+  saving_outros_mensal?: number
+  /** Saving acumulado estimado de outras categorias. */
+  saving_outros_acumulado?: number
+  /** Quanto os snapshots ainda retidos custam por mês. */
   desconto_mensal_snapshots: number
+  /** Custo acumulado estimado dos snapshots durante o período de retenção. */
+  custo_acumulado_snapshots?: number
   economia_acumulada: number
   /** Só os que entraram na conta. `itens` traz mais que isso: inclui os barrados pelo piso
    *  de dias como órfão, para o detalhe poder mostrar por que ficaram de fora. */
@@ -619,6 +638,12 @@ export interface AzureDesperdicioResposta {
   total_itens: number
   /** null quando a apuração falhou — a tela de desperdício continua funcionando sem ela. */
   saving: AzureSavingOrfaos | null
+  /** Total calculado com a mesma allowlist e os mesmos filtros do portal público. */
+  saving_portal_publico?: {
+    economia_mensal: number
+    economia_acumulada: number
+    recursos_eliminados: number
+  } | null
   /** Itens coletados que ficaram fora por não gerarem custo ao ficarem órfãos (hoje, NIC).
    *  Continuam coletados e detectados — só não entram na visão de FinOps. */
   ocultos_sem_custo: number

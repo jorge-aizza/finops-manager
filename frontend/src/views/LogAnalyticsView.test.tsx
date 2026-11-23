@@ -267,8 +267,8 @@ describe('LogAnalyticsView', () => {
     expect(screen.getByText(/Custo \(Outubro\/2026, real · sem imposto\)/)).toBeInTheDocument()
   })
 
-  it('sem imposto configurado, a alternância nem aparece', async () => {
-    // cru === com imposto ⇒ nada a alternar, e o rótulo não deve insinuar que há imposto.
+  it('mantém a alternância visível quando os valores com e sem imposto são iguais', async () => {
+    const user = userEvent.setup()
     const semImposto = mockWorkspaces.map((w) => ({
       ...w,
       custo_mes_total: w.custo_mes_total_cru,
@@ -280,8 +280,13 @@ describe('LogAnalyticsView', () => {
     vi.mocked(logAnalyticsApi.getLogAnalyticsWorkspaces).mockResolvedValue(semImposto)
     renderWithClient()
     await screen.findByText('rg-shared')
-    expect(screen.queryByLabelText('Incluir imposto')).not.toBeInTheDocument()
-    expect(screen.getByText('Custo (Outubro/2026, real)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Incluir imposto')).toBeInTheDocument()
+    expect(screen.getByText('Neste período, os valores com e sem imposto são iguais.')).toBeInTheDocument()
+    expect(screen.getByText('Custo (Outubro/2026, real · com imposto)')).toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Incluir imposto'))
+    expect(screen.getByText('Custo (Outubro/2026, real · sem imposto)')).toBeInTheDocument()
+    expect(screen.getByText('Neste período, os valores com e sem imposto são iguais.')).toBeInTheDocument()
   })
 
   it('não mostra os cards de Sentinel/Commitment Tier quando nenhum workspace tem esse custo', async () => {

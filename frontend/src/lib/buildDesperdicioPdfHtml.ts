@@ -7,11 +7,14 @@ interface DesperdicioPdfItem {
   resource_id?: string | null
   categoria: string
   subscription_name?: string | null
+  subscription_id?: string | null
   resource_group: string | null
   sku: string | null
   tamanho_gb: number | null
   custo_mensal_estimado: number | null
   dias_orfao: number | null
+  dias_estado_atual?: number | null
+  dias_ocioso?: number | null
 }
 
 const CATEGORIA_LABEL: Record<string, string> = {
@@ -53,16 +56,18 @@ export function buildDesperdicioPdfHtml(itens: DesperdicioPdfItem[], filtrosDesc
     + '<td class="r">' + brl(v.custo) + '</td></tr>',
   ).join('')
 
-  const linhas = itens.map((i) =>
-    '<tr><td>' + esc(i.nome || i.resource_id) + '</td>'
-    + '<td>' + esc(i.subscription_name || '—') + '</td>'
-    + '<td>' + esc(CATEGORIA_LABEL[i.categoria] || i.categoria) + '</td>'
-    + '<td>' + esc(i.resource_group || '—') + '</td>'
-    + '<td>' + esc(i.sku || '—') + '</td>'
-    + '<td class="r">' + (i.tamanho_gb ? esc(i.tamanho_gb) + ' GB' : '—') + '</td>'
-    + '<td class="r">' + (i.custo_mensal_estimado === null ? '—' : brl(i.custo_mensal_estimado)) + '</td>'
-    + '<td class="c">' + (i.dias_orfao !== null ? i.dias_orfao + 'd' : '—') + '</td></tr>',
-  ).join('')
+  const linhas = itens.map((i) => {
+    const diasOcioso = i.dias_ocioso !== undefined ? i.dias_ocioso : (i.dias_estado_atual ?? i.dias_orfao)
+    return '<tr><td>' + esc(i.nome || i.resource_id) + '</td>'
+      + '<td>' + esc(i.subscription_name || '—') + '</td>'
+      + '<td>' + esc(i.subscription_id || '—') + '</td>'
+      + '<td>' + esc(CATEGORIA_LABEL[i.categoria] || i.categoria) + '</td>'
+      + '<td>' + esc(i.resource_group || '—') + '</td>'
+      + '<td>' + esc(i.sku || '—') + '</td>'
+      + '<td class="r">' + (i.tamanho_gb ? esc(i.tamanho_gb) + ' GB' : '—') + '</td>'
+      + '<td class="r">' + (i.custo_mensal_estimado === null ? '—' : brl(i.custo_mensal_estimado)) + '</td>'
+      + '<td class="c">' + (diasOcioso != null ? diasOcioso + 'd' : '—') + '</td></tr>'
+  }).join('')
 
   return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <title>Desperdício de Recursos — FinOps</title>
@@ -105,7 +110,7 @@ tbody tr.tot td{background:#9333ea;color:#fff;font-weight:700}
 <table><thead><tr><th style="text-align:left">Tipo de recurso</th><th>Qtd</th><th>% do custo</th><th>Custo/mês</th></tr></thead>
 <tbody>${tipoRows}<tr class="tot"><td>TOTAL</td><td class="c">${itens.length}</td><td class="c">100,0%</td><td class="r">${brl(custoTotal)}</td></tr></tbody></table>
 <h2>Recursos ociosos</h2>
-<table><thead><tr><th style="text-align:left">Recurso</th><th>Assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th><th>Tam.</th><th>Custo/mês</th><th>Dias órfão</th></tr></thead>
+<table><thead><tr><th style="text-align:left">Recurso</th><th>Assinatura</th><th>ID da assinatura</th><th>Tipo</th><th>Resource Group</th><th>SKU</th><th>Tam.</th><th>Custo/mês</th><th>Dias ocioso</th></tr></thead>
 <tbody>${linhas}</tbody></table>
 <div class="nota">Custo estimado pelo billing observado nos últimos 30 dias. Recursos sem linha de billing conhecida aparecem como “—”, nunca como R$ 0,00.</div>
 </body></html>`

@@ -73,12 +73,12 @@ describe('calcEstimado — RN-DB-001 Databricks cluster rate', () => {
 })
 
 describe('calcEstimado — pico (peak)', () => {
-  it('usaPico substitui a taxa média quando custo_hora_pico > 0 (tipo hora)', () => {
+  it('não usa pico de recurso como tarifa horária padrão', () => {
     const r = makeRecurso({ custo_hora_pico: 4 })
     const c = calcEstimado(r, 10, new Map())
-    expect(c.usaPico).toBe(true)
+    expect(c.usaPico).toBe(false)
     expect(c.picoBrl).toBeCloseTo(4, 6)
-    expect(c.estimado).toBeCloseTo(40, 6)
+    expect(c.estimado).toBeCloseTo(25, 6)
   })
 
   it('pico NUNCA se aplica a tipo=reserva ou tipo=mes mesmo com custo_hora_pico > 0', () => {
@@ -88,13 +88,28 @@ describe('calcEstimado — pico (peak)', () => {
     expect(calcEstimado(rMes, 10, new Map()).usaPico).toBe(false)
   })
 
-  it('usaPicoCluster tem prioridade sobre usaPico quando o recurso é Databricks válido', () => {
-    const r = makeRecurso({ resource_group_name: 'databricks-rg-ws1', custo_hora_pico: 4, custo_hora_pico_cluster: 9 })
+  it('usa a contribuição média do RG em vez de repetir o pico do cluster', () => {
+    const r = makeRecurso({ resource_group_name: 'databricks-rg-ws1', total_billing: 300, custo_hora_pico: 4, custo_hora_pico_cluster: 9 })
     const dbMap = new Map([['databricks-rg-ws1', { taxa: 5, valida: true, totalBrl: 1000, hDriver: 100, totalHoras: 200, recursos: 3 }]])
     const c = calcEstimado(r, 10, dbMap)
     expect(c.usaPico).toBe(false) // dbValida exclui usaPico
-    expect(c.usaPicoCluster).toBe(true)
-    expect(c.estimado).toBeCloseTo(90, 6)
+    expect(c.usaPicoCluster).toBe(false)
+    expect(c.rgValida).toBe(true)
+    expect(c.taxaEf).toBeCloseTo(3, 6)
+    expect(c.estimado).toBeCloseTo(30, 6)
+  })
+
+  it('mantém a amortização de reserva fora do rateio variável do RG', () => {
+    const r = makeRecurso({
+      resource_group_name: 'databricks-rg-ws1', tipo_custo: 'reserva', total_billing: 10000,
+      custo_hora_billing: 0, usa_amortizado: true, taxa_hora_rate: 2,
+    })
+    const rgMap = new Map([['DATABRICKS-RG-WS1', { taxa: 10, valida: true, totalBrl: 1000, hDriver: 100, totalHoras: 100, recursos: 2 }]])
+    const c = calcEstimado(r, 10, rgMap)
+
+    expect(c.rgValida).toBe(true)
+    expect(c.taxaEf).toBeCloseTo(2, 6)
+    expect(c.estimado).toBeCloseTo(20, 6)
   })
 })
 

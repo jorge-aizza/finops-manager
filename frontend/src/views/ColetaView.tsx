@@ -20,6 +20,8 @@ import SPModal from './SPModal'
 import DatabricksConfigModal from './DatabricksConfigModal'
 import DatabricksAgendamentoModal from './DatabricksAgendamentoModal'
 import StorageModal from './StorageModal'
+import StorageAgendamentoModal from './StorageAgendamentoModal'
+import StorageReprocessModal from './StorageReprocessModal'
 import WizardColetaModal from './WizardColetaModal'
 import AgendamentoModal from './AgendamentoModal'
 import DiagAgendadorModal from './DiagAgendadorModal'
@@ -319,6 +321,8 @@ export default function ColetaView() {
   const storagesQuery = useQuery({ queryKey: ['coleta-storages'], queryFn: listStorages })
   const [storageModalOpen, setStorageModalOpen] = useState(false)
   const [editingStorage, setEditingStorage] = useState<StorageConfig | null>(null)
+  const [agendamentoStorage, setAgendamentoStorage] = useState<StorageConfig | null>(null)
+  const [reprocessarStorageCfg, setReprocessarStorageCfg] = useState<StorageConfig | null>(null)
   const spNameById = new Map((spsQuery.data || []).map((s) => [s.id, s.nome]))
 
   const deleteStorageMutation = useMutation({
@@ -601,6 +605,8 @@ export default function ColetaView() {
                     <div className="table-actions">
                       <button className="btn-icon" title="Testar acesso" disabled={testarStorageMutation.isPending} onClick={() => testarStorageMutation.mutate(s.id)}>🔌</button>
                       <button className="btn-icon" title="Executar agora" disabled={executarStorageMutation.isPending} onClick={() => executarStorageMutation.mutate(s.id)}>▶</button>
+                      <button className="btn-icon" title="Agendamento" onClick={() => setAgendamentoStorage(s)}>⏰</button>
+                      <button className="btn-icon" title="Reprocessar mês" onClick={() => setReprocessarStorageCfg(s)}>🗓</button>
                       <button className="btn-icon" title="Editar" onClick={() => { setEditingStorage(s); setStorageModalOpen(true) }}>
                         <svg viewBox="0 0 16 16" fill="none"><path d="M11 2l3 3-8 8H3V10l8-8z" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" /></svg>
                       </button>
@@ -755,6 +761,8 @@ export default function ColetaView() {
       {storageModalOpen && <StorageModal storage={editingStorage} onClose={() => setStorageModalOpen(false)} />}
       {wizardSP && <WizardColetaModal sp={wizardSP} onClose={() => setWizardSP(null)} />}
       {agendamentoSP && <AgendamentoModal sp={agendamentoSP} onClose={() => setAgendamentoSP(null)} />}
+      {agendamentoStorage && <StorageAgendamentoModal storage={agendamentoStorage} onClose={() => setAgendamentoStorage(null)} />}
+      {reprocessarStorageCfg && <StorageReprocessModal storageId={reprocessarStorageCfg.id} storageNome={reprocessarStorageCfg.nome} onClose={() => setReprocessarStorageCfg(null)} />}
       {diagOpen && <DiagAgendadorModal onClose={() => setDiagOpen(false)} />}
       {expurgoOpen && <ExpurgoModal onClose={() => setExpurgoOpen(false)} />}
       {expurgoDbxOpen && <DatabricksExpurgoModal onClose={() => setExpurgoDbxOpen(false)} />}

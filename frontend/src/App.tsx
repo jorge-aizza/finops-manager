@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type ComponentType, type LazyExoticComponent } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useIsFetching } from '@tanstack/react-query'
+import { createPortal } from 'react-dom'
 import { setRefreshHandler, setViewListener } from './bridge'
 import { TenantFilterProvider } from './contexts/TenantFilterContext'
 import ProjetosView from './views/ProjetosView'
@@ -38,6 +39,29 @@ const VIEWS: Record<string, ComponentType | LazyExoticComponent<ComponentType>> 
   'log-analytics': LogAnalyticsView,
   mailing: MailingView,
   wiki: WikiView,
+}
+
+export function FinOpsQueryLoadingNotice() {
+  const active = useIsFetching({ predicate: (query) => query.state.data === undefined }) > 0
+  const [visible, setVisible] = useState(false)
+
+  useEffect(() => {
+    if (!active) {
+      setVisible(false)
+      return
+    }
+    const timer = window.setTimeout(() => setVisible(true), 2000)
+    return () => window.clearTimeout(timer)
+  }, [active])
+
+  if (!visible) return null
+  return createPortal(
+    <span className="finops-query-status" role="status" aria-live="polite" aria-atomic="true">
+      <span className="finops-query-spinner" aria-hidden="true" />
+      Consultando...
+    </span>,
+    document.body,
+  )
 }
 
 export default function App() {
@@ -87,6 +111,7 @@ export default function App() {
           </ErrorBoundary>
         )}
       </TenantFilterProvider>
+      <FinOpsQueryLoadingNotice />
     </QueryClientProvider>
   )
 }

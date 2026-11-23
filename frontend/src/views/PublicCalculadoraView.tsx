@@ -99,7 +99,6 @@ export default function PublicCalculadoraView({ cfg, ident }: Props) {
 
   function handleOpenOverlay() {
     setOverlayOpen(true)
-    calc.carregarPico()
   }
 
   return (

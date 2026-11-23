@@ -11,10 +11,15 @@ vi.mock('../api/portalEntra')
 const resposta: GenieCotasPublicaResposta = {
   ativo: true,
   nome: 'Ana Souza',
+  periodo: 'month',
+  cache: { atualizado_em: '2026-11-18T12:00:00.000Z', desatualizado: false, atualizando: false },
   workspaces: [
     {
-      workspace_id: 'ws-1', custo: 12.5, limite_local: 50, quota_nativa: 15, acao_nativa: 'BLOCK_USAGE',
-      dias: [{ dia: '2026-09-01', custo: 5, dbus: 10, dbus_free: 10 }, { dia: '2026-09-02', custo: 7.5, dbus: 15, dbus_free: 15 }],
+      workspace_id: 'ws-1', workspace_nome: 'Workspace 1', custo: 12.5, dbus: 25, dbus_free: 5,
+      limite_per_user: 50, quota_nativa: 15, status: 'Dentro do Limite (per-user)',
+      status_usuario: 'Dentro do Limite (per-user)',
+      dias: [{ dia: '2026-09-01', custo: 5, dbus: 10, dbus_free: 2 }, { dia: '2026-09-02', custo: 7.5, dbus: 15, dbus_free: 3 }],
+      detalhes: [{ dia: '2026-09-02', produto: 'Genie', sku: 'GENIE_STANDARD', endpoint: 'endpoint-1', dbus: 15, custo: 7.5 }],
     },
   ],
 }
@@ -61,14 +66,22 @@ describe('PublicGenieCotasView', () => {
     vi.mocked(portalEntraApi.getGenieCotasPublica).mockResolvedValue(resposta)
     renderView()
     expect(await screen.findByTestId('public-genie-cotas')).toBeInTheDocument()
-    expect(await screen.findByText('ws-1')).toBeInTheDocument()
-    expect(screen.getByText(/cota configurada de US\$ 50/)).toBeInTheDocument()
-    expect(screen.getByText(/quota nativa de bloqueio de US\$ 15/)).toBeInTheDocument()
+    expect(await screen.findByText(/ID ws-1/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Workspace 1' })).toBeInTheDocument()
+    expect(screen.getByText(/Limite pessoal:/)).toBeInTheDocument()
+    expect(screen.getAllByText('US$ 50')).toHaveLength(2)
+    expect(screen.getByText('US$ 15')).toBeInTheDocument()
+    expect(screen.getByText('Consumo no período')).toBeInTheDocument()
+    expect(screen.getAllByText('DBU Free')).toHaveLength(2)
+    expect(screen.getByText(/Última coleta:/)).toBeInTheDocument()
+    expect(screen.getByText('Limites pessoais configurados')).toBeInTheDocument()
+    expect(screen.queryByText('Consumo dos workspaces')).not.toBeInTheDocument()
+    expect(screen.queryByText('Status workspace:')).not.toBeInTheDocument()
   })
 
   it('sem consumo no mês: mostra mensagem, não uma tabela vazia', async () => {
     vi.mocked(portalEntraApi.getPortalEntraToken).mockReturnValue('token-valido')
-    vi.mocked(portalEntraApi.getGenieCotasPublica).mockResolvedValue({ ativo: true, nome: 'Ana Souza', workspaces: [] })
+    vi.mocked(portalEntraApi.getGenieCotasPublica).mockResolvedValue({ ativo: true, nome: 'Ana Souza', periodo: 'month', workspaces: [] })
     renderView()
     expect(await screen.findByText(/Nenhum consumo de Genie encontrado para Ana Souza/)).toBeInTheDocument()
   })
@@ -86,7 +99,7 @@ describe('PublicGenieCotasView', () => {
     vi.mocked(portalEntraApi.getGenieCotasPublica).mockResolvedValue(resposta)
     renderView()
     await screen.findByTestId('public-genie-cotas')
-    await screen.findByText('ws-1')
+    await screen.findByText(/ID ws-1/)
     // A view nunca passa e-mail/usuário pra getGenieCotasPublica — só o React Query chama a
     // função (sem argumento próprio nosso); o servidor decide "de quem são os dados" só pelo
     // token, então não há como esta tela pedir dado de outra pessoa.

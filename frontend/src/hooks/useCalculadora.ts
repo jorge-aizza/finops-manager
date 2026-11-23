@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRecursos, listResourceGroups, listSubscriptions, sortRgsComFilhos } from '../api/calculadora'
-import { computeDbTaxas } from '../lib/calcEstimado'
+import { computeDbTaxas, computeRgTaxas } from '../lib/calcEstimado'
 import { tipoRecurso } from '../lib/tipoRecurso'
 import type { RecursoBilling, RecursosQuery, ResourceGroupOption, SubscriptionOption } from '../types/calculadora'
 
@@ -49,9 +49,6 @@ export function useCalculadora(api: CalculadoraApi = defaultApi, apiKey = 'priva
   const [recursos, setRecursos] = useState<RecursoBilling[]>([])
   const [loading, setLoading] = useState(false)
   const [erro, setErro] = useState<string | null>(null)
-  const [picoCarregado, setPicoCarregado] = useState(false)
-  const [picoLoading, setPicoLoading] = useState(false)
-  const [ultimaQuery, setUltimaQuery] = useState<RecursosQuery | null>(null)
   const [selecionados, setSelecionados] = useState<Record<string, number>>({})
 
   // Confirmar Assinatura (OK ✓ do dropdown) — reseta RGs/recursos e
@@ -82,9 +79,7 @@ export function useCalculadora(api: CalculadoraApi = defaultApi, apiKey = 'priva
     if (!subsSel.length || !rgsSel.length) return
     setLoading(true)
     setErro(null)
-    setPicoCarregado(false)
     const q: RecursosQuery = { subscription_id: subsSel, resource_group: rgsSel, data_inicio: dataInicio, data_fim: dataFim }
-    setUltimaQuery(q)
     try {
       const data = await api.getRecursos(q)
       setRecursos(data)
@@ -96,35 +91,9 @@ export function useCalculadora(api: CalculadoraApi = defaultApi, apiKey = 'priva
     }
   }, [api, subsSel, rgsSel, dataInicio, dataFim])
 
-  // Lazy pico — buscado uma vez ao abrir o overlay Configurar Estimativa,
-  // mesclado por resource_id+unidade (não reexecuta _dbComputeTaxas).
-  const carregarPico = useCallback(async () => {
-    if (picoCarregado || !ultimaQuery || !recursos.length) { setPicoCarregado(true); return }
-    setPicoLoading(true)
-    try {
-      const data = await api.getRecursos({ ...ultimaQuery, pico: true })
-      const picoMap = new Map(data.map((r) => [r.resource_id + '|' + (r.unidade || ''), r]))
-      setRecursos((prev) => prev.map((r) => {
-        const p = picoMap.get(r.resource_id + '|' + (r.unidade || ''))
-        if (!p) return r
-        return {
-          ...r,
-          custo_hora_pico: p.custo_hora_pico,
-          pico_custo_dia: p.pico_custo_dia,
-          pico_horas_dia: p.pico_horas_dia,
-          custo_hora_pico_cluster: p.custo_hora_pico_cluster,
-        }
-      }))
-    } catch {
-      // silencioso — igual ao legado, pico é um enriquecimento opcional
-    }
-    setPicoCarregado(true)
-    setPicoLoading(false)
-  }, [api, picoCarregado, ultimaQuery, recursos.length])
-
-  // RN-DB-001 — computado uma vez por busca (não a cada merge de pico, já
-  // que os campos usados por _dbComputeTaxas não mudam com o pico).
+  // A taxa agrupada é derivada uma vez da busca e compartilhada por overlay e invoice.
   const dbTaxaMap = useMemo(() => computeDbTaxas(recursos), [recursos])
+  const rgTaxaMap = useMemo(() => computeRgTaxas(recursos, rgOptions), [recursos, rgOptions])
 
   // ── Seleção / filtros ──
   const [chGlobal, setChGlobal] = useState(720)
@@ -219,8 +188,7 @@ export function useCalculadora(api: CalculadoraApi = defaultApi, apiKey = 'priva
     rgQuery, rgOptions, rgsSel, setRgsSel,
     dataInicio, setDataInicio, dataFim, setDataFim,
     recursos, loading, erro, buscarRecursos,
-    picoCarregado, picoLoading, carregarPico,
-    dbTaxaMap,
+    dbTaxaMap, rgTaxaMap,
     selecionados, setSelecionados, chGlobal, setChGlobal, horasAplicadas, setHorasAplicadas,
     filtroTexto, setFiltroTexto, filtroTipos, toggleTipo,
     expandedGroups, toggleGrupo,

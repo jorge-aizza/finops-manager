@@ -1,4 +1,4 @@
-import type { DbTaxaInfo, EstimadoResult, RecursoBilling, TipoCusto } from '../types/calculadora'
+import type { DbTaxaInfo, EstimadoResult, RecursoBilling, ResourceGroupOption, TipoCusto } from '../types/calculadora'
 
 // Porta fiel de _calcEstimado/_dbInfoParaRecurso/_dbComputeTaxas (calculadora.js)
 // — fonte única do cálculo financeiro por recurso, usada pelos cards do
@@ -10,7 +10,7 @@ import type { DbTaxaInfo, EstimadoResult, RecursoBilling, TipoCusto } from '../t
 
 const TAXA_BRL_FALLBACK = 5.70
 
-export function calcEstimado(r: RecursoBilling, horas: number, dbTaxaMap: Map<string, DbTaxaInfo>, taxaBrl = TAXA_BRL_FALLBACK): EstimadoResult {
+export function calcEstimado(r: RecursoBilling, horas: number, rgTaxaMap: Map<string, DbTaxaInfo>, taxaBrl = TAXA_BRL_FALLBACK): EstimadoResult {
   const isBRL = (r.moeda || 'BRL') === 'BRL'
   const uom = (r.unidade || '').toLowerCase()
   const tipo: TipoCusto = r.tipo_custo || (uom.includes('hour') || uom.includes('hora') ? 'hora' : 'periodo')
@@ -28,34 +28,34 @@ export function calcEstimado(r: RecursoBilling, horas: number, dbTaxaMap: Map<st
   const mesBrl = mesRaw * convR
   const bill = totalBill * convR
 
-  // RN-DB-001: Databricks cluster rate — billing_recurso / H_driver
-  const dbInfo = tipo === 'hora' ? dbInfoParaRecurso(r, dbTaxaMap) : null
+  const rgInfo = rgInfoParaRecurso(r, rgTaxaMap)
+  const rgValida = !!(rgInfo && rgInfo.valida && rgInfo.hDriver > 0)
+  const dbInfo = tipo === 'hora' && isDatabricksRg((r.resource_group_name || '').toLowerCase()) ? rgInfo : null
   const dbValida = !!(dbInfo && dbInfo.valida)
-  const taxaEf = dbValida && dbInfo!.hDriver > 0 ? bill / dbInfo!.hDriver : chora
+  const taxaEf = rgValida && tipo !== 'mes' && tipo !== 'reserva' ? bill / rgInfo!.hDriver : chora
 
   // Estimado: pico do período quando disponível; senão billing
   const upqBrl = (Number(r.total_upq_brl) || 0) * convR
   const fallback = upqBrl > 0 ? (upqBrl / diasAtiv * 30) : mesBrl
   const picoRaw = Number(r.custo_hora_pico) || 0
   const picoBrl = picoRaw > 0 ? picoRaw * convR : 0
-  const usaPico = picoBrl > 0 && tipo !== 'reserva' && tipo !== 'mes' && !dbValida
+  const usaPico = false
   const picoClusterRaw = Number(r.custo_hora_pico_cluster) || 0
   const picoClusterBrl = picoClusterRaw > 0 ? picoClusterRaw * convR : 0
-  const usaPicoCluster = dbValida && picoClusterBrl > 0
+  const usaPicoCluster = false
+  const usaMediaRg = rgValida && tipo !== 'mes' && tipo !== 'reserva'
 
   const estimado = (tipo === 'mes')
     ? mesBrl
-    : usaPicoCluster
-      ? picoClusterBrl * horas
-      : usaPico
-        ? picoBrl * horas
-        : (tipo === 'periodo')
-          ? fallback / 720 * horas
-          : taxaEf * horas
+    : usaMediaRg
+      ? taxaEf * horas
+      : (tipo === 'periodo')
+        ? fallback / 720 * horas
+        : taxaEf * horas
 
   return {
     tipo, isBRL, convR, chora, custoUomBrl, diasAtiv, mesBrl, bill,
-    dbInfo, dbValida, taxaEf, picoBrl, picoClusterBrl, usaPico, usaPicoCluster,
+    dbInfo, dbValida, rgInfo, rgValida, taxaEf, picoBrl, picoClusterBrl, usaPico, usaPicoCluster,
     estimado,
   }
 }
@@ -71,10 +71,66 @@ function isDatabricksRg(rgLower: string): boolean {
   return rgLower.startsWith('databricks-rg-') || rgLower.startsWith('managed-rg-')
 }
 
-function dbInfoParaRecurso(r: RecursoBilling, dbTaxaMap: Map<string, DbTaxaInfo>): DbTaxaInfo | null {
-  const rg = (r.resource_group_name || '').toLowerCase()
-  if (!isDatabricksRg(rg)) return null
-  return dbTaxaMap.get(rg) || null
+function rgInfoParaRecurso(r: RecursoBilling, rgTaxaMap: Map<string, DbTaxaInfo>): DbTaxaInfo | null {
+  const rg = (r.resource_group_name || '').toUpperCase()
+  return rgTaxaMap.get(rg) || rgTaxaMap.get(rg.toLowerCase()) || null
+}
+
+export function computeRgTaxas(recursos: RecursoBilling[], rgOptions: ResourceGroupOption[]): Map<string, DbTaxaInfo> {
+  interface Raw { totalBrl: number; driverHours: number; vmHours: number; anchors: Set<string>; aliases: Set<string> }
+  const parentByRg = new Map<string, string>()
+  for (const rg of rgOptions) {
+    if (rg.parent_rg) parentByRg.set(rg.resource_group_name.toUpperCase(), rg.parent_rg.toUpperCase())
+  }
+
+  const raw = new Map<string, Raw>()
+  for (const r of recursos) {
+    const rg = (r.resource_group_name || '').toUpperCase()
+    if (!rg) continue
+    const group = parentByRg.get(rg) || rg
+    if (!raw.has(group)) raw.set(group, { totalBrl: 0, driverHours: 0, vmHours: 0, anchors: new Set(), aliases: new Set() })
+    const entry = raw.get(group)!
+    entry.aliases.add(rg)
+
+    if (r.tipo_custo !== 'mes' && r.tipo_custo !== 'reserva') {
+      const rate = Number(r.taxa_cambio) || 0
+      const conversion = (r.moeda || 'BRL') === 'BRL' ? 1 : (rate > 1 ? rate : TAXA_BRL_FALLBACK)
+      entry.totalBrl += (Number(r.total_billing) || 0) * conversion
+    }
+
+    if (r.tipo_custo === 'hora') {
+      const driverHours = Number(r.soma_h_driver) || 0
+      const vmHours = Number(r.horas_reais) || 0
+      const isVm = (r.consumed_service || '').toLowerCase() === 'microsoft.compute'
+        || (r.categoria || '').toLowerCase().includes('virtual machine')
+      if (driverHours > 0) {
+        entry.driverHours = Math.max(entry.driverHours, driverHours)
+        entry.anchors.add(r.resource_id || rg)
+      } else if (isVm && vmHours > 0) {
+        entry.vmHours = Math.max(entry.vmHours, vmHours)
+        entry.anchors.add(r.resource_id || rg)
+      }
+    }
+  }
+
+  const result = new Map<string, DbTaxaInfo>()
+  for (const entry of raw.values()) {
+    const hDriver = entry.driverHours || entry.vmHours
+    const valid = hDriver >= 24 && entry.anchors.size > 0
+    const info = {
+      taxa: valid ? entry.totalBrl / hDriver : 0,
+      valida: valid,
+      totalBrl: entry.totalBrl,
+      hDriver,
+      totalHoras: Math.round(hDriver),
+      recursos: entry.anchors.size,
+    }
+    for (const alias of entry.aliases) {
+      result.set(alias, info)
+      result.set(alias.toLowerCase(), info)
+    }
+  }
+  return result
 }
 
 // Roda uma vez por busca (não a cada merge de pico) — igual ao legado, que

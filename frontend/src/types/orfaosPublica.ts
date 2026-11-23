@@ -17,6 +17,11 @@ export interface OrfaoItem {
   /** null (nunca 0) quando não há billing conhecido. */
   custo_mensal_estimado: number | null
   dias_orfao: number | null
+  /** Dias no estado atual; null quando não há histórico recente suficiente. */
+  dias_estado_atual?: number | null
+  estado_desde?: string | null
+  dias_ocioso?: number | null
+  fonte_dias_ocioso?: 'azure' | 'coleta' | null
 }
 
 export interface OrfaosPublicaResposta {

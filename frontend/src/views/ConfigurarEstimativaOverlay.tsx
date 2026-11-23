@@ -131,8 +131,8 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
 
   // ── Estimativa (Subtotal/Total) — fonte única: buildEstimativa/calcEstimado ──
   const estimativa = useMemo(
-    () => buildEstimativa(calc.recursos, calc.selecionados, calc.dbTaxaMap, { pctImposto, pctCond, pctGordura }, taxaBrl, calc.chGlobal, impostoSplit),
-    [calc.recursos, calc.selecionados, calc.dbTaxaMap, pctImposto, pctCond, pctGordura, taxaBrl, calc.chGlobal, impostoSplit],
+    () => buildEstimativa(calc.recursos, calc.selecionados, calc.rgTaxaMap, { pctImposto, pctCond, pctGordura }, taxaBrl, calc.chGlobal, impostoSplit),
+    [calc.recursos, calc.selecionados, calc.rgTaxaMap, pctImposto, pctCond, pctGordura, taxaBrl, calc.chGlobal, impostoSplit],
   )
 
   const selKeys = useMemo(() => Object.keys(calc.selecionados), [calc.selecionados])
@@ -218,7 +218,7 @@ export default function ConfigurarEstimativaOverlay({ calc, taxaBrl, onClose, on
                 const r = rMap.get(rid)
                 if (!r) return null
                 const horas = calc.selecionados[rid] || 720
-                const calcR = calcEstimado(r, horas, calc.dbTaxaMap, taxaBrl)
+                const calcR = calcEstimado(r, horas, calc.rgTaxaMap, taxaBrl)
                 const managed = managedRgMap.get((r.resource_group_name || '').toUpperCase())
                 return <EstimativaCard key={rid} r={r} horas={horas} calc={calcR} managed={managed} />
               })}
@@ -438,7 +438,7 @@ function EstimativaCard({ r, horas, calc, managed }: { r: RecursoBilling; horas:
   const horasReais = Number(r.horas_reais || 0)
   // Uso parcial: recurso ficou ligado menos de 55% do mês (~400h de 720h)
   const usoParcial = isHora && horasReais > 0 && horasReais < 400
-  const isDbu = !calc.dbValida && (r.unidade || '').toLowerCase().includes('dbu')
+  const isDbu = !calc.rgValida && (r.unidade || '').toLowerCase().includes('dbu')
   const estimadoFinal = calc.estimado
 
   const rgStyle = managed?.managed_type === 'aks'
@@ -451,16 +451,10 @@ function EstimativaCard({ r, horas, calc, managed }: { r: RecursoBilling; horas:
     : managed?.managed_type === 'databricks' ? `RG gerenciado pelo Databricks — workspace: ${managed.managed_label || ''}`
       : rg
 
-  const estimadoBg = calc.tipo === 'mes' ? 'rgba(77,166,255,.10)'
-    : (calc.usaPicoCluster || calc.usaPico) ? 'rgba(255,140,66,.08)'
-      : calc.dbValida ? 'rgba(77,166,255,.10)' : 'var(--bg-card)'
-  const estimadoBorder = calc.tipo === 'mes' ? '2px solid rgba(77,166,255,.40)'
-    : (calc.usaPicoCluster || calc.usaPico) ? '2px solid rgba(255,140,66,.35)'
-      : calc.dbValida ? '2px solid rgba(77,166,255,.40)' : '1px solid var(--accent-glow)'
-  const estimadoColor = calc.tipo === 'mes' ? 'var(--blue,#4da6ff)'
-    : (calc.usaPicoCluster || calc.usaPico) ? 'var(--orange,#ff8c42)'
-      : calc.dbValida ? 'var(--blue,#4da6ff)' : 'var(--text-muted)'
-  const estimadoLbl = (calc.tipo === 'mes' ? '🔒 Infra Fixa' : ((calc.usaPicoCluster || calc.usaPico) ? '⚠ ' : calc.dbValida ? '⚡ ' : '') + 'Estimado')
+  const estimadoBg = calc.tipo === 'mes' || calc.rgValida ? 'rgba(77,166,255,.10)' : 'var(--bg-card)'
+  const estimadoBorder = calc.tipo === 'mes' || calc.rgValida ? '2px solid rgba(77,166,255,.40)' : '1px solid var(--accent-glow)'
+  const estimadoColor = calc.tipo === 'mes' || calc.rgValida ? 'var(--blue,#4da6ff)' : 'var(--text-muted)'
+  const estimadoLbl = (calc.tipo === 'mes' ? '🔒 Infra Fixa' : (calc.rgValida ? '⚡ ' : '') + 'Estimado')
     + (calc.tipo === 'periodo' ? ' /mês*' : '')
 
   return (
@@ -483,7 +477,7 @@ function EstimativaCard({ r, horas, calc, managed }: { r: RecursoBilling; horas:
         {rg && <span style={{ fontSize: 10, borderRadius: 4, padding: '2px 7px', ...rgStyle }} title={rgTitle}>{rgPrefix}{rg}</span>}
         {r.consumed_service && <span style={{ fontSize: 10, background: 'var(--bg-card)', color: 'var(--text-dim)', borderRadius: 4, padding: '2px 7px', border: '1px solid var(--border)' }}>{r.consumed_service}</span>}
         {usoParcial && <span style={{ fontSize: 10, background: 'rgba(255,140,66,.15)', color: 'var(--orange,#ff8c42)', borderRadius: 4, padding: '2px 7px' }} title="Recurso ficou ligado menos de 55% do mês no período importado">⚠ Uso parcial</span>}
-        {calc.dbValida && <span style={{ fontSize: 10, background: 'rgba(77,166,255,.12)', color: 'var(--blue,#4da6ff)', borderRadius: 4, padding: '2px 7px' }} title="Custo estimado pela taxa proporcional do workspace Databricks">⚡ Databricks</span>}
+        {calc.rgValida && <span style={{ fontSize: 10, background: 'rgba(77,166,255,.12)', color: 'var(--blue,#4da6ff)', borderRadius: 4, padding: '2px 7px' }} title={`Custo variável rateado pela média do RG: ${brl(calc.rgInfo!.taxa)}/h`}>⚡ Média RG</span>}
         {isDbu && <span style={{ fontSize: 10, background: 'rgba(77,166,255,.12)', color: 'var(--blue,#4da6ff)', borderRadius: 4, padding: '2px 7px' }} title={`Databricks DBU — cobrança de software (licenciamento de runtime). Taxa: ${brl(calc.custoUomBrl)}/DBU`}>⚡ DBU</span>}
       </div>
 
@@ -503,14 +497,14 @@ function EstimativaCard({ r, horas, calc, managed }: { r: RecursoBilling; horas:
       {/* Grid: Custo/h (ou pico/cluster/mês) · Horas · Cobrado · Estimado */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6 }}>
         <div
-          style={{ textAlign: 'center', borderRadius: 6, padding: '6px 4px', ...(calc.dbValida ? { background: 'rgba(77,166,255,.08)', border: '1px solid rgba(77,166,255,.30)' } : { background: 'var(--bg-card)', border: '1px solid transparent' }) }}
+          style={{ textAlign: 'center', borderRadius: 6, padding: '6px 4px', ...(calc.rgValida ? { background: 'rgba(77,166,255,.08)', border: '1px solid rgba(77,166,255,.30)' } : { background: 'var(--bg-card)', border: '1px solid transparent' }) }}
           title={col1.tooltip}
         >
           <div style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700, color: col1.color, marginBottom: 2 }}>{col1.label}</div>
-          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, fontWeight: 700, color: calc.dbValida ? 'var(--blue,#4da6ff)' : col1.valueColor }}>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, fontWeight: 700, color: calc.rgValida ? 'var(--blue,#4da6ff)' : col1.valueColor }}>
             {col1.value}<span style={{ fontSize: 9, fontWeight: 400 }}>{col1.suffix}</span>
           </div>
-          {calc.dbValida && <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 1 }}>billing:&nbsp;{brl(calc.chora)}/h</div>}
+          {calc.rgValida && <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 1 }}>parcela deste item</div>}
           {calc.custoUomBrl > 0 && (calc.tipo === 'periodo' || calc.tipo === 'mes') && (
             <div style={{ fontSize: 8, color: 'var(--orange,#ff8c42)', opacity: 0.85, marginTop: 3, fontFamily: "'IBM Plex Mono',monospace", whiteSpace: 'nowrap', borderTop: '1px solid rgba(255,140,66,.12)', paddingTop: 2 }} title="Cost ÷ Qty = taxa real por unidade de medida — auditoria FinOps">
               {brl(calc.custoUomBrl)}&nbsp;/&nbsp;{(r.unidade || '').replace(/^\d+\s+/, '').trim() || 'un.'}
@@ -545,35 +539,14 @@ interface Col1Info { label: string; valueColor: string; color: string; value: st
 // (calculadora.js) — nunca reordenar: cada branch é mutuamente exclusivo e a
 // ordem em si é parte da regra de negócio (reserva/mês sempre vencem pico, etc).
 function col1Info(r: RecursoBilling, c: ReturnType<typeof calcEstimado>): Col1Info {
-  const orange = 'var(--orange,#ff8c42)'
   const blue = 'var(--blue,#4da6ff)'
   const muted = 'var(--text-muted)'
   if (c.tipo === 'reserva') return { label: 'Amort./h 🔒', color: blue, valueColor: blue, value: brl(c.chora), suffix: '/h', tooltip: '' }
   if (c.tipo === 'mes') return { label: '🔒 Fixo/mês', color: blue, valueColor: blue, value: brl(c.mesBrl), suffix: '/mês', tooltip: 'Custo mensal fixo baseado no billing histórico' }
-  if (c.usaPico && (c.tipo === 'hora' || c.tipo === 'dia')) {
-    const picoData = r.pico_data ? new Date(r.pico_data).toLocaleDateString('pt-BR') : '—'
-    const picoDia = (r.pico_custo_dia || 0) * c.convR
-    const picoH = r.pico_horas_dia || 0
-    const label = c.dbValida ? '⚠ Pico Cluster/h' : '⚠ Pico/h'
-    const tooltip = `Pico: ${picoData} — custo do dia: ${brl(picoDia)}` + (picoH > 0 ? ` em ${picoH.toFixed(1)}h ligado` : '') + ` → ${brl(c.picoBrl)}/h`
-    return { label, color: orange, valueColor: orange, value: brl(c.picoBrl), suffix: '/h', tooltip }
-  }
-  if (c.usaPico && c.tipo === 'periodo') {
-    const picoData = r.pico_data ? new Date(r.pico_data).toLocaleDateString('pt-BR') : '—'
-    const picoDia = (r.pico_custo_dia || 0) * c.convR
-    const tooltip = `Pico: ${picoData} — custo do dia: ${brl(picoDia)} × 30 dias = ${brl(c.picoBrl * 720)}/mês`
-    return { label: '⚠ Pico/mês*', color: orange, valueColor: orange, value: brl(c.picoBrl * 720), suffix: '/mês', tooltip }
-  }
-  if (c.usaPicoCluster) {
-    const pcData = r.pico_cluster_data ? new Date(r.pico_cluster_data).toLocaleDateString('pt-BR') : '—'
-    const pcCusto = (r.pico_cluster_custo_rg || 0) * c.convR
-    const pcHoras = r.pico_cluster_horas_dia || 0
-    const tooltip = `Pico cluster: ${pcData} — custo total RG: ${brl(pcCusto)}` + (pcHoras > 0 ? ` em ${pcHoras.toFixed(1)}h (driver)` : '') + ` → ${brl(c.picoClusterBrl)}/h`
-    return { label: '⚠ Pico Cluster/h', color: orange, valueColor: orange, value: brl(c.picoClusterBrl), suffix: '/h', tooltip }
-  }
-  if (c.dbValida) {
-    const tooltip = `Custo proporcional: billing R$ ${c.bill.toFixed(2)} ÷ ${c.dbInfo!.hDriver}h (uptime cluster) = R$ ${c.taxaEf.toFixed(4)}/h | workspace: R$ ${c.dbInfo!.taxa.toFixed(4)}/h (${c.dbInfo!.recursos} VMs)`
-    return { label: '⚡ Cluster/h', color: blue, valueColor: blue, value: brl(c.taxaEf), suffix: '/h', tooltip }
+  if (c.rgValida) {
+    const info = c.rgInfo!
+    const tooltip = `Média do RG: ${brl(info.totalBrl)} ÷ ${info.hDriver}h = ${brl(info.taxa)}/h. Parcela deste item: ${brl(c.bill)} ÷ ${info.hDriver}h = ${brl(c.taxaEf)}/h.`
+    return { label: 'Parcela RG/h', color: blue, valueColor: blue, value: brl(c.taxaEf), suffix: '/h', tooltip }
   }
   if (c.tipo === 'periodo' && (r.unidade || '').toLowerCase().includes('dbu')) {
     return { label: '⚡ DBU/mês*', color: blue, valueColor: blue, value: brl(c.mesBrl), suffix: '/mês', tooltip: `Custo mensal proporcional dos DBUs Databricks (software licensing). Taxa unitária: ${brl(c.custoUomBrl)}/DBU` }

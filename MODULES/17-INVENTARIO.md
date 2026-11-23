@@ -29,6 +29,40 @@ da Change Analysis é 14), com margem de 5 min para indexação. "Novo" = primei
 `resource_id` aparece no banco, não `changeType === 'Create'` (o tipo cru vai para
 `operation_name`).
 
+## Cobertura de autoria e permissões
+
+O Service Principal do Inventário precisa da role Azure **Reader** em cada assinatura
+monitorada. Ela dá acesso de leitura aos recursos e à Change Analysis usados pelo coletor;
+não é necessário Owner ou Contributor. Para converter GUIDs de autores em nomes, o App
+Registration dessa mesma SP também precisa da permissão de aplicativo Microsoft Graph
+`Directory.Read.All`, com admin consent no tenant. Essa permissão é separada do Azure RBAC
+e só resolve identidades que já vieram nos eventos — não coleta eventos adicionais. Conceda
+como **Application permission** no App Registration cujo client ID está cadastrado para o
+Inventário; após o consentimento, renove o token Graph. O passo a passo está em
+**04-AZURE-API.md**.
+
+A Change Analysis alimenta eventos de criação, atualização e exclusão observados, dentro da
+retenção nativa de 14 dias. A consulta de estado pode identificar VMs paradas, mas o
+Inventário atual **não registra quem executou stop/start ou deallocate**: esse fluxo não
+consulta o Activity Log.
+
+Para os módulos de operação planejados, registrar cada chamada de escrita/exclusão no log
+de auditoria da aplicação e coletar o Activity Log para confirmar a operação no Azure. A
+leitura exige `Microsoft.Insights/eventtypes/values/read` além das permissões necessárias
+para consultar recursos. Se a chamada for feita pela SP operacional da ferramenta, o Azure
+atribuirá a operação à SP; para identificar a pessoa solicitante, correlacionar o evento
+Azure com o usuário autenticado, ação, recurso, resultado e correlation/request ID gravados
+pela aplicação. `Directory.Read.All` resolve GUIDs de identidades Entra existentes, mas não
+converte a identidade da SP em usuário final.
+
+As permissões de escrita/exclusão não devem ser adicionadas à SP de coleta. A SP operacional
+deve receber Contributor ou role customizada somente nos escopos autorizados; para um papel
+customizado, enumerar as ações de cada provider a partir dos módulos efetivamente liberados.
+Conceder permissões RBAC não implementa os módulos nem inicia a coleta do Activity Log.
+
+Se a mesma SP também consulta workspaces na funcionalidade Log Analytics, atribua
+**Log Analytics Reader** no escopo de cada workspace. Essa role é opcional para o Inventário.
+
 ## Armadilhas
 
 **A unidade de verdade da idade é `COALESCE(criado_em, detectado_em)`, nunca só `criado_em`.**
@@ -60,6 +94,13 @@ reconciliação rodou", não o recurso. O único uso legítimo de `atualizado_em
 GREATEST(criado_em, atualizado_em, detectado_em)` em `inventarioReconcile.js`, para proteger
 recurso recém-tocado contra desativação por snapshot desatualizado — semântica de proteção, não de
 idade.
+
+**A duração de estado do Desperdício tem trilha própria.** Não derive tempo parado/sem backend de
+`atualizado_em`, nem confunda `dias_orfao` com a data em que VM/IP/LB/App Gateway entrou no estado.
+`azure_desperdicio_estado_historico` registra amostras horárias e encerra episódios apenas quando
+uma coleta completa confirma que o recurso saiu da categoria. O primeiro registro é um limite
+inferior observável, não um histórico retroativo; após duas horas sem amostra, a duração atual fica
+indisponível até confirmação.
 
 **`azure_inventario_coleta_historico.origem` é `VARCHAR(40)` por boa razão — já estourou uma vez.**
 A reconciliação grava `'reconciliacao_' + origem`. Com `origem='manual'` dá exatos 20 caracteres;

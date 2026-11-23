@@ -219,7 +219,7 @@ function CampanhasTab() {
   const campanhasQuery = useQuery({
     queryKey: ['mailing-campanhas'],
     queryFn: listCampanhas,
-    refetchInterval: (query) => query.state.data?.some((campanha) => statusCampanhaAtual(campanha) === 'enviando') ? 2000 : false,
+    refetchInterval: (query) => Array.isArray(query.state.data) && query.state.data.some((campanha) => statusCampanhaAtual(campanha) === 'enviando') ? 2000 : false,
   })
 
   const deleteMutation = useMutation({
@@ -289,7 +289,8 @@ function CampanhasTab() {
     enviarMutation.mutate({ id: campanha.id, selecao })
   }
 
-  const campanhas = campanhasQuery.data || []
+  const respostaCampanhasInvalida = campanhasQuery.data != null && !Array.isArray(campanhasQuery.data)
+  const campanhas = Array.isArray(campanhasQuery.data) ? campanhasQuery.data : []
 
   return (
     <div style={{ padding: '12px 20px 0' }}>
@@ -306,7 +307,9 @@ function CampanhasTab() {
             <thead><tr><th>Assunto</th><th>Status</th><th style={{ textAlign: 'right' }}>Enviados</th><th style={{ textAlign: 'right' }}>Falhas</th><th>Criado em</th><th>Ações</th></tr></thead>
             <tbody>
               {campanhasQuery.isLoading && <tr><td colSpan={6} className="empty-state">Carregando...</td></tr>}
-              {!campanhasQuery.isLoading && campanhas.length === 0 && <tr><td colSpan={6} className="empty-state">Nenhum comunicado criado ainda.</td></tr>}
+              {campanhasQuery.isError && <tr><td colSpan={6} className="empty-state">Erro ao carregar comunicados: {(campanhasQuery.error as Error).message}</td></tr>}
+              {respostaCampanhasInvalida && <tr><td colSpan={6} className="empty-state">O servidor retornou uma resposta de comunicados inválida. Atualize a tela.</td></tr>}
+              {!campanhasQuery.isLoading && !campanhasQuery.isError && !respostaCampanhasInvalida && campanhas.length === 0 && <tr><td colSpan={6} className="empty-state">Nenhum comunicado criado ainda.</td></tr>}
               {campanhas.map((c) => {
                 const status = statusCampanhaAtual(c)
                 const st = STATUS_CAMP_LABEL[status] || { label: status, color: 'var(--text-muted)' }

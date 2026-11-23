@@ -8,8 +8,8 @@ import type { DatabricksJobRun } from '../types/databricksJobRuns'
 // filtro de drill-down `jobId` já usados pelo resto do Dashboard (clicar num job em "Por
 // Job" também escopa esta lista, sem precisar de um seletor de período próprio).
 
-function fmtBRL(v: number): string {
-  return 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+function fmtUSD(v: number): string {
+  return 'US$ ' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 // Igual ao formatDuracao já usado em ColetaView.tsx, com um degrau a mais pra horas —
@@ -106,7 +106,7 @@ export default function DatabricksJobRunsCard({ periodo, jobId }: { periodo: { i
                   <td><ResultStateBadge state={run.result_state} /></td>
                   <td style={{ textAlign: 'right', fontSize: 12, color: run.custo_estimado == null ? 'var(--text-muted)' : undefined }}
                       title={run.custo_estimado == null ? 'Sem dado de billing correlacionado a este run (comum em jobs de cluster all-purpose)' : undefined}>
-                    {run.custo_estimado == null ? '—' : fmtBRL(run.custo_estimado)}
+                    {run.custo_estimado == null ? '—' : fmtUSD(run.custo_estimado)}
                   </td>
                 </tr>
               ))}

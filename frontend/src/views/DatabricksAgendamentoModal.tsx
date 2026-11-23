@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { coletarDatabricks, excluirAgendamentoDatabricks, getDatabricksStatus, salvarAgendamentoDatabricks } from '../api/databricksColeta'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { coletarDatabricks, excluirAgendamentoDatabricks, salvarAgendamentoDatabricks } from '../api/databricksColeta'
 import type { DatabricksConfig } from '../types/databricksColeta'
 
 const DIAS_SEMANA = [
@@ -10,6 +10,14 @@ const DIAS_SEMANA = [
 
 function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function periodoManualPadrao() {
+  const fim = new Date()
+  fim.setDate(fim.getDate() - 1)
+  const inicio = new Date(fim)
+  inicio.setDate(inicio.getDate() - 89)
+  return { inicio: ymd(inicio), fim: ymd(fim) }
 }
 
 interface Props {
@@ -28,6 +36,9 @@ export default function DatabricksAgendamentoModal({ config, onClose }: Props) {
   const [diasEspecificos, setDiasEspecificos] = useState((config.dias_semana || '').length > 0)
   const [dias, setDias] = useState<Set<string>>(new Set((config.dias_semana || '1,2,3,4,5').split(',').filter(Boolean)))
   const [granularidade, setGranularidade] = useState(config.granularidade_dias || 7)
+  const [granularidadeAuxiliar, setGranularidadeAuxiliar] = useState(config.granularidade_auxiliar_dias || 1)
+  const [incluirAuxiliares, setIncluirAuxiliares] = useState(true)
+  const [periodoManual, setPeriodoManual] = useState(periodoManualPadrao)
 
   function toggleDia(v: string, checked: boolean) {
     setDias((prev) => { const n = new Set(prev); if (checked) n.add(v); else n.delete(v); return n })
@@ -41,6 +52,7 @@ export default function DatabricksAgendamentoModal({ config, onClose }: Props) {
         dias_semana: ativo ? diasParaEnviar : null,
         auto_coleta: ativo,
         granularidade_dias: granularidade,
+        granularidade_auxiliar_dias: granularidadeAuxiliar,
       })
     },
     onSuccess: () => {
@@ -61,17 +73,8 @@ export default function DatabricksAgendamentoModal({ config, onClose }: Props) {
     onError: (e: Error) => window.showToast?.('Erro ao remover agendamento: ' + e.message, 'error'),
   })
 
-  const statusQuery = useQuery({ queryKey: ['databricks-coleta-status'], queryFn: getDatabricksStatus, enabled: false })
-
   const coletarAgoraMutation = useMutation({
-    mutationFn: async () => {
-      const fresh = await statusQuery.refetch()
-      if (fresh.data?.em_execucao) throw new Error('Já existe uma coleta Databricks em execução.')
-      const fim = new Date()
-      const ini = new Date(fim)
-      ini.setDate(ini.getDate() - (config.granularidade_dias || 7))
-      return coletarDatabricks(config.id, ymd(ini), ymd(fim))
-    },
+    mutationFn: () => coletarDatabricks(config.id, periodoManual.inicio, periodoManual.fim, incluirAuxiliares),
     onSuccess: (r) => {
       window.showToast?.(r.message, 'success')
       queryClient.invalidateQueries({ queryKey: ['databricks-coleta-status'] })
@@ -150,10 +153,33 @@ export default function DatabricksAgendamentoModal({ config, onClose }: Props) {
             <input id="dbx-gran" type="number" min={1} value={granularidade}
               onChange={(e) => setGranularidade(Math.max(1, parseInt(e.target.value, 10) || 7))} />
           </div>
+          <div className="form-group">
+            <label htmlFor="dbx-gran-aux">Consultas auxiliares a cada (dias)</label>
+            <input id="dbx-gran-aux" type="number" min={1} max={30} value={granularidadeAuxiliar}
+              onChange={(e) => setGranularidadeAuxiliar(Math.max(1, Math.min(30, parseInt(e.target.value, 10) || 1)))} />
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Billing continua na frequência principal. Padrão 1 dia preserva a coleta atual.</span>
+          </div>
 
           <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-            <button className="btn-ghost" disabled={coletarAgoraMutation.isPending} onClick={() => coletarAgoraMutation.mutate()}>
-              {coletarAgoraMutation.isPending ? 'Iniciando...' : `▶ Coletar agora (últimos ${config.granularidade_dias || 7} dias)`}
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+              <div className="form-group" style={{ margin: 0, flex: '1 1 150px' }}>
+                <label htmlFor="dbx-manual-inicio">Início da carga manual</label>
+                <input id="dbx-manual-inicio" type="date" value={periodoManual.inicio}
+                  max={periodoManual.fim} onChange={(e) => setPeriodoManual((p) => ({ ...p, inicio: e.target.value }))} />
+              </div>
+              <div className="form-group" style={{ margin: 0, flex: '1 1 150px' }}>
+                <label htmlFor="dbx-manual-fim">Fim da carga manual</label>
+                <input id="dbx-manual-fim" type="date" value={periodoManual.fim}
+                  min={periodoManual.inicio} max={ymd(new Date())}
+                  onChange={(e) => setPeriodoManual((p) => ({ ...p, fim: e.target.value }))} />
+              </div>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 12 }}>
+              <input type="checkbox" checked={incluirAuxiliares} onChange={(e) => setIncluirAuxiliares(e.target.checked)} style={{ width: 'auto' }} />
+              Incluir consultas auxiliares nesta carga manual
+            </label>
+            <button className="btn-ghost" disabled={coletarAgoraMutation.isPending || !periodoManual.inicio || !periodoManual.fim || periodoManual.inicio > periodoManual.fim} onClick={() => coletarAgoraMutation.mutate()}>
+              {coletarAgoraMutation.isPending ? 'Iniciando...' : `▶ Coletar ${periodoManual.inicio} → ${periodoManual.fim}`}
             </button>
           </div>
         </div>

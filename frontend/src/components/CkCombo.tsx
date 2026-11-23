@@ -12,13 +12,14 @@ interface Props {
   rotulo: string
   placeholder: string
   opcoes: string[]
+  rotulos?: Record<string, string>
   valor: string[]
   onChange: (v: string[]) => void
 }
 
 const MAX_CHIPS = 2   // acima disso vira "+N", senao o campo de 41px estoura
 
-export default function CkCombo({ id, rotulo, placeholder, opcoes, valor, onChange }: Props) {
+export default function CkCombo({ id, rotulo, placeholder, opcoes, rotulos = {}, valor, onChange }: Props) {
   const [busca, setBusca] = useState('')
   const [aberto, setAberto] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -33,7 +34,7 @@ export default function CkCombo({ id, rotulo, placeholder, opcoes, valor, onChan
   }, [aberto])
 
   const filtradas = opcoes.filter(
-    (o) => !valor.includes(o) && o.toLowerCase().includes(busca.trim().toLowerCase())
+    (o) => !valor.includes(o) && `${rotulos[o] || o} ${o}`.toLowerCase().includes(busca.trim().toLowerCase())
   )
   const visiveis = valor.slice(0, MAX_CHIPS)
   const extras = valor.length - visiveis.length
@@ -48,11 +49,11 @@ export default function CkCombo({ id, rotulo, placeholder, opcoes, valor, onChan
       <label htmlFor={id}>{rotulo}</label>
       <div className="ck-combo-control" onClick={() => setAberto(true)}>
         {visiveis.map((v) => (
-          <span className="ck-combo-chip" key={v} title={v}>
-            <span className="ck-chip-label">{v}</span>
+          <span className="ck-combo-chip" key={v}>
+            <span className="ck-chip-label">{rotulos[v] || v}</span>
             <button
               type="button"
-              aria-label={`Remover ${v}`}
+              aria-label={`Remover ${rotulos[v] || v}`}
               onClick={(e) => { e.stopPropagation(); alternar(v) }}
             >×</button>
           </span>
@@ -79,11 +80,13 @@ export default function CkCombo({ id, rotulo, placeholder, opcoes, valor, onChan
         <ul className="ck-combo-list">
           {valor.map((v) => (
             <li key={'sel-' + v} className="ck-combo-selected" onClick={() => alternar(v)}>
-              {v} ×
+              {rotulos[v] || v} ×
             </li>
           ))}
           {filtradas.map((o) => (
-            <li key={o} onClick={() => alternar(o)}>{o}</li>
+            <li key={o} onClick={() => alternar(o)}>
+              {rotulos[o] || o}
+            </li>
           ))}
           {!filtradas.length && !valor.length && (
             <li className="ck-combo-empty">Nenhum resultado</li>

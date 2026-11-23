@@ -568,8 +568,7 @@ export default function LogAnalyticsView() {
           usuário clica. Não renderiza nada quando não há execução recente. */}
       <LogAnalyticsProgressoBar />
 
-      {impostoAtivo && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 10px', fontSize: 13 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 10px', fontSize: 13 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
             <input
               type="checkbox"
@@ -586,16 +585,17 @@ export default function LogAnalyticsView() {
             <span>Incluir imposto</span>
           </label>
           <span style={{ color: 'var(--text-muted)' }}>
-            {mostrarComImposto
+            {!impostoAtivo
+              ? 'Neste período, os valores com e sem imposto são iguais.'
+              : mostrarComImposto
               ? 'Valores com o imposto que o sistema adiciona — NÃO batem com o portal da Azure.'
               : 'Valores crus da fatura — é o que bate com o portal da Azure e com o export.'}
           </span>
-        </div>
-      )}
+      </div>
       <div className="stats-grid-5">
         <div className="stat-card accent">
           <div className="stat-label">
-            Custo ({mesLabel}, real{impostoAtivo ? (mostrarComImposto ? ' · com imposto' : ' · sem imposto') : ''})
+            Custo ({mesLabel}, real · {mostrarComImposto ? 'com imposto' : 'sem imposto'})
           </div>
           <div className="stat-value">{fmtBRL(custoTotal)}</div>
         </div>

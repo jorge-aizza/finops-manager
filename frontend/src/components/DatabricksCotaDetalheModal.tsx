@@ -46,35 +46,76 @@ function Campo({ rotulo, valor }: { rotulo: string; valor: string }) {
   )
 }
 
+function DadosDetalhe({ item, tipo, workspaceName }: {
+  item: DatabricksCotaWorkspace | DatabricksCotaUsuario
+  tipo: 'workspace' | 'usuario'
+  workspaceName?: string
+}) {
+  const ehWs = tipo === 'workspace'
+  const w = item as DatabricksCotaWorkspace
+  const u = item as DatabricksCotaUsuario
+  const teto = ehWs ? w.cota : u.limite
+  const pct = item.pct
+  const s = STATUS_PILL[item.status]
+  const disponivelPct = pct == null ? null : 100 - pct
+  const saldo = teto == null ? null : teto - item.custo
+  const corDisp = disponivelPct == null ? 'var(--ck-neutral)'
+    : disponivelPct < 0 ? 'var(--ck-red)' : 'var(--ck-green)'
+
+  return (
+    <>
+      <div className="ck-highlights">
+        <Destaque rotulo="% utilizado" valor={pctTxt(pct)} cor={s.cor} />
+        <Destaque rotulo="% disponível" valor={pctTxt(disponivelPct)} cor={corDisp} />
+        <Destaque rotulo="DBU Free no mês" valor={fmt(item.dbus_free)} cor="var(--ck-teal)" />
+        <Destaque rotulo="DBU Pago no mês" valor={fmt(item.dbus_pago)} cor="var(--ck-magenta)" />
+      </div>
+
+      <div className="ck-fields">
+        <Campo rotulo="Budget configurado" valor={item.budget_nome || 'Sem budget configurado'} />
+        <Campo rotulo="Ação ao estourar a cota" valor={item.budget_acao || (item.budget_nome ? 'Alerta (não bloqueia)' : '—')} />
+        <Campo rotulo={ehWs ? 'Cota do workspace (USD)' : 'Limite do usuário (USD)'} valor={usd(teto)} />
+        <Campo rotulo={ehWs ? 'Consumo da cota (USD)' : 'Consumo do limite (USD)'} valor={usd(item.custo)} />
+        <Campo rotulo="Saldo disponível da cota (USD)" valor={usd(saldo)} />
+        {!ehWs && (
+          <Campo
+            rotulo="Origem do limite"
+            valor={u.origem_limite === 'individual' ? 'Exceção individual'
+              : u.origem_limite === 'workspace' ? 'Teto por usuário do workspace' : '—'}
+          />
+        )}
+        <Campo rotulo="DBU total no mês" valor={fmt(item.dbus)} />
+        {!ehWs && <Campo rotulo="Workspace" valor={workspaceName || 'Nome indisponível'} />}
+      </div>
+    </>
+  )
+}
+
 interface Props {
   item: DatabricksCotaWorkspace | DatabricksCotaUsuario
   tipo: 'workspace' | 'usuario'
+  workspaceContext?: DatabricksCotaWorkspace | null
   // A lista de usuarios saiu daqui: ela duplicava o painel "Cotas Usuario",
   // que ja passa a mostrar os usuarios do workspace quando um e selecionado --
   // e as duas listas divergiam, porque o painel e um Top 10 global.
   /** Quando veio de um workspace, o rótulo do caminho de volta. */
+  workspaceName?: string
   voltarPara?: string | null
   onVoltar?: () => void
+  carregandoQuotaNativa?: boolean
+  erroQuotaNativa?: string | null
   onClose: () => void
 }
 
 export default function DatabricksCotaDetalheModal({
-  item, tipo, voltarPara, onVoltar, onClose,
+  item, tipo, workspaceContext, workspaceName, voltarPara, onVoltar, carregandoQuotaNativa, erroQuotaNativa, onClose,
 }: Props) {
   const ehWs = tipo === 'workspace'
-  const w = item as DatabricksCotaWorkspace
-  const u = item as DatabricksCotaUsuario
+  const u = ehWs ? null : item as DatabricksCotaUsuario
 
-  const titulo = ehWs ? `Workspace · ${w.workspace_id}` : `Usuário · ${u.usuario}`
-  const teto = ehWs ? w.cota : u.limite
-  const pct = item.pct
-  const s = STATUS_PILL[item.status]
-
-  const disponivelPct = pct == null ? null : 100 - pct
-  const saldo = teto == null ? null : teto - item.custo
-  // negativo = estourou; a cor acompanha para nao passar por "sobra"
-  const corDisp = disponivelPct == null ? 'var(--ck-neutral)'
-    : disponivelPct < 0 ? 'var(--ck-red)' : 'var(--ck-green)'
+  const nomeWorkspace = workspaceName || 'Nome indisponível'
+  const titulo = `Workspace · ${nomeWorkspace}`
+  const s = STATUS_PILL[ehWs ? item.status : workspaceContext?.status ?? item.status]
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -106,32 +147,29 @@ export default function DatabricksCotaDetalheModal({
           </span>
         </div>
 
-        <div className="ck-highlights">
-          <Destaque rotulo="% utilizado" valor={pctTxt(pct)} cor={s.cor} />
-          <Destaque rotulo="% disponível" valor={pctTxt(disponivelPct)} cor={corDisp} />
-          <Destaque rotulo="DBU Free no mês" valor={fmt(item.dbus_free)} cor="var(--ck-teal)" />
-          <Destaque rotulo="DBU Pago no mês" valor={fmt(item.dbus_pago)} cor="var(--ck-magenta)" />
-        </div>
+        {carregandoQuotaNativa && <div role="status" className="ck-panel-note">Consultando quotas nativas Genie...</div>}
+        {erroQuotaNativa && <div role="alert" className="ck-panel-note">Não foi possível consultar a quota nativa: {erroQuotaNativa}</div>}
 
-        <div className="ck-fields">
-          <Campo rotulo="Budget configurado" valor={item.budget_nome || 'Sem budget configurado'} />
-          {/* Nossos orçamentos ALERTAM, nunca bloqueiam -- bloqueio de verdade
-              só existe nas Quotas Genie (Budgets API nativa). Escrever
-              "Bloqueio" aqui, como o cockpit faz, seria falso. */}
-          <Campo rotulo="Ação ao estourar a cota" valor={item.budget_nome ? 'Alerta (não bloqueia)' : '—'} />
-          <Campo rotulo={ehWs ? 'Cota do workspace (USD)' : 'Limite do usuário (USD)'} valor={usd(teto)} />
-          <Campo rotulo={ehWs ? 'Consumo da cota (USD)' : 'Consumo do limite (USD)'} valor={usd(item.custo)} />
-          <Campo rotulo="Saldo disponível da cota (USD)" valor={usd(saldo)} />
-          {!ehWs && (
-            <Campo
-              rotulo="Origem do limite"
-              valor={u.origem_limite === 'individual' ? 'Exceção individual'
-                : u.origem_limite === 'workspace' ? 'Teto por usuário do workspace' : '—'}
-            />
-          )}
-          <Campo rotulo="DBU total no mês" valor={fmt(item.dbus)} />
-          {!ehWs && <Campo rotulo="Workspace" valor={u.workspace_id} />}
-        </div>
+        {ehWs ? (
+          <DadosDetalhe item={item} tipo="workspace" workspaceName={nomeWorkspace} />
+        ) : (
+          <>
+            {workspaceContext && <DadosDetalhe item={workspaceContext} tipo="workspace" workspaceName={nomeWorkspace} />}
+            <section style={{ marginTop: 22, paddingTop: 18, borderTop: '1px solid var(--ck-line)' }}>
+              <div className="ck-panel-head">
+                <div>
+                  <h2>Usuário · {u!.usuario}</h2>
+                  <div className="ck-panel-note">Consumo consolidado deste usuário no workspace selecionado</div>
+                </div>
+                <span className={'ck-status-pill ' + STATUS_PILL[item.status].cls}>
+                  {STATUS_PILL[item.status].rotulo} (limite per-user)
+                </span>
+              </div>
+              <DadosDetalhe item={item} tipo="usuario" workspaceName={nomeWorkspace} />
+            </section>
+          </>
+        )}
+
 
       </div>
     </div>

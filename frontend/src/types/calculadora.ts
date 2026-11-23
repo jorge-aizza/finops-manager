@@ -12,6 +12,7 @@ export interface SubscriptionOption {
 }
 
 export interface ResourceGroupOption {
+  subscription_id?: string
   resource_group_name: string
   moeda: string | null
   managed_type: 'databricks' | 'aks' | null
@@ -134,6 +135,8 @@ export interface EstimadoResult {
   bill: number
   dbInfo: DbTaxaInfo | null
   dbValida: boolean
+  rgInfo: DbTaxaInfo | null
+  rgValida: boolean
   taxaEf: number
   picoBrl: number
   picoClusterBrl: number
@@ -178,6 +181,8 @@ export interface ResultadoEstimativa {
   moeda: string
   databricks_valida?: boolean
   databricks_taxa?: number
+  rg_valida?: boolean
+  rg_taxa?: number
 }
 
 export interface RecursoMesFixo {

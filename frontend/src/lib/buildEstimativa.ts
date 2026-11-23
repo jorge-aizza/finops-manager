@@ -32,7 +32,7 @@ export interface ImpostoSplit {
 export function buildEstimativa(
   recursos: RecursoBilling[],
   selecionados: Record<string, number>,
-  dbTaxaMap: Map<string, DbTaxaInfo>,
+  rgTaxaMap: Map<string, DbTaxaInfo>,
   taxas: TaxasEstimativa,
   taxaBrl: number,
   chGlobal: number,
@@ -70,7 +70,7 @@ export function buildEstimativa(
     totalCobrado += (Number(r.total_billing) || 0) * convR
 
     const horas = selecionados[rid] || 720
-    const calc = calcEstimado(r, horas, dbTaxaMap, taxaBrl)
+    const calc = calcEstimado(r, horas, rgTaxaMap, taxaBrl)
     const nome = r.nome_recurso || rid.split('/').filter(Boolean).pop() || rid.slice(0, 50)
 
     if (calc.tipo === 'mes') {
@@ -101,7 +101,9 @@ export function buildEstimativa(
       tipo_custo: calc.tipo, fixo_mensal: false, isHora: calc.tipo === 'hora' || calc.tipo === 'dia', horas,
       custo_hora: calc.chora, fonte_estimado: 'billing', custo_mes: calc.mesBrl, dias_ativos: calc.diasAtiv,
       total_cobrado: calc.bill, estimado_brl: estimadoComImposto,
-      moeda: r.moeda || 'BRL', databricks_valida: calc.dbValida, databricks_taxa: calc.taxaEf,
+      moeda: r.moeda || 'BRL', databricks_valida: calc.dbValida,
+      databricks_taxa: calc.dbValida ? calc.taxaEf : undefined,
+      rg_valida: calc.rgValida, rg_taxa: calc.taxaEf,
     })
   }
 

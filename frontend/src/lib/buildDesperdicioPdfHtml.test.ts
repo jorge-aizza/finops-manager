@@ -29,14 +29,23 @@ describe('buildDesperdicioPdfHtml', () => {
     expect(html).toContain('<td class="r">—</td>')
   })
 
+  it('mostra uma duração ociosa unificada', () => {
+    const html = buildDesperdicioPdfHtml([item({ dias_orfao: 40, dias_estado_atual: 7, dias_ocioso: 40 })], 'x')
+    expect(html).toContain('<th>Dias ocioso</th>')
+    expect(html).not.toContain('<th>Dias no estado atual</th>')
+    expect(html).toContain('<td class="c">40d</td>')
+  })
+
   it('traz o nome da assinatura na coluna de recursos ociosos', () => {
     const html = buildDesperdicioPdfHtml([item({ subscription_name: 'SP Produção' })], 'x')
     expect(html).toContain('<th>Assinatura</th>')
+    expect(html).toContain('<th>ID da assinatura</th>')
     expect(html).toContain('<td>SP Produção</td>')
+    expect(html).toContain('<td>s</td>')
   })
 
-  it('mostra "—" quando a assinatura não foi resolvida (ex: portal público sanitizado)', () => {
-    const html = buildDesperdicioPdfHtml([item({ subscription_name: null })], 'x')
-    expect(html).toMatch(/<td>disco-1<\/td><td>—<\/td>/)
+  it('mostra "—" quando assinatura e ID não foram resolvidos (ex: portal público sanitizado)', () => {
+    const html = buildDesperdicioPdfHtml([item({ subscription_name: null, subscription_id: '' })], 'x')
+    expect(html).toMatch(/<td>disco-1<\/td><td>—<\/td><td>—<\/td>/)
   })
 })

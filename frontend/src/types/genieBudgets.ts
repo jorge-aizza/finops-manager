@@ -18,6 +18,11 @@ export interface GenieBudgetThresholdInput {
   email_target?: string // usado só quando action_type = EMAIL_NOTIFICATION
 }
 
+export interface GenieBudgetLevelInput {
+  percentage: number
+  actions: GenieActionType[]
+}
+
 export interface GenieBudgetTagInput {
   key: string
   value: string
@@ -38,8 +43,12 @@ export interface GenieBudgetInput {
   display_name: string
   workspace_ids: number[]
   tags: GenieBudgetTagInput[]
-  threshold: GenieBudgetThresholdInput
-  confirmar_bloqueio?: boolean // obrigatório (true) quando threshold.action_type = BLOCK_USAGE
+  monthly_limit_usd: string
+  scope_type: GenieScopeType
+  levels: GenieBudgetLevelInput[]
+  email_target?: string
+  threshold?: GenieBudgetThresholdInput // compatibilidade com clientes antigos
+  confirmar_bloqueio?: boolean // obrigatório (true) quando algum nível inclui BLOCK_USAGE
   principal_overrides?: GenieBudgetPrincipalOverride[]
 }
 
@@ -47,6 +56,18 @@ export interface GenieBudgetInput {
 // 'user') ou nome (tipo 'group') via Account SCIM v2.1 API.
 export interface GeniePrincipal {
   id: string
+  nome: string
+}
+
+export interface GenieResolvedUserPrincipal {
+  id: string
+  username: string
+  nome: string
+  grupos: { id: string; nome: string }[]
+}
+
+export interface GenieWorkspace {
+  workspace_id: string
   nome: string
 }
 
@@ -87,6 +108,20 @@ export interface GenieBudgetFilter {
   tags?: { key: string; value?: { operator?: string; values?: string[] } }[]
 }
 
+export interface GenieAlertSpendStatus {
+  alert_configuration_id?: string
+  percent_consumed?: string
+  scope_type?: GenieScopeType
+  time_period?: string
+  spend?: string
+  threshold?: string
+}
+
+export interface GenieBudgetSpendStatus {
+  alert_spend_statuses?: GenieAlertSpendStatus[]
+  name?: string
+}
+
 export interface GenieBudget {
   budget_configuration_id: string
   display_name: string
@@ -95,9 +130,17 @@ export interface GenieBudget {
   alert_configurations: GenieBudgetAlertConfiguration[]
   create_time?: number
   update_time?: number
+  _spend_status?: GenieBudgetSpendStatus
+  _spend_status_error?: string
   // true quando o servidor não achou uma conexão OAuth M2M real configurada e caiu no
   // fallback de demonstração (databricks_genie_budgets_demo) — ver server.js,
   // _dbxDemoModeNeeded. Nunca presente junto com dado real da Budgets API.
   _demo?: boolean
   [extra: string]: unknown // spend status e outros campos não confirmados pela documentação
+}
+
+export interface GenieBudgetsListResponse {
+  budgets: GenieBudget[]
+  account_total: number
+  genie_total: number
 }

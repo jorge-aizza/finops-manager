@@ -183,6 +183,16 @@ describe('MailingView — Comunicados', () => {
     expect(screen.getByText('✅ Concluída')).toBeInTheDocument()
   });
 
+  it('não quebra a tela se o endpoint responder com um envelope inesperado', async () => {
+    const user = userEvent.setup()
+    vi.mocked(mailingApi.listCampanhas).mockResolvedValue({ data: mockCampanhas } as unknown as MailingCampanha[])
+    renderWithClient()
+
+    await user.click(screen.getByRole('tab', { name: 'Comunicados' }))
+    expect(await screen.findByText(/resposta de comunicados inválida/)).toBeInTheDocument()
+    expect(screen.queryByText(/d.data\?\.some is not a function/)).not.toBeInTheDocument()
+  })
+
   it('rascunho mostra ações de editar/enviar/excluir e concluída oferece editar, reenviar e excluir', async () => {
     const user = userEvent.setup()
     renderWithClient()

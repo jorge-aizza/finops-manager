@@ -27,17 +27,26 @@ taxa_hora_rate = SUM(effective_price × qty) / NULLIF(SUM(qty) × fator_UoM, 0)
 ```
 **Impact**: Cluster VMs, SQL databases covered by RIs show amortized cost, not zero.
 
-### RN-DB-001 — Databricks Cluster Rate
-VMs in cluster run in parallel, not sequentially:
+### RN-RG-001 — Average Hourly Cost by Resource Group
+Resources in parent and managed RGs are consolidated once. Variable costs are
+allocated by the group's observed operating hours; parallel VM hours must not be
+summed as if they were wall-clock hours. Driver hours take priority, then VM hours.
+PaaS hourly quantities (for example, Event Hubs capacity-hours) are not uptime anchors:
 ```sql
-soma_h_driver = SUM(MAX(horas_por_dia) BY dia)  -- daily approach (accurate)
-taxa_cluster = C_total_rg / soma_h_driver
--- estimado_vm_i = (billing_i / soma_h_driver) × slider_horas
+H_operacao = MAX(soma_h_driver) when driver data exists
+H_operacao = MAX(horas_reais) over VM resources otherwise
+C_variavel = SUM(billing_i) for selected non-monthly, non-reservation resources
+taxa_rg = C_variavel / H_operacao
+estimado_i = (billing_i / H_operacao) × horas_solicitadas
 ```
 
-**Validity threshold**: `H_driver ≥ 24h AND ids_distintos ≥ 2` (workspace must have multi-VMs).
+**Validity threshold**: at least 24 observed operating hours and one driver/VM anchor.
+Parent/managed RG mapping is case-insensitive. Monthly fixed resources remain in
+`Infra Fixa`; reservations keep their existing amortized hourly treatment. The daily
+peak is no longer used as the default charge rate.
 
-**Fallback**: `custo_hora_billing` (per-VM average) if threshold not met.
+**Fallback**: preserve the existing per-resource billing formula when the group has no
+reliable hourly anchor.
 
 ## Calculation Flow (Calculadora.tsx)
 
@@ -50,13 +59,13 @@ User selects: subscription → resource group → date range → clicks "Buscar"
                     ↓
   User opens "Configurar Estimativa" overlay
                     ↓
-  Lazy load: GET /api/calculadora/recursos?pico=1
+  Derive one shared RG rate map from fetched resources and parent/managed RG options
                     ↓
   _calcEstimado() runs on each resource:
   ├─ Determine tipo_custo (reserva/hora/dia/mes/periodo)
   ├─ Apply RN-007 fallback if reserva
-  ├─ Apply RN-DB-001 if Databricks cluster
-  ├─ Apply pico (if enabled) or average
+  ├─ Apply RN-RG-001 to variable resources where operating hours are reliable
+  ├─ Keep fixed monthly costs and amortized reservations on their current paths
   └─ Return { estimado, taxa_hora, mesBrl, usaPico, ...}
                     ↓
   Sum all → overlay Subtotal + Total
@@ -76,17 +85,21 @@ User selects: subscription → resource group → date range → clicks "Buscar"
 
 **Where**: `frontend/src/lib/calcEstimado.ts` + related files (8 test files, 48 unit tests).
 
-## Databricks Special Cases
+## Databricks and Other Resource Groups
 
-**Two billing streams**:
-1. **Infra** (VMs in `databricks-rg-*`): Billed per hour, use RN-DB-001 (cluster rate)
-2. **Software** (DBUs in workspace RG): Billed per DBU, use RN-006 (`custo_uom_billing` = R$/DBU)
+Databricks parent-RG software charges and managed-RG infrastructure are included in
+the same RG rate when the parent mapping is available. The same allocation applies to
+other RGs with a VM uptime anchor. Usage-only services are included in their group's
+variable cost share, but do not define uptime. Groups without driver/VM hours retain the
+previous per-resource behavior.
 
-**Total cost/h for workspace**:
-```
-estimado/h = taxa_cluster + (total_DBU_cost / soma_h_driver)
--- Requires cross-RG addition (not automated, user's math)
-```
+**Managed RG parent links**: AKS `properties.nodeResourceGroup` and Databricks
+`properties.managedResourceGroupId` from Azure Resource Graph are persisted by
+`(subscription_id, managed_rg_upper)` in `azure_rg_parent_cache`. Startup performs a
+read-only backfill for existing subscriptions; inventory reconciliation refreshes links
+for new/changed workspaces and clusters. Billing-name heuristics remain fallback only.
+Parent options without direct billing are synthesized for the private calculator; the
+public calculator adds them only when the parent is present in its configured RG allowlist.
 
 ## Horário Livre (Free Hours)
 
@@ -124,8 +137,8 @@ Reuses `_calcEstimado()` without changes.
 | No usage data (qty=0) | Skip resource (no estimado) |
 | Mixed charge types | Grouped separately (RI + PayG in 2 rows) |
 | Missing UoM | Fallback to `periodo` type + daily amortization |
-| Pico load timeout | Retry 3x; use average if all fail |
-| Cross-RG Databricks | Manual addition (not calculated) |
+| Missing driver/VM operating data | Keep previous per-resource estimate; do not invent an RG rate |
+| Parent/managed RG mapping unavailable | Calculate each RG independently |
 
 ---
 

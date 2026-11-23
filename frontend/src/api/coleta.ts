@@ -35,11 +35,14 @@ export const setSPPadrao = (id: number) =>
 export const testarSP = (id: number) =>
   apiFetch<TestarSPResponse>('POST', '/azure-coleta/sps/' + id + '/testar', undefined, 40000)
 
-export const testarStorage = (id: number) =>
-  apiFetch<TestarStorageResponse>('POST', '/azure-coleta/storages/' + id + '/testar', undefined, 40000)
+export const testarStorage = (id: number, mes?: string) =>
+  apiFetch<TestarStorageResponse>('POST', '/azure-coleta/storages/' + id + '/testar', mes ? { mes } : undefined, 40000)
 
 export const executarStorage = (id: number) =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/storages/' + id + '/executar')
+
+export const reprocessarStorageMes = (id: number, mes: string, runId?: string) =>
+  apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/storages/' + id + '/reprocessar-mes', { mes, runId: runId || undefined })
 
 export const coletarAPI = (spId: number, input: ColetarAPIInput) =>
   apiFetch<{ ok: boolean; message: string }>('POST', '/azure-coleta/sps/' + spId + '/coletar-api', input, 20000)
@@ -278,6 +281,8 @@ export const setStorageAtivo = (storage: StorageConfig, ativo: boolean) =>
     reservas_prefix: storage.reservas_prefix || '',
     sp_id: storage.sp_id,
     ativo,
+    coletar_price_list: storage.coletar_price_list !== false,
+    coletar_reservas: storage.coletar_reservas !== false,
   })
 
 // ── Cobertura por Mês ───────────────────────────────────────────

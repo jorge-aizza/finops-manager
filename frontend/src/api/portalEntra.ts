@@ -1,6 +1,6 @@
 import { API_BASE } from './client'
 import type { PortalIdentSessao } from '../types/portal'
-import type { GenieCotasPublicaResposta } from '../types/genieCotasPublica'
+import type { GenieCotasPeriodoPublico, GenieCotasPublicaResposta } from '../types/genieCotasPublica'
 
 const SS_PORTAL_ENTRA_TOKEN = 'portal_entra_token'
 
@@ -31,9 +31,9 @@ export async function consumePortalEntraHandoff(code: string): Promise<{ token: 
   return d
 }
 
-export async function getGenieCotasPublica(): Promise<GenieCotasPublicaResposta> {
+export async function getGenieCotasPublica(period: GenieCotasPeriodoPublico = 'month'): Promise<GenieCotasPublicaResposta> {
   const token = getPortalEntraToken()
-  const r = await fetch(API_BASE + '/public/genie-cotas', {
+  const r = await fetch(API_BASE + '/public/genie-cotas?period=' + encodeURIComponent(period), {
     headers: token ? { Authorization: 'Bearer ' + token } : {},
   })
   const d = await r.json()

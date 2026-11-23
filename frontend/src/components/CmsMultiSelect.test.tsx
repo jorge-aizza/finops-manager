@@ -116,4 +116,17 @@ describe('CmsMultiSelect — botão Limpar', () => {
     await user.click(screen.getByRole('button', { name: 'OK ✓' }))
     expect(onChange).toHaveBeenCalledWith([]);
   });
+
+  it('permite selecionar e confirmar um texto que não existe nas opções', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<CmsMultiSelect values={[]} options={options} searchPlaceholder="Buscar..." triggerLabel="Assinaturas" allowCustomValues onChange={onChange} />)
+
+    await user.click(screen.getByText('Assinaturas'))
+    await user.type(screen.getByPlaceholderText('Buscar...'), 'Assinatura não listada')
+    await user.click(screen.getByLabelText('Usar texto "Assinatura não listada"'))
+    await user.click(screen.getByRole('button', { name: 'OK ✓' }))
+
+    expect(onChange).toHaveBeenCalledWith(['Assinatura não listada'])
+  })
 });

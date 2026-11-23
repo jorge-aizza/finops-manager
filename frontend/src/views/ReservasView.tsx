@@ -61,6 +61,7 @@ export default function ReservasView() {
   const queryClient = useQueryClient()
   const spsQuery = useQuery({ queryKey: ['azure-sps'], queryFn: listSPs })
   const spsAtivas = (spsQuery.data || []).filter((sp) => sp.ativo)
+  const spsReservas = spsAtivas.filter((sp) => sp.coletar_reservas_api !== false)
   const [spId, setSpId] = useState('')
   const [syncResult, setSyncResult] = useState<SincronizarAzureResult | null>(null)
   const [importResult, setImportResult] = useState<ImportarReservasResult | null>(null)
@@ -216,15 +217,15 @@ export default function ReservasView() {
               <option value="">Todos os Tipos de Recurso</option>
               {resourceTypes.map((resourceType) => <option key={resourceType}>{resourceType}</option>)}
             </select>
-            {spsAtivas.length > 1 && (
+            {spsReservas.length > 1 && (
               <select
                 className="filter-select"
                 aria-label="Service Principal"
                 value={spId}
                 onChange={(e) => setSpId(e.target.value)}
               >
-                <option value="">SP padrão</option>
-                {spsAtivas.map((sp) => (
+                <option value="">Todas as SPs aptas</option>
+                {spsReservas.map((sp) => (
                   <option key={sp.id} value={sp.id}>
                     {sp.nome}
                   </option>
@@ -241,9 +242,9 @@ export default function ReservasView() {
         </details>
         <button
           className="btn-ghost"
-          style={spsAtivas.length > 1 ? undefined : { marginLeft: 'auto' }}
-          disabled={syncMutation.isPending || spsAtivas.length === 0}
-          title={spsAtivas.length === 0 ? 'Cadastre uma Service Principal ativa na Coleta Azure' : 'Importar reservas e savings plans direto da Azure'}
+          style={spsReservas.length > 1 ? undefined : { marginLeft: 'auto' }}
+          disabled={syncMutation.isPending || spsReservas.length === 0}
+          title={spsReservas.length === 0 ? 'Habilite Reservas via API em uma Service Principal ativa' : 'Importar reservas e savings plans direto da Azure'}
           onClick={() => syncMutation.mutate()}
         >
           {syncMutation.isPending ? 'Sincronizando...' : 'Sincronizar com Azure'}
@@ -278,7 +279,13 @@ export default function ReservasView() {
                 {syncResult.total} encontrada(s) — {syncResult.inseridas} nova(s), {syncResult.atualizadas} atualizada(s).
                 Custos não informados pela Azure podem ser preenchidos manualmente na edição.
               </div>
-              {syncResult.avisos.map((a) => (
+              {syncResult.por_sp?.map((resultado) => (
+                <div key={resultado.sp} style={{ fontSize: 12, color: resultado.ok ? 'var(--text-muted)' : 'var(--text-red)', marginTop: 4 }}>
+                  <strong>{resultado.sp}:</strong> {resultado.ok ? `${resultado.total} item(ns)` : 'falha na consulta'}
+                  {resultado.avisos.map((aviso) => <div key={aviso}>⚠ {aviso}</div>)}
+                </div>
+              ))}
+              {!syncResult.por_sp?.length && syncResult.avisos.map((a) => (
                 <div key={a} style={{ fontSize: 12, color: 'var(--text-orange)', marginTop: 4 }}>
                   ⚠ {a}
                 </div>
