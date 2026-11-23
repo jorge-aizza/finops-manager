@@ -162,7 +162,7 @@ test('a idade do snapshot pode ser filtrada pela interface, sem corte fixo na co
   assert.match(montarQuery(90), /criado < ago\(90d\)/)
 })
 
-test('portal público e opções de RG usam snapshots sem corte fixo de idade', () => {
+test('portal público mantém 90 dias para snapshots, sem afetar as outras categorias', () => {
   const inicioPublico = SRC.indexOf("app.get('/api/public/orfaos'")
   const inicioAdmin = SRC.indexOf("app.get('/api/admin/portal-config/orfaos-opcoes'")
   const fimAdmin = SRC.indexOf("app.post('/api/public/calculadora/identificar'", inicioAdmin)
@@ -170,10 +170,10 @@ test('portal público e opções de RG usam snapshots sem corte fixo de idade', 
 
   const rotaPublica = SRC.slice(inicioPublico, inicioAdmin)
   const opcoesAdmin = SRC.slice(inicioAdmin, fimAdmin)
-  assert.match(rotaPublica, /_getDesperdicioCached\(escopos\.map\(\(e\) => e\.subscriptionId\), 0\)/)
+  assert.match(rotaPublica, /_getDesperdicioCached\(escopos\.map\(\(e\) => e\.subscriptionId\), 90\)/)
   assert.match(rotaPublica, /const _DIAS_MIN_OCIOSO_PUBLICO = 30/)
-  assert.match(opcoesAdmin, /_getDesperdicioCached\(escopos\.map\(\(e\) => e\.subscriptionId\), 0\)/)
-  assert.match(SRC, /_getDesperdicioCached\(\[\.\.\.subsPermitidas\], 0\)/)
+  assert.match(opcoesAdmin, /_getDesperdicioCached\(escopos\.map\(\(e\) => e\.subscriptionId\), 90\)/)
+  assert.match(SRC, /_getDesperdicioCached\(\[\.\.\.subsPermitidas\], 90\)/)
 })
 
 test('as demais categorias de desperdício não aplicam corte fixo de idade', () => {

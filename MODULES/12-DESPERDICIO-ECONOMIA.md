@@ -34,7 +34,7 @@ No portal autenticado, os números são apresentados sem subtrair o custo do sna
 
 O custo pago enquanto o snapshot existiu não é Saving de snapshot. A tela mantém esses custos separados do Saving dos discos. `economia_mensal_bruta` continua sendo o total bruto legado de recursos; `economia_mensal` e `economia_acumulada` continuam líquidos para compatibilidade com consumidores existentes, inclusive o portal público.
 
-Na lista privada, snapshots são coletados sem corte fixo de idade e seguem o filtro `Órfão há` da tela, usando `timeCreated` como início da idade. O portal público também consulta snapshots de qualquer idade e aplica seu piso de 30 dias de ociosidade; as opções administrativas de Resource Groups usam a mesma base completa para não ocultar grupos elegíveis.
+Na lista privada, snapshots são coletados sem corte fixo de idade e seguem o filtro `Órfão há` da tela, usando `timeCreated` como início da idade. No portal público, somente snapshots mantêm o corte de 90 dias por `timeCreated`; as demais categorias seguem o piso público de 30 dias de ociosidade. As opções administrativas de Resource Groups e o comparativo público usam o mesmo corte de snapshots do portal.
 
 ## Armadilhas
 

@@ -5154,7 +5154,7 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
 
     await ensureAzureColetaTable();
     const { escopos } = await _getInventarioEscopos();
-    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 0);
+    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 90);
     const filtrados = filtrarOrfaosPublicos(cache, {
       subscriptionIds: subsPermitidas,
       categories: categorias,
@@ -5527,7 +5527,7 @@ app.get('/api/admin/portal-config/orfaos-opcoes', authMiddleware, dbMiddleware, 
   try {
     await ensureAzureColetaTable();
     const { escopos } = await _getInventarioEscopos();
-    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 0);
+    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 90);
     const rgMap = new Map();
     for (const x of cache) {
       if (!x.resource_group) continue;
@@ -13668,7 +13668,7 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       if (portalCfg.orfaos_ativo && subsPermitidas.size && categoriasPublicas.size) {
         // O comparativo deve usar a seleção pública completa, independente do tenant que o
         // usuário escolheu para a lista privada. A API pública usa a mesma janela de 90 dias.
-        const dadosPublicos = await _getDesperdicioCached([...subsPermitidas], 0);
+        const dadosPublicos = await _getDesperdicioCached([...subsPermitidas], 90);
         const snapshotsPublicos = filtrarOrfaosPublicos(dadosPublicos, {
           subscriptionIds: subsPermitidas,
           categories: categoriasPublicas,
