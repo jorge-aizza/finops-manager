@@ -5154,7 +5154,7 @@ app.get('/api/public/orfaos', _orfaosPublicoLimiter, _portalMiddleware, dbMiddle
 
     await ensureAzureColetaTable();
     const { escopos } = await _getInventarioEscopos();
-    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 90);
+    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 0);
     const filtrados = filtrarOrfaosPublicos(cache, {
       subscriptionIds: subsPermitidas,
       categories: categorias,
@@ -5527,7 +5527,7 @@ app.get('/api/admin/portal-config/orfaos-opcoes', authMiddleware, dbMiddleware, 
   try {
     await ensureAzureColetaTable();
     const { escopos } = await _getInventarioEscopos();
-    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 90);
+    const cache = await _getDesperdicioCached(escopos.map((e) => e.subscriptionId), 0);
     const rgMap = new Map();
     for (const x of cache) {
       if (!x.resource_group) continue;
@@ -13252,10 +13252,11 @@ const _KQL_VMS_PARADAS = `
   | project id, name, resourceGroup, location, sku = tostring(properties.hardwareProfile.vmSize)`;
 
 function _kqlSnapshotsAntigos(dias) {
+  const filtroIdade = dias > 0 ? `| where criado < ago(${dias}d)` : '';
   return `
     Resources | where type =~ 'microsoft.compute/snapshots'
     | extend criado = todatetime(properties.timeCreated)
-    | where criado < ago(${dias}d)
+    ${filtroIdade}
     | project id, name, resourceGroup, location, sizeGB = toint(properties.diskSizeGB),
               criadoEm = tostring(properties.timeCreated),
               origem = tostring(properties.creationData.sourceResourceId)`;
@@ -13559,7 +13560,8 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
   try {
     const t0Desp = Date.now();
     await ensureAzureColetaTable();
-    const dias = Math.max(1, Math.min(3650, parseInt(req.query.dias_snapshot, 10) || 90));
+    const diasParam = Number.parseInt(req.query.dias_snapshot, 10);
+    const dias = Number.isFinite(diasParam) ? Math.max(0, Math.min(3650, diasParam)) : 0;
     const { subscription_id } = req.query;
     const { escopos } = await _getInventarioEscopos();
     // Filtro de Tenant da tela — sem `sp_id`, varre as assinaturas de todas as SPs ativas.
@@ -13666,7 +13668,7 @@ app.get('/api/azure-inventario/desperdicio', authMiddleware, dbMiddleware, async
       if (portalCfg.orfaos_ativo && subsPermitidas.size && categoriasPublicas.size) {
         // O comparativo deve usar a seleção pública completa, independente do tenant que o
         // usuário escolheu para a lista privada. A API pública usa a mesma janela de 90 dias.
-        const dadosPublicos = await _getDesperdicioCached([...subsPermitidas], 90);
+        const dadosPublicos = await _getDesperdicioCached([...subsPermitidas], 0);
         const snapshotsPublicos = filtrarOrfaosPublicos(dadosPublicos, {
           subscriptionIds: subsPermitidas,
           categories: categoriasPublicas,

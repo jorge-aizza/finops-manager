@@ -153,3 +153,40 @@ test('a tabela de episódios é separada da detecção usada pela economia', () 
     assert.ok(categorias.includes(`'${categoria}'`), `coletor horario não inclui ${categoria}`)
   }
 })
+
+test('a idade do snapshot pode ser filtrada pela interface, sem corte fixo na coleta', () => {
+  const montarQuery = construir('_kqlSnapshotsAntigos')
+
+  assert.match(montarQuery(0), /microsoft\.compute\/snapshots/)
+  assert.doesNotMatch(montarQuery(0), /ago\(/)
+  assert.match(montarQuery(90), /criado < ago\(90d\)/)
+})
+
+test('portal público e opções de RG usam snapshots sem corte fixo de idade', () => {
+  const inicioPublico = SRC.indexOf("app.get('/api/public/orfaos'")
+  const inicioAdmin = SRC.indexOf("app.get('/api/admin/portal-config/orfaos-opcoes'")
+  const fimAdmin = SRC.indexOf("app.post('/api/public/calculadora/identificar'", inicioAdmin)
+  assert.ok(inicioPublico >= 0 && inicioAdmin > inicioPublico && fimAdmin > inicioAdmin)
+
+  const rotaPublica = SRC.slice(inicioPublico, inicioAdmin)
+  const opcoesAdmin = SRC.slice(inicioAdmin, fimAdmin)
+  assert.match(rotaPublica, /_getDesperdicioCached\(escopos\.map\(\(e\) => e\.subscriptionId\), 0\)/)
+  assert.match(rotaPublica, /const _DIAS_MIN_OCIOSO_PUBLICO = 30/)
+  assert.match(opcoesAdmin, /_getDesperdicioCached\(escopos\.map\(\(e\) => e\.subscriptionId\), 0\)/)
+  assert.match(SRC, /_getDesperdicioCached\(\[\.\.\.subsPermitidas\], 0\)/)
+})
+
+test('as demais categorias de desperdício não aplicam corte fixo de idade', () => {
+  const consultas = [
+    '_KQL_DISCOS_ORFAOS', '_KQL_NICS_ORFAS', '_KQL_IPS_SOLTOS',
+    '_KQL_ASP_VAZIOS', '_KQL_LBS_SEM_BACKEND', '_KQL_APPGWS_SEM_BACKEND',
+    '_KQL_VMS_PARADAS',
+  ]
+
+  for (const nome of consultas) {
+    const inicio = SRC.indexOf(`const ${nome} = \``)
+    const fim = SRC.indexOf('\`;', inicio)
+    assert.ok(inicio >= 0 && fim > inicio, `consulta ${nome} não encontrada`)
+    assert.doesNotMatch(SRC.slice(inicio, fim), /ago\(/, `${nome} não deve limitar idade`)
+  }
+})
