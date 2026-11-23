@@ -115,6 +115,14 @@ uses the run GUID shown by Test; if a newer run appears before execution, it ask
 The Test button performs no import. Optional Price List and Reservations prefixes are skipped
 during a cost-only month reprocess.
 
+### Backlog: FOCUS and Amortized Cost
+
+- Next stage: evaluate the FOCUS version and map Azure cost exports into a canonical cost
+  model. Keep `BilledCost` and `EffectiveCost` as distinct measures; do not combine or
+  replace billed values with amortized values. Validate mappings and totals against Azure
+  exports before enabling ingestion or reports. This is a backlog item, not implemented in
+  the current collection flow.
+
 ### 3. Resource Graph (RP/RP)
 **Endpoint**: `https://management.azure.com/providers/Microsoft.ResourceGraph/resources`
 **Auth**: Same Bearer token
