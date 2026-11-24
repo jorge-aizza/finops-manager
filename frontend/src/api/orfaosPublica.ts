@@ -14,8 +14,8 @@ export async function baixarOrfaosPublicaExcel(itens: OrfaoItem[], filtrosDescri
     body: JSON.stringify({ itens, filtros_descricao: filtrosDescricao }),
   })
   if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: 'Erro desconhecido' }))
-    throw new Error(err.error || 'Erro ao exportar')
+    const err = await resp.json().catch(() => null)
+    throw new Error(err?.error || `Falha ao exportar Excel (HTTP ${resp.status})`)
   }
   const blob = await resp.blob()
   const url = URL.createObjectURL(blob)
